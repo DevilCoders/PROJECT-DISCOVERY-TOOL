@@ -54,7 +54,16 @@ def _result() -> ScanResult:
             "file_types": {"text": 2}, "size_buckets": {"4-64KiB": 2},
             "development_directories": {"node_dependencies": 1},
             "host_os": {"system": "Linux", "machine": "x86_64"},
-            "native_backend": {"backend": "x86_64-sse2-popcnt-asm", "hardware_threads": 8},
+            "native_backend": {
+                "backend": "x86_64-sse2-popcnt-asm", "hardware_threads": 8,
+                "gpu_status": "online", "gpu_name": "Test GPU",
+                "gpu_dispatches": 3, "gpu_fallbacks": 1,
+            },
+            "execution": {
+                "mode": "bounded-thread-pool", "worker_count": 4,
+                "max_pending_tasks": 8,
+                "ordering": "deterministic-submission-order",
+            },
             "vulnerability_intelligence": {
                 "enabled": True, "advisory_count": 1200,
                 "last_imported_at": "2026-11-03T12:00:00+00:00",
@@ -125,6 +134,11 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "Potential attacker impact" in content
     assert "Recommended remediation" in content
     assert "🔴 Line 12" in content
+    assert "Analysis workers: 4" in content
+    assert "GPU status: online" in content
+    assert "GPU device: Test GPU" in content
+    assert "GPU byte-count dispatches: 3" in content
+    assert "GPU CPU fallbacks: 1" in content
 
 
 def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
