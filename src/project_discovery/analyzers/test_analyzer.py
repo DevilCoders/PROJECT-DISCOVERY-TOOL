@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..language_catalog import source_extensions, source_language_names
 
 
 _QUOTE = r"""['"\x60]"""
@@ -57,11 +58,7 @@ _PATTERNS = {
     ".vhdl": re.compile(r"(?im)^\s*entity\s+(tb_[A-Za-z0-9_]+)\s+is"),
     ".zig": re.compile(r'(?m)\btest\s+["\']([^"\']+)["\']'),
 }
-_SUPPORTED_EXTENSIONS = set(_PATTERNS) | {
-    ".pl", ".t", ".bats", ".ps1", ".sol", ".nim", ".hs", ".groovy",
-    ".m", ".f90", ".v", ".sv", ".vhd", ".vhdl", ".exs", ".r", ".jl",
-    ".scala", ".clj", ".lua",
-}
+_SUPPORTED_EXTENSIONS = set(_PATTERNS) | source_extensions() | {".bats"}
 _TEST_DIRS = {"test", "tests", "testing", "__tests__", "spec", "specs"}
 _TEST_FILENAMES = (
     re.compile(r"(^|/)(?:test_[^/]+|[^/]+_test)\.py$", re.I),
@@ -88,21 +85,23 @@ class TestDiscoveryAnalyzer(Analyzer):
 
     name = "test-discovery"
     domains = ("tests",)
-    languages = (
-        "Python", "JavaScript", "TypeScript", "Rust", "Go", "Java", "Kotlin",
-        "C#", "F#", "Visual Basic", "C", "C++", "PHP", "Ruby", "Swift",
-        "Dart", "Elixir", "R", "Julia", "Scala", "Clojure", "Lua", "Perl",
-        "PowerShell", "Solidity", "Nim", "Haskell", "Groovy", "Objective-C",
-        "Fortran", "Verilog", "SystemVerilog", "VHDL", "Zig",
-    )
+    languages = source_language_names() + ("Bats",)
 
     def supports(self, record: FileRecord) -> bool:
         if record.error or record.extension not in _SUPPORTED_EXTENSIONS:
             return False
-        parts = {part.lower() for part in Path(record.path).parts[:-1]}
+        normalized = record.path.replace("\\", "/")
+        parts = {part.lower() for part in Path(normalized).parts[:-1]}
+        filename = Path(normalized).name.lower()
+        stem = Path(filename).stem
+        generic_test_name = (
+            stem.startswith(("test_", "test-"))
+            or stem.endswith(("_test", "_tests", "_spec", "_specs", ".test", ".spec"))
+        )
         return (
             bool(parts & _TEST_DIRS)
-            or any(pattern.search(record.path) for pattern in _TEST_FILENAMES)
+            or generic_test_name
+            or any(pattern.search(normalized) for pattern in _TEST_FILENAMES)
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:

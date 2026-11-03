@@ -239,7 +239,7 @@ class BuildManifestAnalyzer(Analyzer):
             elif record.extension in {".gradle", ".sbt"} or name.startswith("build.gradle"):
                 targets = [
                     f"task: {task}" for task in re.findall(
-                        r"(?m)\b(?:task|register)\s*\(?\s*['\"]?([A-Za-z0-9_.-]+)", content
+                        r"(?m)\b(?:tasks?\.register|task|register)\s*(?:<[^>]+>)?\s*\(?\s*['\"]?([A-Za-z0-9_.-]+)", content
                     )
                 ]
             elif name in {
