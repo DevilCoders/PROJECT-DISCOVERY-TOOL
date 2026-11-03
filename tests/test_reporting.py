@@ -123,3 +123,11 @@ def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
     assert payload["directories"][1]["path"] == "src"
     assert payload["symlinks"][0]["target_scope"] == "internal"
     assert payload["special_entries"][0]["entry_type"] == "fifo"
+
+def test_html_report_exposes_symlink_scope_verification_and_permissions(tmp_path: Path):
+    path = write_reports(_result(), tmp_path, {"html"})[0]
+    content = path.read_text(encoding="utf-8")
+    assert "<th>Verification</th>" in content
+    assert "<th>Permissions</th>" in content
+    assert 'item.target_state||"unverified"' in content
+    assert "const REPORT =" in content
