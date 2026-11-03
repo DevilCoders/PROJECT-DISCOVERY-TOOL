@@ -26,7 +26,7 @@ _LICENSE_HINTS = (
 )
 _SOURCE_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".c",
-    ".h", ".cpp", ".hpp", ".java", ".kt", ".swift", ".cs", ".rb", ".php",
+    ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".kt", ".swift", ".cs", ".rb", ".php",
     ".sh", ".yaml", ".yml", ".toml", ".json",
 }
 
@@ -70,9 +70,11 @@ class LicenseAnalyzer(Analyzer):
     def supports(self, record: FileRecord) -> bool:
         name = Path(record.path).name.lower()
         is_manifest = name in {"package.json", "pyproject.toml", "cargo.toml", "composer.json"}
-        is_source = record.extension in _SOURCE_EXTENSIONS and name.endswith(
-            (".py", ".js", ".ts", ".rs", ".go", ".java", ".c", ".h")
-        )
+        is_source = record.extension in {
+            ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go",
+            ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".kt",
+            ".swift", ".cs", ".rb", ".php", ".sh",
+        }
         return record.error is None and (
             name in _LICENSE_NAMES or is_manifest or is_source
         )
