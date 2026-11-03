@@ -71,6 +71,7 @@ class SymlinkRecord:
     path: str
     target: str
     target_scope: str
+    target_state: str = "unverified"
     is_hidden: bool = False
     permissions: int | None = None
 
