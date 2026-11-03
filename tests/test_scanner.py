@@ -218,3 +218,20 @@ def test_scandir_fallback_streams_fanout_but_keeps_deterministic_inventory_order
         "zeta.py", "alpha.py", "mu.py", "Beta.py",
     }
 
+
+
+
+def test_inventory_output_order_is_deterministic_without_sorted_scandir_buffers(tmp_path: Path):
+    # Create entries in deliberately non-lexical order. The scanner may consume
+    # the OS directory iterator directly, but its public result order is stable.
+    for name in ("zeta.py", "Alpha.py", "middle.py"):
+        (tmp_path / name).write_text("pass\\n", encoding="utf-8")
+    for name in ("zeta_dir", "Alpha_dir", "middle_dir"):
+        (tmp_path / name).mkdir()
+
+    files, directories, _, _, _ = discover_inventory(tmp_path)
+
+    assert [item.path for item in files] == ["Alpha.py", "middle.py", "zeta.py"]
+    assert [item.path for item in directories] == [
+        ".", "Alpha_dir", "middle_dir", "zeta_dir",
+    ]
