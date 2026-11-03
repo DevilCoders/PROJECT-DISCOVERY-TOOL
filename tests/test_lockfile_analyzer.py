@@ -73,3 +73,14 @@ def test_mix_lock_extracts_hex_package_version(tmp_path: Path):
         '"decimal": {:hex, :decimal, "2.1.1", "checksum", [:mix], [], "hexpm", "checksum"},\n',
     )
     assert "decimal==2.1.1" in findings[0].evidence
+
+def test_lockfile_analyzer_detects_growth_after_inventory(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import lockfile_analyzer
+
+    path = tmp_path / "growing-lock.json"
+    path.write_text('{"dependencies":{"express":"^4.0.0"}}', encoding="utf-8")
+    monkeypatch.setattr(lockfile_analyzer, "_MAX_LOCKFILE_INVENTORY_BYTES", 8)
+    record = FileRecord(path.name, 1, ".json", "Lockfile")
+    findings = LockfileAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
