@@ -31,6 +31,7 @@ native_extension = Extension(
     sources=native_sources,
     define_macros=macros,
     extra_compile_args=["/O2"] if sys.platform == "win32" else ["-O3", "-std=c11"],
+    libraries=["dl"] if sys.platform.startswith("linux") else [],
     optional=True,
 )
 cpp_extension = Extension(
