@@ -257,7 +257,7 @@ class BuildManifestAnalyzer(Analyzer):
                 elif name == "mix.exs":
                     targets = [
                         f"Elixir task: {item}" for item in re.findall(
-                            r":([a-zA-Z_][a-zA-Z0-9_]*)\s*,\s*"[^"]+"",
+                            r':([a-zA-Z_][a-zA-Z0-9_]*)\s*,\s*"[^"]+"',
                             content,
                         )
                     ]

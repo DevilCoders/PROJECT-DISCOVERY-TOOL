@@ -107,3 +107,58 @@ def test_build_supports_more_ecosystem_manifests(tmp_path: Path):
     ):
         record = FileRecord(filename, 1, Path(filename).suffix.lower(), "Build")
         assert analyzer.supports(record), filename
+
+
+
+def test_scons_visual_studio_qmake_and_jenkins_targets(tmp_path: Path):
+    scons = _scan(tmp_path, "SConstruct", "Program('agent', ['main.c'])\n")
+    solution = _scan(
+        tmp_path, "Core.sln",
+        'Project("{GUID}") = "Core", "Core.csproj", "{PROJECT}"\nEndProject\n',
+    )
+    qmake = _scan(tmp_path, "widget.pro", "TEMPLATE = app\nTARGET = widget\n")
+    jenkins = _scan(
+        tmp_path, "Jenkinsfile",
+        "pipeline { stages { stage('Build') {} stage('Test') {} } }\n",
+    )
+    assert "target: agent" in scons[0].evidence
+    assert "project: Core" in solution[0].evidence
+    assert "target: widget" in qmake[0].evidence
+    assert "stage: Build" in jenkins[0].evidence
+    assert "stage: Test" in jenkins[0].evidence
+
+
+def test_ci_taskfile_autotools_and_gradle_targets(tmp_path: Path):
+    azure = _scan(
+        tmp_path, "azure-pipelines.yml",
+        "trigger:\n- main\njobs:\n- job: Build\n- job: Test\n",
+    )
+    taskfile = _scan(
+        tmp_path, "Taskfile.yaml",
+        "version: '3'\ntasks:\n  build:\n    cmds: []\n  test:\n    cmds: []\n",
+    )
+    autotools = _scan(
+        tmp_path, "Makefile.am",
+        "AM_INIT_AUTOMAKE([foreign])\nAC_CONFIG_FILES([Makefile])\n",
+    )
+    gradle = _scan(
+        tmp_path, "build.gradle.kts",
+        "tasks.register(\"compileKotlin\") {}\ntask(\"test\") {}\n",
+    )
+    assert "job: Build" in azure[0].evidence
+    assert "job: Test" in azure[0].evidence
+    assert "task: build" in taskfile[0].evidence
+    assert "task: test" in taskfile[0].evidence
+    assert "build macro: AM_INIT_AUTOMAKE" in autotools[0].evidence
+    assert "task: compileKotlin" in gradle[0].evidence
+    assert "task: test" in gradle[0].evidence
+
+
+def test_generic_build_manifests_and_mix_dependencies(tmp_path: Path):
+    setup = _scan(tmp_path, "setup.py", "from setuptools import setup\nsetup(name='sample')\n")
+    mix = _scan(
+        tmp_path, "mix.exs",
+        'defp deps do\n  [{:phoenix, "~> 1.7"}]\nend\n',
+    )
+    assert "recognized build ecosystem manifest: setup.py" in setup[0].detail
+    assert "Elixir task: phoenix" in mix[0].evidence
