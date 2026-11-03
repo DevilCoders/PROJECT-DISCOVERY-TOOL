@@ -1,4 +1,4 @@
-"""Static test-suite discovery across common language ecosystems."""
+"""Static test-suite discovery across polyglot repositories."""
 from __future__ import annotations
 
 import re
@@ -9,40 +9,100 @@ from ..models import FileRecord, Finding
 
 
 _QUOTE = r"""['"\x60]"""
+_STRING_CASE = lambda names: re.compile(
+    r"(?m)\b(?:" + names + r")\s*\(\s*" + _QUOTE + r"([^'\"\x60]+)" + _QUOTE
+)
 _PATTERNS = {
     ".py": re.compile(r"(?m)^\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)\s*\("),
-    ".js": re.compile(r"(?m)\b(?:it|test)\s*\(\s*" + _QUOTE + r"([^'\"\x60]+)" + _QUOTE),
-    ".jsx": re.compile(r"(?m)\b(?:it|test)\s*\(\s*" + _QUOTE + r"([^'\"\x60]+)" + _QUOTE),
-    ".ts": re.compile(r"(?m)\b(?:it|test)\s*\(\s*" + _QUOTE + r"([^'\"\x60]+)" + _QUOTE),
-    ".tsx": re.compile(r"(?m)\b(?:it|test)\s*\(\s*" + _QUOTE + r"([^'\"\x60]+)" + _QUOTE),
+    ".js": _STRING_CASE("it|test"),
+    ".jsx": _STRING_CASE("it|test"),
+    ".mjs": _STRING_CASE("it|test"),
+    ".cjs": _STRING_CASE("it|test"),
+    ".ts": _STRING_CASE("it|test"),
+    ".tsx": _STRING_CASE("it|test"),
     ".rs": re.compile(r"(?m)#\s*\[\s*(?:tokio::)?test\s*\]"),
     ".go": re.compile(r"(?m)^\s*func\s+(Test[A-Za-z0-9_]+)\s*\("),
-    ".java": re.compile(r"(?m)^\s*@(?:Test|ParameterizedTest|RepeatedTest)\b"),
+    ".java": re.compile(r"(?m)^\s*@(?:Test|ParameterizedTest|RepeatedTest|TestFactory)\b"),
     ".kt": re.compile(r"(?m)^\s*@(?:Test|ParameterizedTest)\b"),
-    ".cs": re.compile(r"(?m)^\s*\[(?:Test|Fact|Theory|TestCase)\b"),
-    ".cpp": re.compile(r"(?m)\bTEST(?:_F|_P)?\s*\(\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*\)"),
-    ".cc": re.compile(r"(?m)\bTEST(?:_F|_P)?\s*\(\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)\s*\)"),
+    ".cs": re.compile(r"(?m)^\s*\[(?:Test|Fact|Theory|TestCase|TestMethod)\b"),
+    ".fs": re.compile(r"(?m)^\s*\[<\s*(?:Fact|Theory|Test)\s*>\]"),
+    ".vb": re.compile(r"(?im)^\s*<(?:Test|Fact|TestMethod)\s*>"),
+    ".cpp": re.compile(r"(?m)\b(?:TEST(?:_F|_P)?|TEST_CASE)\s*\(\s*([A-Za-z0-9_]+)"),
+    ".cc": re.compile(r"(?m)\b(?:TEST(?:_F|_P)?|TEST_CASE)\s*\(\s*([A-Za-z0-9_]+)"),
+    ".cxx": re.compile(r"(?m)\b(?:TEST(?:_F|_P)?|TEST_CASE)\s*\(\s*([A-Za-z0-9_]+)"),
+    ".c": re.compile(r"(?m)\b(?:START_TEST|TEST_CASE)\s*\(\s*([A-Za-z0-9_]+)"),
     ".php": re.compile(r"(?m)^\s*public\s+function\s+(test[A-Za-z0-9_]+)\s*\("),
-    ".rb": re.compile(r"(?m)\b(?:it|specify)\s*\(?\s*" + _QUOTE + r"([^'\"\x60]+)" + _QUOTE),
-    ".swift": re.compile(r"(?m)^\s*func\s+test[A-Za-z0-9_]+\s*\("),
+    ".rb": _STRING_CASE("it|specify"),
+    ".swift": re.compile(r"(?m)^\s*func\s+(test[A-Za-z0-9_]+)\s*\("),
+    ".dart": _STRING_CASE("test|group"),
+    ".exs": re.compile(r'(?m)\btest\s+["\']([^"\']+)["\']'),
+    ".r": re.compile(r'(?m)\btest_that\s*\(\s*["\']([^"\']+)["\']'),
+    ".jl": re.compile(r'(?m)@testset\s+["\']([^"\']+)["\']'),
+    ".scala": _STRING_CASE("test|it"),
+    ".clj": re.compile(r"(?m)\(deftest\s+([A-Za-z0-9_!?-]+)"),
+    ".lua": _STRING_CASE("describe|it|test"),
+    ".pl": re.compile(r"(?m)^\s*(?:ok|is|isnt|subtest)\s*\("),
+    ".t": re.compile(r"(?m)^\s*(?:ok|is|isnt|subtest)\s*\("),
+    ".bats": re.compile(r'(?m)^\s*@test\s+["\']([^"\']+)["\']'),
+    ".ps1": re.compile(r'(?mi)^\s*(?:Describe|Context|It)\s+["\']([^"\']+)["\']'),
+    ".sol": re.compile(r"(?m)^\s*function\s+(test[A-Za-z0-9_]*)\s*\("),
+    ".nim": re.compile(r'(?mi)^\s*(?:test|suite)\s+["\']([^"\']+)["\']'),
+    ".hs": re.compile(r'(?m)\b(?:describe|it)\s+["\']([^"\']+)["\']'),
+    ".groovy": re.compile(r"(?m)^\s*def\s+(?:'([^']+)'|([A-Za-z0-9_]+))\s*\("),
+    ".m": re.compile(r"(?m)^\s*-\s*\(void\)\s*(test[A-Za-z0-9_]+)"),
+    ".f90": re.compile(r"(?im)^\s*subroutine\s+(test_[A-Za-z0-9_]+)"),
+    ".v": re.compile(r"(?m)^\s*module\s+(tb_[A-Za-z0-9_]+)"),
+    ".sv": re.compile(r"(?m)^\s*module\s+(tb_[A-Za-z0-9_]+)"),
+    ".vhd": re.compile(r"(?im)^\s*entity\s+(tb_[A-Za-z0-9_]+)\s+is"),
+    ".vhdl": re.compile(r"(?im)^\s*entity\s+(tb_[A-Za-z0-9_]+)\s+is"),
+    ".zig": re.compile(r'(?m)\btest\s+["\']([^"\']+)["\']'),
 }
+_SUPPORTED_EXTENSIONS = set(_PATTERNS) | {
+    ".pl", ".t", ".bats", ".ps1", ".sol", ".nim", ".hs", ".groovy",
+    ".m", ".f90", ".v", ".sv", ".vhd", ".vhdl", ".exs", ".r", ".jl",
+    ".scala", ".clj", ".lua",
+}
+_TEST_DIRS = {"test", "tests", "testing", "__tests__", "spec", "specs"}
 _TEST_FILENAMES = (
-    re.compile(r"(^|/)test_[^/]+\.py$", re.I),
-    re.compile(r"(^|/)[^/]+_test\.(?:go|rs|js|jsx|ts|tsx|java|kt|cs|cpp|cc)$", re.I),
-    re.compile(r"(^|/)[^/]+\.(?:test|spec)\.(?:js|jsx|ts|tsx)$", re.I),
+    re.compile(r"(^|/)(?:test_[^/]+|[^/]+_test)\.py$", re.I),
+    re.compile(r"(^|/)(?:test_[^/]+|[^/]+_test)\.(?:go|rs|js|jsx|mjs|cjs|ts|tsx|java|kt|cs|cpp|cc|cxx|c)$", re.I),
+    re.compile(r"(^|/)[^/]+\.(?:test|spec)\.(?:js|jsx|mjs|cjs|ts|tsx)$", re.I),
     re.compile(r"(^|/)[^/]+_spec\.rb$", re.I),
+    re.compile(r"(^|/)[^/]+_tests?\.(?:java|kt|cs|fs|vb|swift|dart|exs|r|jl|scala|clj|lua|pl|ps1|sol|nim|hs|groovy|m|f90|cpp|cc|cxx)$", re.I),
+    re.compile(r"(^|/)runtests\.jl$", re.I),
+    re.compile(r"(^|/)test[^/]*\.bats$", re.I),
+    re.compile(r"(^|/)Test[^/]*\.t\.sol$", re.I),
+    re.compile(r"(^|/)[^/]+\.t$", re.I),
+    re.compile(r"(^|/)Spec\.hs$", re.I),
+    re.compile(r"(^|/)(?:test_[^/]+|[^/]+_(?:test|tests|spec))\.(?:dart|exs|r|jl|scala|clj|lua|ps1|sol|sv|bats)$", re.I),
+    re.compile(r"(^|/)[^/]+Tests?\.(?:java|kt|cs|fs|vb|swift|dart|groovy|m)$", re.I),
+    re.compile(r"(^|/)[^/]+(?:Spec|Suite)\.(?:scala|hs)$", re.I),
+    re.compile(r"(^|/)[^/]+\.t\.sol$", re.I),
+    re.compile(r"(^|/)tb_[^/]+\.(?:v|sv|vhd|vhdl)$", re.I),
+    re.compile(r"(^|/)[^/]+\.bats$", re.I),
 )
 
 
 class TestDiscoveryAnalyzer(Analyzer):
-    """Find test files and statically recognizable test declarations."""
+    """Find test files and recognizable test declarations across language ecosystems."""
 
     name = "test-discovery"
     domains = ("tests",)
+    languages = (
+        "Python", "JavaScript", "TypeScript", "Rust", "Go", "Java", "Kotlin",
+        "C#", "F#", "Visual Basic", "C", "C++", "PHP", "Ruby", "Swift",
+        "Dart", "Elixir", "R", "Julia", "Scala", "Clojure", "Lua", "Perl",
+        "PowerShell", "Solidity", "Nim", "Haskell", "Groovy", "Objective-C",
+        "Fortran", "Verilog", "SystemVerilog", "VHDL", "Zig",
+    )
 
     def supports(self, record: FileRecord) -> bool:
-        return record.error is None and any(
-            pattern.search(record.path) for pattern in _TEST_FILENAMES
+        if record.error or record.extension not in _SUPPORTED_EXTENSIONS:
+            return False
+        parts = {part.lower() for part in Path(record.path).parts[:-1]}
+        return (
+            bool(parts & _TEST_DIRS)
+            or any(pattern.search(record.path) for pattern in _TEST_FILENAMES)
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
@@ -51,8 +111,8 @@ class TestDiscoveryAnalyzer(Analyzer):
             return [Finding(
                 "testing",
                 f"Test candidate: {record.path}",
-                "The path follows a common test-file naming convention; this language's "
-                "test declarations are not yet extracted by the built-in patterns.",
+                "The path follows a test-directory or naming convention; this format's "
+                "test declarations are not extracted by the built-in patterns.",
                 confidence="INFERRED",
                 evidence=[record.path],
                 analyzer=self.name,
