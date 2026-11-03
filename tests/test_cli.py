@@ -21,6 +21,8 @@ def test_default_report_output_is_sibling_of_target(tmp_path: Path):
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert "analyzer_registry" in payload["metrics"]
     assert "source_structure" in payload["metrics"]["active_analyzer_domains"]
+    assert "native_backend" in payload["metrics"]
+    assert "vcs_provider_signal_count" in payload["metrics"]
 
 
 def test_scan_writes_reports_without_touching_target(tmp_path: Path):
@@ -100,3 +102,86 @@ def test_large_file_content_skip_is_opt_in(tmp_path: Path):
     assert "Explicit --skip" in skip_payload["files"][0]["content_skipped_reason"]
     assert skip_payload["metrics"]["oversized_files"] == 1
     assert skip_payload["metrics"]["content_skip_enabled"] is True
+
+
+
+def test_scan_with_local_vulnerability_database_reports_advisory_match(tmp_path: Path):
+    import json
+    from project_discovery.vulnerability_db import VulnerabilityDatabase
+
+    project = tmp_path / "vulnerable-project"
+    project.mkdir()
+    (project / "package-lock.json").write_text(
+        json.dumps({
+            "packages": {
+                "": {"name": "fixture", "version": "1.0.0"},
+                "node_modules/demo-lib": {"version": "1.9.0"},
+            }
+        }),
+        encoding="utf-8",
+    )
+    feed = tmp_path / "osv-feed"
+    feed.mkdir()
+    (feed / "advisory.json").write_text(json.dumps({
+        "id": "GHSA-cli-test-1234",
+        "aliases": ["CVE-2025-77777"],
+        "summary": "Fixture vulnerability for CLI integration",
+        "database_specific": {"severity": "HIGH"},
+        "affected": [{
+            "package": {"ecosystem": "npm", "name": "demo-lib"},
+            "ranges": [{
+                "type": "SEMVER",
+                "events": [{"introduced": "1.0.0"}, {"fixed": "2.0.0"}],
+            }],
+        }],
+    }), encoding="utf-8")
+    database_path = tmp_path / "local-advisories.sqlite3"
+    with VulnerabilityDatabase(database_path) as database:
+        database.import_osv(feed)
+
+    output = tmp_path / "report"
+    assert run_scan(
+        project, output, {"json", "markdown", "html"}, 1,
+        vulnerability_db=database_path,
+    ) == 0
+    payload = json.loads(
+        (output / "discovery-report.json").read_text(encoding="utf-8")
+    )
+    matches = [item for item in payload["findings"] if item["category"] == "vulnerabilities"]
+    assert len(matches) == 1
+    assert "GHSA-cli-test-1234" in matches[0]["title"]
+    assert payload["metrics"]["vulnerability_intelligence"]["enabled"] is True
+    html = (output / "discovery-report.html").read_text(encoding="utf-8")
+    markdown = (output / "discovery-report.md").read_text(encoding="utf-8")
+    assert "GHSA-cli-test-1234" in html
+    assert "GHSA-cli-test-1234" in markdown
+
+
+def test_vuln_db_cli_import_and_status_are_local(tmp_path: Path, monkeypatch):
+    import json
+    import sys
+    from project_discovery.cli import main
+
+    feed = tmp_path / "osv"
+    feed.mkdir()
+    (feed / "advisory.json").write_text(json.dumps({
+        "id": "GHSA-status-1234",
+        "affected": [{
+            "package": {"ecosystem": "npm", "name": "pkg"},
+            "versions": ["1.0.0"],
+        }],
+    }), encoding="utf-8")
+    db = tmp_path / "advisories.sqlite3"
+    monkeypatch.setattr(
+        sys, "argv", ["pdt", "vuln-db", "import", str(feed), "--db", str(db)]
+    )
+    with pytest.raises(SystemExit) as imported:
+        main()
+    assert imported.value.code == 0
+
+    monkeypatch.setattr(
+        sys, "argv", ["pdt", "vuln-db", "status", "--db", str(db)]
+    )
+    with pytest.raises(SystemExit) as status:
+        main()
+    assert status.value.code == 0

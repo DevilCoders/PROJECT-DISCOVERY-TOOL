@@ -1,0 +1,42 @@
+from project_discovery import native_backend
+
+
+def test_count_byte_matches_python_for_all_buffer_shapes():
+    payload = bytes(range(256)) * 257 + b"\n\n\x00"
+    for value in (0, 1, 10, 127, 255):
+        expected = payload.count(bytes([value]))
+        assert native_backend.count_byte(payload, value) == expected
+        assert native_backend.count_byte(bytearray(payload), value) == expected
+        assert native_backend.count_byte(memoryview(payload), value) == expected
+
+
+def test_count_byte_handles_empty_and_unaligned_buffers():
+    assert native_backend.count_byte(b"", 0) == 0
+    payload = b"x" * 31 + b"!" + b"x" * 7
+    assert native_backend.count_byte(payload, ord("!")) == 1
+
+
+def test_count_byte_rejects_invalid_needle():
+    import pytest
+
+    for value in (-1, 256, True, 1.5):
+        with pytest.raises(ValueError):
+            native_backend.count_byte(b"sample", value)
+
+
+def test_native_capability_report_is_machine_readable():
+    import platform
+    import sys
+
+    info = native_backend.capabilities()
+    assert info["architecture"]
+    assert info["backend"] in {
+        "x86_64-sse2-popcnt-asm", "portable-c", "python-fallback",
+    }
+    assert info["hardware_threads"] >= 1
+    assert isinstance(info["assembly_compiled"], bool)
+    if info["backend"] == "x86_64-sse2-popcnt-asm":
+        assert info["assembly_compiled"] is True
+    if sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}:
+        assert native_backend.native_available()
+        assert info["assembly_compiled"] is True

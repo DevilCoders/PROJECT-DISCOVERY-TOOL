@@ -41,9 +41,9 @@ The current feature branch has first-pass implementations for filesystem invento
 
 The baseline is not production-ready:
 - scanner inventory, pending directories and result objects are still materialized in memory;
-- default scanner ignore names implicitly prune several development/dependency/build trees;
+- all development/cache/build trees are traversed by default and only explicitly excluded subtrees are pruned;
 - file type classification is still mostly extension/language-family based, not a complete signature classifier;
-- special files are counted but do not have full records;
+- FIFO/socket/device/unknown special entries have inventory records;
 - Windows hidden attributes and several permission/ownership fields need cross-platform validation;
 - archive index inspection is substantive only for ZIP/TAR; other recognized formats are detection-only;
 - archive entry-count and member-byte caps exist, but full time/depth/ratio/metadata budgets and adversarial testing remain;
@@ -101,8 +101,9 @@ The baseline is not production-ready:
 - [ ] Separate metadata-only inventory from content analyzers so the same file is not read repeatedly without purpose.
 - [ ] Add configurable CPU, memory, I/O and per-analyzer budgets.
 - [ ] Make progress phase-based: inventory, hashing, analyzer domains, archive inspection, correlation, reporting.
-- [ ] Add a Rust native walker/indexer/stream engine only after the benchmark identifies Python as a bottleneck; maintain a portable Python fallback and stable ABI/IPC boundary.
-- [ ] Use C only for measured native interop or a proven hot path; introduce assembly only for a reproducible architecture-specific win. No decorative C/ASM.
+- [x] Implement portable C byte counting and host capability reporting, used in scanner signature classification and streaming secret analysis.
+- [x] Implement Linux x86-64 SIMD Assembly byte counting with runtime SSE2/POPCNT detection and scalar C/Python fallbacks.
+- [ ] Implement the Rust native walker/indexer/stream engine with bounded producer-consumer queues and resumable checkpoints.
 - [ ] Cross-compile/test native modules on Linux, Windows and macOS; fuzz FFI boundaries and test graceful fallback.
 - [ ] Benchmark 2GB, 10GB, 50GB and 100GB+ corpora with varied file counts/sizes, deep trees, large dependency directories, archives and symlink-heavy layouts.
 - [ ] Publish wall time, files/sec, bytes/sec, cache hit rate, peak RSS, CPU, I/O, archive budgets and report-generation memory.
@@ -149,7 +150,41 @@ The baseline is not production-ready:
 - [ ] Detect auth middleware, versioning, rate-limit and validation declarations where evidence exists.
 - [ ] Build endpoint catalog with method, path, framework, handler symbol, contract, auth marker, source evidence and confidence. Never imply reachability.
 
-## Phase 5 — Secrets, credentials and personal-data indicators
+## Phase 5 — VCS, source hosting and delivery-provider intelligence
+
+- [x] Detect Git checkout metadata through .git directories and .git pointer files used by worktrees/submodules.
+- [x] Inspect Git remotes and fingerprint GitHub, GitLab, Bitbucket, Azure Repos, AWS CodeCommit, Google Cloud Source Repositories, SourceHut and selected self-hosted hosts.
+- [x] Detect Git HEAD references, detached HEAD, shallow clone boundaries, packed refs, branch config sections, submodule declarations and Git LFS rules.
+- [x] Add initial Mercurial, Subversion, Bazaar, Darcs, Jujutsu, Pijul, CVS and Perforce metadata markers.
+- [x] Detect GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines, Jenkins, CircleCI, Buildkite, Travis, Drone, Woodpecker and AppVeyor definitions.
+- [x] Detect AWS CodeBuild/CodeDeploy/CDK/SAM, Google Cloud Build, Firebase and selected deployment markers.
+- [ ] Deeply decode SVN working-copy SQLite metadata, Mercurial revlogs, specialized Jujutsu/Pijul layouts and Perforce workspaces.
+- [ ] Add configurable provider fingerprints for GitHub Enterprise, GitLab self-managed, Bitbucket Data Center, Azure DevOps Server, Gitea/Forgejo, Gerrit and Gitolite.
+- [ ] Correlate remotes, submodules, package registries, CI workflows and cloud deployment manifests into a provenance graph.
+- [ ] Add bare repositories, worktrees, nested repositories, detached/shallow clones, multiple remotes, malformed metadata and credential-bearing remote URL fixtures.
+- [ ] Verify credentials/query/fragment redaction across every report/output path.
+- [ ] Keep analysis offline: no VCS command execution, ref fetching, host lookup or provider API requests.
+
+## Phase 6 — Local vulnerability intelligence
+
+- [x] Add a local SQLite advisory store with explicit OSV JSON import and coverage/status reporting.
+- [x] Import advisories from a local JSON file or directory tree; do not download, update or contact advisory providers.
+- [x] Match resolved package/version pairs from supported lockfiles against OSV affected package coordinates.
+- [x] Support explicit affected-version lists and initial SEMVER/ECOSYSTEM event-range evaluation, including introduced/fixed/last_affected/limit boundaries.
+- [x] Report advisory identifiers, CVE/GHSA aliases, severity, modified date, fixed-version boundary, lockfile evidence and confidence.
+- [x] Treat unsupported range schemes, unreadable/malformed lockfiles, missing versions and parser-budget limits as UNKNOWN; do not label them clean.
+- [x] Add dedicated JSON/Markdown/HTML vulnerability sections and CLI database import/status.
+- [ ] Extend resolved lockfile coverage for all catalogued language ecosystems and package managers.
+- [ ] Add adapters for local NVD JSON feeds, GHSA exports, distro advisories (Debian, Ubuntu, Alpine, Red Hat), OS package DBs, container/SBOM advisories and vendor bulletins.
+- [ ] Add ecosystem-native comparators for PEP 440, SemVer, Maven, NuGet, Go pseudo-versions, RubyGems, Debian, RPM and vendor-specific versions.
+- [ ] Support CPE/purl matching, duplicate/alias resolution, withdrawn/superseded advisories, exploit maturity, CVSS vector parsing and VEX status.
+- [ ] Resolve direct/transitive dependency graphs and retain parent path/provenance for vulnerable packages.
+- [ ] Add static dependency reachability evidence where symbol/call graphs support it; never claim exploitability from version matching alone.
+- [ ] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping.
+- [ ] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds.
+- [ ] Include advisory snapshot provenance, import timestamp, source identity/hash, ecosystem coverage and freshness warning in reports.
+
+## Phase 7 — Secrets, credentials and personal-data indicators
 
 - [x] Field-name indicators for first/given/middle/last/family name, username, email, phone, address, date of birth and government-ID fields.
 - [x] Email-shaped value indicators with raw values omitted.
@@ -163,7 +198,7 @@ The baseline is not production-ready:
 - [ ] Add strict redaction tests for JSON/HTML/Markdown/terminal/exception logs and archive member findings.
 - [ ] Add allowlists/false-positive controls that do not suppress genuine findings silently; record suppression rules in the report.
 
-## Phase 6 — Polyglot language and framework intelligence
+## Phase 8 — Polyglot language and framework intelligence
 
 - [ ] Maintain 40+ language packs with real conformance fixtures, not just extension recognition: mainstream, legacy, scientific, functional, scripting, mobile, game, embedded, HDL, GPU and smart-contract languages.
 - [ ] Leverage Tree-sitter where grammar coverage is robust; add dedicated parsers/SDKs where Tree-sitter is insufficient or unavailable.
@@ -174,7 +209,7 @@ The baseline is not production-ready:
 - [ ] Add mixed-language monorepo fixtures and projects containing generated, vendored and nested workspace trees.
 - [ ] Every unsupported or partially supported language must report capability gaps explicitly.
 
-## Phase 7 — Security, configuration, API, database, test and build coverage
+## Phase 9 — Security, configuration, API, database, test and build coverage
 
 - [ ] Security: credentials, injection, command execution, traversal, SSRF, unsafe deserialization, authentication, authorization, cryptography, TLS, insecure randomness, dataflow/taint, container/IaC and supply-chain indicators.
 - [ ] Configuration: environment variables, defaults, overrides, secrets references, configuration layering, schema validation, drift and cross-file key references.
@@ -185,7 +220,7 @@ The baseline is not production-ready:
 - [ ] Build analyzer capability must separate recognized manifest, extracted target/task, resolved dependency, and executed build; PDT never runs the build.
 - [ ] Add tests for common, legacy, proprietary and custom project conventions; support safe custom rules through plugins.
 
-## Phase 8 — Domain extensions
+## Phase 10 — Domain extensions
 
 - [ ] Expand AI/ML model architecture, tokenizer/config, training/inference, datasets, accelerators, distributed training and checkpoint metadata without deserializing untrusted payloads.
 - [ ] Expand ROS 1/ROS 2 packages, nodes, topics, services, actions, launch compositions, QoS and message/interface relationships.
@@ -198,7 +233,7 @@ The baseline is not production-ready:
 - [ ] Expand observability/logging/metrics/tracing, cloud service binding, supply chain, SBOM/provenance and privacy/data governance.
 - [ ] Expand multi-project comparison and integration planning while keeping each project independent.
 
-## Phase 9 — Comprehensive report schema and report UX
+## Phase 11 — Comprehensive report schema and report UX
 
 ### Data model
 - [ ] Version the JSON schema and retain migration support for older report versions.
@@ -230,7 +265,7 @@ The baseline is not production-ready:
 - [ ] Add CLI commands for capability catalog, analyzer diagnostics, archive policy, budgets and report inspection.
 - [ ] Test TTY, no-TTY, narrow terminals, Windows console, ANSI-disabled terminals and large CI logs.
 
-## Phase 10 — Large-project and adversarial verification
+## Phase 12 — Large-project and adversarial verification
 
 - [ ] Build synthetic and representative corpora at 2GB, 10GB, 50GB and 100GB+.
 - [ ] Include high file count, deep nesting, huge fan-out, large development dependency trees, mixed file size distributions and binary-heavy projects.
@@ -240,7 +275,7 @@ The baseline is not production-ready:
 - [ ] Set explicit resource SLOs by scan mode; fail CI when budgets regress materially.
 - [ ] Run fuzzers/property tests for archive parsers, path normalization, language/file-type recognition and report serialization.
 
-## Phase 11 — Production release
+## Phase 13 — Production release
 
 - [ ] Full supported OS and Python CI matrix, plus native build matrix where Rust/C modules exist.
 - [ ] Analyzer conformance and regression coverage for all claimed capabilities.

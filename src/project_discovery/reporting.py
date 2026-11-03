@@ -166,9 +166,10 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
   <aside class="sidebar" aria-label="Report navigation">
    <h3>Navigation</h3>
    <a href="#overview">01 // Overview</a><a href="#inventory">02 // Inventory</a>
-   <a href="#directories">03 // Directories</a><a href="#symlinks">04 // Symlinks</a>
-   <a href="#special">05 // Special entries</a><a href="#files">06 // File browser</a>
-   <a href="#findings">07 // Findings</a><a href="#diagnostics">08 // Diagnostics</a>
+   <a href="#vulnerabilities">03 // Vulnerabilities</a><a href="#vcs">04 // VCS / Providers</a>
+   <a href="#directories">05 // Directories</a><a href="#symlinks">06 // Symlinks</a>
+   <a href="#special">07 // Special entries</a><a href="#files">08 // File browser</a>
+   <a href="#findings">09 // Findings</a><a href="#diagnostics">10 // Diagnostics</a>
   </aside>
   <main class="content">
    <section class="section" id="overview">
@@ -177,13 +178,26 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>File type distribution</h3><div id="file-types"></div></div>
      <div class="profile-card"><h3>File size distribution</h3><div id="size-buckets"></div></div>
      <div class="profile-card"><h3>Development dependency trees</h3><div id="development-dirs"></div></div>
-     <div class="profile-card"><h3>Host environment</h3><div id="host-os" class="mono muted"></div></div>
+     <div class="profile-card"><h3>Host & native engine</h3><div id="host-os" class="mono muted"></div></div>
+     <div class="profile-card"><h3>Vulnerability intelligence</h3><div id="vuln-summary" class="mono muted"></div></div>
+     <div class="profile-card"><h3>Source control & delivery</h3><div id="vcs-summary" class="mono muted"></div></div>
     </div>
    </section>
    <section class="section" id="inventory">
     <div class="section-head"><h2>Filesystem inventory</h2><span class="kicker">02 / ENTRY PROFILE</span></div>
     <div id="inventory-summary" class="muted"></div>
     <p class="muted">The JSON report contains full inventory metadata. Large tables are rendered in bounded pages.</p>
+   </section>
+   <section class="section" id="vulnerabilities">
+    <div class="section-head"><h2>Local vulnerability intelligence</h2><span class="kicker">03 / OFFLINE ADVISORY MATCHING</span></div>
+    <div class="controls"><span id="vuln-db-state" class="badge">LOCAL DB STATUS</span><span id="vuln-db-updated" class="muted"></span></div>
+    <div id="vulnerability-findings" class="finding-list"></div>
+    <div id="no-vulnerabilities" class="empty hidden">No local advisory matches were produced. This does not prove dependencies are vulnerability-free.</div>
+   </section>
+   <section class="section" id="vcs">
+    <div class="section-head"><h2>VCS, hosting & delivery providers</h2><span class="kicker">04 / SOURCE PROVENANCE</span></div>
+    <div id="vcs-findings" class="finding-list"></div>
+    <div id="no-vcs" class="empty hidden">No local VCS, source-hosting or delivery-provider metadata was detected.</div>
    </section>
    <section class="section" id="directories">
     <div class="section-head"><h2>Directory intelligence</h2><span class="kicker">03 / STRUCTURE</span></div>
@@ -268,7 +282,76 @@ $("stat-hidden").textContent=number(metrics.hidden_entry_count||0);
 $("stat-errors").textContent=number((REPORT.errors||[]).length+(metrics.walk_errors||0));
 fillBars("file-types",metrics.file_types);fillBars("size-buckets",metrics.size_buckets);
 fillBars("development-dirs",metrics.development_directories);
-$("host-os").textContent=JSON.stringify(metrics.host_os||{},null,2);
+$("host-os").textContent=JSON.stringify({
+ host:metrics.host_os||{},
+ native_backend:metrics.native_backend||{backend:"not reported"}
+},null,2);
+const vulnMeta=metrics.vulnerability_intelligence||{enabled:false};
+const vulnFindings=(REPORT.findings||[]).filter(item=>item.category==="vulnerabilities");
+$("vuln-summary").textContent=vulnMeta.enabled
+ ? number(vulnMeta.advisory_count||0)+" local advisories • "+number(vulnFindings.length)+" matched finding(s)"
+ : "Offline advisory database not configured";
+$("vuln-db-state").textContent=vulnMeta.enabled?"LOCAL DATABASE ACTIVE":"NO LOCAL DATABASE";
+$("vuln-db-updated").textContent=vulnMeta.last_imported_at
+ ? "Last local import: "+vulnMeta.last_imported_at
+ : "No local advisory snapshot metadata";
+const vulnTarget=$("vulnerability-findings");
+for(const item of vulnFindings.slice(0,200)){
+ const card=document.createElement("article");card.className="finding";
+ const details=document.createElement("details"),summary=document.createElement("summary");
+ const title=document.createElement("span");title.className="finding-title";title.textContent=item.title;
+ const severity=document.createElement("span");severity.className="badge sev-"+String(item.severity||"info").toLowerCase();severity.textContent=item.severity||"INFO";
+ const confidence=document.createElement("span");confidence.className="badge "+String(item.confidence||"unknown").toLowerCase();confidence.textContent=item.confidence||"UNKNOWN";
+ summary.append(title,severity,confidence);details.append(summary);
+ const body=document.createElement("div");body.className="finding-body";
+ const paragraph=document.createElement("p");paragraph.textContent=item.detail||"";body.append(paragraph);
+ if(Array.isArray(item.evidence)&&item.evidence.length){
+  const evidence=document.createElement("div");evidence.className="evidence";
+  const label=document.createElement("strong");label.textContent="Dependency/advisory evidence";evidence.append(label);
+  const list=document.createElement("ul");
+  for(const value of item.evidence.slice(0,30)){const li=document.createElement("li");const code=document.createElement("code");code.textContent=String(value);li.append(code);list.append(li);}
+  evidence.append(list);body.append(evidence);
+ }
+ details.append(body);card.append(details);vulnTarget.append(card);
+}
+$("no-vulnerabilities").classList.toggle("hidden",vulnFindings.length!==0);
+if(vulnFindings.length>200){
+ const note=document.createElement("div");note.className="empty";
+ note.textContent="Showing first 200 vulnerability matches here. The global findings view and JSON report contain the complete set.";
+ vulnTarget.append(note);
+}
+const vcsCategories=new Set(["vcs","hosting_providers","ci_cd","cloud_services"]);
+const vcsFindings=(REPORT.findings||[]).filter(item=>vcsCategories.has(item.category));
+const providerNames=[...new Set(vcsFindings.map(item=>item.title.split(":")[0]))].sort();
+$("vcs-summary").textContent=vcsFindings.length
+ ? number(vcsFindings.length)+" evidence item(s) • "+providerNames.slice(0,8).join(" / ")
+   +(providerNames.length>8?" / +"+(providerNames.length-8)+" more":"")
+ : "No VCS/provider evidence";
+const vcsTarget=$("vcs-findings");
+for(const item of vcsFindings.slice(0,100)){
+ const card=document.createElement("article");card.className="finding";
+ const details=document.createElement("details"),summary=document.createElement("summary");
+ const title=document.createElement("span");title.className="finding-title";title.textContent=item.title;
+ const category=document.createElement("span");category.className="badge";category.textContent=item.category;
+ const confidence=document.createElement("span");confidence.className="badge "+String(item.confidence||"unknown").toLowerCase();confidence.textContent=item.confidence||"UNKNOWN";
+ summary.append(title,category,confidence);details.append(summary);
+ const body=document.createElement("div");body.className="finding-body";
+ const paragraph=document.createElement("p");paragraph.textContent=item.detail||"";body.append(paragraph);
+ if(Array.isArray(item.evidence)&&item.evidence.length){
+  const evidence=document.createElement("div");evidence.className="evidence";
+  const label=document.createElement("strong");label.textContent="Evidence";evidence.append(label);
+  const list=document.createElement("ul");
+  for(const value of item.evidence.slice(0,30)){const li=document.createElement("li");const code=document.createElement("code");code.textContent=String(value);li.append(code);list.append(li);}
+  evidence.append(list);body.append(evidence);
+ }
+ details.append(body);card.append(details);vcsTarget.append(card);
+}
+$("no-vcs").classList.toggle("hidden",vcsFindings.length!==0);
+if(vcsFindings.length>100){
+ const note=document.createElement("div");note.className="empty";
+ note.textContent="Showing first 100 VCS/provider findings. Use the global findings view or JSON report for the complete set.";
+ vcsTarget.append(note);
+}
 $("inventory-summary").textContent=number(REPORT.files.length)+" files • "+
  number(Math.max(0,REPORT.directories.length-1))+" directories • "+number(REPORT.symlinks.length)+
  " links • "+number((REPORT.special_entries||[]).length)+" special entries • "+formatBytes(metrics.total_bytes)+" • "+number(metrics.hidden_entry_count||0)+
@@ -460,6 +543,29 @@ def _markdown_report(result: ScanResult) -> str:
                 f"- {item.path} — {item.entry_type}, permissions {mode}, "
                 f"hidden: {item.is_hidden}, size: {item.size_bytes:,} bytes"
             )
+    vulnerability_findings = [
+        item for item in result.findings if item.category == "vulnerabilities"
+    ]
+    vuln_meta = metrics.get("vulnerability_intelligence", {})
+    lines.extend(["", "## Local Vulnerability Intelligence", ""])
+    if not vuln_meta.get("enabled"):
+        lines.append(
+            "No local advisory database was configured. This is not a vulnerability-free result."
+        )
+    else:
+        lines.append(
+            f"- Local advisories available: {vuln_meta.get('advisory_count', 0):,}"
+        )
+        lines.append(
+            f"- Local advisory snapshot imported: {vuln_meta.get('last_imported_at', 'unknown')}"
+        )
+        lines.append(f"- Matched findings: {len(vulnerability_findings):,}")
+    for item in vulnerability_findings:
+        lines.extend([
+            f"- [{item.severity}][{item.confidence}] {item.title}",
+            f"  - {item.detail}",
+            f"  - Evidence: " + "; ".join(item.evidence),
+        ])
     lines.extend(["", "## Findings", ""])
     if not result.findings:
         lines.append("No findings were produced.")

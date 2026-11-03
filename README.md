@@ -82,7 +82,8 @@ The current branch contains first-pass implementations of:
 - Test discovery, build manifests, CI/CD, container and deployment manifests.
 - ZIP/TAR member metadata and bounded content samples without extraction; other recognized archive formats may be detection-only.
 - IPv4/IPv6/CIDR/port, URI/URL, hostname/subdomain and protocol indicators; host OS metadata and target-platform markers.
-- Initial AI/ML, ROS 1/2, mobile, game-engine, frontend, accessibility, localization, observability, coverage and multi-project analysis.
+- Initial AI/ML, ROS 1/2, mobile, game-engine, frontend, accessibility, localization, observability, coverage, VCS/hosting and multi-project analysis.
+- Local-only OSV advisory database import and lockfile-based vulnerability matching when an operator supplies `--vuln-db`.
 - JSON/Markdown reports and an offline dark HTML report with search, filters, pagination and collapsible findings.
 - A Rich CLI with an ASCII banner, progress phases, compact summary panels and TTY-aware screen clearing.
 
@@ -136,6 +137,9 @@ pdt scan /path/to/project
 pdt scan /path/to/project --output /path/to/reports --format json,markdown,html
 pdt scan /path/to/project --skip --max-file-mb 128
 pdt scan /path/to/project --exclude-dir node_modules --exclude-dir .cache
+pdt vuln-db import /local/advisories/osv --db ~/.pdt/vulnerability-advisories.sqlite3
+pdt vuln-db status --db ~/.pdt/vulnerability-advisories.sqlite3
+pdt scan /path/to/project --vuln-db ~/.pdt/vulnerability-advisories.sqlite3
 pdt compare project-a-report/discovery-report.json project-b-report/discovery-report.json
 pdt catalog-add /reports/project-a/discovery-report.json
 pdt catalog-list
@@ -154,7 +158,7 @@ The terminal is an analysis console, not an append-only file dump. On an interac
 
 ## Reporting UX
 
-The HTML report is a standalone offline document with a dark command-center visual system. It currently includes project summary panels, inventory tables, directory and symlink views, finding search/filter controls, bounded pagination, per-finding disclosure and open/close controls.
+The HTML report is a standalone offline document with a dark command-center visual system. It includes project summary panels, inventory tables, dedicated local vulnerability and VCS/provider views, directory and symlink views, finding search/filter controls, bounded pagination, per-finding disclosure and open/close controls.
 
 Production report goals:
 - comprehensive overview of files, directories, hidden entries, links, file types, languages, sizes and development trees;
@@ -164,6 +168,23 @@ Production report goals:
 - global search, filters, stable navigation, open/close-all, section collapse and evidence detail;
 - redacted content and no remote assets, scripts, fonts or requests;
 - keyboard accessibility, responsive layouts, clear empty/loading/error states and tests for report-data escaping.
+
+## Local vulnerability intelligence
+
+PDT can match resolved dependency versions from supported lockfiles against an operator-provisioned local OSV JSON snapshot. Import and scan are separate operations:
+
+```bash
+# Import JSON advisory records already stored on this machine (no network access)
+pdt vuln-db import /local/advisories/osv --db ~/.pdt/vulnerability-advisories.sqlite3
+pdt vuln-db status --db ~/.pdt/vulnerability-advisories.sqlite3
+
+# Enable local advisory matching for this scan
+pdt scan /path/to/project --vuln-db ~/.pdt/vulnerability-advisories.sqlite3
+```
+
+The initial matching layer covers ecosystems represented by supported lockfile parsers (npm, PyPI, crates.io, Go, Packagist, RubyGems, Hex, NuGet and Swift Package Manager). It evaluates OSV explicit affected-version lists and supported SEMVER/ECOSYSTEM event ranges, records aliases such as CVE/GHSA, severity and fixed-version boundaries, and includes advisory snapshot metadata in reports.
+
+A confirmed range match means the resolved version matches the imported advisory range. It does **not** prove runtime loading, reachability, exploitability or exposure. Unsupported range schemes (including commit-only GIT ranges), missing version information and parser-budget failures remain UNKNOWN. No automatic online update, hosted API, telemetry or network fallback is performed during scanning. The advisory DB is local and should be refreshed by an operator using a separately obtained, trusted advisory snapshot. Current support is partial; distro packages, OS packages, transitive resolution not represented in lockfiles and additional advisory feeds remain roadmap work.
 
 ## Evidence and confidence
 
@@ -175,16 +196,17 @@ Documentation does not prove implementation. A declared package does not prove i
 
 ## Polyglot and native implementation strategy
 
-PDT will use the best-fit implementation language for each measured subsystem rather than forcing every analyzer into Python:
+PDT is intentionally polyglot. Python is the control plane, not the only implementation language:
 
-- **Python:** orchestration, plugin API, analyzer coordination, CLI, reporting and rapid domain-specific analysis.
-- **Rust:** preferred implementation for high-throughput, memory-safe filesystem traversal, bounded work queues, archive metadata readers and indexing if benchmarks show Python's current in-memory model is not viable.
-- **C:** narrow native interoperability or measured hot paths where a stable C ABI materially improves compatibility or performance.
-- **Assembly:** only for a demonstrated architecture-specific bottleneck with reproducible benchmarks and a portable fallback. It is not a default filesystem requirement.
-- **JavaScript/TypeScript:** report interaction/UI where it materially improves accessibility, filtering and large-dataset rendering; bundle locally with no hosted dependency.
-- **Other languages:** permitted when a concrete parser, SDK or ecosystem makes them the maintainable choice.
+- **Python:** CLI/control plane, analyzer orchestration, plugin SDK, capability registry, local cache coordination and shared report schema.
+- **C:** implemented portable native core for bounded byte scanning and hardware capability reporting. The scanner uses it for magic-byte classification; the streaming secret analyzer uses it for native newline counting.
+- **x86-64 Assembly:** implemented Linux x86-64 SIMD backend using SSE2 compare/movemask and POPCNT, selected only after runtime CPU-feature checks. Other CPUs/platforms use C fallback.
+- **Rust:** required next native subsystem for high-throughput filesystem traversal, bounded queues, resumable indexing and archive scheduling for 2GB–100GB+ workspaces.
+- **C++:** focused native SDK/library integrations where a mature C++ ecosystem is the best fit.
+- **JavaScript/TypeScript:** local-only report UI, large-result filtering, navigation and graphs; all assets bundled, no remote scripts/fonts/telemetry.
+- **Other languages:** analyzers and parsers use the languages/framework SDKs that provide the most accurate evidence.
 
-Every native component requires an API contract, ownership/error model, cross-platform build, fuzz/regression suite, benchmark comparison and a fallback strategy. Low-level code is not added decoratively.
+The current C/Assembly backend is real and used on scan paths, but it is not yet a native filesystem walker. Rust traversal, bounded streaming inventory, cross-platform native packaging, sanitizer/fuzz coverage and benchmarks remain release gates. Every native component needs explicit API/ownership/error contracts, tests, a portable fallback and repeatable benchmark evidence.
 
 ## Release policy
 

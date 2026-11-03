@@ -1,6 +1,7 @@
 """PDT command line."""
 import argparse
 import platform
+import sqlite3
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,9 @@ from .python_graph import analyze_python_dependencies
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
 from .scanner import discover_inventory, sha256_file
+from .native_backend import capabilities as native_capabilities, native_available
+from .vulnerability_db import VulnerabilityDatabase, default_database_path
+from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
 
 
 def now() -> str:
@@ -59,6 +63,7 @@ def _render_banner(console: Console) -> None:
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
     *, skip_oversized: bool = False, ignores: set[str] | None = None,
+    vulnerability_db: Path | None = None,
 ) -> int:
     console = Console(stderr=True)
     root = root.expanduser().resolve(strict=True)
@@ -82,6 +87,21 @@ def run_scan(
     )
     analyzer_load = load_analyzers()
     analyzers = analyzer_load.analyzers
+    vulnerability_db_status = {"enabled": False, "advisory_count": 0}
+    if vulnerability_db is not None:
+        vulnerability_db = vulnerability_db.expanduser().resolve(strict=True)
+        if not vulnerability_db.is_file():
+            raise FileNotFoundError(
+                f"Local vulnerability database is not a file: {vulnerability_db}"
+            )
+        if vulnerability_db == root or root in vulnerability_db.parents:
+            raise ValueError("The vulnerability database must be outside the analyzed project.")
+        with VulnerabilityDatabase(vulnerability_db) as advisory_store:
+            vulnerability_db_status = {
+                "enabled": True,
+                **advisory_store.status(),
+            }
+        analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
     findings = []
     errors = list(analyzer_load.diagnostics)
     counts = Counter()
@@ -150,7 +170,18 @@ def run_scan(
     architecture_layout, architecture_findings = analyze_project_architecture(records)
     findings.extend(architecture_findings)
     domain_catalog = analyzer_domain_catalog()
+    vcs_provider_findings = [
+        item for item in findings
+        if item.category in {"vcs", "hosting_providers", "ci_cd", "cloud_services"}
+    ]
     metrics = {
+        "vcs_provider_signal_count": len(vcs_provider_findings),
+        "vcs_provider_categories": dict(sorted(Counter(
+            item.category for item in vcs_provider_findings
+        ).items())),
+        "native_backend": native_capabilities(),
+        "native_extension_available": native_available(),
+        "vulnerability_intelligence": vulnerability_db_status,
         "file_count": len(records),
         "directory_count": len(directories) - 1,
         "symlink_count": len(symlinks),
@@ -244,6 +275,13 @@ def run_scan(
     summary.add_row("Scan errors", str(len(errors) + metrics["walk_errors"]))
     summary.add_row("Large files skipped by request", str(metrics["oversized_files"]))
     summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
+    summary.add_row("Native backend", metrics["native_backend"]["backend"])
+    summary.add_row(
+        "Local vulnerability advisories",
+        str(vulnerability_db_status.get("advisory_count", 0))
+        if vulnerability_db_status["enabled"] else "not configured",
+    )
+    summary.add_row("VCS / hosting / delivery signals", str(metrics["vcs_provider_signal_count"]))
     console.print(summary)
     _status(
         console,
@@ -284,6 +322,10 @@ def main() -> None:
         metavar="NAME",
         help="Explicitly prune a directory name or relative path; the directory remains inventoried",
     )
+    scan.add_argument(
+        "--vuln-db", type=Path, default=None,
+        help="Use a local OSV advisory SQLite database; scanning performs no network access",
+    )
     compare = sub.add_parser("compare", help="Compare two or more independent PDT JSON reports")
     compare.add_argument("reports", type=Path, nargs="+")
     compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
@@ -300,12 +342,47 @@ def main() -> None:
     catalog_compare.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
     catalog_compare.add_argument("--output", type=Path, default=Path("./pdt-catalog-comparison"))
     catalog_compare.add_argument("--format", default="json,markdown")
+    vuln_db = sub.add_parser(
+        "vuln-db", help="Manage the local offline vulnerability advisory database"
+    )
+    vuln_actions = vuln_db.add_subparsers(dest="vuln_action", required=True)
+    vuln_import = vuln_actions.add_parser(
+        "import", help="Import local OSV JSON records without network access"
+    )
+    vuln_import.add_argument("source", type=Path, help="Local OSV JSON file or directory tree")
+    vuln_import.add_argument("--db", type=Path, default=default_database_path())
+    vuln_status = vuln_actions.add_parser(
+        "status", help="Show local advisory database coverage"
+    )
+    vuln_status.add_argument("--db", type=Path, default=default_database_path())
     args = parser.parse_args()
     formats = (
         {item.strip().lower() for item in args.format.split(",") if item.strip()}
         if hasattr(args, "format") else set()
     )
     try:
+        if args.command == "vuln-db":
+            if args.vuln_action == "import":
+                with VulnerabilityDatabase(args.db) as database:
+                    imported = database.import_osv(args.source)
+                print(
+                    f"[ SUCCESS ] Imported {imported['imported_advisories']} advisory record(s); "
+                    f"{imported['affected_package_records']} affected package record(s); "
+                    f"{imported['skipped_records']} skipped."
+                )
+                for error in imported["errors"][:20]:
+                    print("[ WARNING ] " + error)
+                raise SystemExit(0 if imported["skipped_records"] == 0 else 1)
+            with VulnerabilityDatabase(args.db) as database:
+                status = database.status()
+            print("[ VULNERABILITY DATABASE ]")
+            print(f"[ INFO ] Database: {status['database']}")
+            print(f"[ INFO ] Advisories: {status['advisory_count']}")
+            print(f"[ INFO ] Affected package records: {status['affected_package_records']}")
+            print(f"[ INFO ] Last import: {status.get('last_imported_at', 'never')}")
+            for ecosystem, count in status["ecosystems"].items():
+                print(f"[ ECOSYSTEM ] {ecosystem}: {count}")
+            raise SystemExit(0)
         if args.command == "catalog-add":
             with ProjectCatalog(args.db) as catalog:
                 item = catalog.add_report(args.report)
@@ -343,6 +420,7 @@ def main() -> None:
             raise SystemExit(run_scan(
                 args.path, args.output, formats, args.max_file_mb,
                 skip_oversized=args.skip, ignores=set(args.exclude_dir),
+                vulnerability_db=args.vuln_db,
             ))
 
         if not formats or formats - {"json", "markdown"}:
@@ -353,7 +431,7 @@ def main() -> None:
         for report in write_comparison(comparison, args.output, formats):
             print("[ SUCCESS ] Comparison report: " + str(report))
         raise SystemExit(0)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, sqlite3.Error) as exc:
         parser.exit(2, "[ ERROR ] " + str(exc) + "\n")
 
 

@@ -25,6 +25,7 @@ def test_builtin_registry_returns_unique_stable_names():
     assert "mobile-intelligence" in names
     assert "game-engine-intelligence" in names
     assert "migration-intelligence" in names
+    assert "vcs-hosting-intelligence" in names
     assert result.diagnostics == []
 
 

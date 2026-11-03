@@ -17,6 +17,8 @@ class AnalyzerDomain:
 
 
 _DOMAINS = (
+    AnalyzerDomain("vcs", "Version Control Intelligence", "Git, Mercurial, Subversion, Bazaar, Darcs, Jujutsu, Pijul, CVS, Perforce, clones, remotes, worktrees, submodules and LFS.", "partial"),
+    AnalyzerDomain("hosting_providers", "Source Hosting Intelligence", "GitHub, GitLab, Bitbucket, Azure Repos, AWS CodeCommit, SourceHut, Gitea, Forgejo, Gerrit and self-hosted hosts.", "partial"),
     AnalyzerDomain("source_structure", "Source Structure", "Files, declarations, scopes, namespaces and source organization.", "partial"),
     AnalyzerDomain("symbol_index", "Symbol Index", "Classes, functions, methods, types, fields, macros and symbol references."),
     AnalyzerDomain("imports", "Import and Module Graph", "Imports, exports, module resolution, dependency edges and cycles.", "partial"),
@@ -27,7 +29,7 @@ _DOMAINS = (
     AnalyzerDomain("dependency_resolution", "Dependency Resolution", "Resolved dependency trees, conflicts, version constraints and provenance.", "partial"),
     AnalyzerDomain("licenses", "License Intelligence", "License declarations, notices, compatibility and attribution evidence.", "partial"),
     AnalyzerDomain("secrets", "Secret Exposure", "Potential credentials, keys, tokens and sensitive material with redaction.", "partial"),
-    AnalyzerDomain("vulnerabilities", "Vulnerability Intelligence", "Known vulnerable dependency versions and local advisory matching."),
+    AnalyzerDomain("vulnerabilities", "Vulnerability Intelligence", "Local OSV advisory import, lockfile-resolved package/version matching, affected ranges, CVE/GHSA aliases, fixed-version boundaries and severity. No network updates during scanning.", "partial"),
     AnalyzerDomain("secure_code", "Secure Code Analysis", "Static unsafe API, shell execution, deserialization, TLS, SQL construction and memory API indicators.", "partial"),
     AnalyzerDomain("authentication", "Authentication", "Static identity-framework imports, token/session markers and credential-verification API references.", "partial"),
     AnalyzerDomain("authorization", "Authorization", "Static route guards, role annotations and access-control marker inventory.", "partial"),
@@ -51,7 +53,7 @@ _DOMAINS = (
     AnalyzerDomain("containers", "Container Intelligence", "Docker build instructions, Compose services, images, ports and privilege settings.", "partial"),
     AnalyzerDomain("orchestration", "Orchestration Intelligence", "Kubernetes resources, pod containers, Helm charts and security context indicators.", "partial"),
     AnalyzerDomain("infrastructure_as_code", "Infrastructure as Code", "Terraform block inventory and selected CloudFormation resource declarations.", "partial"),
-    AnalyzerDomain("cloud_services", "Cloud Service Intelligence", "Cloud resources, service bindings, IAM references and deployment topology."),
+    AnalyzerDomain("cloud_services", "Cloud Service Intelligence", "Cloud resources, service bindings, IAM references, VCS hosting and static AWS/Azure/Bitbucket delivery-provider markers.", "partial"),
     AnalyzerDomain("networking", "Network Architecture", "Static IPv4/IPv6, CIDR, port, URL/URI, hostname, subdomain and protocol indicator inventory.", "partial"),
     AnalyzerDomain("performance", "Performance Hotspots", "Complexity indicators, expensive patterns, bottlenecks and profiling artifacts."),
     AnalyzerDomain("concurrency", "Concurrency and Parallelism", "Threads, tasks, locks, races, async flows and synchronization."),

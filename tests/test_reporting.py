@@ -32,6 +32,18 @@ def _result() -> ScanResult:
                 "Detected one IP indicator.", confidence="CONFIRMED",
                 evidence=["config.yaml:4 (192.0.2.1)"], analyzer="network-indicators",
             ),
+            Finding(
+                "vulnerabilities", "GHSA-unit-test-1234: Vulnerable dependency",
+                "requests@2.31.0 matched a local OSV advisory. Secret-free evidence.",
+                confidence="CONFIRMED", evidence=["poetry.lock", "package: requests", "resolved_version: 2.31.0"],
+                analyzer="local-vulnerability-intelligence", severity="HIGH",
+            ),
+            Finding(
+                "hosting_providers", "Git remote provider: GitHub",
+                "Remote origin points to github.com; sanitized locator only.",
+                confidence="CONFIRMED", evidence=[".git/config", "remote section: origin"],
+                analyzer="vcs-hosting-intelligence",
+            ),
         ],
         metrics={
             "file_count": 2, "total_bytes": 192, "directory_count": 1,
@@ -39,6 +51,11 @@ def _result() -> ScanResult:
             "file_types": {"text": 2}, "size_buckets": {"4-64KiB": 2},
             "development_directories": {"node_dependencies": 1},
             "host_os": {"system": "Linux", "machine": "x86_64"},
+            "native_backend": {"backend": "x86_64-sse2-popcnt-asm", "hardware_threads": 8},
+            "vulnerability_intelligence": {
+                "enabled": True, "advisory_count": 1200,
+                "last_imported_at": "2026-11-03T12:00:00+00:00",
+            },
         },
         errors=["sample diagnostic"],
         analyzer_names=["secret-patterns", "network-indicators"],
@@ -59,6 +76,7 @@ def test_html_report_has_interactive_paged_inventory_and_findings(tmp_path: Path
         'id="open-all"', 'id="close-all"', 'id="load-more"',
         'id="file-search"', 'id="symlink-rows"', 'id="directory-rows"',
         'id="special-rows"', 'id="stat-special"',
+        'id="vulnerability-findings"', 'id="vcs-findings"', 'id="vuln-db-state"',
         "FINDING_PAGE=100", "FILE_PAGE=100", "REPORT =", "textContent",
     ):
         assert expected in content
@@ -68,6 +86,8 @@ def test_html_report_has_interactive_paged_inventory_and_findings(tmp_path: Path
     assert "192.0.2.1" in content
     assert "current" in content
     assert "events.pipe" in content
+    assert "GHSA-unit-test-1234" in content
+    assert "Git remote provider: GitHub" in content
     assert "node_dependencies" in content
 
 
@@ -89,6 +109,9 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "## Largest Directories" in content
     assert "## Symbolic Links" in content
     assert "## Special Filesystem Entries" in content
+    assert "## Local Vulnerability Intelligence" in content
+    assert "GHSA-unit-test-1234" in content
+    assert "Git remote provider: GitHub" in content
     assert "current" in content
     assert "node_dependencies" in content
 

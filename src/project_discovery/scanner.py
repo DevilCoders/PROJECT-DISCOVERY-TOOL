@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from .language_catalog import detect_language, is_source_path, is_textual_path
+from .native_backend import count_byte as native_count_byte
 from .models import (
     DirectoryRecord,
     FileRecord,
@@ -149,7 +150,7 @@ def _signature_type(path: Path, relative_path: str) -> str | None:
         return "archive/deb"
     if lower.endswith(".iso"):
         return "archive/iso-detected-by-extension"
-    if b"\x00" in head:
+    if native_count_byte(head, 0) > 0:
         return "binary/unknown"
     return None
 

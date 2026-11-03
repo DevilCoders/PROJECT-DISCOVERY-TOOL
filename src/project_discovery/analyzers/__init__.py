@@ -39,6 +39,7 @@ from .secure_code_analyzer import SecureCodePatternAnalyzer
 from .sql_analyzer import SQLSchemaAnalyzer
 from .test_analyzer import TestDiscoveryAnalyzer
 from .tree_sitter_analyzer import TreeSitterAnalyzer
+from .vcs_analyzer import VCSHostingAnalyzer
 
 
 @dataclass(slots=True)
@@ -84,6 +85,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         MessagingIntelligenceAnalyzer(),
         ROSIntelligenceAnalyzer(),
         TreeSitterAnalyzer(),
+        VCSHostingAnalyzer(),
     ]
     diagnostics: list[str] = []
     names = {analyzer.name for analyzer in analyzers}
