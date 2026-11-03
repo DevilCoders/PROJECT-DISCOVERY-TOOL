@@ -1,30 +1,108 @@
 # PROJECT DISCOVERY TOOL
 
-**Local-first, read-only project intelligence and architecture analyzer.**
+**PDT — local-first, read-only, polyglot project intelligence for large and heterogeneous codebases.**
 
-PDT inventories and analyzes heterogeneous software repositories without importing or executing target project code. It is designed for polyglot codebases and extensible analysis domains; it does not assume that a repository uses one language, framework, architecture, or deployment model.
+PDT is designed to discover what a project actually contains: source languages, files, directories, hidden entries, development dependency trees, build systems, APIs, network indicators, credentials/PII indicators, archives, databases, deployment infrastructure, AI/ML components, robotics, game engines, and relationships between independent projects.
 
-## Current capabilities
+It is not a one-language directory counter. A repository may combine dozens of programming languages, generated formats, binaries, embedded systems, mobile applications, frontend applications, ML artifacts, and infrastructure definitions. PDT must report that heterogeneity without assuming that any single language or framework is the project's center.
 
-- Deterministic filesystem inventory; skips symlinks and common generated/vendor directories.
-- SQLite fingerprint cache for incremental content hashing.
+> **Status:** active engineering / pre-production. The current PR is not a production release. Capability catalogs distinguish implemented, partial, parser-mapped, and planned coverage. Presence in a catalog is not a claim of complete semantic analysis.
+
+## Project banner
+
+```text
+ ____  ____ _____
+|  _ \/ ___|_   _|
+| |_) \___ \ | |
+|  __/ ___) || |
+|_|   |____/ |_|
+
+PROJECT DISCOVERY TOOL
+POLYGLOT INTELLIGENCE  //  LOCAL-FIRST  //  READ-ONLY
+```
+
+## Engineering contracts
+
+### Local-first and read-only
+
+- No target source, reports, configuration, or scan results are uploaded to hosted services.
+- Target code is never imported, executed, launched, or connected to a runtime service.
+- No automatic grammar downloads, dependency installation, archive extraction, or cloud/API calls.
+- Scan cache and generated reports are stored outside the analyzed project by default.
+- Symlinks are recorded as links and never traversed.
+- Archive members are inspected through archive metadata/index structures; entries are never extracted to disk.
+- Secret-like values and personal data are redacted in findings. Reports should retain evidence locations and classifications, not raw passwords, tokens, private keys, or full PII values.
+- Static observations are separated from runtime facts. A URL, port, dependency, endpoint, or ROS topic found in source is not proof that it is reachable or active.
+
+### Polyglot by design
+
+The language catalog recognizes 40+ programming languages and many additional schemas, build formats, configuration languages, documentation formats, and binary artifact types. The optional Tree-sitter adapter maps 60+ grammar names.
+
+PDT tracks language capability states separately:
+
+1. file type recognized;
+2. parser integration mapped;
+3. parser available locally;
+4. syntax tree parsed;
+5. declarations/imports extracted;
+6. project-local symbols and references resolved;
+7. language-specific semantics analyzed.
+
+A grammar mapping is not equivalent to semantic support. The long-term target is substantive analyzer coverage across 40+ languages and their framework ecosystems, not merely extension recognition. Language/analyzer packs are independently testable and optional where a parser or SDK is required.
+
+### Large-repository design
+
+Target workload: repositories from a few gigabytes through 100GB+.
+
+- Deterministic, incremental inventory with metadata-aware cache invalidation.
+- Bounded-memory streaming for hashing and text-pattern analysis.
+- Parallelizable file work with configurable concurrency and back-pressure.
+- Separate resource budgets for parsers, archives, and individual analyzers.
+- Directory and development-dependency summaries to identify large generated/vendor/cache trees.
+- Progress reporting based on discovery and analysis phases, with errors isolated per entry/analyzer.
+- No unbounded read of a large file into memory merely because global oversized-file skipping is disabled.
+
+**Oversized-file policy transition:** the current branch still has a global size threshold that marks oversized files as skipped automatically. This is a known behavior to remove before release. The target behavior is opt-in: content analysis is skipped only when the user explicitly supplies `--skip` (with a configurable size threshold); otherwise compatible streaming analyzers continue. Parsers that cannot safely process a particular huge file must report an analyzer-specific resource-limit status rather than silently hiding the file or pretending it was fully analyzed.
+
+## Current implementation
+
+The following capabilities have initial implementations in the current branch; their documentation and tests describe the current scope, not complete production coverage:
+
+- Deterministic filesystem inventory, read-only output boundary, common generated/vendor directory pruning, and SQLite fingerprint caching.
 - Python AST analysis and evidence-backed internal Python import graph with cycle detection.
-- Structural documentation analysis for Markdown, HTML, reStructuredText and text formats; optional PDF and DOCX extraction.
-- Conservative secret-pattern detection with strict value redaction, Python AST security heuristics, severity-rated findings, plus expanded configuration inventory for environment files, JSON/JSON5/JSONC, YAML, TOML, INI, XML/plist, Nix, HCL/Terraform, Nginx, Dockerfile, systemd and common application/platform config names, with values excluded from key inventories.
-- Static API contract inventory for OpenAPI/Swagger, AsyncAPI, OpenRPC, GraphQL, Protocol Buffers, Thrift, WSDL, RAML and nested Postman collections (request URLs and values are excluded from collection evidence).
-- SQL DDL/schema inventory, Prisma ORM models/relations, plus cross-framework migration recognition for Flyway, Liquibase, Alembic, Django, Rails, Prisma, TypeORM, Knex, EF Core, Laravel and Ecto. Destructive operations are evidence-backed indicators, not claims about execution or rollback safety.
-- Test-suite candidate discovery across the central polyglot source catalog; build/CI manifest inventory across Bazel, Buck, SCons, Ant, Ninja, QMake, SwiftPM, .NET, Autotools, Jenkins, GitHub Actions, GitLab, Azure Pipelines and other ecosystems.
-- Dependency declaration extraction for Python, Node.js, Rust, Go and Composer manifests.
-- Static AI/ML discovery for framework imports, training/inference/data-pipeline markers, selected model metadata and model/dataset artifact inventories. Binary model and dataset payloads are never deserialized.
-- Initial ROS 1/ROS 2 discovery for package.xml, Python node APIs, C++ communication calls, launch descriptions and .msg/.srv/.action interfaces. Static call sites are not represented as a runtime ROS graph.
-- Recognition catalog for 40+ languages and project file formats.
-- Optional offline-first Tree-sitter adapter covering 60+ language/format grammar mappings, declaration extraction and selected-language import-reference inventory when grammars are already provisioned locally.
-- Machine-readable analyzer domain catalog spanning 50+ domains, including security, APIs, databases, infrastructure, CI/CD, AI/ML, robotics, embedded, game engines, mobile and multi-project intelligence.
-- Rich terminal progress and summary output, plus JSON, Markdown and standalone dark HTML reports with search, category/confidence filters, collapsible findings and raw metrics.
+- Central language recognition catalog and optional offline-first Tree-sitter grammar adapter.
+- Markdown/document analysis with optional PDF and DOCX integrations.
+- JSON, Markdown, and standalone interactive dark HTML reports.
+- Rich terminal progress and summary UI.
+- Analyzer plugin entry-point API and domain coverage catalog.
+- Dependency manifests, selected lockfiles, license inventory, and configuration key inventory.
+- Secret-pattern detection, Python and polyglot secure-code heuristics, and identity/access-control markers.
+- REST/OpenAPI, GraphQL, RPC, event, SOAP/WSDL, API collection, and selected source endpoint discovery.
+- SQL, NoSQL, Prisma ORM, and cross-framework migration inventory.
+- Test/build/CI/CD, container, deployment, and infrastructure manifest discovery.
+- Initial ML/AI, ROS 1/ROS 2, mobile, game-engine, frontend, accessibility, and multi-project intelligence.
 
-The language and domain catalogs are coverage maps, not claims that every language-specific semantic analyzer or every domain analyzer is complete. Domain status is explicitly classified as implemented, partial or planned in scan metrics.
+See [Analyzer Coverage](docs/ANALYZER_COVERAGE.md), [Architecture](docs/ARCHITECTURE.md), and [Roadmap](docs/ROADMAP.md) for capability status and work remaining.
 
-## Install
+## Required discovery domains
+
+The following are first-class PDT inventory/analyzer domains. The roadmap tracks their implementation state and acceptance criteria.
+
+| Area | Required discovery |
+|---|---|
+| Filesystem | Files, subdirectories, directory depth/fan-out, empty directories, hidden entries, symlinks, special files, permissions, ownership where available, timestamps, file type, extension, size buckets and per-directory totals |
+| Development artifacts | `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, build outputs, IDE indexes, compiler caches, fuzzing corpora and other ecosystem-specific trees |
+| Operating systems | Host OS versus inferred project target OS; OS/package manager, shell, service, kernel, cross-compilation, platform and CI matrix indicators |
+| Network indicators | IPv4, IPv6, CIDR, ports, hostnames, domains/subdomains, URLs/URIs, socket/protocol references, proxy, bind/listen/connect and service-discovery references |
+| APIs and protocols | REST, GraphQL, RPC/gRPC, JSON-RPC, SOAP, WebSocket, event/messaging, AsyncAPI, OpenAPI, schema registries, framework routes, generated clients and API collections |
+| Secrets and identity data | Passwords, passphrases, tokens, API keys, private-key material, access credentials, usernames, first/last-name fields, email addresses, phone/address identifiers and other PII indicators—with strict value redaction |
+| Archives | ZIP, TAR and compressed/container formats; archive member names, entry types, symlinks, permissions, timestamps, compression metadata, encrypted entries, path traversal/absolute paths and suspicious metadata, without extraction |
+| Project structure | File-type/signature classification, size distributions, hidden files, subdirectory maps, dependency/build trees, symlink targets/scopes, and generated/vendor/cache indicators |
+| Reports | Searchable/filterable HTML, grouped and collapsible findings, open-all/close-all controls, summary dashboards, inventory tables, archive and network sections, severity/confidence, evidence paths and machine-readable JSON |
+
+PDT must never turn an inferred value into a confirmed fact. Detection of an email-shaped string is a PII indicator; it is not proof of a person's identity. Detection of `0.0.0.0:8080` in a config file is not proof of a listener is bound on that port.
+
+## Installation
 
 Core:
 
@@ -42,62 +120,81 @@ pytest
 Optional parser and document integrations:
 
 ```bash
-python -m pip install -e ".[polyglot,documents]"
+python -m pip install -e ".[polyglot,documents,infrastructure]"
 ```
 
-PDT never downloads grammars during a scan. The Tree-sitter adapter checks local parser availability first. Provision any required grammar libraries separately under your own operational policy; unavailable grammars are reported as capability gaps and skipped.
+Install optional extras only when required. PDT must not download grammars or install target-project dependencies during a scan.
 
-## Run
+## Current CLI
 
 ```bash
+pdt --version
 pdt scan /path/to/project
-```
-
-By default, reports are written to a sibling directory named `<project-name>-pdt-report`, outside the target repository. Override it explicitly:
-
-```bash
 pdt scan /path/to/project --output /path/to/reports --format json,markdown,html
-```
-
-The output directory must be outside the analyzed project. PDT does not modify target files.
-
-Register reports in the local project catalog and compare all registered projects without merging project identities:
-
-```bash
+pdt compare project-a-report/discovery-report.json project-b-report/discovery-report.json
 pdt catalog-add /reports/project-a/discovery-report.json
-pdt catalog-add /reports/project-b/discovery-report.json
 pdt catalog-list
 pdt catalog-compare --output /reports/project-comparison
 ```
 
-Or compare report files directly:
+The output directory must be outside the analyzed project. PDT does not modify target files.
+
+### Resource-control CLI target
+
+The explicit oversized-file policy is being implemented. The intended interface is:
 
 ```bash
-pdt compare project-a-report/discovery-report.json project-b-report/discovery-report.json --output comparison-report
+# Default: do not globally skip large files; use bounded/streaming analyzers.
+pdt scan /path/to/project
+
+# Opt in to skipping content analysis above the configured threshold.
+pdt scan /path/to/project --skip --max-file-mb 128
+
+# Opt in to ignoring selected directory trees without hiding their directory markers.
+pdt scan /path/to/project --exclude-dir node_modules --exclude-dir .cache
 ```
 
-## Confidence model
+Flags will be documented as available only after they are implemented and tested. Exclusion of a tree must be visible in the inventory/report and never silently look like a directory did not exist.
 
-- **CONFIRMED** — directly supported by source or configuration evidence.
-- **INFERRED** — heuristic conclusion; requires validation.
+## Reporting and terminal UX
+
+The terminal interface is intended to behave like a focused analysis console, not an ever-growing raw file listing: clear command boundaries, a branded ASCII header, phase-oriented progress, grouped status messages, compact metric panels, actionable warnings, and a final summary. Interactive terminals may clear the previous screen; redirected/non-interactive output must remain stable and script-friendly.
+
+The HTML report is intended for large result sets. It must provide:
+- high-level project overview and scan health;
+- inventory and size distribution;
+- directory and development-artifact maps;
+- symlink, hidden-entry, file-type and archive sections;
+- network and API endpoint sections;
+- redacted secret/PII indicators;
+- analyzer/domain coverage and diagnostics;
+- category, severity, confidence and text filters;
+- lazy/collapsible findings with open-all and close-all controls;
+- evidence navigation, summary counts, and responsive dark UI.
+
+## Confidence and evidence model
+
+- **CONFIRMED** — directly supported by source, metadata, or configuration evidence.
+- **INFERRED** — heuristic conclusion that requires validation.
 - **UNKNOWN** — evidence is insufficient or a capability is unavailable.
 
-A dependency manifest declaration does not prove that a dependency is installed or used. Documentation does not prove that a described feature is implemented. Parser diagnostics do not prove that a program fails to compile or run.
+A dependency declaration does not prove installation or use. Documentation does not prove code implementation. A source URL or port does not prove network reachability. A parser error is not by itself a compiler/runtime failure. A project OS indicator does not prove the current host OS.
 
-## Extending PDT
+## Polyglot and native implementation strategy
 
-Implement the analyzer contract in `project_discovery.analyzers.base.Analyzer` and expose a no-argument constructor through the `pdt.analyzers` entry-point group. Plugins execute in the PDT process and must be trusted. The analyzer domain catalog documents the broader coverage contract and distinguishes implemented domains from planned work.
+- **Python** remains the orchestration, plugin, CLI, reporting, and rapid analyzer layer.
+- **Rust** is the preferred candidate for a memory-safe high-throughput filesystem/archive/indexing core if benchmarks show that the Python implementation is a bottleneck. The native boundary must have a stable, versioned interface and a portable fallback.
+- **C** is reserved for narrowly scoped native interoperability or a measured hot path that cannot be handled cleanly through Rust/Python.
+- **Assembly** is not a default requirement for filesystem discovery. It may be considered only for a measured, architecture-specific bottleneck with reproducible benchmarks and a portable fallback.
+- **JavaScript/TypeScript** may be used for self-contained report UI behavior, while remaining bundled/offline and not requiring a hosted service.
+- Other languages may be added when a concrete analyzer, ecosystem, or runtime makes them the most maintainable choice.
 
-## Privacy and operational boundaries
+The project will not add C/ASM merely to appear low-level. Every native component needs benchmarks, portability tests, memory-safety review, and a documented reason to exist.
 
-- No telemetry or hosted inference is part of the scanner.
-- Target source is not uploaded.
-- Target files are read only; cache and reports are written to the external output directory.
-- Symlinks are not followed.
-- Oversized files are inventoried but skipped for content analysis.
-- Optional parser grammars must already be present locally; scanning does not initiate parser downloads.
-- PDT is a static analyzer, not a sandbox. Review third-party plugins before enabling them.
+## Plugin development
 
-## Project status
+Implement the analyzer contract in `project_discovery.analyzers.base.Analyzer` and expose a no-argument constructor through the `pdt.analyzers` entry-point group. Plugins execute in the PDT process and must be trusted. The plugin SDK and conformance suite are part of the production release gate.
 
-PDT is under active development. The current PR is not a production release. Production readiness requires the full analyzer suite, regression/performance testing, packaging validation, security review, and release documentation.
+## Production-release policy
+
+PDT remains pre-production until the release gate in [ROADMAP](docs/ROADMAP.md) is satisfied: cross-platform CI, analyzer conformance, broad polyglot coverage, large-repository benchmarks, memory/resource limits, read-only and offline guarantees, archive adversarial tests, secret redaction, report UX/accessibility, reproducible packages, and security review. The feature PR must remain unmerged until the repository owner explicitly approves it.
