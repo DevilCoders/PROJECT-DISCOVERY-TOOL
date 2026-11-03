@@ -115,7 +115,7 @@ def test_zip_central_directory_limit_is_checked_before_materializing_entries(tmp
         raise AssertionError("ZipFile must not materialize an over-budget central directory")
 
     monkeypatch.setattr(archive_module.zipfile, "ZipFile", forbidden_materialization)
-    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "many-entries.zip"))
+    findings = ArchiveIntelligenceAnalyzer()._zip(path, _record(path, "many-entries.zip"))
     assert findings[0].confidence == "UNKNOWN"
     assert "central-directory budget exceeded" in findings[0].title
     assert "declared entries: 2" in " ".join(findings[0].evidence)
