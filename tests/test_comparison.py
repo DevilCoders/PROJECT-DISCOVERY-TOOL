@@ -78,3 +78,25 @@ def test_multi_project_markdown_writer(tmp_path):
     markdown = paths[0].read_text(encoding="utf-8")
     assert "Shared across all projects" in markdown
     assert "/a" in markdown and "/b" in markdown and "/c" in markdown
+
+
+def test_comparison_reports_resolved_dependency_version_conflicts():
+    left = _report("/left", ["Python"], [], [], [])
+    right = _report("/right", ["Python"], [], [], [])
+    left["findings"].append({
+        "category": "dependency",
+        "title": "Resolved dependency inventory: poetry.lock",
+        "evidence": ["httpx==0.27.0"],
+    })
+    right["findings"].append({
+        "category": "dependency",
+        "title": "Resolved dependency inventory: poetry.lock",
+        "evidence": ["httpx==0.28.0"],
+    })
+    result = compare_reports(left, right)
+    assert result["resolved_dependency_overlap"] == [{
+        "name": "httpx",
+        "left_versions": ["0.27.0"],
+        "right_versions": ["0.28.0"],
+        "version_conflict": True,
+    }]

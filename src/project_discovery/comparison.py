@@ -44,6 +44,20 @@ def _file_hashes(report: dict[str, Any]) -> dict[str, list[str]]:
     return dict(result)
 
 
+
+def _resolved_dependency_versions(report: dict[str, Any]) -> dict[str, set[str]]:
+    resolved: dict[str, set[str]] = defaultdict(set)
+    for finding in report.get("findings", []):
+        if not finding.get("title", "").startswith("Resolved dependency inventory:"):
+            continue
+        for evidence in finding.get("evidence", []):
+            if "==" in evidence:
+                package, version = evidence.rsplit("==", 1)
+                if package and version:
+                    resolved[package].add(version)
+    return dict(resolved)
+
+
 def compare_reports(
     left: dict[str, Any], right: dict[str, Any]
 ) -> dict[str, Any]:
@@ -54,6 +68,8 @@ def compare_reports(
     right_dependencies = _declared_dependencies(right)
     left_modules = _python_modules(left)
     right_modules = _python_modules(right)
+    left_resolved = _resolved_dependency_versions(left)
+    right_resolved = _resolved_dependency_versions(right)
 
     left_hashes = _file_hashes(left)
     right_hashes = _file_hashes(right)
@@ -82,6 +98,15 @@ def compare_reports(
     shared_dependencies = sorted(left_dependencies & right_dependencies)
     shared_modules = sorted(left_modules & right_modules)
     shared_api_evidence = sorted(left_api & right_api)
+    resolved_overlap = [
+        {
+            "name": package,
+            "left_versions": sorted(left_resolved[package]),
+            "right_versions": sorted(right_resolved[package]),
+            "version_conflict": left_resolved[package] != right_resolved[package],
+        }
+        for package in sorted(set(left_resolved) & set(right_resolved))
+    ]
     return {
         "schema_version": "1.0",
         "comparison_type": "independent_project_reports",
@@ -105,11 +130,13 @@ def compare_reports(
             "right_only": sorted(right_modules - left_modules),
         },
         "shared_api_evidence": shared_api_evidence,
+        "resolved_dependency_overlap": resolved_overlap,
         "duplicate_file_content": duplicate_content,
         "interpretation": {
             "shared_dependencies": "CONFIRMED declarations; not proof of compatible versions or runtime use.",
             "shared_module_names": "INFERRED naming overlap; not proof of equivalent implementation.",
             "shared_api_evidence": "CONFIRMED matching evidence strings; not proof of API compatibility.",
+            "dependency_version_conflicts": "CONFIRMED lockfile version differences; dependency compatibility still requires semantic analysis.",
             "duplicate_file_content": "CONFIRMED byte-identical content based on SHA-256 report fingerprints.",
             "integration_recommendation": "Not generated. Similarity is evidence for human review, not authorization to merge projects.",
         },
@@ -131,6 +158,7 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     dependency_sets = [_declared_dependencies(report) for report in reports]
     module_sets = [_python_modules(report) for report in reports]
+    resolved_sets = [_resolved_dependency_versions(report) for report in reports]
     api_sets = [
         {
             evidence
@@ -147,7 +175,21 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     common_languages = set.intersection(*language_sets) if language_sets else set()
     common_dependencies = set.intersection(*dependency_sets) if dependency_sets else set()
     common_modules = set.intersection(*module_sets) if module_sets else set()
+    common_resolved = set.intersection(*(set(item) for item in resolved_sets)) if resolved_sets else set()
     common_api = set.intersection(*api_sets) if api_sets else set()
+    resolved_across_all = [
+        {
+            "name": package,
+            "versions_by_project": {
+                str(projects[index]["root"]): sorted(item[package])
+                for index, item in enumerate(resolved_sets)
+            },
+            "version_conflict": len({
+                version for item in resolved_sets for version in item[package]
+            }) > 1,
+        }
+        for package in sorted(common_resolved)
+    ]
     duplicates = []
     for digest, locations in sorted(shared_hashes.items()):
         if len(locations) >= 2:
@@ -171,6 +213,9 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
                 "shared_declared_dependencies": result["dependency_overlap"]["shared_declared_dependencies"],
                 "shared_python_module_names": result["python_module_overlap"]["shared_module_names"],
                 "duplicate_file_count": len(result["duplicate_file_content"]),
+                "dependency_version_conflict_count": sum(
+                    1 for item in result["resolved_dependency_overlap"] if item["version_conflict"]
+                ),
             })
 
     return {
@@ -181,6 +226,7 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             "languages": sorted(common_languages),
             "declared_dependencies": sorted(common_dependencies),
             "python_module_names": sorted(common_modules),
+            "resolved_dependencies": resolved_across_all,
             "api_evidence": sorted(common_api),
         },
         "pairwise_comparisons": pairwise,
