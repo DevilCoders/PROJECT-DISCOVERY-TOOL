@@ -68,14 +68,14 @@ _DOMAINS = (
     AnalyzerDomain("graphics_shaders", "Graphics and Shader Systems", "Shader stages, pipelines, bindings, materials and rendering assets."),
     AnalyzerDomain("game_engines", "Game Engine Intelligence", "Scenes, entities, components, assets, scripts and engine configuration."),
     AnalyzerDomain("frontend", "Frontend Application Intelligence", "Components, routes, state, rendering, bundlers and client dependencies."),
-    AnalyzerDomain("mobile", "Mobile Application Intelligence", "Android, iOS, permissions, manifests, build variants and native bridges."),
+    AnalyzerDomain("mobile", "Mobile Application Intelligence", "Android manifests, iOS property lists and entitlements, Gradle, CocoaPods, Flutter and React Native declarations.", "partial"),
     AnalyzerDomain("accessibility", "Accessibility", "Semantic structure, labels, keyboard navigation and accessibility metadata."),
     AnalyzerDomain("localization", "Localization", "Translation catalogs, locale fallback, missing keys and formatting."),
     AnalyzerDomain("assets", "Asset and Media Intelligence", "Images, audio, video, fonts, 3D assets and references."),
     AnalyzerDomain("architecture", "Architecture and Boundaries", "Layers, components, coupling, cohesion, patterns and boundary violations."),
     AnalyzerDomain("multi_project", "Multi-Project Intelligence", "Cross-repository comparison, shared capabilities, conflicts and integration maps."),
     AnalyzerDomain("supply_chain", "Software Supply Chain", "Mutable container base-image and CI action reference indicators.", "partial"),
-    AnalyzerDomain("privacy", "Privacy and Data Governance", "PII indicators, retention configuration, data flows and privacy controls."),
+    AnalyzerDomain("privacy", "Privacy and Data Governance", "Initial mobile privacy usage-description and permission declaration inventory.", "partial"),
 )
 
 
