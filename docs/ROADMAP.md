@@ -46,7 +46,7 @@ The baseline is not production-ready:
 - FIFO/socket/device/unknown special entries have inventory records;
 - Windows hidden attributes are captured by the native walker and Python fallback, but system attributes, ACLs and ownership metadata still need cross-platform validation;
 - archive index inspection is substantive only for ZIP/TAR; other recognized formats are detection-only;
-- archive entry-count and member-byte caps exist, but full time/depth/ratio/metadata budgets and adversarial testing remain;
+- ZIP central-directory preflight, archive entry-count/member-byte caps and cooperative ZIP/TAR wall-time budgets now exist; nested-depth, configurable budget policies, comprehensive metadata bounds and adversarial testing remain;
 - some domain analyzers are lexical/heuristic and do not yet resolve symbols, types, dataflow or framework semantics;
 - report and CLI have a working first-pass command-center design, but still need completeness, scale, accessibility and usability gates.
 
@@ -136,12 +136,12 @@ The baseline is not production-ready:
 - [ ] Make archive inspection states explicit: detected, index-read, metadata-complete, sample-read, sample-truncated, encrypted, unsupported, malformed, budget-stopped.
 - [x] Refuse ZIP index materialization when EOCD/ZIP64 preflight cannot establish bounded central-directory limits; return UNKNOWN instead.
 - [x] Enforce a per-archive wall-time budget during ZIP/TAR metadata traversal and bounded member sampling; time stops produce UNKNOWN findings.
-- [ ] Add configurable maximum archive bytes, entries, nested depth, total uncompressed bytes, per-member sample bytes, total sample bytes, compression ratio and wall time.
+- [ ] Make archive byte, entry, nested-depth, total-uncompressed-byte, per-member sample, total-sample, compression-ratio and wall-time budgets configurable per scan/domain; current ZIP/TAR limits are fixed safety defaults.
 - [ ] Validate ZIP data descriptors, ZIP64, encrypted members, duplicate/case-colliding paths, Unicode path normalization and truncated directories.
 - [ ] Add safe metadata readers for 7z, RAR, CAB, ISO, Zstandard, DEB/RPM and language package formats through optional offline dependencies where appropriate.
 - [ ] No archive backend may extract members to disk or follow archive links.
 - [ ] Add malicious fixture set: archive bombs, high-ratio entries, nested bombs, malformed headers, encrypted archives, path traversal, absolute paths, hardlinks, symlink loops, sparse TAR, huge entry counts and corrupt checksums.
-- [ ] Report every archive budget hit and content coverage percentage.
+- [ ] Report every archive budget hit, per-archive member/content coverage percentage and which limits prevented deeper inspection.
 
 ## Phase 4 — Network and endpoint intelligence
 
