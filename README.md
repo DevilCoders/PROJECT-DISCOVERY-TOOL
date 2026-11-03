@@ -208,6 +208,20 @@ PDT is intentionally polyglot. Python is the control plane, not the only impleme
 
 C, x86-64 Assembly, C++, Rust and JavaScript now have source files and actual execution paths. The Rust iterator reduces Python-level traversal overhead but does not yet solve the all-in-memory inventory/result model. Persistent storage, bounded analyzer queues, cross-platform native packaging, sanitizer/fuzz coverage and 2GB–100GB+ benchmarks remain release gates. Every native component needs explicit API/ownership/error contracts, tests, a portable fallback and repeatable benchmark evidence.
 
+## Polyglot source map
+
+| Component | Source files | Runtime responsibility |
+|---|---|---|
+| Python orchestration and analyzers | `src/project_discovery/` | CLI, analyzer registry, evidence correlation, report schema and portable fallbacks |
+| Rust filesystem iterator | `native/rust/Cargo.toml`, `native/rust/src/lib.rs` | PyO3 no-follow directory iteration and native filesystem metadata |
+| C++ signature engine | `native/pdt_signatures.cpp` | C++17 magic-byte classifier used by scanner file-type detection |
+| C native core | `native/pdt_native.c` | Portable byte counting and CPU capability reporting |
+| x86-64 Assembly | `native/pdt_simd_x86_64.S` | Linux x86-64 SIMD/POPCNT byte-counting primitive |
+| Offline report client | `src/project_discovery/web/report.js` | Search, paging, filters and expandable/collapsible findings; bundled into HTML |
+
+Native build integration is defined in `setup.py`, `pyproject.toml` and `MANIFEST.in`. The test suite requires the C++, Rust and platform-appropriate C/Assembly components to build in CI; Python fallbacks remain available for unsupported local environments.
+
+
 ## Release policy
 
 The current PR remains unmerged. Production readiness requires all mandatory roadmap gates, a green CI run on the final PR head, representative 2GB/10GB/50GB/100GB+ benchmarks, bounded-memory behavior, adversarial archive and symlink tests, broad language/analyzer conformance, verified redaction, offline/read-only guarantees, usable large HTML reports, reproducible packages and security review. Only the repository owner decides when to merge into `master`.
