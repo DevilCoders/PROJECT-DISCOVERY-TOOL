@@ -186,8 +186,10 @@ def _signature_type(
     return None
 
 
-def _file_type(path: Path, relative_path: str) -> str:
-    signature = _signature_type(path, relative_path)
+def _file_type(
+    path: Path, relative_path: str, expected_info: os.stat_result | None = None,
+) -> str:
+    signature = _signature_type(path, relative_path, expected_info)
     if signature:
         return signature
     if is_source_path(relative_path):
