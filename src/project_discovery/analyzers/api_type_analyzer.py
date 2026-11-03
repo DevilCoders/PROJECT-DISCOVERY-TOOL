@@ -51,15 +51,17 @@ class APITypeAnalyzer(Analyzer):
         line_hits: dict[str, set[int]] = {}
         try:
             with path.open("r", encoding="utf-8", errors="replace") as stream:
-                line_number = 0
+                line_number = 1
                 while True:
                     line = stream.readline(_MAX_LINE_CHARS)
                     if not line:
                         break
-                    line_number += 1
+                    current_line = line_number
                     for api_type, pattern in _PATTERNS.items():
                         if pattern.search(line):
-                            line_hits.setdefault(api_type, set()).add(line_number)
+                            line_hits.setdefault(api_type, set()).add(current_line)
+                    if line.endswith(("\n", "\r")):
+                        line_number += 1
         except OSError as exc:
             return [Finding(
                 "api", f"API classification unavailable: {record.path}",

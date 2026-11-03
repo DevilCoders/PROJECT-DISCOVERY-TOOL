@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from project_discovery.analyzers import api_source_analyzer
 from project_discovery.analyzers.api_source_analyzer import APIEndpointAnalyzer
 from project_discovery.models import FileRecord
 
@@ -40,7 +41,7 @@ def test_javascript_and_java_route_declarations(tmp_path: Path):
     assert any("POST /users" in item for item in java[0].evidence)
 
 
-def test_go_and_ruby_route_patterns(tmp_path: Path):
+def test_go_ruby_dotnet_and_cpp_routes(tmp_path: Path):
     go = _scan(
         tmp_path, "routes.go", "server/routes.go",
         'r.GET("/health", health)\nr.POST("/jobs", createJob)\n',
@@ -51,25 +52,22 @@ def test_go_and_ruby_route_patterns(tmp_path: Path):
         "get '/health' do\nend\npost '/jobs' do\nend\n",
     )
     assert len(ruby[0].evidence) == 2
-
-
-def test_non_route_source_produces_no_api_finding(tmp_path: Path):
-    assert _scan(tmp_path, "math.py", "math.py", "def add(a, b):\n    return a + b\n") == []
-
-
-def test_dotnet_minimal_api_and_cpp_crow_routes_are_scanned(tmp_path: Path):
     dotnet = _scan(
         tmp_path, "MinimalApi.cs", "src/MinimalApi.cs",
         'app.MapGet("/health", () => "ok");\n'
         'app.MapPost("/users", createUser);\n',
     )
+    assert any("GET /health" in item for item in dotnet[0].evidence)
+    assert any("POST /users" in item for item in dotnet[0].evidence)
     crow = _scan(
         tmp_path, "routes.cpp", "server/routes.cpp",
         'CROW_ROUTE(app, "/api/items");\n',
     )
-    assert any("GET /health" in item for item in dotnet[0].evidence)
-    assert any("POST /users" in item for item in dotnet[0].evidence)
     assert any("ANY /api/items" in item for item in crow[0].evidence)
+
+
+def test_non_route_source_produces_no_api_finding(tmp_path: Path):
+    assert _scan(tmp_path, "math.py", "math.py", "def add(a, b):\n    return a + b\n") == []
 
 
 def test_api_endpoint_analyzer_accepts_the_full_source_language_catalog():
@@ -80,3 +78,26 @@ def test_api_endpoint_analyzer_accepts_the_full_source_language_catalog():
     for extension in source_extensions():
         record = FileRecord("sample" + extension, 1, extension, "Source")
         assert analyzer.supports(record), extension
+
+
+def test_python_ast_endpoint_budget_returns_unknown(tmp_path: Path, monkeypatch):
+    path = tmp_path / "large.py"
+    path.write_text("@app.get('/health')\ndef health(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(api_source_analyzer, "MAX_PYTHON_ENDPOINT_AST_BYTES", 1)
+    record = FileRecord("large.py", path.stat().st_size, ".py", "Python")
+    finding = APIEndpointAnalyzer().analyze(path, record)[0]
+    assert finding.confidence == "UNKNOWN"
+    assert "AST resource limit" in finding.title
+
+
+def test_polyglot_endpoint_stream_budget_returns_unknown(tmp_path: Path, monkeypatch):
+    path = tmp_path / "routes.ts"
+    path.write_text(
+        "app.get('/first', handler);\n" + ("// " + "x" * 100) +
+        "\napp.get('/not-seen', handler);\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api_source_analyzer, "MAX_SOURCE_ENDPOINT_SCAN_BYTES", 40)
+    record = FileRecord("routes.ts", path.stat().st_size, ".ts", "TypeScript")
+    findings = APIEndpointAnalyzer().analyze(path, record)
+    assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)

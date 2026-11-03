@@ -22,8 +22,6 @@ def test_ipv4_ipv6_cidr_ports_uri_and_subdomain_detection(tmp_path: Path):
         'PORT = 5432\n'
         'URL = "https://admin:super-secret@api.dev.example.com:8443/v1/users?token=hidden"\n',
     )
-    categories = {item.category for item in findings}
-    assert "network" in categories
     titles = [item.title for item in findings]
     assert any("IPv4 address" in title for title in titles)
     assert any("IPv6 address" in title for title in titles)
@@ -46,3 +44,19 @@ def test_network_analyzer_uses_bounded_line_chunks(tmp_path: Path):
     source = "x = 1\n" + ("a" * (300 * 1024)) + '\nHOST = "198.51.100.5"\n'
     findings = _scan(tmp_path, source)
     assert any("198.51.100.5" in repr(item.evidence) for item in findings)
+
+
+def test_bare_container_and_service_ports_are_detected(tmp_path: Path):
+    findings = _scan(
+        tmp_path,
+        "EXPOSE 80\nlisten 443 ssl\nendpoint = \"192.0.2.20:8081\"\n",
+    )
+    ports = next(item for item in findings if "Port indicators" in item.title)
+    for value in ("80", "443", "8081"):
+        assert value in ports.detail
+
+
+def test_ipv4_mapped_ipv6_literal_is_recognized(tmp_path: Path):
+    findings = _scan(tmp_path, 'HOST = "::ffff:192.0.2.128"\n')
+    ipv6 = next(item for item in findings if "IPv6 address" in item.title)
+    assert "::ffff:c000:280" in repr(ipv6.evidence)

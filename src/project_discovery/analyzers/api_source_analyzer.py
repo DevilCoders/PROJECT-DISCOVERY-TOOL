@@ -11,6 +11,9 @@ from ..language_catalog import source_extensions, source_language_names
 
 
 _SOURCE_EXTENSIONS = source_extensions()
+MAX_PYTHON_ENDPOINT_AST_BYTES = 16 * 1024 * 1024
+MAX_SOURCE_ENDPOINT_SCAN_BYTES = 32 * 1024 * 1024
+MAX_ENDPOINT_LINE_CHARS = 256 * 1024
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
 _ROUTE_PATTERNS = (
@@ -120,49 +123,94 @@ class APIEndpointAnalyzer(Analyzer):
         return record.error is None and record.extension in _SOURCE_EXTENSIONS
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        try:
-            source = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            return [Finding(
-                "api", f"API endpoint scan unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
-                evidence=[record.path], analyzer=self.name,
-            )]
+        routes: list[tuple[str, str, int]] = []
+        truncated = False
         if record.extension in {".py", ".pyi"}:
-            routes = _python_routes(source, record.path)
+            if record.size_bytes > MAX_PYTHON_ENDPOINT_AST_BYTES:
+                return [Finding(
+                    "api",
+                    f"Python endpoint AST resource limit: {record.path}",
+                    f"File size {record.size_bytes:,} bytes exceeds this endpoint parser's "
+                    f"{MAX_PYTHON_ENDPOINT_AST_BYTES:,}-byte AST budget.",
+                    confidence="UNKNOWN",
+                    evidence=[record.path],
+                    analyzer=self.name,
+                    severity="LOW",
+                )]
+            try:
+                source = path.read_text(encoding="utf-8")
+                routes = _python_routes(source, record.path)
+            except (OSError, UnicodeDecodeError) as exc:
+                return [Finding(
+                    "api", f"API endpoint scan unavailable: {record.path}",
+                    f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                    evidence=[record.path], analyzer=self.name,
+                )]
         else:
-            routes = []
-            for number, line in enumerate(source.splitlines(), 1):
-                for pattern in _ROUTE_PATTERNS:
-                    for match in pattern.finditer(line):
-                        groups = match.groups()
-                        if pattern.pattern.startswith(r"""@(?:GET"""):
-                            method, route = "ANY", groups[0] or ""
-                        elif pattern.pattern.startswith(r"""\[\s*Http"""):
-                            method = groups[0].upper()
-                            route = groups[1] or ""
-                        elif pattern.pattern.startswith(r"""(?:app|group|router)"""):
-                            method, route = groups[0].upper(), groups[1]
-                        elif pattern.pattern.startswith(r"""\b(?:http\.)?HandleFunc""") or pattern.pattern.startswith(r"""\bCROW_ROUTE"""):
-                            method, route = "ANY", groups[1]
-                        elif len(groups) >= 2:
-                            method, route = groups[0].upper().removesuffix("MAPPING"), groups[1]
-                        else:
-                            continue
-                        routes.append((method, route, number))
+            bytes_scanned = 0
+            line_number = 1
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as stream:
+                    while bytes_scanned < MAX_SOURCE_ENDPOINT_SCAN_BYTES:
+                        line = stream.readline(min(
+                            MAX_ENDPOINT_LINE_CHARS,
+                            MAX_SOURCE_ENDPOINT_SCAN_BYTES - bytes_scanned,
+                        ))
+                        if not line:
+                            break
+                        bytes_scanned += len(line.encode("utf-8", errors="replace"))
+                        for pattern in _ROUTE_PATTERNS:
+                            for match in pattern.finditer(line):
+                                groups = match.groups()
+                                if pattern.pattern.startswith(r"""@(?:GET"""):
+                                    method, route = "ANY", groups[0] or ""
+                                elif pattern.pattern.startswith(r"""\[\s*Http"""):
+                                    method = groups[0].upper()
+                                    route = groups[1] or ""
+                                elif pattern.pattern.startswith(r"""(?:app|group|router)"""):
+                                    method, route = groups[0].upper(), groups[1]
+                                elif pattern.pattern.startswith(r"""\b(?:http\.)?HandleFunc""") or pattern.pattern.startswith(r"""\bCROW_ROUTE"""):
+                                    method, route = "ANY", groups[1]
+                                elif len(groups) >= 2:
+                                    method, route = groups[0].upper().removesuffix("MAPPING"), groups[1]
+                                else:
+                                    continue
+                                routes.append((method, route, line_number))
+                        if line.endswith(("\n", "\r")):
+                            line_number += 1
+                truncated = record.size_bytes > bytes_scanned
+            except OSError as exc:
+                return [Finding(
+                    "api", f"API endpoint scan unavailable: {record.path}",
+                    f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                    evidence=[record.path], analyzer=self.name,
+                )]
+
         unique = sorted(set(routes), key=lambda item: (item[2], item[0], item[1]))
-        if not unique:
-            return []
-        return [Finding(
-            "api",
-            f"API route declarations: {record.path}",
-            f"Detected {len(unique)} statically recognizable endpoint declaration(s). "
-            "Route prefixes, middleware, runtime registration, and deployed reachability "
-            "are not resolved.",
-            confidence="CONFIRMED",
-            evidence=[
-                f"{record.path}:{line} {method} {route}"
-                for method, route, line in unique[:150]
-            ],
-            analyzer=self.name,
-        )]
+        findings: list[Finding] = []
+        if unique:
+            findings.append(Finding(
+                "api",
+                f"API route declarations: {record.path}",
+                f"Detected {len(unique)} statically recognizable endpoint declaration(s). "
+                "Route prefixes, middleware, runtime registration, and deployed reachability "
+                "are not resolved.",
+                confidence="CONFIRMED",
+                evidence=[
+                    f"{record.path}:{line} {method} {route}"
+                    for method, route, line in unique[:150]
+                ],
+                analyzer=self.name,
+            ))
+        if truncated:
+            findings.append(Finding(
+                "api",
+                f"API endpoint scan budget reached: {record.path}",
+                f"Only the first {MAX_SOURCE_ENDPOINT_SCAN_BYTES:,} bytes were scanned. "
+                "Later route declarations may not appear in this report.",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            ))
+        return findings

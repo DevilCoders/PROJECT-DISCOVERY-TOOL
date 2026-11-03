@@ -50,19 +50,21 @@ class DataExposureAnalyzer(Analyzer):
         secret_field_lines: set[int] = set()
         try:
             with path.open("r", encoding="utf-8", errors="replace") as stream:
-                line_number = 0
+                line_number = 1
                 while True:
                     line = stream.readline(_MAX_LINE_CHARS)
                     if not line:
                         break
-                    line_number += 1
+                    current_line = line_number
                     for field_name, pattern in _PII_FIELDS.items():
                         if pattern.search(line):
-                            field_lines.setdefault(field_name, set()).add(line_number)
+                            field_lines.setdefault(field_name, set()).add(current_line)
                     if _EMAIL.search(line):
-                        email_lines.add(line_number)
+                        email_lines.add(current_line)
                     if _SECRET_FIELDS.search(line):
-                        secret_field_lines.add(line_number)
+                        secret_field_lines.add(current_line)
+                    if line.endswith(("\n", "\r")):
+                        line_number += 1
         except OSError as exc:
             return [Finding(
                 "privacy", f"Data exposure scan unavailable: {record.path}",

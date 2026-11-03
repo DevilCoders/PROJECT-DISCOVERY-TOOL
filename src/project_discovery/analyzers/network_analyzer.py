@@ -14,13 +14,15 @@ from ..models import FileRecord, Finding
 _URI = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://[^\s<>\"']+", re.I)
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 _IPV6 = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:])")
+_IPV6_MAPPED = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,6}(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 _CIDR = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b|(?<![\w:])[0-9A-Fa-f:]{3,}/\d{1,3}\b")
 _PORT_KEY = re.compile(
     r"""(?i)\b(?:port|listen|expose|target_port|containerPort|hostPort|bind_port)\s*(?:=|:)\s*['"]?(\d{1,5})\b"""
 )
 _HOST_PORT = re.compile(
-    r"""(?i)(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[[0-9a-f:]+\])\s*:\s*(\d{1,5})\b"""
+    r"""(?i)(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\])\s*:\s*(\d{1,5})\b"""
 )
+_BARE_PORT = re.compile(r"""(?im)^\s*(?:EXPOSE|listen)\s+(\d{1,5})\b""")
 _DOMAIN = re.compile(
     r"(?<![@\w-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\b"
 )
@@ -116,21 +118,23 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     addresses["IPv4"].add((str(parsed), number))
                 except ValueError:
                     pass
-            for candidate in _IPV6.findall(line):
-                try:
-                    parsed = ipaddress.ip_address(candidate)
-                    if parsed.version == 6:
-                        addresses["IPv6"].add((str(parsed), number))
-                except ValueError:
-                    pass
+            for pattern in (_IPV6, _IPV6_MAPPED):
+                for candidate in pattern.findall(line):
+                    try:
+                        parsed = ipaddress.ip_address(candidate)
+                        if parsed.version == 6:
+                            addresses["IPv6"].add((str(parsed), number))
+                    except ValueError:
+                        pass
             for match in _PORT_KEY.finditer(line):
                 value = int(match.group(1))
                 if 1 <= value <= 65535:
                     ports.add((value, number))
-            for match in _HOST_PORT.finditer(line):
-                value = int(match.group(1))
-                if 1 <= value <= 65535:
-                    ports.add((value, number))
+            for pattern in (_HOST_PORT, _BARE_PORT):
+                for match in pattern.finditer(line):
+                    value = int(match.group(1))
+                    if 1 <= value <= 65535:
+                        ports.add((value, number))
             for match in _URI.finditer(line):
                 raw_uri = match.group(0).rstrip(".,;:)]}")
                 safe = _safe_uri(raw_uri)
