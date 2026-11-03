@@ -1,15 +1,21 @@
 # Polyglot Parser Adapter
 
-PDT includes a generic Tree-sitter adapter for a broad language set through the optional `polyglot` extra:
+PDT is designed for heterogeneous and polyglot repositories. Its language catalog recognizes more than 40 source languages and a wider range of schemas, build formats, configuration formats, documentation formats, game-engine assets and hardware/compute languages. The optional Tree-sitter adapter maps more than 60 grammar identifiers.
 
-```bash
-python -m pip install -e ".[polyglot]"
-```
+## Capability levels
+- Recognized: a file extension or known filename maps to a language or format.
+- Parser mapped: a grammar adapter is configured.
+- Parser provisioned: the optional grammar is available locally.
+- Syntax analyzed: a syntax tree and parser diagnostics are generated.
+- Structure extracted: declarations and selected imports are extracted.
+- Semantics resolved: symbols, modules, types, calls and relationships are resolved with evidence.
 
-The adapter uses `has_parser()` before requesting a parser. That capability check does not perform network I/O. If a grammar is not already available in the local parser cache, PDT reports the missing capability in scan metrics and skips syntax analysis for that language. It never invokes the parser pack's on-demand download path during a project scan.
+Install the optional parser package with:
 
-This preserves local-only scan behavior: target source is not uploaded, and parser provisioning is a separate operator-controlled setup step. A syntax tree confirms parser structure and error/missing nodes; it does not prove that a program compiles, links, passes tests, or behaves correctly.
+    python -m pip install -e ".[polyglot]"
 
-The adapter provides generic syntax-tree metrics and parser diagnostics, language-specific declaration extraction for mapped grammars, and generic declaration fallback for additional grammars. It also inventories import references for selected JavaScript/TypeScript, Go, Rust, C/C++, Java/Kotlin, Swift, C#, Ruby, PHP, Dart, Scala and Haskell grammars. These import references are not yet resolved to confirmed in-project modules. Call graphs, type resolution, dataflow and framework semantics remain separate analyzer milestones. The 60+ grammar mapping is a parser integration surface, not a claim that all language-specific semantic analyzers are complete.
+The adapter checks local parser availability before constructing a parser. It never invokes the parser pack's on-demand download path during a project scan. If a grammar is not provisioned locally, PDT records the capability gap and continues without network access.
 
-Parser capability status is included only for languages actually detected in the current project. The adapter checks local availability and does not download grammars.
+A syntax tree confirms parser structure and parser diagnostics; it does not prove that a program compiles, links, passes tests or behaves correctly. Generic import references are not considered internal dependencies until resolution proves that relationship.
+
+The 60+ grammar mapping is an integration surface, not a claim that all language-specific semantic analyzers are complete.

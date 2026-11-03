@@ -85,3 +85,60 @@ def test_secure_code_rules_cover_the_full_recognized_source_catalog(tmp_path: Pa
 
     findings = _scan(tmp_path, "agent.jl", "result = eval(user_input)\n")
     assert any("Dynamic code execution" in item.title for item in findings)
+
+
+def test_polyglot_security_rules_detect_web_dataflow_and_token_misuse(tmp_path: Path):
+    javascript = _scan(
+        tmp_path,
+        "routes.js",
+        'db.query("SELECT * FROM users WHERE id = " + req.query.id);\n'
+        'fetch(req.query.url);\n'
+        'res.redirect(req.query.next);\n'
+        'const token = Math.random();\n',
+    )
+    titles = [item.title for item in javascript]
+    assert any("dynamically constructed SQL" in title for title in titles)
+    assert any("user-controlled outbound request" in title for title in titles)
+    assert any("user-controlled redirect" in title for title in titles)
+    assert any("non-cryptographic randomness" in title for title in titles)
+
+    java = _scan(
+        tmp_path,
+        "Controller.java",
+        'String path = request.getParameter("file");\n'
+        'new FileInputStream(path);\n'
+        'MessageDigest.getInstance("MD5");\n'
+        'response.sendRedirect(request.getParameter("next"));\n',
+    )
+    java_titles = [item.title for item in java]
+    assert any("user-controlled filesystem path" in title for title in java_titles)
+    assert any("weak cryptographic hash" in title for title in java_titles)
+    assert any("user-controlled redirect" in title for title in java_titles)
+
+
+def test_polyglot_security_rules_cover_dotnet_and_xml_parser_misconfiguration(tmp_path: Path):
+    source = _scan(
+        tmp_path,
+        "Service.cs",
+        'var client = new HttpClient();\n'
+        'client.GetAsync(request.Query["url"]);\n'
+        'settings.DtdProcessing = DtdProcessing.Parse;\n',
+    )
+    titles = [item.title for item in source]
+    assert any("user-controlled outbound request" in title for title in titles)
+    assert any("external-entity" in title for title in titles)
+
+
+def test_polyglot_security_rule_catalog_is_deterministic():
+    from project_discovery.analyzers.secure_code_analyzer import _PATTERNS
+
+    names = [item[0] for item in _PATTERNS]
+    assert len(names) == len(set(names))
+    assert {
+        "dynamic_sql_query",
+        "ssrf_user_controlled_url",
+        "path_traversal_user_controlled_path",
+        "jwt_verification_disabled",
+        "open_redirect_user_controlled",
+        "unsafe_xml_external_entities",
+    } <= set(names)

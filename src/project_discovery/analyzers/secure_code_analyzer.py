@@ -58,6 +58,87 @@ _PATTERNS = (
         "Potentially unsafe C memory/string API",
         "Review buffer bounds and prefer APIs that accept explicit destination sizes.",
     ),
+    (
+        "dynamic_sql_query",
+        re.compile(
+            r"""(?i)\b(?:query|execute|execSQL|raw|createQuery)\s*\([^;\n]*(?:\+\s*[A-Za-z_$]|\.format\s*\(|\$\{)"""
+        ),
+        "Potential dynamically constructed SQL query",
+        "A query API receives a concatenated, formatted, or interpolated expression. "
+        "Review the data source and use parameterized query APIs.",
+    ),
+    (
+        "ssrf_user_controlled_url",
+        re.compile(
+            r"""(?i)\b(?:requests?\.(?:get|post|put|delete)|httpx\.(?:get|post)|axios\.(?:get|post)|fetch|http\.Get|GetAsync|sendAsync)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params|body)|getParameter\s*\(|params\[|user_?input)"""
+        ),
+        "Potential user-controlled outbound request",
+        "An outbound HTTP client call appears to receive request-derived input. "
+        "Validate destination schemes, hosts, redirects, DNS results and network boundaries.",
+    ),
+    (
+        "path_traversal_user_controlled_path",
+        re.compile(
+            r"""(?i)\b(?:readFile|writeFile|FileInputStream|Paths\.get|Path\.Combine|sendFile|open)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params|body)|getParameter\s*\(|params\[|user_?input|file_?name)"""
+        ),
+        "Potential user-controlled filesystem path",
+        "A filesystem API appears to receive request or user-derived path material. "
+        "Normalize paths and enforce an explicit allowed root after canonicalization.",
+    ),
+    (
+        "weak_hash",
+        re.compile(
+            r"""(?i)(?:MessageDigest\.getInstance|createHash|HashAlgorithm\.Create)\s*\(\s*["'](?:MD5|SHA-?1|md5|sha1)["']|\b(?:md5|sha1)\s*\("""
+        ),
+        "Potential weak cryptographic hash",
+        "MD5 and SHA-1 are unsuitable for collision-resistant security uses; "
+        "review whether the operation is security-sensitive.",
+    ),
+    (
+        "jwt_verification_disabled",
+        re.compile(
+            r"""(?i)(?:algorithms\s*[:=]\s*\[\s*["']none["']|ignoreExpiration\s*[:=]\s*true|verify\s*\(\s*[^,]+,\s*false\s*\))"""
+        ),
+        "JWT or token verification may be disabled",
+        "A token verification configuration appears to accept an unsigned token or "
+        "skip verification. Confirm library semantics and enforce algorithm allowlists.",
+    ),
+    (
+        "insecure_random_for_secret",
+        re.compile(
+            r"""(?i)(?:token|secret|session|nonce|api[_-]?key)\w{0,30}.{0,100}(?:Math\.random\s*\(|new\s+Random\s*\(|\brand\s*\()"""
+        ),
+        "Potential non-cryptographic randomness for a secret",
+        "A security-sensitive identifier appears to be derived from a non-cryptographic "
+        "random generator. Use an operating-system-backed cryptographic random source.",
+    ),
+    (
+        "open_redirect_user_controlled",
+        re.compile(
+            r"""(?i)\b(?:redirect|sendRedirect|Redirect)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params)|getParameter\s*\(|returnUrl|return_url|nextUrl|next_url)"""
+        ),
+        "Potential user-controlled redirect target",
+        "A redirect API appears to consume request-derived destination data. "
+        "Validate against an allowlist or use server-side destination identifiers.",
+    ),
+    (
+        "insecure_file_permissions",
+        re.compile(
+            r"""(?i)(?:\bchmod\s*\([^;\n]*(?:0o?777|511)|\bchmod\s+0?777\b|\bsetWritable\s*\(\s*true\s*\))"""
+        ),
+        "Potentially permissive filesystem permissions",
+        "A source declaration appears to grant broad write permissions. Review the "
+        "effective mode, platform semantics and required access.",
+    ),
+    (
+        "unsafe_xml_external_entities",
+        re.compile(
+            r"""(?i)(?:setFeature\s*\([^;\n]*(?:external-general-entities|external-parameter-entities)[^;\n]*true|resolveExternals\s*=\s*true|DtdProcessing\s*[:=]\s*Parse)"""
+        ),
+        "Potential unsafe XML external-entity configuration",
+        "The XML parser appears to permit external entities or DTD processing. "
+        "Disable external entity resolution and apply parser resource limits.",
+    ),
 )
 _PYTHON_UNSAFE_LOADERS = {"UnsafeLoader", "Loader", "FullLoader"}
 
