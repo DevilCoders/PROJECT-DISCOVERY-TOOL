@@ -52,7 +52,7 @@ def test_ros_interfaces_and_launch_files_are_inventoried(tmp_path: Path):
         interface, _record(interface, "action/MoveRobot.action")
     )
     assert findings[0].category == "robotics"
-    assert "3 non-comment definition lines" in findings[0].detail
+    assert "5 non-comment definition lines" in findings[0].detail
 
     launch = tmp_path / "bringup.launch.py"
     launch.write_text("from launch import LaunchDescription\n", encoding="utf-8")
