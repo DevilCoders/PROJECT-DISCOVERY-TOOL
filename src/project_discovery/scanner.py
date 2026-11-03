@@ -344,7 +344,11 @@ def discover_inventory(
     The traversal never follows symlinks. The current implementation still retains
     inventory records in memory; Phase 2 replaces this with a bounded streaming store.
     """
-    root = root.expanduser().resolve(strict=True)
+    root = root.expanduser().absolute()
+    root_info = root.lstat()
+    if stat.S_ISLNK(root_info.st_mode):
+        raise ValueError("The scan root itself is a symlink; pass its real directory path explicitly.")
+    root = root.resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(root)
     if max_file_bytes < 1:
