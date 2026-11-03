@@ -38,7 +38,7 @@ _DOMAINS = (
     AnalyzerDomain("api_rpc", "RPC and Service Contracts", "gRPC, Thrift, message contracts, generated stubs and compatibility.", "implemented"),
     AnalyzerDomain("databases_sql", "SQL Database Intelligence", "Schemas, queries, indexes, constraints, stored procedures and migrations.", "implemented"),
     AnalyzerDomain("databases_nosql", "NoSQL Intelligence", "Document, key-value, graph and wide-column data models."),
-    AnalyzerDomain("orm", "ORM and Data Mapping", "Models, relations, query builders, mappings and schema drift."),
+    AnalyzerDomain("orm", "ORM and Data Mapping", "Models, relations, query builders, mappings and schema drift.", "implemented"),
     AnalyzerDomain("migrations", "Data Migration Intelligence", "Migration ordering, reversibility, destructive operations and version state.", "implemented"),
     AnalyzerDomain("messaging", "Messaging and Event Systems", "Queues, topics, event schemas, consumers, producers and delivery semantics."),
     AnalyzerDomain("tests", "Test Intelligence", "Test discovery, frameworks, fixtures, suites and test-to-code relationships.", "implemented"),

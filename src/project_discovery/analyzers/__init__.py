@@ -8,6 +8,7 @@ from .configuration_analyzer import ConfigurationAnalyzer
 from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
 from .document_analyzer import DocumentAnalyzer
+from .prisma_analyzer import PrismaSchemaAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .security_analyzer import SecretPatternAnalyzer
 from .sql_analyzer import SQLSchemaAnalyzer
@@ -24,6 +25,7 @@ def load_analyzers() -> list[Analyzer]:
         ConfigurationAnalyzer(),
         APIContractAnalyzer(),
         SQLSchemaAnalyzer(),
+        PrismaSchemaAnalyzer(),
         TestDiscoveryAnalyzer(),
         BuildManifestAnalyzer(),
         SecretPatternAnalyzer(),

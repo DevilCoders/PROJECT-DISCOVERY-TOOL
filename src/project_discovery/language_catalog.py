@@ -20,6 +20,7 @@ class LanguageSpec:
 
 _SPECS = (
     LanguageSpec("Python", (".py", ".pyi"), parser_backend="stdlib:ast"),
+    LanguageSpec("Prisma", (".prisma",), family="schema"),
     LanguageSpec("JavaScript", (".js", ".jsx", ".mjs", ".cjs"), parser_backend="optional:tree-sitter"),
     LanguageSpec("TypeScript", (".ts", ".tsx", ".mts", ".cts"), parser_backend="optional:tree-sitter"),
     LanguageSpec("Rust", (".rs",), parser_backend="optional:tree-sitter"),
