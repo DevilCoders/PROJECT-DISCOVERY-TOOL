@@ -11,7 +11,8 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from .base import Analyzer
-from ..models import FileRecord, Finding
+from ..models import CodeEvidence, FileRecord, Finding
+from ..source_utils import redact_source_excerpt
 
 
 _ARCHIVE_EXTENSIONS = {
@@ -118,10 +119,11 @@ def _read_member_sample(
 def _member_content_findings(
     archive_path: str, member_name: str, sample: bytes,
 ) -> list[Finding]:
-    """Return path/line-only indicators; matched values are deliberately discarded."""
+    """Return redacted member source lines and conditional impact; discard matched values."""
     if not sample:
         return []
     text = sample.decode("utf-8", errors="replace")
+    source_lines = text.splitlines()
     hits: dict[tuple[str, str], set[int]] = {}
     for label, pattern, category in _CONTENT_RULES:
         for match in pattern.finditer(text):
@@ -129,6 +131,27 @@ def _member_content_findings(
             hits.setdefault((category, label), set()).add(line)
     findings: list[Finding] = []
     for (category, label), lines in sorted(hits.items()):
+        if category == "secrets":
+            impact = (
+                "If the archived value is a valid active credential, an attacker who obtains "
+                "the archive may access the linked API, cloud account or database, read or alter "
+                "data, invoke privileged operations or pivot to connected services."
+            )
+            recommendation = (
+                "Revoke and rotate any live credential, remove it from archived source/configuration "
+                "where appropriate, replace it with secret-manager or protected runtime injection, "
+                "and audit repository/artifact access."
+            )
+        else:
+            impact = (
+                "If the address is real, exposing it in a repository artifact may reveal a contact "
+                "identity for unsolicited contact, phishing or account correlation."
+            )
+            recommendation = (
+                "Replace real addresses in fixtures and examples with reserved example addresses; "
+                "remove exposed personal data from tracked files and published artifacts."
+            )
+        selected_lines = sorted(lines)
         findings.append(Finding(
             category,
             f"{label.title()} inside archive member: {archive_path}",
@@ -137,12 +160,23 @@ def _member_content_findings(
             confidence="INFERRED",
             evidence=[
                 f"{archive_path}::{member_name}:{line} ({label}; value redacted)"
-                for line in sorted(lines)[:_MAX_EVIDENCE]
+                for line in selected_lines[:_MAX_EVIDENCE]
             ],
             analyzer="archive-intelligence",
             severity="HIGH" if category == "secrets" else "MEDIUM",
+            code_evidence=[
+                CodeEvidence(
+                    line_number=line,
+                    code=redact_source_excerpt(source_lines[line - 1]),
+                )
+                for line in selected_lines[:20]
+                if 0 < line <= len(source_lines)
+            ],
+            impact=impact,
+            recommendation=recommendation,
         ))
     return findings
+
 _MAX_EVIDENCE = 100
 _PATH_DRIVE = re.compile(r"^[A-Za-z]:")
 
