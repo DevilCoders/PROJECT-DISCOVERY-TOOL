@@ -14,7 +14,7 @@ _IDENTITY_ASSIGNMENT = re.compile(
 )
 _CREDENTIAL_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/@\s]+:)[^@\s/]+(@)")
 _AUTHORIZATION_HEADER = re.compile(
-    r"(?i)(\bauthorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)[^,\s]+"
+    r"(?i)\bauthorization\s*[:=]\s*(?:(?:bearer|basic)\s+)?[^,\r\n;]+"
 )
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _TOKEN = re.compile(
@@ -33,7 +33,7 @@ def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     """Return a bounded source line with credentials and direct identifiers removed."""
     value = source_line.rstrip("\r\n")
     value = _PRIVATE_KEY_BODY.sub("[REDACTED PRIVATE KEY MATERIAL]", value)
-    value = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", value)
+    value = _AUTHORIZATION_HEADER.sub("Authorization: [REDACTED]", value)
     value = _SECRET_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _IDENTITY_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _CREDENTIAL_URL.sub(r"\1[REDACTED]\2", value)
