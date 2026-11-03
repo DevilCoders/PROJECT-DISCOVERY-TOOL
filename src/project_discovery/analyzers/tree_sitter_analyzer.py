@@ -80,6 +80,74 @@ GRAMMARS = {
 }
 
 
+
+DECLARATION_NODE_TYPES = {
+    "javascript": {"function_declaration": "function", "class_declaration": "class", "method_definition": "method"},
+    "typescript": {"function_declaration": "function", "class_declaration": "class", "interface_declaration": "interface", "type_alias_declaration": "type", "method_definition": "method"},
+    "tsx": {"function_declaration": "function", "class_declaration": "class", "interface_declaration": "interface", "type_alias_declaration": "type"},
+    "rust": {"function_item": "function", "struct_item": "struct", "enum_item": "enum", "trait_item": "trait", "type_item": "type", "mod_item": "module", "const_item": "constant"},
+    "go": {"function_declaration": "function", "method_declaration": "method", "type_declaration": "type", "const_declaration": "constant", "var_declaration": "variable"},
+    "c": {"function_definition": "function", "struct_specifier": "struct", "enum_specifier": "enum", "type_definition": "typedef"},
+    "cpp": {"function_definition": "function", "class_specifier": "class", "struct_specifier": "struct", "enum_specifier": "enum", "namespace_definition": "namespace"},
+    "java": {"class_declaration": "class", "interface_declaration": "interface", "enum_declaration": "enum", "record_declaration": "record", "method_declaration": "method", "constructor_declaration": "constructor"},
+    "kotlin": {"class_declaration": "class", "object_declaration": "object", "function_declaration": "function", "property_declaration": "property"},
+    "swift": {"class_declaration": "class", "struct_declaration": "struct", "enum_declaration": "enum", "protocol_declaration": "protocol", "function_declaration": "function"},
+    "c_sharp": {"class_declaration": "class", "struct_declaration": "struct", "interface_declaration": "interface", "enum_declaration": "enum", "method_declaration": "method"},
+    "ruby": {"class": "class", "module": "module", "method": "method", "singleton_method": "method"},
+    "php": {"class_declaration": "class", "interface_declaration": "interface", "trait_declaration": "trait", "function_definition": "function", "method_declaration": "method"},
+    "perl": {"subroutine_declaration_statement": "function"},
+    "r": {"function_definition": "function"},
+    "julia": {"function_definition": "function", "struct_definition": "struct", "module_definition": "module"},
+    "lua": {"function_declaration": "function"},
+    "scala": {"class_definition": "class", "object_definition": "object", "trait_definition": "trait", "function_definition": "function"},
+    "fortran": {"function_subprogram": "function", "subroutine_subprogram": "subroutine", "module": "module"},
+    "zig": {"function_declaration": "function", "variable_declaration": "variable", "container_declaration": "type"},
+    "solidity": {"contract_declaration": "contract", "function_definition": "function", "modifier_definition": "modifier", "event_definition": "event", "struct_declaration": "struct"},
+    "graphql": {"object_type_definition": "type", "interface_type_definition": "interface", "enum_type_definition": "enum", "scalar_type_definition": "scalar"},
+    "proto": {"message": "message", "enum": "enum", "service": "service", "rpc": "rpc"},
+}
+_IDENTIFIER_TYPES = {
+    "identifier", "type_identifier", "field_identifier", "namespace_identifier",
+    "simple_identifier", "constant",
+}
+
+
+def _extract_declarations(root_node, grammar: str) -> list[dict[str, str | int]]:
+    """Extract conservative declaration names for grammars with known node schemas."""
+    node_kinds = DECLARATION_NODE_TYPES.get(grammar, {})
+    if not node_kinds:
+        return []
+    declarations: list[dict[str, str | int]] = []
+    stack = [root_node]
+    while stack:
+        node = stack.pop()
+        kind = node_kinds.get(node.type)
+        if kind:
+            try:
+                name_node = node.child_by_field_name("name")
+            except (AttributeError, TypeError):
+                name_node = None
+            if name_node is None:
+                name_node = next(
+                    (child for child in node.children if child.type in _IDENTIFIER_TYPES),
+                    None,
+                )
+            if name_node is not None:
+                raw_name = name_node.text
+                symbol_name = (
+                    raw_name.decode("utf-8", errors="replace")
+                    if isinstance(raw_name, bytes) else str(raw_name)
+                )
+                declarations.append({
+                    "kind": kind,
+                    "name": symbol_name,
+                    "node_type": node.type,
+                    "line": node.start_point.row + 1,
+                })
+        stack.extend(reversed(node.children))
+    return declarations
+
+
 def _walk_tree(root_node):
     """Iteratively summarize a syntax tree without recursion-depth risk."""
     stack = [(root_node, 0)]
@@ -167,6 +235,7 @@ class TreeSitterAnalyzer(Analyzer):
                 raise RuntimeError("Tree-sitter parser returned no syntax tree")
             root = tree.root_node
             node_count, max_depth, errors, top_level = _walk_tree(root)
+            declarations = _extract_declarations(root, grammar)
         except Exception as exc:
             return [Finding(
                 "code",
@@ -187,6 +256,26 @@ class TreeSitterAnalyzer(Analyzer):
             evidence=[record.path],
             analyzer=self.name,
         )]
+
+        if declarations:
+            symbol_preview = [
+                "{} {}".format(item["kind"], item["name"])
+                for item in declarations[:40]
+            ]
+            evidence = [
+                "{}:{}".format(record.path, item["line"])
+                for item in declarations[:100]
+            ]
+            findings.append(Finding(
+                "code_structure",
+                f"Declarations: {record.path}",
+                f"Extracted {len(declarations)} declaration names: "
+                + ", ".join(symbol_preview)
+                + ("; additional declarations omitted from preview." if len(declarations) > 40 else "."),
+                confidence="CONFIRMED",
+                evidence=evidence,
+                analyzer=self.name,
+            ))
         if errors:
             preview = errors[:50]
             evidence = [

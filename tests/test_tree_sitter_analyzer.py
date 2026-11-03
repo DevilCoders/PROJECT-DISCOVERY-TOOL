@@ -91,3 +91,33 @@ def test_parser_capability_check_does_not_download(monkeypatch):
     monkeypatch.setattr(module.importlib, "import_module", lambda _: OfflinePack)
     capabilities = module.parser_capabilities({"Rust"})
     assert capabilities["Rust"] == "grammar_not_provisioned"
+
+
+def test_language_specific_declaration_extraction():
+    from types import SimpleNamespace
+    from project_discovery.analyzers.tree_sitter_analyzer import _extract_declarations
+
+    point = SimpleNamespace(row=4, column=0)
+    name = SimpleNamespace(type="identifier", text=b"run", children=[])
+    declaration = SimpleNamespace(
+        type="function_item",
+        children=[name],
+        start_point=point,
+        child_by_field_name=lambda field: name if field == "name" else None,
+    )
+    root = SimpleNamespace(type="source_file", children=[declaration])
+    symbols = _extract_declarations(root, "rust")
+    assert symbols == [{
+        "kind": "function",
+        "name": "run",
+        "node_type": "function_item",
+        "line": 5,
+    }]
+
+
+def test_unmapped_grammar_returns_no_semantic_claims():
+    from types import SimpleNamespace
+    from project_discovery.analyzers.tree_sitter_analyzer import _extract_declarations
+
+    root = SimpleNamespace(type="program", children=[])
+    assert _extract_declarations(root, "unmapped_grammar") == []
