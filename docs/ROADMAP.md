@@ -112,7 +112,8 @@ The baseline is not production-ready:
 
 
 - [ ] Replace the all-in-memory `files/directories/symlinks/pending` model with a streaming inventory iterator and bounded producer/consumer queues.
-- [ ] Persist inventory rows incrementally to a local SQLite or append-only spool store; stream report assembly from it.
+- [x] Add a bounded-batch SQLite `InventoryStore` primitive with deterministic streaming reads, scan metadata, explicit close semantics, private POSIX file permissions and symlink-path rejection.
+- [ ] Integrate `InventoryStore` into the scanner lifecycle and stream report assembly from it; the current scanner still materializes inventory lists.
 - [ ] Implement bounded concurrency, work stealing only if justified, back-pressure, cancellation and resumable checkpoints.
 - [ ] Stream SHA-256 and content scanning; avoid repeated passes when analyzers can share a bounded decoded stream safely.
 - [ ] Add content fingerprint cache with metadata validation, file identity where reliable, stale-entry pruning and corruption recovery.
