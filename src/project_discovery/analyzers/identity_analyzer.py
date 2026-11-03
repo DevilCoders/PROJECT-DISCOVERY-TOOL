@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from pathlib import Path
 
 from .base import Analyzer
@@ -150,21 +152,33 @@ class IdentityIntelligenceAnalyzer(Analyzer):
             return [Finding(
                 "identity", f"Identity analysis resource limit: {record.path}",
                 f"File size {record.size_bytes:,} bytes exceeds the identity analyzer's "
-                f"{_MAX_IDENTITY_SOURCE_BYTES:,}-byte in-memory parsing budget.",
+                f"{_MAX_IDENTITY_SOURCE_BYTES:,}-byte content budget. This is not a clean result.",
                 confidence="UNKNOWN", evidence=[record.path],
                 analyzer=self.name, severity="LOW",
             )]
         try:
-            source = (
-                read_python_source(path)
-                if record.extension in {".py", ".pyi"}
-                else path.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeDecodeError) as exc:
+            with path.open("rb") as stream:
+                raw_source = stream.read(_MAX_IDENTITY_SOURCE_BYTES + 1)
+            if len(raw_source) > _MAX_IDENTITY_SOURCE_BYTES:
+                return [Finding(
+                    "identity", f"Identity analysis resource limit: {record.path}",
+                    f"Content grew beyond the {_MAX_IDENTITY_SOURCE_BYTES:,}-byte identity "
+                    "analyzer budget while being read. This is not a clean result.",
+                    confidence="UNKNOWN",
+                    evidence=[record.path, f"read_limit: {_MAX_IDENTITY_SOURCE_BYTES} bytes"],
+                    analyzer=self.name, severity="LOW",
+                )]
+            if record.extension in {".py", ".pyi"}:
+                encoding, _ = tokenize.detect_encoding(io.BytesIO(raw_source).readline)
+                source = raw_source.decode(encoding)
+            else:
+                source = raw_source.decode("utf-8")
+        except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
+            from ..source_utils import redact_source_excerpt
             return [Finding(
                 "identity", f"Identity analysis unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
-                evidence=[record.path], analyzer=self.name,
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
             )]
         frameworks: dict[str, set[int]] = {}
         markers: dict[str, set[int]] = {}
