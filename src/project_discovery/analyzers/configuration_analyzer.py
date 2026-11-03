@@ -17,7 +17,7 @@ _CONFIG_FILENAMES = {
     "nginx.conf", "config.ini", "settings.ini", "appsettings.json",
 }
 _CONFIG_EXTENSIONS = {
-    ".env", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".env", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".properties", ".tf", ".tfvars", ".hcl",
 }
 _KEY_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*(.*?)\s*$")
