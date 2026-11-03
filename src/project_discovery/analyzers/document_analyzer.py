@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import importlib
+import io
 import re
+import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import SourceBudgetExceeded, read_bytes_bounded, read_text_bounded
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -84,6 +87,14 @@ def _rst_headings(text: str) -> list[str]:
     return headings
 
 
+_MAX_TEXT_DOCUMENT_BYTES = 32 * 1024 * 1024
+_MAX_BINARY_DOCUMENT_BYTES = 16 * 1024 * 1024
+_MAX_PDF_PAGES = 5000
+_MAX_DOCUMENT_TEXT_CHARS = 16 * 1024 * 1024
+_MAX_DOCX_ENTRIES = 10_000
+_MAX_DOCX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+
+
 class DocumentAnalyzer(Analyzer):
     """Extract document structure and text metrics without asserting implementation."""
 
@@ -96,10 +107,30 @@ class DocumentAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         extension = record.extension
+        binary_document = extension in {".pdf", ".docx"}
+        max_bytes = _MAX_BINARY_DOCUMENT_BYTES if binary_document else _MAX_TEXT_DOCUMENT_BYTES
+
+        def budget_finding(detail: str) -> list[Finding]:
+            return [Finding(
+                "documentation",
+                f"Document analysis resource limit: {record.path}",
+                detail,
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            )]
+
+        if record.size_bytes > max_bytes:
+            return budget_finding(
+                f"File size {record.size_bytes:,} bytes exceeds the document analyzer's "
+                f"{max_bytes:,}-byte input budget."
+            )
+
         try:
             if extension in {".html", ".htm"}:
                 parser = _HTMLTextExtractor()
-                parser.feed(path.read_text(encoding="utf-8"))
+                parser.feed(read_text_bounded(path, _MAX_TEXT_DOCUMENT_BYTES))
                 parser.close()
                 text = " ".join(parser.text_parts)
                 title = parser.title_parts[0] if parser.title_parts else Path(record.path).stem
@@ -108,7 +139,7 @@ class DocumentAnalyzer(Analyzer):
                     f"links: {len(parser.links)}; approximately {_word_count(text)} words."
                 )
             elif extension == ".rst":
-                content = path.read_text(encoding="utf-8")
+                content = read_text_bounded(path, _MAX_TEXT_DOCUMENT_BYTES)
                 headings = _rst_headings(content)
                 title = headings[0] if headings else Path(record.path).stem
                 details = (
@@ -116,42 +147,104 @@ class DocumentAnalyzer(Analyzer):
                     f"approximately {_word_count(content)} words."
                 )
             elif extension in {".txt", ".adoc", ".asciidoc", ".tex"}:
-                content = path.read_text(encoding="utf-8")
+                content = read_text_bounded(path, _MAX_TEXT_DOCUMENT_BYTES)
                 title = Path(record.path).stem
                 details = (
                     f"Text document; lines: {len(content.splitlines())}; "
                     f"approximately {_word_count(content)} words."
                 )
             elif extension == ".pdf":
+                raw_document = read_bytes_bounded(path, _MAX_BINARY_DOCUMENT_BYTES)
                 pypdf = importlib.import_module("pypdf")
-                reader = pypdf.PdfReader(str(path), strict=False)
-                page_text = [page.extract_text() or "" for page in reader.pages]
+                reader = pypdf.PdfReader(io.BytesIO(raw_document), strict=False)
+                page_count = len(reader.pages)
+                if page_count > _MAX_PDF_PAGES:
+                    return budget_finding(
+                        f"PDF contains {page_count:,} pages; the configured page budget is "
+                        f"{_MAX_PDF_PAGES:,}. No page text was extracted."
+                    )
+                page_text: list[str] = []
+                text_chars = 0
+                for page in reader.pages:
+                    value = page.extract_text() or ""
+                    text_chars += len(value)
+                    if text_chars > _MAX_DOCUMENT_TEXT_CHARS:
+                        return budget_finding(
+                            f"PDF extracted text exceeded {_MAX_DOCUMENT_TEXT_CHARS:,} characters. "
+                            "Text extraction stopped and the document result is UNKNOWN."
+                        )
+                    page_text.append(value)
                 content = "\n".join(page_text)
                 metadata = reader.metadata
                 title = str(metadata.title) if metadata and metadata.title else Path(record.path).stem
                 details = (
-                    f"PDF pages: {len(reader.pages)}; pages with extractable text: "
+                    f"PDF pages: {page_count}; pages with extractable text: "
                     f"{sum(bool(value.strip()) for value in page_text)}; "
                     f"approximately {_word_count(content)} words."
                 )
             else:
+                raw_document = read_bytes_bounded(path, _MAX_BINARY_DOCUMENT_BYTES)
+                with zipfile.ZipFile(io.BytesIO(raw_document)) as package:
+                    members = package.infolist()
+                    if len(members) > _MAX_DOCX_ENTRIES:
+                        return budget_finding(
+                            f"DOCX package contains {len(members):,} entries; "
+                            f"entry budget is {_MAX_DOCX_ENTRIES:,}."
+                        )
+                    uncompressed_bytes = sum(item.file_size for item in members)
+                    if uncompressed_bytes > _MAX_DOCX_UNCOMPRESSED_BYTES:
+                        return budget_finding(
+                            f"DOCX package declares {uncompressed_bytes:,} uncompressed bytes; "
+                            f"package budget is {_MAX_DOCX_UNCOMPRESSED_BYTES:,} bytes."
+                        )
+                    if any(
+                        item.compress_size > 0 and
+                        item.file_size / item.compress_size > 1000
+                        for item in members
+                    ):
+                        return budget_finding(
+                            "DOCX package contains a member with a compression ratio above "
+                            "the 1000:1 document safety threshold."
+                        )
                 docx = importlib.import_module("docx")
-                document = docx.Document(str(path))
-                paragraphs = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
-                table_cells = [
-                    cell.text for table in document.tables
-                    for row in table.rows for cell in row.cells
-                ]
+                document = docx.Document(io.BytesIO(raw_document))
+                paragraphs: list[str] = []
+                table_cells: list[str] = []
+                text_chars = 0
+                title = Path(record.path).stem
+                for paragraph in document.paragraphs:
+                    if paragraph.text:
+                        text_chars += len(paragraph.text)
+                        if text_chars > _MAX_DOCUMENT_TEXT_CHARS:
+                            return budget_finding(
+                                f"DOCX extracted text exceeded {_MAX_DOCUMENT_TEXT_CHARS:,} "
+                                "characters; extraction stopped."
+                            )
+                        paragraphs.append(paragraph.text)
+                        if (
+                            title == Path(record.path).stem
+                            and paragraph.style
+                            and paragraph.style.name == "Title"
+                        ):
+                            title = paragraph.text
+                for table in document.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text:
+                                text_chars += len(cell.text)
+                                if text_chars > _MAX_DOCUMENT_TEXT_CHARS:
+                                    return budget_finding(
+                                        f"DOCX extracted text exceeded {_MAX_DOCUMENT_TEXT_CHARS:,} "
+                                        "characters; extraction stopped."
+                                    )
+                                table_cells.append(cell.text)
                 content = "\n".join(paragraphs + table_cells)
-                title = next(
-                    (paragraph.text for paragraph in document.paragraphs
-                     if paragraph.style and paragraph.style.name == "Title" and paragraph.text),
-                    Path(record.path).stem,
-                )
                 details = (
                     f"DOCX paragraphs: {len(paragraphs)}; tables: {len(document.tables)}; "
                     f"approximately {_word_count(content)} words."
                 )
+        except SourceBudgetExceeded as exc:
+            return budget_finding(str(exc))
         except ImportError as exc:
             optional = "pypdf" if extension == ".pdf" else "python-docx"
             return [Finding(
