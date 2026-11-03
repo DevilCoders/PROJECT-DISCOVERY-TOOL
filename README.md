@@ -156,6 +156,23 @@ The output directory must remain outside the analyzed project. PDT never changes
 
 The terminal is an analysis console, not an append-only file dump. On an interactive TTY, a new scan starts from a clean screen and displays the ASCII brand, phase progress, grouped statuses and a concise end summary. Redirected output must remain deterministic and must not emit terminal-control sequences. A no-color mode, narrow-terminal layouts and stable machine-readable logging remain in the roadmap.
 
+## Asynchronous execution and GPU acceleration
+
+The current scan pipeline is being extended with bounded concurrent file analysis and a C-native acceleration path. The intended runtime policy is automatic but capability-scoped:
+
+- PDT detects OpenCL GPU devices at runtime through the C extension; a GPU SDK or GPU hardware is not required to install or build PDT.
+- Supported large-buffer kernels may use the detected GPU after a size threshold. Small files and unsupported operations stay on the CPU because transfer/launch overhead can be higher than the work itself.
+- The portable C/SIMD path remains the mandatory fallback when no GPU is available or a device/kernel operation fails. A GPU is never assumed to be present.
+- File analysis is scheduled through a bounded worker pool with back-pressure and deterministic result ordering. SQLite cache access remains on the coordinator thread.
+- `pdt scan --jobs N` will select a fixed worker count; `--jobs 0` requests automatic sizing. Worker and GPU capability/dispatch metrics are included in reports.
+- GPU acceleration is not a claim that every analyzer runs on the GPU. Only explicitly implemented and tested native kernels may be dispatched there; language, framework and security semantics remain analyzer-specific.
+
+## Security findings: code, impact and remediation
+
+Security findings are being upgraded to include redacted source-line evidence and exact line numbers, in addition to confidence and severity. The HTML report will display the affected line in red and put the attacker-impact explanation and recommended remediation beside the evidence. JSON and Markdown will expose equivalent structured information (Markdown uses an explicit vulnerable-line marker).
+
+Source excerpts must be sanitized before report generation. Passwords, tokens, private keys, credential URL values and personal identifiers must never be copied into reports. Impact descriptions explain plausible consequences—such as credential abuse, unauthorized data access, command execution or internal-service access—without claiming that a heuristic finding is exploitable or reachable.
+
 ## Reporting UX
 
 The HTML report is a standalone offline document with a dark command-center visual system. It includes project summary panels, inventory tables, dedicated local vulnerability and VCS/provider views, directory and symlink views, finding search/filter controls, bounded pagination, per-finding disclosure and open/close controls.
@@ -199,7 +216,7 @@ Documentation does not prove implementation. A declared package does not prove i
 PDT is intentionally polyglot. Python is the control plane, not the only implementation language:
 
 - **Python:** CLI/control plane, analyzer orchestration, plugin SDK, capability registry, local cache coordination and shared report schema.
-- **C:** implemented portable native core for bounded byte counting and hardware capability reporting. The streaming secret analyzer uses it for native newline counting.
+- **C:** portable native core for bounded byte counting and hardware capability reporting. The active implementation block adds dynamic OpenCL device discovery and a bounded GPU kernel with automatic CPU fallback; no GPU SDK is required at build time.
 - **x86-64 Assembly:** implemented Linux x86-64 SIMD backend using SSE2 compare/movemask and POPCNT, selected only after runtime CPU-feature checks. Other CPUs/platforms use C fallback.
 - **Rust:** an optional PyO3 no-follow filesystem iterator is now integrated into scanner traversal. It uses native directory iterators and bounded active-directory state; persistent indexing and bounded analyzer queues remain outstanding.
 - **C++:** an optional C++17 signature classifier is compiled as a native extension and used by scanner file-type detection, with a Python fallback.
@@ -228,7 +245,7 @@ The current PR remains unmerged. Production readiness requires all mandatory roa
 
 ## Production engineering priorities (2026-11-04)
 
-The next implementation cycle prioritizes correctness and scale over adding catalog labels. The required order is: (1) remove silent inventory pruning and introduce bounded streaming inventory; (2) implement the Rust traversal/index engine and stable native boundary; (3) complete archive metadata/content inspection under explicit decompression, nesting, ratio, time and byte budgets; (4) expand cross-language security/configuration/API/database/test/build evidence; (5) complete redacted identity/credential, network, OS, file-type and dependency-tree reporting; (6) make the offline HTML report lazy and bounded for very large result sets; (7) validate the full system with adversarial fixtures, polyglot corpora and 2GB–100GB+ benchmarks.
+The next implementation cycle prioritizes correctness and scale over adding catalog labels. The required order is: (1) remove silent inventory pruning and introduce bounded streaming inventory; (2) implement the Rust traversal/index engine and stable native boundary; (3) complete archive metadata/content inspection under explicit decompression, nesting, ratio, time and byte budgets; (4) expand cross-language security/configuration/API/database/test/build evidence; (5) complete redacted identity/credential, network, OS, file-type and dependency-tree reporting; (6) add bounded asynchronous file analysis and C/OpenCL GPU acceleration for measured, supported kernels with CPU fallback; (7) attach redacted vulnerable source lines, attacker-impact context and remediation to JSON/Markdown/HTML reports; (8) make the offline HTML report lazy and bounded for very large result sets; (9) validate the full system with adversarial fixtures, polyglot corpora and 2GB–100GB+ benchmarks.
 
 PDT's language goal is 40+ language families, with capability states reported per analyzer. Python remains orchestration only. Native C and x86-64 Assembly are implemented; Rust must become an integrated, tested execution path for traversal/indexing. C++ is used only where an actual native dependency or performance boundary justifies it. JavaScript/TypeScript own the offline report interaction layer. No language is considered implemented because it appears in documentation or a catalog.
 
