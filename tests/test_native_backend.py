@@ -86,3 +86,12 @@ def test_native_byte_counter_is_safe_under_concurrent_calls():
             lambda value: native_backend.count_byte(payload, value), values
         ))
     assert results == [payload.count(bytes([value])) for value in values]
+
+def test_large_mutable_buffers_use_safe_cpu_path():
+    payload = bytearray(bytes(range(256)) * 32768)
+    before = native_backend.capabilities()["gpu_dispatches"]
+    expected = payload.count(b"\\x0a")
+    assert native_backend.count_byte(payload, 10) == expected
+    assert native_backend.count_byte(memoryview(payload), 10) == expected
+    after = native_backend.capabilities()["gpu_dispatches"]
+    assert after == before
