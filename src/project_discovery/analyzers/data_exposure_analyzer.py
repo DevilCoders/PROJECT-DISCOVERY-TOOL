@@ -89,12 +89,12 @@ class DataExposureAnalyzer(Analyzer):
                         break
                     if (
                         len(raw_line) == _MAX_LINE_BYTES
-                        and not raw_line.endswith((b"\\n", b"\\r"))
+                        and not raw_line.endswith((b"\n", b"\r"))
                     ):
                         next_byte = stream.read(1)
                         if next_byte:
                             bytes_scanned += 1
-                            if next_byte in (b"\\n", b"\\r"):
+                            if next_byte in (b"\n",):
                                 raw_line += next_byte
                             else:
                                 line_budget_reached = True
