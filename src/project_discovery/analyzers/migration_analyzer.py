@@ -22,7 +22,7 @@ _MIGRATION_DIRS = {
 }
 _FLYWAY_NAME = re.compile(r"^(?P<identifier>(?:V\d+|R|U\d+)__.+)\.sql$", re.I)
 _REVISION = re.compile(r"(?m)^\s*revision\s*=\s*['\"]([^'\"]+)['\"]")
-_PARENT_REVISION = re.compile(r"(?m)^\s*down_revision\s*=\s*['\\"]([^'\\"]+)['\\"]")
+_PARENT_REVISION = re.compile(r"""(?m)^\s*down_revision\s*=\s*['"]([^'"]+)['"]""")
 _CHANGESET_ID = re.compile(r"(?i)<changeSet\b[^>]*\bid\s*=\s*['\"]([^'\"]+)")
 _OPERATION_PATTERNS = (
     ("create_table", re.compile(
