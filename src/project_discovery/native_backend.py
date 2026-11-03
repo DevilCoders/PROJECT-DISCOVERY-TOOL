@@ -1,4 +1,4 @@
-"""Portable Python interface to PDT's optional C, Assembly, C++ and Rust backends."""
+"""Portable Python interface to PDT's optional C, Assembly, C++, Rust and GPU backends."""
 from __future__ import annotations
 
 from typing import Any
@@ -20,7 +20,7 @@ except ImportError:
 
 
 def count_byte(data: bytes | bytearray | memoryview, needle: int) -> int:
-    """Count a byte using SIMD/C if built, otherwise use the portable fallback."""
+    """Count a byte using automatic large-buffer GPU dispatch or CPU fallback."""
     if not isinstance(needle, int) or isinstance(needle, bool) or not 0 <= needle <= 255:
         raise ValueError("needle must be an integer between 0 and 255")
     if _native is not None:
@@ -29,7 +29,7 @@ def count_byte(data: bytes | bytearray | memoryview, needle: int) -> int:
 
 
 def capabilities() -> dict[str, Any]:
-    """Report native backends selected or available on this machine."""
+    """Report CPU, GPU and optional native backends available on this machine."""
     if _native is not None:
         info = dict(_native.capabilities())
     else:
@@ -40,9 +40,21 @@ def capabilities() -> dict[str, Any]:
             "backend": "python-fallback",
             "hardware_threads": os.cpu_count() or 1,
             "assembly_compiled": False,
+            "gpu_available": False,
+            "opencl_available": False,
+            "gpu_backend": "none",
+            "gpu_name": "",
+            "gpu_vendor": "",
+            "gpu_compute_units": 0,
+            "gpu_global_memory_bytes": 0,
+            "gpu_max_allocation_bytes": 0,
+            "gpu_threshold_bytes": 8 * 1024 * 1024,
+            "gpu_dispatches": 0,
+            "gpu_fallbacks": 0,
         }
     info["cpp_signature_classifier"] = _native_cpp is not None
     info["rust_filesystem_walker"] = _walker is not None
+    info["gpu_status"] = "online" if info.get("gpu_available") else "cpu-fallback"
     return info
 
 
