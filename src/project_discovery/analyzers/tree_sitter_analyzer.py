@@ -187,7 +187,13 @@ def _extract_imports(root_node, grammar: str) -> list[dict[str, str | int]]:
     stack = [root_node]
     while stack:
         node = stack.pop()
-        if node.type in node_types:
+        node_type = node.type.lower()
+        generic_import_node = (
+            "import" in node_type
+            or "include" in node_type
+            or node_type in {"use_declaration", "using_directive"}
+        )
+        if node.type in node_types or generic_import_node:
             raw = node.text
             text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
             for pattern in _IMPORT_TARGET_PATTERNS:

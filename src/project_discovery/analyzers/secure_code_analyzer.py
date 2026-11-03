@@ -133,7 +133,7 @@ _PATTERNS = (
     (
         "unsafe_xml_external_entities",
         re.compile(
-            r"""(?i)(?:setFeature\s*\([^;\n]*(?:external-general-entities|external-parameter-entities)[^;\n]*true|resolveExternals\s*=\s*true|DtdProcessing\s*[:=]\s*Parse)"""
+            r"""(?i)(?:setFeature\s*\([^;\n]*(?:external-general-entities|external-parameter-entities)[^;\n]*true|resolveExternals\s*=\s*true|DtdProcessing\s*[:=]\s*(?:DtdProcessing\.)?Parse)"""
         ),
         "Potential unsafe XML external-entity configuration",
         "The XML parser appears to permit external entities or DTD processing. "

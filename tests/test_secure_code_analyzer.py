@@ -106,7 +106,7 @@ def test_polyglot_security_rules_detect_web_dataflow_and_token_misuse(tmp_path: 
         tmp_path,
         "Controller.java",
         'String path = request.getParameter("file");\n'
-        'new FileInputStream(path);\n'
+        'new FileInputStream(request.getParameter("file"));\n'
         'MessageDigest.getInstance("MD5");\n'
         'response.sendRedirect(request.getParameter("next"));\n',
     )

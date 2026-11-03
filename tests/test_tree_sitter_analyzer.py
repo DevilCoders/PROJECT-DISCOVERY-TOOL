@@ -168,3 +168,43 @@ def test_import_inventory_skips_unmapped_language():
 
     root = SimpleNamespace(type="program", children=[])
     assert _extract_imports(root, "unknown") == []
+
+
+def test_generic_import_node_fallback_supports_additional_grammars():
+    from types import SimpleNamespace
+    from project_discovery.analyzers.tree_sitter_analyzer import _extract_imports
+
+    point = SimpleNamespace(row=0, column=0)
+    imported = SimpleNamespace(
+        type="module_import",
+        text=b'import "std/io";',
+        children=[],
+        start_point=point,
+    )
+    use = SimpleNamespace(
+        type="use_declaration",
+        text=b"use std::collections;",
+        children=[],
+        start_point=point,
+    )
+    include = SimpleNamespace(
+        type="include_directive",
+        text=b'include "config.inc"',
+        children=[],
+        start_point=point,
+    )
+    root = SimpleNamespace(type="source_file", children=[imported, use, include])
+
+    imports = _extract_imports(root, "grammar_not_in_explicit_map")
+
+    assert {item["target"] for item in imports} == {
+        "std/io", "std::collections", "config.inc"
+    }
+
+
+def test_grammar_mapping_covers_sixty_plus_languages_and_matches_recognition_catalog():
+    from project_discovery.language_catalog import language_catalog
+
+    recognized = {item["name"] for item in language_catalog()}
+    assert len(GRAMMARS) >= 60
+    assert set(GRAMMARS) <= recognized
