@@ -134,24 +134,30 @@ def test_generic_migration_folder_is_not_overstated_as_confirmed(tmp_path: Path)
     assert findings[0].confidence == "INFERRED"
 
 
-def test_goose_drizzle_and_diesel_migrations_are_discovered(tmp_path: Path):
-    goose = _scan(
+def test_goose_migration_is_discovered(tmp_path: Path):
+    findings = _scan(
         tmp_path, "db/migrations/20261103_add_users.sql",
         "-- +goose Up\nCREATE TABLE users(id INTEGER);\n"
         "-- +goose Down\nDROP TABLE users;\n",
     )
-    drizzle = _scan(
+    assert "Goose" in findings[0].detail
+    assert any("Potentially destructive" in item.title for item in findings)
+
+
+def test_drizzle_migration_is_discovered(tmp_path: Path):
+    findings = _scan(
         tmp_path, "drizzle/0001_add_users.ts",
         'import { pgTable } from "drizzle-orm/pg-core";\n'
         'export const users = pgTable("users", {});\n',
     )
-    diesel = _scan(
+    assert "Drizzle ORM" in findings[0].detail
+    assert any("operation: create_table" in item for item in findings[0].evidence)
+
+
+def test_diesel_migration_is_discovered(tmp_path: Path):
+    findings = _scan(
         tmp_path, "migrations/20261103_drop_legacy.rs",
         'diesel::sql_query("DROP TABLE legacy").execute(connection);\n',
     )
-    assert "Goose" in goose[0].detail
-    assert any("Potentially destructive" in item.title for item in goose)
-    assert "Drizzle ORM" in drizzle[0].detail
-    assert any("operation: create_table" in item for item in drizzle[0].evidence)
-    assert "Diesel" in diesel[0].detail
-    assert any("Potentially destructive" in item.title for item in diesel)
+    assert "Diesel" in findings[0].detail
+    assert any("Potentially destructive" in item.title for item in findings)
