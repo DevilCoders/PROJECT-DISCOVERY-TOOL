@@ -157,8 +157,8 @@ class SecretPatternAnalyzer(Analyzer):
                                 }
                                 else "MEDIUM"
                             )
-                            line_start = combined.rfind("\\n", 0, match.start()) + 1
-                            line_end = combined.find("\\n", match.start())
+                            line_start = combined.rfind("\n", 0, match.start()) + 1
+                            line_end = combined.find("\n", match.start())
                             if line_end < 0:
                                 line_end = len(combined)
                             excerpt = redact_source_excerpt(combined[line_start:line_end])
