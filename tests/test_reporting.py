@@ -187,3 +187,29 @@ def test_json_and_html_report_writers_do_not_materialize_scanresult_dict(
     payload = json.loads((tmp_path / "discovery-report.json").read_text(encoding="utf-8"))
     assert payload["schema_version"] == "1.3"
     assert "const REPORT =" in (tmp_path / "discovery-report.html").read_text(encoding="utf-8")
+
+
+def test_html_report_escapes_untrusted_source_code_inside_script_payload(tmp_path: Path):
+    result = _result()
+    result.findings = [
+        Finding(
+            "security",
+            "Untrusted source excerpt",
+            "Test finding",
+            severity="HIGH",
+            code_evidence=[
+                CodeEvidence(
+                    77,
+                    'message = "</script><script>window.pwned = true</script>"; '
+                    'email = "dev@example.com"',
+                )
+            ],
+            impact="Conditional impact for the test fixture.",
+            recommendation="Render source through a text node.",
+        )
+    ]
+    path = write_reports(result, tmp_path, {"html"})[0]
+    content = path.read_text(encoding="utf-8")
+    assert "</script><script>window.pwned" not in content
+    assert "\\u003c/script\\u003e" in content
+    assert "textContent=String(sourceLine.code" in content
