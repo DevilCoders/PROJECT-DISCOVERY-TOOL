@@ -296,6 +296,16 @@ class ConfigurationAnalyzer(Analyzer):
                 )]
             content = raw_content.decode("utf-8")
             keys, risks, risk_source = _parse_config(content, record)
+        except ConfigurationKeyBudgetExceeded as exc:
+            return [Finding(
+                "configuration",
+                f"Configuration inventory resource limit: {record.path}",
+                redact_source_excerpt(str(exc)),
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            )]
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, configparser.Error, ET.ParseError, ValueError, RecursionError, MemoryError) as exc:
             return [Finding(
                 "configuration",
