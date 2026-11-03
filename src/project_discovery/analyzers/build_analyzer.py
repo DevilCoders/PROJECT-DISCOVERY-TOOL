@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import SourceBudgetExceeded, read_text_bounded
+from ..source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
 
 
 _MAX_BUILD_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -283,11 +283,24 @@ class BuildManifestAnalyzer(Analyzer):
                     ]
             else:
                 metadata.append("recognized build manifest; specialized extraction pending")
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, ET.ParseError) as exc:
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "build",
+                f"Build manifest resource limit: {record.path}",
+                redact_source_excerpt(str(exc)),
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            )]
+        except (
+            OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError,
+            ET.ParseError, ValueError, RecursionError, MemoryError,
+        ) as exc:
             return [Finding(
                 "build",
                 f"Build manifest parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
