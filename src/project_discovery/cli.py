@@ -195,12 +195,20 @@ def main() -> None:
     formats = {
         item.strip().lower() for item in args.format.split(",") if item.strip()
     }
-    if not formats or formats - {"json", "markdown", "html"}:
-        parser.error("--format accepts json, markdown, html")
-    if args.max_file_mb < 1:
-        parser.error("--max-file-mb must be >= 1")
     try:
-        raise SystemExit(run_scan(args.path, args.output, formats, args.max_file_mb))
+        if args.command == "scan":
+            if not formats or formats - {"json", "markdown", "html"}:
+                parser.error("scan --format accepts json, markdown, html")
+            if args.max_file_mb < 1:
+                parser.error("--max-file-mb must be >= 1")
+            raise SystemExit(run_scan(args.path, args.output, formats, args.max_file_mb))
+
+        if not formats or formats - {"json", "markdown"}:
+            parser.error("compare --format accepts json, markdown")
+        comparison = compare_reports(load_report(args.left), load_report(args.right))
+        for report in write_comparison(comparison, args.output, formats):
+            print("[ SUCCESS ] Comparison report: " + str(report))
+        raise SystemExit(0)
     except (OSError, ValueError) as exc:
         parser.exit(2, "[ ERROR ] " + str(exc) + "\n")
 
