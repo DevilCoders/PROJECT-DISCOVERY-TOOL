@@ -37,7 +37,7 @@ _DOMAINS = (
     AnalyzerDomain("api_graphql", "GraphQL Intelligence", "Schemas, resolvers, directives, operations and federation boundaries.", "partial"),
     AnalyzerDomain("api_rpc", "RPC and Service Contracts", "gRPC, Thrift, message contracts, generated stubs and compatibility.", "partial"),
     AnalyzerDomain("databases_sql", "SQL Database Intelligence", "Schemas, queries, indexes, constraints, stored procedures and migrations.", "partial"),
-    AnalyzerDomain("databases_nosql", "NoSQL Intelligence", "Document, key-value, graph and wide-column data models."),
+    AnalyzerDomain("databases_nosql", "NoSQL Intelligence", "Static client import and selected operation discovery for MongoDB, Redis, Neo4j, Elasticsearch, Cassandra and related stores.", "partial"),
     AnalyzerDomain("orm", "ORM and Data Mapping", "Models, relations, query builders, mappings and schema drift.", "partial"),
     AnalyzerDomain("migrations", "Data Migration Intelligence", "Migration ordering, reversibility, destructive operations and version state.", "partial"),
     AnalyzerDomain("messaging", "Messaging and Event Systems", "Queues, topics, event schemas, consumers, producers and delivery semantics."),
