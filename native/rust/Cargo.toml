@@ -1,0 +1,12 @@
+[package]
+name = "pdt-walker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "_walker"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "=0.23.5", features = ["extension-module"] }
