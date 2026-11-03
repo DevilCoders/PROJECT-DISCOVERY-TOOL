@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
+Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 @dataclass(slots=True)
 class Finding:
@@ -12,6 +13,7 @@ class Finding:
     confidence: Confidence = "CONFIRMED"
     evidence: list[str] = field(default_factory=list)
     analyzer: str = "core"
+    severity: Severity = "INFO"
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
