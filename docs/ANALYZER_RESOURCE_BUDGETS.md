@@ -8,13 +8,14 @@ These are per-analyzer safety limits, not a global scan-size policy. They are cu
 |---|---:|---|---|
 | Configuration intelligence | 16 MiB per file | Reads at most limit + 1 bytes; parses one decoded buffer and reuses its source lines | UNKNOWN on indexed oversize or file growth |
 | Cross-language secure-code patterns | 16 MiB per file | Reads at most limit + 1 bytes; PEP 263 decoding for Python | UNKNOWN on oversize/growth/decode/AST resource failure |
-| Identity intelligence | 16 MiB per file | Reads at most limit + 1 bytes; PEP 263 decoding for Python; reuses one line list | UNKNOWN on oversize/growth/decode/AST resource failure |
+| Identity intelligence | 16 MiB per file; 100 retained source locations per category | Reads at most limit + 1 bytes; PEP 263 decoding for Python; bounded location aggregation and line iteration | UNKNOWN on oversize/growth/decode/AST resource failure |
 | Data-exposure / PII indicators | 64 MiB per file; 256 KiB per line; 100 evidence line references; 20 code excerpts | Binary line streaming; redacted excerpts; bounded evidence retention | UNKNOWN/partial when byte budget is reached |
 | Secret-pattern analysis | 64 MiB per file; 8 MiB chunks; 4 KiB overlap; at most 10,000 findings | Binary chunk streaming with cross-chunk overlap | UNKNOWN/partial on byte or finding limits |
 | Python AST inventory/security | 16 MiB per file | PEP 263-aware source reads with AST parsing | UNKNOWN on indexed oversize or parse failure |
 | Python import graph | 16 MiB per module | AST extraction over inventoried source | UNKNOWN for skipped or over-budget modules |
 | Python API endpoint extraction | 16 MiB per Python AST file | PEP 263-aware limit + 1 byte read and AST parsing | UNKNOWN on oversize/growth/parser resource failure |
 | Non-Python API endpoint scanning | 32 MiB per file; 256 KiB per line | Bounded line streaming | UNKNOWN/partial when scan byte limit is reached |
+| API-style classification | 32 MiB per file; 256 KiB per line; 25,000 retained unique indicators; 100 evidence lines | Bounded byte/line streaming with bounded per-category samples | UNKNOWN/partial on byte or indicator cap |
 | API contract parsing | 16 MiB per file | Bounded one-buffer read for OpenAPI, AsyncAPI, OpenRPC, WSDL, RAML, GraphQL, Protobuf and Thrift | UNKNOWN on oversize/growth/parse failure |
 | Tree-sitter syntax parsing | 16 MiB per file | Bounded source read before parser invocation | UNKNOWN on oversize/growth/parser failure |
 | Build manifest analysis | 16 MiB per file | Bounded one-buffer read for build/CI manifests | UNKNOWN on oversize/growth/parse failure |
