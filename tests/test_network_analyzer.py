@@ -78,3 +78,17 @@ def test_network_analyzer_caps_unique_indicator_cardinality(tmp_path: Path, monk
     monkeypatch.setattr(module, "_MAX_NETWORK_INDICATORS", 1)
     findings = _scan(tmp_path, 'HOSTS = "192.0.2.1 198.51.100.2"\n')
     assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
+
+
+def test_network_analyzer_reports_overlong_physical_line_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.network_analyzer as module
+
+    monkeypatch.setattr(module, "_MAX_NETWORK_LINE_BYTES", 64)
+    path = tmp_path / "long-line.py"
+    path.write_text('HOST = "' + ("x" * 1000) + '"', encoding="utf-8")
+    record = FileRecord(path.name, path.stat().st_size, ".py", "Python", file_type="text")
+    findings = NetworkIndicatorAnalyzer().analyze(path, record)
+    assert any(
+        item.confidence == "UNKNOWN" and "physical line" in item.detail
+        for item in findings
+    )
