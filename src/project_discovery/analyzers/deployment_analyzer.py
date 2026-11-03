@@ -109,7 +109,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         try:
             text = path.read_text(encoding="utf-8")
             return _SafeDeploymentLoader.load_all(text), None
-        except (OSError, UnicodeDecodeError, RuntimeError, ValueError) as exc:
+        except Exception as exc:
             return None, Finding(
                 "deployment",
                 f"Deployment manifest unavailable: {record.path}",
@@ -165,8 +165,11 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                     evidence=[f"{record.path}:{line}"],
                     analyzer=self.name,
                 ))
-        for line, user in users:
-            if user.lower() in {"root", "0"}:
+        for entry in users:
+            if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+                continue
+            line, user = entry[0], entry[1]
+            if str(user).lower() in {"root", "0"}:
                 findings.append(Finding(
                     "security",
                     f"Container explicitly runs as root: {record.path}",
