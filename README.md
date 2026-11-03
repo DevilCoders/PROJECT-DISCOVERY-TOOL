@@ -86,6 +86,7 @@ The current branch contains first-pass implementations of:
 - Local-only OSV advisory database import and lockfile-based vulnerability matching when an operator supplies `--vuln-db`.
 - JSON/Markdown reports and an offline dark HTML report with search, filters, pagination and collapsible findings.
 - A Rich CLI with an ASCII banner, progress phases, compact summary panels and TTY-aware screen clearing.
+- Bounded asynchronous file analysis (`--jobs 0` auto or `--jobs N`) plus a C-native OpenCL GPU byte-count path for large buffers, with runtime detection and C/SIMD/Python fallback.
 
 These are initial implementations with varying depth. In particular, the filesystem inventory is currently retained in memory, common dependency/build directories are still implicitly pruned by the scanner, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
 
@@ -158,20 +159,19 @@ The terminal is an analysis console, not an append-only file dump. On an interac
 
 ## Asynchronous execution and GPU acceleration
 
-The current scan pipeline is being extended with bounded concurrent file analysis and a C-native acceleration path. The intended runtime policy is automatic but capability-scoped:
+## Asynchronous execution and GPU acceleration
 
-- PDT detects OpenCL GPU devices at runtime through the C extension; a GPU SDK or GPU hardware is not required to install or build PDT.
-- Supported large-buffer kernels may use the detected GPU after a size threshold. Small files and unsupported operations stay on the CPU because transfer/launch overhead can be higher than the work itself.
-- The portable C/SIMD path remains the mandatory fallback when no GPU is available or a device/kernel operation fails. A GPU is never assumed to be present.
-- File analysis is scheduled through a bounded worker pool with back-pressure and deterministic result ordering. SQLite cache access remains on the coordinator thread.
-- `pdt scan --jobs N` will select a fixed worker count; `--jobs 0` requests automatic sizing. Worker and GPU capability/dispatch metrics are included in reports.
-- GPU acceleration is not a claim that every analyzer runs on the GPU. Only explicitly implemented and tested native kernels may be dispatched there; language, framework and security semantics remain analyzer-specific.
+The scan pipeline now schedules file analysis through a bounded worker pool and exposes `pdt scan --jobs N`; `--jobs 0` selects a bounded automatic worker count based on detected hardware concurrency. Pending tasks are capped at twice the worker count, results are collected in deterministic submission order, and SQLite fingerprint-cache access stays on the coordinator thread. Stateful third-party analyzers can declare `concurrent_safe = False` to serialize their own calls.
+
+The C extension dynamically discovers OpenCL at runtime; PDT does not require OpenCL headers, an SDK or a GPU to install/build. For buffers of at least 8 MiB, the supported byte-count operation may dispatch to a detected GPU using a bounded reduction kernel. The large-file secret scanner uses this native byte counter. Small buffers, unsupported devices, allocation failures and kernel/dispatch errors fall back to C/SIMD; when the C extension is unavailable, the Python fallback remains functional. The runtime reports device capabilities, dispatches and fallback counts.
+
+This is deliberately capability-scoped: PDT does not claim that every analyzer runs on the GPU. Language parsing, security rules, framework semantics and report generation remain analyzer-side CPU work. An 8 MiB threshold is an initial engineering default, not a proven optimal threshold; per-device benchmarks and GPU/no-GPU CI coverage remain release gates.
 
 ## Security findings: code, impact and remediation
 
-Security findings are being upgraded to include redacted source-line evidence and exact line numbers, in addition to confidence and severity. The HTML report will display the affected line in red and put the attacker-impact explanation and recommended remediation beside the evidence. JSON and Markdown will expose equivalent structured information (Markdown uses an explicit vulnerable-line marker).
+Security findings now carry exact source line numbers, redacted vulnerable-line excerpts, severity, confidence, conditional attacker-impact explanations and recommended remediation. The HTML report displays the source excerpts in red and uses safe DOM text nodes; JSON and Markdown expose the same finding fields, and Markdown marks vulnerable lines with a red indicator. The HTML/JSON payload schema and JSON report schema are versioned as 1.3.
 
-Source excerpts must be sanitized before report generation. Passwords, tokens, private keys, credential URL values and personal identifiers must never be copied into reports. Impact descriptions explain plausible consequences—such as credential abuse, unauthorized data access, command execution or internal-service access—without claiming that a heuristic finding is exploitable or reachable.
+Redaction is applied by the source excerpt helper and again at the `CodeEvidence` model boundary, including for third-party analyzers. It covers common password/token/key assignments, bearer/basic authorization values, credential URLs, provider token formats, JWT-shaped values, email addresses and common identity-field assignments. No heuristic finding is proof of exploitability or runtime exposure: impact text is conditional on reachability and attacker-controlled data, and severity must be reviewed against actual data flow and deployment context.
 
 ## Reporting UX
 
@@ -245,7 +245,7 @@ The current PR remains unmerged. Production readiness requires all mandatory roa
 
 ## Production engineering priorities (2026-11-04)
 
-The next implementation cycle prioritizes correctness and scale over adding catalog labels. The required order is: (1) remove silent inventory pruning and introduce bounded streaming inventory; (2) implement the Rust traversal/index engine and stable native boundary; (3) complete archive metadata/content inspection under explicit decompression, nesting, ratio, time and byte budgets; (4) expand cross-language security/configuration/API/database/test/build evidence; (5) complete redacted identity/credential, network, OS, file-type and dependency-tree reporting; (6) add bounded asynchronous file analysis and C/OpenCL GPU acceleration for measured, supported kernels with CPU fallback; (7) attach redacted vulnerable source lines, attacker-impact context and remediation to JSON/Markdown/HTML reports; (8) make the offline HTML report lazy and bounded for very large result sets; (9) validate the full system with adversarial fixtures, polyglot corpora and 2GB–100GB+ benchmarks.
+The next implementation cycle prioritizes correctness and scale over adding catalog labels. The current branch now contains bounded asynchronous analysis, a capability-scoped C/OpenCL byte-count kernel with CPU fallback, and redacted vulnerable-line findings across the report formats. Remaining release work is: (1) remove silent inventory pruning and introduce a truly streaming/persistent inventory; (2) complete archive metadata/content inspection under explicit decompression, nesting, ratio, time and byte budgets; (3) deepen cross-language security/configuration/API/database/test/build semantics and project-local data-flow analysis; (4) extend redaction tests across plugin/report paths and review all source-evidence categories; (5) complete lazy/chunked offline HTML rendering for very large result sets; (6) validate GPU-present, GPU-absent, OpenCL failure and CPU/GPU parity on actual supported hardware; (7) benchmark 2GB/10GB/50GB/100GB+ corpora and tune worker/GPU thresholds using wall time, throughput and peak RSS; (8) run the full cross-platform build, security, coverage and packaging gates on the final PR head.
 
 PDT's language goal is 40+ language families, with capability states reported per analyzer. Python remains orchestration only. Native C and x86-64 Assembly are implemented; Rust must become an integrated, tested execution path for traversal/indexing. C++ is used only where an actual native dependency or performance boundary justifies it. JavaScript/TypeScript own the offline report interaction layer. No language is considered implemented because it appears in documentation or a catalog.
 
