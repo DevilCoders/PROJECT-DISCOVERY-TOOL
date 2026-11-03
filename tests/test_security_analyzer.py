@@ -137,6 +137,7 @@ def test_source_excerpt_redacts_secrets_identity_and_credential_urls():
         'Authorization: Bearer bearer-secret-value'
     )
     excerpt = redact_source_excerpt(sensitive)
+    assert "Authorization: [REDACTED]" in excerpt
     for value in (
         "Alice", "alice@example.com", "super-secret-value",
         "ghp_" + "A" * 36, "db-password", "Bearer", "bearer-secret-value",
