@@ -268,7 +268,7 @@ The baseline is not production-ready:
 - [ ] Add archive summary/member risk records, network endpoint records, API endpoint records, OS/platform indicators, credential/PII classifications and analyzer coverage.
 - [ ] Add per-file analyzer status: not applicable, completed, partial, unsupported, budget-stopped, excluded, error.
 - [ ] Add evidence spans/source locations, redaction state, confidence and severity.
-- [x] Stream JSON and HTML serialization record-by-record without building duplicate result dictionaries or one giant HTML string.
+- [x] Stream JSON, HTML payloads and Markdown output without building duplicate result dictionaries or a report-sized Markdown string; keep the Markdown largest-directory summary bounded to its top 100 entries.
 - [ ] Add NDJSON/chunked external report data backed by a persistent inventory store.
 
 ### HTML report
