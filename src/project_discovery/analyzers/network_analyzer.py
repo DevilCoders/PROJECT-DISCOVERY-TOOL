@@ -57,19 +57,6 @@ _COMMON_PORTS = {
 }
 
 
-def _bounded_lines(path: Path, max_chunk_chars: int = 256 * 1024):
-    """Yield bounded line chunks while preserving line numbers for huge minified files."""
-    line_number = 1
-    with path.open("r", encoding="utf-8", errors="replace") as stream:
-        while True:
-            chunk = stream.readline(max_chunk_chars)
-            if not chunk:
-                break
-            yield line_number, chunk
-            if chunk.endswith(("\n", "\r")):
-                line_number += 1
-
-
 def _safe_uri(value: str) -> str | None:
     value = value.rstrip(".,;:)]}")
     try:
