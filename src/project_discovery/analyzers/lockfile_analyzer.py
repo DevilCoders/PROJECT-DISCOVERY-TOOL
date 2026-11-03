@@ -19,7 +19,7 @@ _LOCK_NAMES = {
 _YARN_HEADER = re.compile(r"""(?m)^"?([^"\n]+?)@[^:\n]+:\s*$""")
 _YARN_VERSION = re.compile(r'(?m)^\s+version\s+"?([^"\s]+)"?')
 _GEM_SPEC = re.compile(r"(?m)^\s{4}([A-Za-z0-9_.-]+)\s+\(([^)]+)\)")
-_GO_SUM = re.compile(r"(?m)^([A-Za-z0-9_./-]+)\s+(v[^\s]+)(?:/go.mod)?\s+")
+_GO_SUM = re.compile(r"(?m)^([A-Za-z0-9_./-]+)\s+(v[^\s]+?)(?:/go.mod)?\s+")
 _PNPM_PACKAGE = re.compile(r"""(?m)^\s{2,}['"]?(@[^@\s]+/[^@\s]+|[^@\s/]+)@([^:\s'"]+)['"]?:\s*$""")
 _MIX_PACKAGE = re.compile(r'(?m)^\s*"([^"]+)":\s*\{:[^,]+,\s*:[^,]+,\s*"([^"]+)"')
 
@@ -99,7 +99,7 @@ class LockfileAnalyzer(Analyzer):
                             cursor += 1
                         if version:
                             selector = header.group(1).split(",", 1)[0].strip().strip('"')
-                            package = selector.rsplit("@", 1)[0] if "@" in selector else selector
+                            package = selector
                             packages.append((package, version))
                     index += 1
             elif name == "gemfile.lock":
