@@ -20,3 +20,11 @@ def test_markdown_analyzer_counts_headings(tmp_path: Path):
     finding = MarkdownAnalyzer().analyze(source,rec)[0]
     assert "2 headings" in finding.detail
     assert "1 links" in finding.detail
+
+def test_python_analyzer_honors_pep263_source_encoding_cookie(tmp_path: Path):
+    source = tmp_path / "latin_source.py"
+    source.write_bytes(b"# -*- coding: latin-1 -*-\\nname = 'caf\\xe9'\\n")
+    record = FileRecord("latin_source.py", source.stat().st_size, ".py", "Python")
+    findings = PythonAnalyzer().analyze(source, record)
+    assert any(item.title == "Python module: latin_source.py" for item in findings)
+    assert not any("parse error" in item.title.lower() for item in findings)
