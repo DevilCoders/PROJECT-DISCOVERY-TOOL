@@ -49,3 +49,27 @@ def test_go_sum_extracts_module_versions(tmp_path: Path):
 def test_malformed_lockfile_is_unknown(tmp_path: Path):
     findings = _scan(tmp_path, "package-lock.json", "{")
     assert findings[0].confidence == "UNKNOWN"
+
+
+def test_scoped_yarn_dependency_name_is_preserved(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "yarn.lock",
+        '"@babel/core@^7.0.0":\n  version "7.26.0"\n',
+    )
+    assert "@babel/core==7.26.0" in findings[0].evidence
+
+
+def test_pnpm_lock_extracts_package_entries(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "pnpm-lock.yaml",
+        "lockfileVersion: '9.0'\npackages:\n  react@18.2.0:\n    resolution: {}\n",
+    )
+    assert "react==18.2.0" in findings[0].evidence
+
+
+def test_mix_lock_extracts_hex_package_version(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "mix.lock",
+        '"decimal": {:hex, :decimal, "2.1.1", "checksum", [:mix], [], "hexpm", "checksum"},\n',
+    )
+    assert "decimal==2.1.1" in findings[0].evidence
