@@ -468,7 +468,6 @@ def _markdown_report(result: ScanResult) -> str:
 
 def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[Path]:
     output.mkdir(parents=True, exist_ok=True)
-    data = result.to_dict()
     written: list[Path] = []
     if "json" in formats:
         path = output / "discovery-report.json"
