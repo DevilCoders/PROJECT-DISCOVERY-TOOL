@@ -90,7 +90,7 @@ The current branch contains first-pass implementations of:
 
 These are initial implementations with varying depth. In particular, the filesystem inventory is currently retained in memory, dependency/cache/build directories are traversed by default unless explicitly excluded, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
 
-See [Analyzer Coverage](docs/ANALYZER_COVERAGE.md), [Architecture](docs/ARCHITECTURE.md), and [Roadmap](docs/ROADMAP.md).
+See [Analyzer Coverage](docs/ANALYZER_COVERAGE.md), [Architecture](docs/ARCHITECTURE.md), [Analyzer Resource Budgets](docs/ANALYZER_RESOURCE_BUDGETS.md), and [Roadmap](docs/ROADMAP.md).
 
 ## Required discovery surface
 
