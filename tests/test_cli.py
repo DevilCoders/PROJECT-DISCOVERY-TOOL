@@ -81,7 +81,7 @@ def test_large_file_content_skip_is_opt_in(tmp_path: Path):
 
     project = tmp_path / "project"
     project.mkdir()
-    (project / "large.bin").write_bytes(b"x" * 128)
+    (project / "large.bin").write_bytes(b"x" * (1024 * 1024 + 1))
     default_output = tmp_path / "default-report"
     assert run_scan(project, default_output, {"json"}, 1) == 0
     default_payload = json.loads(
