@@ -42,6 +42,17 @@ _FRAMEWORKS = {
     "github.com/golang-jwt": "Go JWT",
     "casbin": "Casbin",
 }
+def _add_location(
+    locations: dict[str, set[int]],
+    key: str,
+    line_number: int,
+) -> None:
+    """Retain at most the configured number of source lines per evidence category."""
+    bucket = locations.setdefault(key, set())
+    if len(bucket) < _MAX_IDENTITY_EVIDENCE_LINES:
+        bucket.add(line_number)
+
+
 _PATTERNS = (
     (
         "authentication",
