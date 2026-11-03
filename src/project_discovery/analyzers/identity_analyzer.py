@@ -10,6 +10,7 @@ from ..models import FileRecord, Finding
 from ..source_utils import read_python_source
 
 
+_MAX_IDENTITY_SOURCE_BYTES = 16 * 1024 * 1024
 _SOURCE_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
     ".java", ".kt", ".kts", ".cs", ".fs", ".php", ".rb", ".go", ".rs",
@@ -145,6 +146,14 @@ class IdentityIntelligenceAnalyzer(Analyzer):
         return record.error is None and record.extension in _SOURCE_EXTENSIONS
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > _MAX_IDENTITY_SOURCE_BYTES:
+            return [Finding(
+                "identity", f"Identity analysis resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the identity analyzer's "
+                f"{_MAX_IDENTITY_SOURCE_BYTES:,}-byte in-memory parsing budget.",
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
         try:
             source = (
                 read_python_source(path)
