@@ -1,4 +1,4 @@
-"""Portable Python interface to PDT's optional C/Assembly backend."""
+"""Portable Python interface to PDT's optional C, Assembly, C++ and Rust backends."""
 from __future__ import annotations
 
 from typing import Any
