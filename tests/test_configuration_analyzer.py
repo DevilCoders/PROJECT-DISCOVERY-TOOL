@@ -128,14 +128,20 @@ def test_configuration_security_findings_include_redacted_code_and_impact(tmp_pa
 
 def test_tls_verification_risk_requires_insecure_setting(tmp_path: Path):
     secure = _scan(
-        tmp_path, "secure.yaml",
-        "verify: true\\nrejectUnauthorized: true\\ninsecure_skip_verify: false\\n",
+        tmp_path, "secure.yaml", "\n".join([
+            "verify: true",
+            "rejectUnauthorized: true",
+            "insecure_skip_verify: false",
+        ]),
     )
     assert not any("tls_verification_disabled" in item.title for item in secure)
 
     insecure = _scan(
-        tmp_path, "insecure.yaml",
-        "verify: false\\nrejectUnauthorized: false\\ninsecure_skip_verify: true\\n",
+        tmp_path, "insecure.yaml", "\n".join([
+            "verify: false",
+            "rejectUnauthorized: false",
+            "insecure_skip_verify: true",
+        ]),
     )
     tls_risks = [item for item in insecure if "tls_verification_disabled" in item.title]
     assert len(tls_risks) == 3
