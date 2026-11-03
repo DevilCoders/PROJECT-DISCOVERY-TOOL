@@ -50,3 +50,15 @@ def test_api_type_analyzer_caps_retained_evidence_lines(tmp_path: Path, monkeypa
     assert findings
     assert len(findings[0].evidence) <= 2
     assert "10 line(s)" in findings[0].detail
+
+def test_api_type_analyzer_reports_oversized_file_metadata_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.api_type_analyzer as module
+
+    path = tmp_path / "large.ts"
+    path.write_text("app.get('/users', handler)\n", encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_API_TYPE_FILE_BYTES", 8)
+    record = FileRecord(path.name, 100, ".ts", "TypeScript", file_type="text")
+    findings = APITypeAnalyzer().analyze(path, record)
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "resource limit" in findings[0].title.lower()
