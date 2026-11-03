@@ -30,7 +30,7 @@ from .cache import ScanCache
 from .comparison import compare_many_reports, load_report, write_comparison
 from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
-from .models import ScanResult
+from .models import Finding, ScanResult
 from .python_graph import analyze_python_dependencies
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
