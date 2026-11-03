@@ -125,3 +125,31 @@ def test_configuration_security_findings_include_redacted_code_and_impact(tmp_pa
     assert "privileges" in risky.impact or "host" in risky.impact
     assert risky.recommendation
     assert "super-secret-value-should-not-leak" not in repr([x.to_dict() for x in findings])
+
+def test_tls_verification_risk_requires_insecure_setting(tmp_path: Path):
+    secure = _scan(
+        tmp_path, "secure.yaml",
+        "verify: true\\nrejectUnauthorized: true\\ninsecure_skip_verify: false\\n",
+    )
+    assert not any("tls_verification_disabled" in item.title for item in secure)
+
+    insecure = _scan(
+        tmp_path, "insecure.yaml",
+        "verify: false\\nrejectUnauthorized: false\\ninsecure_skip_verify: true\\n",
+    )
+    tls_risks = [item for item in insecure if "tls_verification_disabled" in item.title]
+    assert len(tls_risks) == 3
+    assert all(item.impact and item.recommendation for item in tls_risks)
+
+
+def test_oversized_configuration_is_unknown_without_content_read(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import configuration_analyzer
+
+    path = tmp_path / "large.json"
+    path.write_text('{"debug":true}', encoding="utf-8")
+    monkeypatch.setattr(configuration_analyzer, "_MAX_CONFIG_FILE_BYTES", 4)
+    record = FileRecord(path.name, 100, ".json", "Configuration")
+    findings = ConfigurationAnalyzer().analyze(path, record)
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "resource limit" in findings[0].title.lower()
