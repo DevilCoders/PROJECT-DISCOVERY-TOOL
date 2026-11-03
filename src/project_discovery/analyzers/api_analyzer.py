@@ -306,9 +306,9 @@ class APIContractAnalyzer(Analyzer):
         )]
 
     def _raml(self, record: FileRecord, content: str) -> list[Finding]:
-        routes = re.findall(r"(?m)^(/[^\\s:]+)\\s*:\\s*$", content)
+        routes = re.findall(r"(?m)^(/[^\s:]+)\s*:\s*$", content)
         methods = re.findall(
-            r"(?im)^\\s{2,}(get|post|put|patch|delete|options|head)\\s*:\\s*$",
+            r"(?im)^\s{2,}(get|post|put|patch|delete|options|head)\s*:\s*$",
             content,
         )
         evidence = (
