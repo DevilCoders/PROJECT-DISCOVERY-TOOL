@@ -516,9 +516,12 @@ def discover_inventory(
             parent = parent.parent
 
     return (
-        sorted(files, key=lambda item: item.path.casefold()),
-        sorted(directories_by_path.values(), key=lambda item: (item.depth, item.path.casefold())),
-        sorted(symlinks, key=lambda item: item.path.casefold()),
-        sorted(special_entries, key=lambda item: item.path.casefold()),
+        sorted(files, key=lambda item: (item.path.casefold(), item.path)),
+        sorted(
+            directories_by_path.values(),
+            key=lambda item: (item.depth, item.path.casefold(), item.path),
+        ),
+        sorted(symlinks, key=lambda item: (item.path.casefold(), item.path)),
+        sorted(special_entries, key=lambda item: (item.path.casefold(), item.path)),
         dict(stats),
     )
