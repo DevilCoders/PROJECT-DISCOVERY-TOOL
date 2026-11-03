@@ -196,3 +196,14 @@ def test_ruby_gemspec_dependencies_are_extracted(tmp_path: Path):
     )
     assert any("rack" in item.title for item in findings)
     assert any("rspec" in item.title for item in findings)
+
+def test_dependency_manifest_reports_oversized_and_growing_source_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.dependency_manifest_analyzer as module
+
+    path = tmp_path / "package.json"
+    path.write_text('{"dependencies":{"express":"^4.0.0"}}', encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_DEPENDENCY_MANIFEST_BYTES", 8)
+    record = FileRecord(path.name, 1, ".json", "Configuration")
+    findings = DependencyManifestAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
