@@ -250,6 +250,12 @@ def _discover_with_rust(
     if walker is None:
         return False
     for relative, kind, size, mode, mtime_ns, hidden, target, error, depth in walker:
+        if kind == "directory_error":
+            record = directories_by_path.get(relative)
+            if record is not None:
+                record.error = error or "Directory read failed"
+            stats["walk_errors"] += 1
+            continue
         stats["entry_count"] += 1
         parent = PurePosixPath(relative).parent.as_posix() or "."
         parent_record = directories_by_path.get(parent)
@@ -257,12 +263,6 @@ def _discover_with_rust(
             parent_record.direct_child_count += 1
         if hidden:
             stats["hidden_entry_count"] += 1
-        if kind == "directory_error":
-            record = directories_by_path.get(relative)
-            if record is not None:
-                record.error = error or "Directory read failed"
-            stats["walk_errors"] += 1
-            continue
         if kind == "entry_error":
             stats["entry_errors"] += 1
             files.append(FileRecord(
