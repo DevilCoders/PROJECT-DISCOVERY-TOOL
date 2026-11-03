@@ -82,7 +82,9 @@ class PythonSecurityAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            source = read_python_source(path)\n            tree = ast.parse(source, filename=record.path)
+            source = read_python_source(path)
+            tree = ast.parse(source, filename=record.path)
+            source_lines = source.splitlines()
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             return [Finding(
                 "security",
