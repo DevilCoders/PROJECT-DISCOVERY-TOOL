@@ -20,6 +20,7 @@ from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
 from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
+from .comparison import compare_reports, load_report, write_comparison
 from .language_catalog import language_catalog, recognized_language_count
 from .models import ScanResult
 from .python_graph import analyze_python_dependencies
@@ -185,6 +186,11 @@ def main() -> None:
     scan.add_argument("--output", type=Path, default=None)
     scan.add_argument("--format", default="json,markdown,html")
     scan.add_argument("--max-file-mb", type=int, default=8)
+    compare = sub.add_parser("compare", help="Compare two independent PDT JSON reports")
+    compare.add_argument("left", type=Path)
+    compare.add_argument("right", type=Path)
+    compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
+    compare.add_argument("--format", default="json,markdown")
     args = parser.parse_args()
     formats = {
         item.strip().lower() for item in args.format.split(",") if item.strip()
