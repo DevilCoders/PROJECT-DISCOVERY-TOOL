@@ -18,6 +18,7 @@ from .document_analyzer import DocumentAnalyzer
 from .deployment_analyzer import DeploymentIntelligenceAnalyzer
 from .lockfile_analyzer import LockfileAnalyzer
 from .license_analyzer import LicenseAnalyzer
+from .identity_analyzer import IdentityIntelligenceAnalyzer
 from .prisma_analyzer import PrismaSchemaAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .ros_analyzer import ROSIntelligenceAnalyzer
@@ -44,6 +45,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         DependencyManifestAnalyzer(),
         LockfileAnalyzer(),
         LicenseAnalyzer(),
+        IdentityIntelligenceAnalyzer(),
         ConfigurationAnalyzer(),
         APIContractAnalyzer(),
         APIEndpointAnalyzer(),
