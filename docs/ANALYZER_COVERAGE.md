@@ -46,3 +46,8 @@ Migration discovery likewise accepts migration scripts written in any recognized
 ## Implemented project architecture layout slice
 
 PDT now builds a project-level architecture layout inventory from repository paths. It recognizes common presentation, application, domain, infrastructure, persistence, API, testing, documentation, robotics, game-engine, machine-learning and delivery directory conventions. Results are explicitly INFERRED from naming and do not claim dependency direction, runtime boundaries, deployment topology or architectural compliance.
+
+
+## Expanded dependency ecosystem coverage
+
+Dependency declarations are now extracted from Maven POMs, Gradle, .NET project XML, Swift Package Manager, Dart pubspec, Ruby Gemfiles, Elixir mix.exs, Julia Project.toml, R DESCRIPTION, CMake, Conan, Clojure deps.edn/Leiningen, Scala sbt, Perl cpanfile, Haskell Cabal, OCaml opam, Nimble, ROS package.xml, vcpkg, DUB, Haxelib and Fortran fpm manifests, in addition to the existing Python, Node, Rust, Go and Composer support. These findings confirm manifest declarations only, not installation, build resolution or runtime use.
