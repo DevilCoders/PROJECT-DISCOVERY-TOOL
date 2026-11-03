@@ -92,3 +92,28 @@ def test_coverage_artifact_reports_oversized_and_growing_source_as_unknown(tmp_p
     findings = CoverageArtifactAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "grew beyond" in findings[0].detail
+
+
+def test_coverage_reports_growth_as_unknown_and_redacts_parser_errors(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import coverage_analyzer
+
+    path = tmp_path / "coverage.json"
+    path.write_text('{"total":{"lines":{"total":10,"covered":8}}}', encoding="utf-8")
+    record = FileRecord(path.name, 1, ".json", "JSON")
+    monkeypatch.setattr(
+        coverage_analyzer, "_MAX_COVERAGE_ARTIFACT_BYTES", 8
+    )
+    budget = CoverageArtifactAnalyzer().analyze(path, record)
+    assert len(budget) == 1 and budget[0].confidence == "UNKNOWN"
+    assert "resource limit" in budget[0].title.lower()
+
+    monkeypatch.setattr(
+        coverage_analyzer, "_MAX_COVERAGE_ARTIFACT_BYTES", 1024
+    )
+    monkeypatch.setattr(
+        coverage_analyzer.json, "loads",
+        lambda _: (_ for _ in ()).throw(ValueError('api_key="coverage-parser-secret"')),
+    )
+    error = CoverageArtifactAnalyzer().analyze(path, record)
+    assert error[0].confidence == "UNKNOWN"
+    assert "coverage-parser-secret" not in error[0].detail
