@@ -88,7 +88,7 @@ The current branch contains first-pass implementations of:
 - A Rich CLI with an ASCII banner, progress phases, compact summary panels and TTY-aware screen clearing.
 - Bounded asynchronous file analysis (`--jobs 0` auto or `--jobs N`) plus a C-native OpenCL GPU byte-count path for large buffers, with runtime detection and C/SIMD/Python fallback.
 
-These are initial implementations with varying depth. In particular, the filesystem inventory is currently retained in memory, common dependency/build directories are still implicitly pruned by the scanner, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
+These are initial implementations with varying depth. In particular, the filesystem inventory is currently retained in memory, dependency/cache/build directories are traversed by default unless explicitly excluded, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
 
 See [Analyzer Coverage](docs/ANALYZER_COVERAGE.md), [Architecture](docs/ARCHITECTURE.md), and [Roadmap](docs/ROADMAP.md).
 
