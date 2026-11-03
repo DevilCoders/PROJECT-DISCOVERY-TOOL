@@ -304,3 +304,23 @@ A task is complete only when:
 PDT is **not production-ready** while any mandatory acceptance item remains open, any core behavior silently skips project content, any capability is advertised beyond its evidence, the 2GB–100GB+ resource budget is unverified, report UX fails at large scale, or the final CI head is not green.
 
 PR #1 remains open and unmerged. The repository owner alone decides when the verified production-ready branch is merged into `master`.
+
+## Execution order — production completion (2026-11-04)
+
+The next implementation block follows this dependency order. Documentation is updated before implementation; each phase below must land with focused tests and a truthful capability state.
+
+1. **Inventory semantics and no-silent-pruning:** remove implicit exclusions for dependency/cache/build trees; inventory every entry and retain explicit prune/skip reasons; complete symlink and special-entry semantics, hidden attributes, file signatures and size accounting.
+2. **Polyglot scale engine:** replace unbounded in-memory inventory/results with a Rust walker/indexer, bounded queues, incremental persistence, cancellation and checkpoints. Keep Python as orchestration; retain C/SIMD Assembly only on measured hot paths; add C++ only for justified SDK/library integration.
+3. **Archive inspection:** extend no-extraction readers, inspect member names/types/content/links/permissions/ownership/timestamps, and enforce nested-depth, expansion-ratio, entry-count, compressed/uncompressed byte, sample and wall-time budgets. Unsupported formats remain explicitly UNKNOWN/detection-only.
+4. **Analyzer completeness:** expand security, configuration, API style/route/contracts, database/ORM/migrations, test/build/CI, OS/platform, network and identity/credential analyzers across the 40+ language-family catalog. Separate lexical evidence from parser-backed semantics.
+5. **Report schema and UX:** expose every inventory/analyzer state in JSON; provide grouped domain dashboards and lazy/chunked HTML rendering, stable pagination, global search, keyboard-accessible disclosures and open/close-all without unbounded DOM creation.
+6. **Terminal experience:** retain the ASCII banner and command-center presentation; group progress by phase/domain, keep TTY clearing conditional, and add quiet/no-color/JSON-lines/verbosity modes with stable exit codes.
+7. **Verification and release:** adversarial filesystem/archive fixtures, redaction tests, cross-platform native builds, parser conformance, packaging checks, 2GB/10GB/50GB/100GB+ performance and peak-RSS benchmarks, and green CI on the final PR head.
+
+### Polyglot implementation acceptance
+
+A language is part of the implementation only when source files exist, it is built or provisioned reproducibly, a production code path invokes it, its boundary is documented, and tests exercise success/failure/fallback behavior. The required language-family coverage is 40+; Python is not the sole implementation language. C and x86-64 Assembly are already integrated for narrow low-level primitives. Rust traversal/indexing is a mandatory release gate, not a documentation-only aspiration. C++ and JavaScript/TypeScript must likewise be integrated where assigned responsibilities require them; unused language folders or placeholder wrappers do not count.
+
+### Oversized-file invariant
+
+Without `--skip`, no global file-size threshold may suppress content analysis. With `--skip`, oversized files remain inventoried and are marked with the configured threshold and reason. Independent analyzer-specific safety budgets may stop an individual parser; those outcomes must be visible as UNKNOWN/partial and must not be confused with the global skip option.
