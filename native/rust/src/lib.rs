@@ -93,7 +93,7 @@ impl Walker {
                     } else {
                         relative_path(&self.root, &parent)
                     };
-                    return Ok(Some((rel, "directory_error".to_string(), 0, 0, 0, false,
+                    return Ok(Some((rel, "directory_error".to_string(), 0, None, 0, false,
                                     String::new(), Some(error.to_string()), parent_depth)));
                 }
                 None => {
@@ -108,7 +108,7 @@ impl Walker {
             let metadata = match fs::symlink_metadata(&path) {
                 Ok(value) => value,
                 Err(error) => {
-                    return Ok(Some((rel, "entry_error".to_string(), 0, 0, 0, false,
+                    return Ok(Some((rel, "entry_error".to_string(), 0, None, 0, false,
                                     String::new(), Some(error.to_string()), depth)));
                 }
             };
