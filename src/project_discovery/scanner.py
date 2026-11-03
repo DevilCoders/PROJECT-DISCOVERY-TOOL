@@ -515,13 +515,11 @@ def discover_inventory(
                 break
             parent = parent.parent
 
-    return (
-        sorted(files, key=lambda item: (item.path.casefold(), item.path)),
-        sorted(
-            directories_by_path.values(),
-            key=lambda item: (item.depth, item.path.casefold(), item.path),
-        ),
-        sorted(symlinks, key=lambda item: (item.path.casefold(), item.path)),
-        sorted(special_entries, key=lambda item: (item.path.casefold(), item.path)),
-        dict(stats),
-    )
+    # Sort the existing record lists in place to avoid a second full-size
+    # allocation at the end of large scans.
+    files.sort(key=lambda item: (item.path.casefold(), item.path))
+    directories = list(directories_by_path.values())
+    directories.sort(key=lambda item: (item.depth, item.path.casefold(), item.path))
+    symlinks.sort(key=lambda item: (item.path.casefold(), item.path))
+    special_entries.sort(key=lambda item: (item.path.casefold(), item.path))
+    return files, directories, symlinks, special_entries, dict(stats)
