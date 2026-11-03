@@ -254,7 +254,7 @@ class ConfigurationAnalyzer(Analyzer):
             return [Finding(
                 "configuration",
                 f"Configuration parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
