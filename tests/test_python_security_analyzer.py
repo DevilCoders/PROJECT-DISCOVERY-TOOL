@@ -91,3 +91,16 @@ def test_python_security_finding_includes_redacted_line_impact_and_fix(tmp_path:
     assert "should-not-appear" not in repr(finding.to_dict())
     assert "arbitrary Python code" in finding.impact
     assert finding.recommendation
+
+
+def test_python_security_detects_growth_beyond_parser_budget(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import python_security_analyzer
+
+    path = tmp_path / "growing.py"
+    path.write_text("eval(user_input)\n", encoding="utf-8")
+    monkeypatch.setattr(python_security_analyzer, "MAX_AST_FILE_BYTES", 8)
+    record = FileRecord(path.name, 1, ".py", "Python")
+    findings = PythonSecurityAnalyzer().analyze(path, record)
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "resource limit" in findings[0].title.lower()
