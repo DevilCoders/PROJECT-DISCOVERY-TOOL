@@ -9,6 +9,10 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import SourceBudgetExceeded, read_text_bounded
+
+
+_MAX_BUILD_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
 _BUILD_NAMES = {
@@ -62,8 +66,17 @@ class BuildManifestAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         name = Path(record.path).name.lower()
+        if record.size_bytes > _MAX_BUILD_MANIFEST_BYTES:
+            return [Finding(
+                "build",
+                f"Build manifest resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the build analyzer's "
+                f"{_MAX_BUILD_MANIFEST_BYTES:,}-byte content budget.",
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
         try:
-            content = path.read_text(encoding="utf-8")
+            content = read_text_bounded(path, _MAX_BUILD_MANIFEST_BYTES)
             targets: list[str] = []
             metadata: list[str] = []
             if name in {"makefile", "gnumakefile", "justfile"} or record.extension == ".mk":
