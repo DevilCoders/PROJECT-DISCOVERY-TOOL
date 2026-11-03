@@ -67,8 +67,14 @@ def _render_banner(console: Console) -> None:
         padding=(1, 2),
     ))
     capabilities = native_capabilities()
+    gpu_status = (
+        f"GPU: {capabilities.get('gpu_vendor', '')} {capabilities.get('gpu_name', '')}".strip()
+        if capabilities.get("gpu_available")
+        else "GPU: CPU fallback (no usable OpenCL GPU)"
+    )
     native_status = (
         f"C/ASM: {capabilities.get('backend', 'unknown')}  //  "
+        f"{gpu_status}  //  "
         f"C++ signatures: {'ONLINE' if capabilities.get('cpp_signature_classifier') else 'FALLBACK'}  //  "
         f"Rust walker: {'ONLINE' if capabilities.get('rust_filesystem_walker') else 'FALLBACK'}"
     )
