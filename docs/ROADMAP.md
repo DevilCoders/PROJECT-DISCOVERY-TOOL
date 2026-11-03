@@ -17,6 +17,9 @@
 - [x] Configuration key inventory and initial risky-setting checks
 - [x] OpenAPI, GraphQL, Protocol Buffers and Thrift contract inventory
 - [x] SQL DDL inventory and destructive migration pattern checks
+- [x] Prisma ORM model, enum, datasource and relation inventory
+- [x] Initial test-suite declaration discovery
+- [x] Initial Make, CMake, package, Python, Cargo, Maven, Docker and CI manifest inventory
 - [x] Interactive standalone HTML report with search and filters
 - [x] Rich terminal progress and summary
 - [x] Metadata-aware cache validation, legacy migration and stale-entry pruning
