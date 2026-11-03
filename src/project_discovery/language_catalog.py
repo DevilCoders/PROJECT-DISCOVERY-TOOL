@@ -83,6 +83,12 @@ _SPECS = (
     LanguageSpec("XML", (".xml", ".xsd", ".xsl", ".xslt"), family="markup"),
     LanguageSpec("XAML", (".xaml",), family="markup"),
     LanguageSpec("Markdown", (".md", ".markdown"), family="documentation"),
+    LanguageSpec("Gettext PO", (".po", ".pot"), family="localization"),
+    LanguageSpec("XLIFF", (".xlf", ".xliff"), family="localization"),
+    LanguageSpec("ARB", (".arb",), family="localization"),
+    LanguageSpec("Apple Strings", (".strings",), family="localization"),
+    LanguageSpec("Fluent", (".ftl",), family="localization"),
+    LanguageSpec("RESX", (".resx",), family="localization"),
     LanguageSpec("reStructuredText", (".rst",), family="documentation"),
     LanguageSpec("AsciiDoc", (".adoc", ".asciidoc"), family="documentation"),
     LanguageSpec("LaTeX", (".tex", ".sty", ".cls"), family="documentation"),
@@ -186,7 +192,7 @@ def recognized_language_count() -> int:
 _SOURCE_FAMILIES = frozenset({"source", "schema", "low_level", "gpu", "shader", "game_source"})
 _TEXT_FAMILIES = frozenset({
     "source", "schema", "markup", "stylesheet", "documentation", "data",
-    "configuration", "build", "low_level", "gpu", "shader", "notebook", "game_source",
+    "configuration", "build", "low_level", "gpu", "shader", "notebook", "game_source", "localization",
 })
 _EXTRA_TEXT_FILENAMES = frozenset({
     ".env", ".npmrc", ".yarnrc", ".editorconfig", ".gitignore", ".gitattributes",

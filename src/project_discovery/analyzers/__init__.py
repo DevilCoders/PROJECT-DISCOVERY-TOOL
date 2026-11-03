@@ -23,6 +23,7 @@ from .document_analyzer import DocumentAnalyzer
 from .deployment_analyzer import DeploymentIntelligenceAnalyzer
 from .lockfile_analyzer import LockfileAnalyzer
 from .license_analyzer import LicenseAnalyzer
+from .localization_analyzer import LocalizationAnalyzer
 from .identity_analyzer import IdentityIntelligenceAnalyzer
 from .game_engine_analyzer import GameEngineIntelligenceAnalyzer
 from .prisma_analyzer import PrismaSchemaAnalyzer
@@ -51,6 +52,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         DependencyManifestAnalyzer(),
         LockfileAnalyzer(),
         LicenseAnalyzer(),
+        LocalizationAnalyzer(),
         IdentityIntelligenceAnalyzer(),
         GameEngineIntelligenceAnalyzer(),
         ConfigurationAnalyzer(),
