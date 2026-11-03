@@ -9,6 +9,7 @@ PDT is not a Python-only scanner. Python is the control plane; native engines an
 | Control plane | Python | CLI, plugin lifecycle, policy, orchestration, cache, findings and report schema |
 | Native low-level core | C | Bounded byte counting, host capability reporting and stable extension boundary |
 | CPU acceleration | x86-64 Assembly + C dispatch | Linux x86-64 SIMD byte counting with runtime SSE2/POPCNT checks; scalar C fallback |
+| GPU byte reduction | OpenCL C loaded dynamically by native C | Optional large immutable-buffer byte counting; runtime device discovery, 8MiB dispatch threshold and CPU fallback; analyzer semantics remain CPU-side |
 | Filesystem traversal | Rust + PyO3 | Integrated no-follow directory iterator with native OS metadata and bounded depth state; persistent indexing remains planned |
 | File-signature classification | C++17 | Integrated native magic-byte classifier with Python fallback |
 | Report application | JavaScript + HTML/CSS | Separate packaged offline client bundled into the standalone report; filtering, pagination and disclosure controls |
@@ -20,7 +21,7 @@ Each language component must serve a production execution path. Merely listing a
 
 1. Python validates target/output paths and local-only policy.
 2. Python inventory records files, directories, symlinks and special entries; traversal does not follow symlinks and does not silently prune development/dependency trees.
-3. C provides native byte-count/signature primitives and host hardware capability reporting. Linux x86-64 may dispatch byte counting to Assembly only after runtime feature checks.
+3. C provides native byte-counting and host capability reporting. Linux x86-64 may dispatch CPU byte counting to Assembly after runtime feature checks; large immutable byte buffers may use a dynamically loaded OpenCL reduction kernel when a supported GPU is available.
 4. Python coordinates analyzer plugins and per-domain resource policies without importing or executing target modules.
 5. Polyglot analyzers parse source/configuration/contracts and use locally provisioned optional parsers with explicit capability states.
 6. Local vulnerability intelligence optionally matches resolved lockfile coordinates against an operator-imported OSV SQLite snapshot. No scan-time network fallback exists.
@@ -33,6 +34,8 @@ Each language component must serve a production execution path. Merely listing a
 - x86-64 Assembly uses the System V ABI and is compiled only on Linux x86-64. C dispatch checks SSE2 and POPCNT before calling it.
 - Other CPUs/platforms use portable C. If the extension cannot be built, the Python fallback remains available.
 - The C byte counter and Linux x86-64 Assembly backend are used by scanner/security code.
+- The C module dynamically loads the OpenCL runtime without SDK headers at build time. It selects a GPU only when device discovery and kernel compilation succeed. A byte-count/reduction kernel is eligible for immutable bytes buffers at or above 8MiB; mutable buffers and other buffer exporters use the GIL-held CPU path to prevent concurrent mutation while the device reads host memory.
+- Every GPU dispatch uses per-call command queue, kernel and buffer objects; unavailable devices, allocation limits and kernel/dispatch failures fall back to CPU. GPU metrics count actual dispatches and CPU fallbacks. No analyzer logic is moved to the GPU.
 - The C++17 signature classifier is used by scanner file-type detection, with the Python catalog as fallback.
 - The Rust PyO3 iterator is used by scanner traversal when built; it does not follow symlinks and retains only the active directory iterator stack.
 - Persistent inventory/index storage, bounded analyzer queues, resumable checkpoints and 100GB+ benchmarks remain mandatory release work.
