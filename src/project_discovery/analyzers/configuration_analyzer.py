@@ -20,6 +20,7 @@ _CONFIG_FILENAMES = {
     "bootstrap.yaml", "sshd_config", "my.cnf", "php.ini", "redis.conf",
     "postgresql.conf", "haproxy.cfg", "supervisord.conf", "logback.xml",
     "log4j2.xml", "cloud.cfg",
+}
 _CONFIG_EXTENSIONS = {
     ".env", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".properties", ".tf", ".tfvars", ".hcl", ".nix", ".xml", ".plist", ".service", ".desktop", ".rc", ".cnf", ".json5", ".jsonc",
@@ -44,6 +45,7 @@ _RISK_PATTERNS = (
     )),
 )
 _SECRET_KEY = re.compile(r"(?i)(?:password|passwd|secret|token|api[_-]?key|private[_-]?key)")
+_NIX_ASSIGNMENT = re.compile(r"(?m)\b([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
 
 
 def _flatten(data: Any, prefix: str = "") -> list[str]:
@@ -137,6 +139,8 @@ def _parse_config(path: Path, record: FileRecord) -> tuple[list[str], list[tuple
         ]
     elif name == "nginx.conf":
         keys = _directive_keys(content)
+    elif record.extension == ".nix":
+        keys = _NIX_ASSIGNMENT.findall(content)
     elif record.extension in {
         ".conf", ".properties", ".tf", ".tfvars", ".hcl", ".nix",
         ".service", ".desktop", ".rc", ".cnf",
@@ -204,7 +208,8 @@ class ConfigurationAnalyzer(Analyzer):
                 severity=(
                     "HIGH" if risk_name in {
                         "tls_verification_disabled", "privileged_container",
-                        "privilege_escalation_enabled", "host_network_enabled", "wildcard_cors"
+                        "privilege_escalation_enabled", "host_network_enabled", "wildcard_cors",
+                        "root_container_user", "nginx_client_verification_disabled"
                     } else "MEDIUM"
                 ),
             ))

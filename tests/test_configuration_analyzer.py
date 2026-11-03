@@ -102,7 +102,7 @@ def test_yaml_and_nix_config_keys_are_inventoried(tmp_path: Path):
     )
     nix = _scan(
         tmp_path, "default.nix",
-        "{ services.nginx.enable = true; environment.systemPackages = []; }\\n",
+        "{\\n  services.nginx.enable = true;\\n  environment.systemPackages = [];\\n}\\n",
     )
     assert yaml
     assert nix
