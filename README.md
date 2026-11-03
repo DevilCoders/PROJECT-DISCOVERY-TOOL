@@ -11,11 +11,10 @@ It is not a one-language directory counter. A repository may combine dozens of p
 ## Project banner
 
 ```text
- ____  ____ _____
-|  _ \/ ___|_   _|
-| |_) \___ \ | |
-|  __/ ___) || |
-|_|   |____/ |_|
+  ___ ___ _____ 
+ | _ \   \_   _|
+ |  _/ |) || |  
+ |_| |___/ |_|  
 
 PROJECT DISCOVERY TOOL
 POLYGLOT INTELLIGENCE  //  LOCAL-FIRST  //  READ-ONLY
