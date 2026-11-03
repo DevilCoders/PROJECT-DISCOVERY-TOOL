@@ -35,7 +35,8 @@ def test_alembic_revision_and_destructive_operation_are_identified(tmp_path: Pat
     assert "Framework: Alembic" in findings[0].detail
     assert "identifier: abc123" in findings[0].detail
     assert "rollback marker: present" in findings[0].detail
-    assert any("operation: drop_table" in item for item in findings[0].evidence)
+    assert any("operation: drop_column" in item for item in findings[0].evidence)
+    assert any("Potentially destructive" in item.title for item in findings)
 
 
 def test_rails_and_laravel_migration_apis_are_recognized(tmp_path: Path):
@@ -141,7 +142,7 @@ def test_goose_migration_is_discovered(tmp_path: Path):
         "-- +goose Down\nDROP TABLE users;\n",
     )
     assert "Goose" in findings[0].detail
-    assert any("Potentially destructive" in item.title for item in findings)
+    assert any("operation: drop_table" in item for item in findings[0].evidence)
 
 
 def test_drizzle_migration_is_discovered(tmp_path: Path):
