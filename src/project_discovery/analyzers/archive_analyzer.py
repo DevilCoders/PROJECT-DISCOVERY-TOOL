@@ -128,6 +128,7 @@ def _member_content_findings(
     text = sample.decode("utf-8", errors="replace")
     hits: dict[tuple[str, str], set[int]] = {}
     excerpts: dict[tuple[str, str, int], str] = {}
+    excerpt_counts: Counter[tuple[str, str]] = Counter()
     timed_out = False
 
     for label, pattern, category in _CONTENT_RULES:
@@ -145,12 +146,13 @@ def _member_content_findings(
             key = (category, label)
             hits.setdefault(key, set()).add(line_number)
             evidence_key = (category, label, line_number)
-            if evidence_key not in excerpts and len(excerpts) < len(_CONTENT_RULES) * 20:
+            if evidence_key not in excerpts and excerpt_counts[key] < 20:
                 line_start = text.rfind("\n", 0, match.start()) + 1
                 line_end = text.find("\n", match.end())
                 if line_end < 0:
                     line_end = len(text)
                 excerpts[evidence_key] = redact_source_excerpt(text[line_start:line_end])
+                excerpt_counts[key] += 1
 
         if timed_out or (
             deadline is not None and time.monotonic() >= deadline
