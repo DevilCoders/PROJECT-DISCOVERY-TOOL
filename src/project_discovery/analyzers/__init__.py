@@ -9,6 +9,7 @@ from .docs_analyzer import MarkdownAnalyzer
 from .document_analyzer import DocumentAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .security_analyzer import SecretPatternAnalyzer
+from .sql_analyzer import SQLSchemaAnalyzer
 from .tree_sitter_analyzer import TreeSitterAnalyzer
 
 
@@ -20,6 +21,7 @@ def load_analyzers() -> list[Analyzer]:
         DependencyManifestAnalyzer(),
         ConfigurationAnalyzer(),
         APIContractAnalyzer(),
+        SQLSchemaAnalyzer(),
         SecretPatternAnalyzer(),
         TreeSitterAnalyzer(),
     ]
