@@ -193,3 +193,21 @@ def test_secure_code_analyzer_honors_python_encoding_cookie(tmp_path: Path):
     findings = SecureCodePatternAnalyzer().analyze(path, record)
     assert any("Dynamic code execution" in item.title for item in findings)
     assert all(item.confidence != "UNKNOWN" for item in findings)
+
+
+def test_secure_code_analyzer_caps_line_locations_and_code_excerpts(tmp_path: Path):
+    source = "".join("eval(user_input)\n" for _ in range(250))
+    findings = _scan(tmp_path, "many.py", source)
+    finding = next(item for item in findings if "Dynamic code execution" in item.title)
+    assert len(finding.evidence) == 100
+    assert len(finding.code_evidence) == 20
+    assert [item.line_number for item in finding.code_evidence] == list(range(1, 21))
+
+
+def test_secure_code_lexical_analysis_streams_and_caps_line_locations(tmp_path: Path):
+    source = "".join("eval(user_input)\n" for _ in range(250))
+    findings = _scan(tmp_path, "many.js", source)
+    finding = next(item for item in findings if "Dynamic code execution" in item.title)
+    assert len(finding.evidence) == 100
+    assert len(finding.code_evidence) == 20
+    assert [item.line_number for item in finding.code_evidence] == list(range(1, 21))
