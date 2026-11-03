@@ -147,3 +147,21 @@ def test_special_files_are_recorded_when_platform_supports_fifo(tmp_path: Path):
     assert special[0].path == "events.pipe"
     assert special[0].entry_type == "fifo"
     assert stats["special_type:fifo"] == 1
+
+def test_symlink_scope_is_lexical_and_does_not_resolve_chained_links(tmp_path: Path):
+    import pytest
+
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-target"
+    outside.mkdir()
+    chained = tmp_path / "chained"
+    alias = tmp_path / "alias"
+    try:
+        chained.symlink_to(outside, target_is_directory=True)
+        alias.symlink_to("chained", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is not available on this runner")
+
+    _, _, symlinks, _, _ = discover_inventory(tmp_path)
+    alias_record = next(item for item in symlinks if item.path == "alias")
+    assert alias_record.target_scope == "internal"
+    assert alias_record.target_state == "unverified"
