@@ -33,10 +33,10 @@ def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     """Return a bounded source line with credentials and direct identifiers removed."""
     value = source_line.rstrip("\r\n")
     value = _PRIVATE_KEY_BODY.sub("[REDACTED PRIVATE KEY MATERIAL]", value)
+    value = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", value)
     value = _SECRET_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _IDENTITY_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _CREDENTIAL_URL.sub(r"\1[REDACTED]\2", value)
-    value = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", value)
     value = _TOKEN.sub("[REDACTED_TOKEN]", value)
     value = _EMAIL.sub("[REDACTED_EMAIL]", value)
     if len(value) > max_chars:
