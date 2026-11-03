@@ -74,3 +74,15 @@ def test_large_buffer_automatic_backend_matches_python_reference():
     assert len(payload) >= 8 * 1024 * 1024
     for value in (0, 10, 127, 255):
         assert native_backend.count_byte(payload, value) == payload.count(bytes([value]))
+
+
+def test_native_byte_counter_is_safe_under_concurrent_calls():
+    from concurrent.futures import ThreadPoolExecutor
+
+    payload = bytes(range(256)) * 32768
+    values = [0, 10, 127, 255] * 8
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(
+            lambda value: native_backend.count_byte(payload, value), values
+        ))
+    assert results == [payload.count(bytes([value])) for value in values]
