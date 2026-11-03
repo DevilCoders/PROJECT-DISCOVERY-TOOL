@@ -126,7 +126,7 @@ def _python_markers(source: str, relative: str) -> tuple[dict[str, set[int]], di
             if framework is None:
                 framework = _FRAMEWORKS.get(module.split(".", 1)[0])
             if framework:
-                frameworks.setdefault(framework, set()).add(node.lineno)
+                _add_location(frameworks, framework, node.lineno)
         elif isinstance(node, ast.Call):
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else (
