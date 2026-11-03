@@ -237,11 +237,15 @@ class BuildManifestAnalyzer(Analyzer):
                 ]
                 metadata.append("CI workflow manifest")
             elif record.extension in {".gradle", ".sbt"} or name.startswith("build.gradle"):
-                targets = [
-                    f"task: {task}" for task in re.findall(
-                        r"(?m)\b(?:tasks?\.register|task|register)\s*(?:<[^>]+>)?\s*\(?\s*['\"]?([A-Za-z0-9_.-]+)", content
-                    )
-                ]
+                task_patterns = (
+                    r"""(?m)\btasks?\s*\.\s*(?:register|create|named)\s*(?:<[^>]+>\s*)?\(\s*['"]([^'"]+)['"]""",
+                    r"""(?m)\btask\s*\(\s*['"]([^'"]+)['"]""",
+                    r"(?m)^\s*task\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+                )
+                task_names = []
+                for pattern in task_patterns:
+                    task_names.extend(re.findall(pattern, content))
+                targets = [f"task: {task}" for task in dict.fromkeys(task_names)]
             elif name in {
                 "setup.py", "setup.cfg", "tox.ini", "pipfile", "rakefile",
                 "gemfile", "mix.exs", "composer.json", "requirements.txt",

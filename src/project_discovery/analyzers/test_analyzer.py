@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..language_catalog import is_source_path
 from ..language_catalog import source_extensions, source_language_names
 
 
@@ -88,7 +89,7 @@ class TestDiscoveryAnalyzer(Analyzer):
     languages = source_language_names() + ("Bats",)
 
     def supports(self, record: FileRecord) -> bool:
-        if record.error or record.extension not in _SUPPORTED_EXTENSIONS:
+        if record.error or (record.extension not in _SUPPORTED_EXTENSIONS and not is_source_path(record.path)):
             return False
         normalized = record.path.replace("\\", "/")
         parts = {part.lower() for part in Path(normalized).parts[:-1]}
