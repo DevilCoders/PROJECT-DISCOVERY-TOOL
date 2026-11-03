@@ -1,7 +1,10 @@
 from pathlib import Path
 
 from project_discovery.models import FileRecord
-from project_discovery.python_graph import analyze_python_dependencies
+from project_discovery.python_graph import (
+    _strongly_connected_components,
+    analyze_python_dependencies,
+)
 
 
 def _record(root: Path, relative: str) -> FileRecord:
@@ -25,7 +28,7 @@ def test_graph_resolves_absolute_and_relative_imports(tmp_path: Path):
 
     assert graph["summary"]["module_count"] == 3
     assert graph["summary"]["edge_count"] == 2
-    assert {edge["target"] for edge in graph["edges"]} == {"pkg", "pkg.helpers"}
+    assert {edge["target"] for edge in graph["edges"]} == {"pkg.service", "pkg.helpers"}
     assert all(edge["confidence"] == "CONFIRMED" for edge in graph["edges"])
     assert any(item.title.startswith("Internal Python dependency:") for item in findings)
 
@@ -53,3 +56,13 @@ def test_graph_skips_oversized_or_unreadable_records(tmp_path: Path):
     assert graph["modules"] == []
     assert graph["edges"] == []
     assert findings == []
+
+
+def test_scc_traversal_handles_deep_graphs_without_recursion():
+    nodes = [f"module_{index}" for index in range(1500)]
+    adjacency = {node: set() for node in nodes}
+    for index in range(len(nodes) - 1):
+        adjacency[nodes[index]].add(nodes[index + 1])
+    adjacency[nodes[-1]].add(nodes[0])
+
+    assert _strongly_connected_components(nodes, adjacency) == [nodes]
