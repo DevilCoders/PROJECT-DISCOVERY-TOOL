@@ -189,11 +189,13 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
    <section class="section" id="symlinks">
     <div class="section-head"><h2>Symbolic links</h2><span class="kicker">04 / NO-FOLLOW INVENTORY</span></div>
     <div class="table-wrap"><table><thead><tr><th>Link path</th><th>Target</th><th>Lexical scope</th><th>Verification</th><th>Permissions</th><th>Hidden</th></tr></thead><tbody id="symlink-rows"></tbody></table></div>
+    <div class="pagination" id="symlink-pagination"><span id="symlink-page-info">0 links</span><button id="symlink-more" class="primary" type="button">Load next page</button></div>
     <div id="no-symlinks" class="empty hidden">No symbolic links were detected.</div>
    </section>
    <section class="section" id="special">
     <div class="section-head"><h2>Special filesystem entries</h2><span class="kicker">05 / FIFO SOCKET DEVICE</span></div>
     <div class="table-wrap"><table><thead><tr><th>Path</th><th>Type</th><th>Permissions</th><th>Hidden</th><th>Size</th></tr></thead><tbody id="special-rows"></tbody></table></div>
+    <div class="pagination" id="special-pagination"><span id="special-page-info">0 entries</span><button id="special-more" class="primary" type="button">Load next page</button></div>
     <div id="no-special" class="empty hidden">No FIFO, socket, device or other special entries were detected.</div>
    </section>
    <section class="section" id="files">
