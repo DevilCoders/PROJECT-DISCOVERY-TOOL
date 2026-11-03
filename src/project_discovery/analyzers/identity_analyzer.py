@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_python_source
 
 
 _SOURCE_EXTENSIONS = {
@@ -145,7 +146,11 @@ class IdentityIntelligenceAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = (
+                read_python_source(path)
+                if record.extension in {".py", ".pyi"}
+                else path.read_text(encoding="utf-8")
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "identity", f"Identity analysis unavailable: {record.path}",
