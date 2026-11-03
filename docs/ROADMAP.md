@@ -23,16 +23,16 @@ These are initial implementations of varying depth. Production readiness is not 
 
 ## Phase 1 — Filesystem inventory and resource model
 
-- [ ] Replace lossy file-only discovery with a typed entry inventory: regular files, directories, symlinks, and special filesystem entries.
-- [ ] Record symlinks without following them: link path, target text (with report-safe handling), target scope (relative/internal/external/unknown), and link metadata.
-- [ ] Detect hidden files/directories on POSIX and Windows, including dotfiles and Windows hidden attributes where available.
-- [ ] Detect file type using filename/extension plus bounded signature inspection; distinguish text, source, configuration, document, archive, executable, shared library, image, audio, video, model, dataset, firmware and unknown binary.
-- [ ] Add file-size buckets and per-extension/per-language/per-directory size summaries; retain exact size in bytes.
-- [ ] Add directory inventory: depth, child counts, aggregate file counts/bytes, empty directories, large fan-out and largest subtrees.
-- [ ] Detect development dependency/generated/cache trees including `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, `target`, IDE indexes, compiler outputs, fuzz corpora and ecosystem-specific stores.
+- [x] Replace lossy file-only discovery with separate regular-file, directory and symlink records; special entries are currently counted by type but do not yet have full per-entry records.
+- [x] Record symlinks without following them: link path, target text, lexical target scope (internal/external/unknown), hidden flag and mode metadata.
+- [x] Detect hidden files/directories on POSIX and Windows, including dotfiles and Windows hidden attributes where available.
+- [ ] Expand the initial bounded signature/MIME classifier into a complete artifact taxonomy for source, configuration, documents, archives, executables/shared libraries, images/audio/video, model/dataset, firmware and unknown binary formats.
+- [x] Add file-size buckets, exact size in bytes and per-directory aggregate bytes; add richer per-extension/per-language size summaries.
+- [x] Add directory inventory: depth, direct child counts, aggregate file counts/bytes and hidden state; add empty-directory and large-fan-out scoring.
+- [x] Detect initial development dependency/generated/cache tree markers including `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, `target`, IDE indexes, compiler outputs, fuzz corpora and ecosystem-specific stores.
 - [ ] Do not silently prune dependency trees by default. Provide explicit tree exclusion/deep-analysis controls and always report detected skipped/excluded trees.
-- [ ] Make oversized-file skipping opt-in through `pdt scan PATH --skip`; default scanning must not globally skip oversized files. Add configurable thresholds and analyzer-specific resource-limit diagnostics.
-- [ ] Preserve the read-only guarantee, deterministic ordering, per-entry error isolation, and no-follow symlink behavior.
+- [x] Make oversized-file skipping opt-in through `pdt scan PATH --skip`; default scanning does not globally skip oversized files. Initial Python AST analyzers and the Python dependency graph report `UNKNOWN` when their independent 16 MiB parser budget is exceeded. Expand per-analyzer budgets and reporting.
+- [x] Preserve the read-only guarantee, deterministic ordering, per-entry error isolation, and no-follow symlink behavior.
 - [ ] Add filesystem tests for permissions, broken links, external links, loops, hidden paths, special files, Windows attributes, unreadable paths, deep nesting and huge fan-out.
 
 ## Phase 2 — Large-repository engine and native acceleration
@@ -58,12 +58,12 @@ These are initial implementations of varying depth. Production readiness is not 
 
 ## Phase 4 — Network, API and OS intelligence
 
-- [ ] Detect IPv4/IPv6 literals, CIDR ranges, ports, host:port pairs, listen/bind/connect calls, socket types and common network protocol references.
-- [ ] Detect URLs and URIs across source, config, documents and manifests; normalize schemes and redact userinfo, query tokens and credential-like URL components.
-- [ ] Detect hostnames, FQDNs, domains and subdomains; distinguish literal domains from templates/placeholders and avoid presenting public reachability conclusions.
-- [ ] Expand API endpoint discovery across source languages/frameworks: REST methods/routes, GraphQL operations, gRPC/RPC, WebSocket, SOAP, event APIs, generated clients and route middleware.
+- [x] Detect IPv4/IPv6 literals, CIDR ranges, common port declarations, URL ports, host:port pairs and common network protocol references; expand socket API, bind/listen/connect extraction.
+- [x] Detect URLs/URIs in recognized text/source/config files; evidence redacts userinfo, paths, query tokens and fragments.
+- [x] Detect hostname/FQDN/domain candidates and probable subdomains without DNS queries; improve template and public-suffix false-positive handling.
+- [x] Add initial source endpoint patterns and API-style classification for REST, GraphQL, gRPC/protobuf, JSON-RPC, SOAP/WSDL, WebSocket and event-driven APIs. Expand API endpoint discovery across source languages/frameworks: REST methods/routes, GraphQL operations, gRPC/RPC, WebSocket, SOAP, event APIs, generated clients and route middleware.
 - [ ] Build static API inventories and code-to-contract cross references with CONFIRMED/INFERRED/UNKNOWN semantics.
-- [ ] Detect host OS separately from inferred target OS. Use platform manifests, package managers, shells, service definitions, CI matrices, sysroots, cross toolchains and deployment manifests.
+- [x] Add host OS metadata and initial inferred target-OS markers from text/config/build files; expand platform manifests, package managers, shells, service definitions, sysroots and cross-toolchains.
 - [ ] Add tests for IPv4/IPv6 edge cases, IPv4-mapped IPv6, ports, URL userinfo, internationalized domains, subdomains, templated hosts and false-positive-heavy source text.
 
 ## Phase 5 — Security, secrets and personal-data indicators
@@ -71,7 +71,7 @@ These are initial implementations of varying depth. Production readiness is not 
 - [ ] Expand secret detection across source/config/docs/build files and 40+ language syntaxes: passwords, passphrases, API keys, cloud credentials, tokens, JWTs, private keys, certificates, database credentials, signing material and service-account files.
 - [ ] Detect identity/PII field names and values: first name, given name, middle name, last name, surname, username, email, phone, address, account/user IDs and related records.
 - [ ] Treat field-name recognition as metadata evidence; treat value-shaped matches as heuristic PII indicators. Never copy full raw credential/PII values into findings.
-- [ ] Add redaction, keyed local fingerprints where appropriate, false-positive suppression and context-aware confidence.
+- [x] Add initial value redaction for PII and secret field-name findings. Add keyed local fingerprints, false-positive suppression and context-aware confidence.
 - [ ] Expand secure-code analysis for injection, command execution, path traversal, SSRF, unsafe deserialization, authn/authz, cryptography, TLS, insecure randomness, data exposure, cloud/IaC, containers, CI/CD and supply-chain weaknesses.
 - [ ] Never claim exploitability from a lexical match. Add severity, evidence, remediation context and dataflow path only when traceable.
 - [ ] Add regression corpus for secret formats, PII edge cases, encoded values, multiline keys, false positives and report redaction.
@@ -91,11 +91,11 @@ These are initial implementations of varying depth. Production readiness is not 
 
 - [ ] Extend the report schema for entries/directories, symlinks, hidden entries, file types, size buckets, dependency trees, OS indicators, network endpoints, secrets/PII, archives and archive-member risks.
 - [ ] Add dashboard metrics, largest files/directories, file-type/extension/language distributions, directory tree summaries and analysis coverage/skip diagnostics.
-- [ ] Redesign HTML as a polished offline dark command-center UI with responsive navigation and summary dashboards.
-- [ ] Add global search and category/severity/confidence filters; lazy-render or paginate large finding groups.
-- [ ] Add working open-all/close-all controls, per-category expand/collapse, evidence details, copy-safe redacted identifiers and stable anchor navigation.
-- [ ] Ensure huge reports do not create thousands of initially expanded DOM nodes; validate with 100k+ synthetic findings.
-- [ ] Redesign terminal output with an ASCII banner, phase panels, live progress, grouped findings, status taxonomy and compact summary. Clear screen only for interactive TTY sessions; keep redirected output deterministic.
+- [x] Add an initial offline dark command-center HTML design with responsive navigation and summary dashboards; continue visual polish and accessibility validation.
+- [x] Add global finding search and category/severity/confidence filters with 100-item client-side finding pages; improve search indexing for very large data.
+- [x] Add working open-all/close-all controls for rendered findings, per-finding collapse, evidence details and stable section navigation; add per-category expand/collapse.
+- [x] Ensure the report does not eagerly create a DOM node for every finding; validate and optimize with 100k+ synthetic findings.
+- [x] Add an ASCII banner, phase progress and compact summary; clear screen only for interactive TTY sessions. Continue advanced terminal panels, theme controls and grouped status taxonomy.
 - [ ] Add terminal accessibility, color/no-color mode, narrow terminal tests and CI log readability.
 
 ## Phase 8 — Project architecture and intelligence depth

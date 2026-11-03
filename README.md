@@ -61,24 +61,24 @@ Target workload: repositories from a few gigabytes through 100GB+.
 - Progress reporting based on discovery and analysis phases, with errors isolated per entry/analyzer.
 - No unbounded read of a large file into memory merely because global oversized-file skipping is disabled.
 
-**Oversized-file policy transition:** the current branch still has a global size threshold that marks oversized files as skipped automatically. This is a known behavior to remove before release. The target behavior is opt-in: content analysis is skipped only when the user explicitly supplies `--skip` (with a configurable size threshold); otherwise compatible streaming analyzers continue. Parsers that cannot safely process a particular huge file must report an analyzer-specific resource-limit status rather than silently hiding the file or pretending it was fully analyzed.
+**Oversized-file policy:** global size-based skipping is opt-in. `pdt scan PATH --skip --max-file-mb 128` marks files above the chosen threshold as inventoried but not content-analyzed. Without `--skip`, no global size threshold silently removes a file from analysis. Individual analyzers may enforce their own documented resource budgets; they must report `UNKNOWN` and the reason rather than presenting a skipped file as a clean result. The initial Python AST analyzers and Python dependency graph use a 16 MiB parser budget.
 
 ## Current implementation
 
 The following capabilities have initial implementations in the current branch; their documentation and tests describe the current scope, not complete production coverage:
 
-- Deterministic filesystem inventory, read-only output boundary, common generated/vendor directory pruning, and SQLite fingerprint caching.
+- Deterministic file/directory/symlink inventory, hidden-entry and permission metadata, bounded file-signature classification, size buckets, development/cache directory markers, explicit directory exclusions, and SQLite fingerprint caching.
 - Python AST analysis and evidence-backed internal Python import graph with cycle detection.
 - Central language recognition catalog and optional offline-first Tree-sitter grammar adapter.
 - Markdown/document analysis with optional PDF and DOCX integrations.
-- JSON, Markdown, and standalone interactive dark HTML reports.
+- JSON and Markdown inventory reports plus an offline dark HTML command-center report with file/directory/symlink views, distribution panels, search/filter controls, lazy pagination, collapsible findings, and open/close-all controls.
 - Rich terminal progress and summary UI.
 - Analyzer plugin entry-point API and domain coverage catalog.
 - Dependency manifests, selected lockfiles, license inventory, and configuration key inventory.
-- Secret-pattern detection, Python and polyglot secure-code heuristics, and identity/access-control markers.
-- REST/OpenAPI, GraphQL, RPC, event, SOAP/WSDL, API collection, and selected source endpoint discovery.
+- Secret-pattern and secure-code heuristics, PII/identity field-name and redacted email indicators, and authentication/access-control markers.
+- REST/OpenAPI, GraphQL, RPC, event, SOAP/WSDL, API collection, selected source endpoint discovery, and static API-style classification.
 - SQL, NoSQL, Prisma ORM, and cross-framework migration inventory.
-- Test/build/CI/CD, container, deployment, and infrastructure manifest discovery.
+- Test/build/CI/CD, container, deployment, and infrastructure manifest discovery; ZIP/TAR metadata-only archive inspection; IPv4/IPv6/CIDR/port/URL/URI/domain/protocol indicators; and host/target OS metadata.
 - Initial ML/AI, ROS 1/ROS 2, mobile, game-engine, frontend, accessibility, and multi-project intelligence.
 
 See [Analyzer Coverage](docs/ANALYZER_COVERAGE.md), [Architecture](docs/ARCHITECTURE.md), and [Roadmap](docs/ROADMAP.md) for capability status and work remaining.
@@ -130,6 +130,8 @@ Install optional extras only when required. PDT must not download grammars or in
 pdt --version
 pdt scan /path/to/project
 pdt scan /path/to/project --output /path/to/reports --format json,markdown,html
+pdt scan /path/to/project --skip --max-file-mb 128
+pdt scan /path/to/project --exclude-dir node_modules --exclude-dir .cache
 pdt compare project-a-report/discovery-report.json project-b-report/discovery-report.json
 pdt catalog-add /reports/project-a/discovery-report.json
 pdt catalog-list
@@ -138,28 +140,17 @@ pdt catalog-compare --output /reports/project-comparison
 
 The output directory must be outside the analyzed project. PDT does not modify target files.
 
-### Resource-control CLI target
+### Resource controls
 
-The explicit oversized-file policy is being implemented. The intended interface is:
+`--skip` is an explicit opt-in. It skips content analysis only for regular files above `--max-file-mb`; inventory metadata remains in the report. Without `--skip`, there is no global size-based skip. Large files may still receive analyzer-specific `UNKNOWN` resource-limit findings where a parser cannot safely process them.
 
-```bash
-# Default: do not globally skip large files; use bounded/streaming analyzers.
-pdt scan /path/to/project
-
-# Opt in to skipping content analysis above the configured threshold.
-pdt scan /path/to/project --skip --max-file-mb 128
-
-# Opt in to ignoring selected directory trees without hiding their directory markers.
-pdt scan /path/to/project --exclude-dir node_modules --exclude-dir .cache
-```
-
-Flags will be documented as available only after they are implemented and tested. Exclusion of a tree must be visible in the inventory/report and never silently look like a directory did not exist.
+`--exclude-dir NAME` explicitly prunes directories by name while retaining a directory marker and pruned status in inventory. Development/cache directories are detected and traversed by default; they are not silently excluded.
 
 ## Reporting and terminal UX
 
 The terminal interface is intended to behave like a focused analysis console, not an ever-growing raw file listing: clear command boundaries, a branded ASCII header, phase-oriented progress, grouped status messages, compact metric panels, actionable warnings, and a final summary. Interactive terminals may clear the previous screen; redirected/non-interactive output must remain stable and script-friendly.
 
-The HTML report is intended for large result sets. It must provide:
+The current HTML report is paginated and filterable to avoid eagerly creating one DOM card for every finding. It includes inventory dashboards, tables, collapsible findings, filters and open/close controls. Further large-report optimization remains on the production roadmap. The target UX includes:
 - high-level project overview and scan health;
 - inventory and size distribution;
 - directory and development-artifact maps;

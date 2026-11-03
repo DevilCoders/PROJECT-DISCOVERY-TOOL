@@ -51,3 +51,16 @@ PDT now builds a project-level architecture layout inventory from repository pat
 ## Expanded dependency ecosystem coverage
 
 Dependency declarations are now extracted from Maven POMs, Gradle, .NET project XML, Swift Package Manager, Dart pubspec, Ruby Gemfiles, Elixir mix.exs, Julia Project.toml, R DESCRIPTION, CMake, Conan, Clojure deps.edn/Leiningen, Scala sbt, Perl cpanfile, Haskell Cabal, OCaml opam, Nimble, ROS package.xml, vcpkg, DUB, Haxelib and Fortran fpm manifests, in addition to the existing Python, Node, Rust, Go and Composer support. These findings confirm manifest declarations only, not installation, build resolution or runtime use.
+
+
+## Initial filesystem, archive, network and platform intelligence
+
+The filesystem inventory now uses separate records for regular files, directories and symbolic links. It inventories hidden state, permissions, selected file signatures, size buckets, directory aggregates and common development/cache directory markers. Symbolic links are classified lexically and never traversed. Special filesystem entries are counted but still need per-entry records.
+
+Oversized-file skipping is opt-in through the scan CLI flag. Initial Python AST analyzers and the Python import graph use an independent 16 MiB parser budget and report UNKNOWN when that budget is exceeded; this does not globally skip the file for streaming analyzers.
+
+Initial archive intelligence reads ZIP/TAR metadata without extracting members. It records archive member counts and selected path traversal, symlink, hardlink, permission, duplicate-name, encrypted-entry and compression-ratio indicators. 7z/RAR/CAB/ISO and other formats may be identified by extension/signature but are not yet semantically indexed.
+
+Network intelligence statically inventories IPv4/IPv6/CIDR, common port declarations, URL/URI, host/domain/subdomain candidates and protocol markers. URL evidence removes userinfo, path, query and fragment. It does not probe or resolve hosts. API type classification adds initial REST, GraphQL, gRPC/protobuf, JSON-RPC, SOAP/WSDL, WebSocket and event markers.
+
+Privacy intelligence inventories PII field-name categories and email-shaped values without retaining the matched values. Existing secret-pattern analysis remains responsible for high-signal credential formats. These are partial static indicators, not a full DLP engine.
