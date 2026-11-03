@@ -51,3 +51,37 @@ def test_unrelated_source_has_no_nosql_findings(tmp_path: Path):
 def test_non_source_files_are_not_supported():
     record = FileRecord("dataset.parquet", 10, ".parquet", "Data")
     assert NoSQLIntelligenceAnalyzer().supports(record) is False
+
+
+def test_python_vector_database_imports_resolve_client_aliases_and_operations(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "vector_store.py",
+        "from qdrant_client import QdrantClient\n"
+        "client = QdrantClient(url='http://localhost')\n"
+        "client.search(collection_name='docs', query_vector=vector)\n"
+        "from chromadb import PersistentClient\n"
+        "chroma = PersistentClient()\n"
+        "collection = chroma.get_or_create_collection('docs')\n"
+        "collection.query(query_texts=['hello'])\n"
+        "from pinecone import Pinecone\n"
+        "pc = Pinecone()\n"
+        "index = pc.Index('docs')\n"
+        "index.upsert(vectors=items)\n",
+    )
+    by_name = {item.title.split(" datastore", 1)[0]: item for item in findings}
+    assert "Qdrant" in by_name
+    assert "Chroma" in by_name
+    assert "Pinecone" in by_name
+    assert any("operation call site(s)" in item.detail for item in findings)
+
+
+def test_javascript_vector_database_clients_are_detected(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "vector.ts",
+        "import { QdrantClient } from '@qdrant/js-client-rest';\n"
+        "client.search({ collection_name: 'docs' });\n"
+        "import { ChromaClient } from 'chromadb';\n"
+        "collection.query({ queryTexts: ['hello'] });\n",
+    )
+    assert any("Qdrant datastore references" in item.title for item in findings)
+    assert any("Chroma datastore references" in item.title for item in findings)

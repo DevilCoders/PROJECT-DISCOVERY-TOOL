@@ -30,6 +30,16 @@ _TECHNOLOGIES = {
     "influxdb_client": ("InfluxDB", "influxdb_client"),
     "clickhouse_connect": ("ClickHouse", "clickhouse_connect"),
     "clickhouse_driver": ("ClickHouse", "clickhouse_driver"),
+    "chromadb": ("Chroma", "chromadb"),
+    "qdrant_client": ("Qdrant", "qdrant_client"),
+    "pinecone": ("Pinecone", "pinecone"),
+    "weaviate": ("Weaviate", "weaviate"),
+    "pymilvus": ("Milvus", "pymilvus"),
+    "faiss": ("FAISS", "faiss"),
+    "lancedb": ("LanceDB", "lancedb"),
+    "vespa": ("Vespa", "vespa"),
+    "arango": ("ArangoDB", "arango"),
+    "surrealdb": ("SurrealDB", "surrealdb"),
 }
 _IMPORT_PATTERNS = {
     "MongoDB": re.compile(
@@ -50,6 +60,16 @@ _IMPORT_PATTERNS = {
     "CouchDB": re.compile(r"(?:import\s+couchdb|require\s*\(\s*['\"]nano['\"])", re.I),
     "InfluxDB": re.compile(r"(?:influxdb_client|influxdb-client)", re.I),
     "ClickHouse": re.compile(r"(?:clickhouse_connect|clickhouse_driver|clickhouse-jdbc)", re.I),
+    "Chroma": re.compile(r"(?:from\\s+chromadb|import\\s+chromadb|require\\s*\\(\\s*['"]chromadb['"])", re.I),
+    "Qdrant": re.compile(r"(?:from\\s+qdrant_client|import\\s+qdrant_client|@qdrant/js-client-rest|github.com/qdrant/go-client)", re.I),
+    "Pinecone": re.compile(r"(?:from\\s+pinecone|import\\s+pinecone|@pinecone-database/pinecone)", re.I),
+    "Weaviate": re.compile(r"(?:from\\s+weaviate|import\\s+weaviate|weaviate-client|io.weaviate)", re.I),
+    "Milvus": re.compile(r"(?:from\\s+pymilvus|import\\s+pymilvus|io.milvus|milvus-sdk-go)", re.I),
+    "FAISS": re.compile(r"(?:from\\s+faiss|import\\s+faiss|faiss/)", re.I),
+    "LanceDB": re.compile(r"(?:from\\s+lancedb|import\\s+lancedb|@lancedb/lancedb)", re.I),
+    "Vespa": re.compile(r"(?:from\\s+vespa|import\\s+vespa|com.yahoo.vespa)", re.I),
+    "ArangoDB": re.compile(r"(?:from\\s+arango|import\\s+arango|arangojs|github.com/arangodb)", re.I),
+    "SurrealDB": re.compile(r"(?:from\\s+surrealdb|import\\s+surrealdb|surrealdb)", re.I),
 }
 _OPERATIONS = {
     "MongoDB": {"find", "find_one", "insert_one", "insert_many", "update_one", "update_many", "delete_one", "aggregate", "bulk_write"},
@@ -63,6 +83,16 @@ _OPERATIONS = {
     "CouchDB": {"save", "get", "delete", "view"},
     "InfluxDB": {"write", "query"},
     "ClickHouse": {"query", "insert", "command"},
+    "Chroma": {"get_or_create_collection", "create_collection", "add", "query", "upsert", "delete"},
+    "Qdrant": {"create_collection", "upsert", "search", "query_points", "retrieve", "delete"},
+    "Pinecone": {"Index", "upsert", "query", "delete", "describe_index_stats"},
+    "Weaviate": {"collections", "query", "insert", "search", "delete"},
+    "Milvus": {"create_collection", "insert", "search", "query", "delete"},
+    "FAISS": {"IndexFlatL2", "IndexFlatIP", "add", "search", "write_index", "read_index"},
+    "LanceDB": {"connect", "create_table", "open_table", "search", "add", "delete"},
+    "Vespa": {"query", "feed", "delete"},
+    "ArangoDB": {"collection", "db", "aql", "insert", "update", "delete"},
+    "SurrealDB": {"query", "select", "create", "update", "delete", "upsert"},
 }
 
 
@@ -74,6 +104,11 @@ def _python_imports(source: str, relative: str) -> tuple[dict[str, set[int]], di
     imports: dict[str, set[int]] = {}
     operations: dict[str, set[int]] = {}
     aliases: dict[str, str] = {}
+    def root_name(node: ast.AST) -> str:
+        while isinstance(node, ast.Attribute):
+            node = node.value
+        return node.id if isinstance(node, ast.Name) else ""
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -89,14 +124,22 @@ def _python_imports(source: str, relative: str) -> tuple[dict[str, set[int]], di
                 imports.setdefault(tech[0], set()).add(node.lineno)
                 for alias in node.names:
                     aliases[alias.asname or alias.name] = tech[0]
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            if isinstance(value, ast.Call):
+                technology = aliases.get(root_name(value.func))
+                if technology:
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            aliases[target.id] = technology
         elif isinstance(node, ast.Call):
             func = node.func
             method = func.attr if isinstance(func, ast.Attribute) else (
                 func.id if isinstance(func, ast.Name) else ""
             )
             if isinstance(func, ast.Attribute):
-                base = func.value
-                root = base.id if isinstance(base, ast.Name) else ""
+                root = root_name(func.value)
                 tech = aliases.get(root)
                 if tech and method in _OPERATIONS[tech]:
                     operations.setdefault(tech, set()).add(node.lineno)

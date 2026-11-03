@@ -29,3 +29,8 @@ The built-in accessibility analyzer checks HTML and common component-template fi
 ## Implemented localization catalog slice
 
 The localization analyzer inventories Gettext PO/POT, ARB, nested JSON, XLIFF, Android string XML, Apple strings, Fluent, RESX and Java properties catalogs. It counts keys and explicitly empty translations without copying translated values into findings. It does not yet perform cross-locale key parity, plural-rule validation, placeholder parity or runtime fallback resolution.
+
+
+## Expanded non-relational and vector datastore inventory
+
+The NoSQL analyzer now recognizes additional vector/search and multi-model datastore client ecosystems, including Chroma, Qdrant, Pinecone, Weaviate, Milvus, FAISS, LanceDB, Vespa, ArangoDB and SurrealDB. Python AST analysis also propagates imported client classes through simple constructor assignments so selected operations on local client variables can be associated with the imported datastore. These are static client/API references, not live connection or schema claims.
