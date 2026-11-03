@@ -27,3 +27,22 @@ def test_unrelated_text_has_no_data_exposure_findings(tmp_path: Path):
     path.write_text("print('hello world')\n", encoding="utf-8")
     record = FileRecord("plain.txt", path.stat().st_size, ".txt", "Text", file_type="text")
     assert DataExposureAnalyzer().analyze(path, record) == []
+
+
+def test_data_exposure_findings_include_redacted_source_and_impact(tmp_path: Path):
+    path = tmp_path / "customer.json"
+    path.write_text(
+        '{"first_name":"Alice","email":"alice@example.com",'
+        '"password":"secret-value-should-not-leak"}',
+        encoding="utf-8",
+    )
+    record = FileRecord(
+        "customer.json", path.stat().st_size, ".json", "JSON", file_type="text"
+    )
+    findings = DataExposureAnalyzer().analyze(path, record)
+    assert findings
+    assert all(item.code_evidence for item in findings)
+    assert all(item.impact and item.recommendation for item in findings)
+    rendered = repr([item.to_dict() for item in findings])
+    for secret in ("Alice", "alice@example.com", "secret-value-should-not-leak"):
+        assert secret not in rendered
