@@ -503,7 +503,6 @@ static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
     int needle;
     size_t count;
     unsigned long long gpu_count = 0;
-    int used_gpu = 0;
 
     (void)self;
     if (!PyArg_ParseTuple(args, "Oi:count_byte", &object, &needle)) {
@@ -517,13 +516,15 @@ static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if ((size_t)view.len >= PDT_GPU_MIN_BYTES) {
+    /* The OpenCL path releases the GIL while the device reads the host buffer.
+       Use it only for immutable bytes; mutable exporters stay on the GIL-held CPU
+       path so another Python thread cannot mutate their contents concurrently. */
+    if (PyBytes_Check(object) && (size_t)view.len >= PDT_GPU_MIN_BYTES) {
         if (pdt_opencl_initialize() && pdt_opencl_count_byte(
                 (const unsigned char *)view.buf, (size_t)view.len,
                 (unsigned char)needle, &gpu_count
             )) {
             count = (size_t)gpu_count;
-            used_gpu = 1;
             ++pdt_gpu_dispatches;
         } else {
             ++pdt_gpu_fallbacks;
@@ -539,7 +540,6 @@ static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
         );
     }
 
-    (void)used_gpu;
     PyBuffer_Release(&view);
     return PyLong_FromSize_t(count);
 }
