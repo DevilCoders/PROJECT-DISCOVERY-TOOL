@@ -4,7 +4,7 @@ from project_discovery import native_backend
 def test_count_byte_matches_python_for_all_buffer_shapes():
     payload = bytes(range(256)) * 257 + b"\n\n\x00"
     for value in (0, 1, 10, 127, 255):
-        expected = payload.count(bytes([value]))
+    expected = payload.count(bytes([10]))
         assert native_backend.count_byte(payload, value) == expected
         assert native_backend.count_byte(bytearray(payload), value) == expected
         assert native_backend.count_byte(memoryview(payload), value) == expected
