@@ -22,15 +22,16 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn mode_bits(metadata: &fs::Metadata) -> u32 {
+fn mode_bits(metadata: &fs::Metadata) -> Option<u32> {
     #[cfg(unix)]
     {
-        metadata.permissions().mode() & 0o7777
+        Some(metadata.permissions().mode() & 0o7777)
     }
     #[cfg(not(unix))]
     {
+        // Windows ACLs are not POSIX mode bits; report unknown rather than 0000.
         let _ = metadata;
-        0
+        None
     }
 }
 
@@ -76,7 +77,7 @@ impl Walker {
         slf
     }
 
-    fn __next__(&mut self) -> PyResult<Option<(String, String, u64, u32, u64, bool, String, Option<String>, usize)>> {
+    fn __next__(&mut self) -> PyResult<Option<(String, String, u64, Option<u32>, u64, bool, String, Option<String>, usize)>> {
         loop {
             let (parent, next_entry, parent_depth) = match self.stack.last_mut() {
                 Some((path, entries, depth)) => (path.clone(), entries.next(), *depth),
