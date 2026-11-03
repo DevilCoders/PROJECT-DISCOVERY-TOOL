@@ -16,6 +16,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
+from rich.panel import Panel
 
 from . import __version__
 from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
@@ -44,21 +45,38 @@ def _status(console: Console, label: str, message: str, style: str) -> None:
 
 
 _BANNER = r"""
-+====================================================================+
-|  P D T  //  PROJECT DISCOVERY TOOL                                  |
-|  POLYGLOT INTELLIGENCE  //  LOCAL-FIRST  //  READ-ONLY              |
-+====================================================================+
+ ____  ____ _____     //  PROJECT DISCOVERY TOOL
+|  _ \/ ___|_   _|    POLYGLOT INTELLIGENCE CORE
+| |_) \___ \ | |     FILESYSTEM // SECURITY // ARCHITECTURE
+|  __/ ___) || |      LOCAL-FIRST // READ-ONLY // OFFLINE
+|_|   |____/ |_|      2GB -> 100GB+ // EVIDENCE-DRIVEN
 """
 
 
 def _render_banner(console: Console) -> None:
     if console.is_terminal:
         console.clear()
-    console.print(f"[bold bright_cyan]{_BANNER}[/bold bright_cyan]")
-    console.print(
-        "[dim]Filesystem intelligence  |  Security telemetry  |  Architecture discovery[/dim]\n"
+    console.print(Panel(
+        _BANNER,
+        title="[bold bright_cyan]PDT // DISCOVERY COMMAND CENTER[/bold bright_cyan]",
+        subtitle="[dim]STATIC INTELLIGENCE • NO TARGET EXECUTION • NO NETWORK PROBING[/dim]",
+        border_style="bright_cyan",
+        padding=(1, 2),
+    ))
+    capabilities = native_capabilities()
+    native_status = (
+        f"C/ASM: {capabilities.get('backend', 'unknown')}  //  "
+        f"C++ signatures: {'ONLINE' if capabilities.get('cpp_signature_classifier') else 'FALLBACK'}  //  "
+        f"Rust walker: {'ONLINE' if capabilities.get('rust_filesystem_walker') else 'FALLBACK'}"
     )
-
+    grid = Table.grid(expand=True, padding=(0, 2))
+    grid.add_column(style="bold bright_cyan", width=12)
+    grid.add_column(style="white")
+    grid.add_row("CONTROL", "Python orchestration // analyzer registry // evidence correlation")
+    grid.add_row("NATIVE", native_status)
+    grid.add_row("REPORT", "JavaScript offline client // bundled HTML // paged findings")
+    console.print(Panel(grid, title="[bold]ENGINE STATUS[/bold]", border_style="blue"))
+    console.print("[dim]Inventory  >  Analyze  >  Correlate  >  Report[/dim]\n")
 
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
