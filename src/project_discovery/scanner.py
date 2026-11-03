@@ -241,7 +241,12 @@ def _discover_with_rust(
     stats: Counter[str],
 ) -> bool:
     """Consume the optional Rust directory iterator; return False if unavailable."""
-    walker = native_create_walker(root, excluded_names, excluded_paths)
+    try:
+        walker = native_create_walker(root, excluded_names, excluded_paths)
+    except OSError as exc:
+        directories_by_path["."].error = f"{type(exc).__name__}: {exc}"
+        stats["walk_errors"] += 1
+        return True
     if walker is None:
         return False
     for relative, kind, size, mode, mtime_ns, hidden, target, error, depth in walker:
@@ -365,7 +370,10 @@ def discover_inventory(
         root, excluded_names, excluded_paths, max_file_bytes, skip_oversized,
         directories_by_path, files, symlinks, special_entries, stats,
     )
-    while pending if not used_rust else False:
+    if used_rust:
+        pending.clear()
+
+    while pending:
         current, relative_dir, depth = pending.pop()
         directory_record = directories_by_path[relative_dir]
         try:
