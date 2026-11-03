@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 
 from .api_analyzer import APIContractAnalyzer
+from .api_source_analyzer import APIEndpointAnalyzer
 from .base import Analyzer
 from .build_analyzer import BuildManifestAnalyzer
 from .configuration_analyzer import ConfigurationAnalyzer
@@ -45,6 +46,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         LicenseAnalyzer(),
         ConfigurationAnalyzer(),
         APIContractAnalyzer(),
+        APIEndpointAnalyzer(),
         SQLSchemaAnalyzer(),
         PrismaSchemaAnalyzer(),
         TestDiscoveryAnalyzer(),

@@ -15,6 +15,7 @@ def test_builtin_registry_returns_unique_stable_names():
     assert "ros-intelligence" in names
     assert "nosql-intelligence" in names
     assert "messaging-intelligence" in names
+    assert "api-endpoints" in names
     assert result.diagnostics == []
 
 
