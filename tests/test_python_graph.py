@@ -91,3 +91,14 @@ def test_graph_applies_independent_ast_resource_budget(tmp_path: Path):
     result, findings = analyze_python_dependencies(tmp_path, [record])
     assert result["summary"]["skipped_module_count"] == 1
     assert findings[0].confidence == "UNKNOWN"
+
+def test_graph_detects_source_growth_after_inventory(tmp_path: Path, monkeypatch):
+    from project_discovery import python_graph
+
+    path = tmp_path / "growing.py"
+    path.write_text("import os\\n", encoding="utf-8")
+    monkeypatch.setattr(python_graph, "MAX_GRAPH_AST_FILE_BYTES", 8)
+    record = FileRecord(path.name, 1, ".py", "Python")
+    graph, findings = analyze_python_dependencies(tmp_path, [record])
+    assert graph["unresolved_imports"][0]["reason"] == "source_budget_exceeded"
+    assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
