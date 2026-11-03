@@ -16,6 +16,11 @@ def test_builtin_registry_returns_unique_stable_names():
     assert "nosql-intelligence" in names
     assert "messaging-intelligence" in names
     assert "api-endpoints" in names
+    assert "archive-intelligence" in names
+    assert "data-exposure-indicators" in names
+    assert "network-indicators" in names
+    assert "operating-system-intelligence" in names
+    assert "api-type-classifier" in names
     assert "identity-intelligence" in names
     assert "mobile-intelligence" in names
     assert "game-engine-intelligence" in names

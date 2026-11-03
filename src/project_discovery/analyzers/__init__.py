@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 
 from .api_analyzer import APIContractAnalyzer
+from .api_type_analyzer import APITypeAnalyzer
+from .archive_analyzer import ArchiveIntelligenceAnalyzer
 from .api_source_analyzer import APIEndpointAnalyzer
 from .accessibility_analyzer import AccessibilityAnalyzer
 from .base import Analyzer
@@ -19,8 +21,11 @@ from .mobile_analyzer import MobileIntelligenceAnalyzer
 from .messaging_analyzer import MessagingIntelligenceAnalyzer
 from .nosql_analyzer import NoSQLIntelligenceAnalyzer
 from .observability_analyzer import ObservabilityAnalyzer
+from .network_analyzer import NetworkIndicatorAnalyzer
+from .os_analyzer import OperatingSystemAnalyzer
 from .document_analyzer import DocumentAnalyzer
 from .deployment_analyzer import DeploymentIntelligenceAnalyzer
+from .data_exposure_analyzer import DataExposureAnalyzer
 from .lockfile_analyzer import LockfileAnalyzer
 from .license_analyzer import LicenseAnalyzer
 from .localization_analyzer import LocalizationAnalyzer
@@ -49,6 +54,11 @@ def load_analyzers() -> AnalyzerLoadResult:
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
         DeploymentIntelligenceAnalyzer(),
+        ArchiveIntelligenceAnalyzer(),
+        DataExposureAnalyzer(),
+        NetworkIndicatorAnalyzer(),
+        OperatingSystemAnalyzer(),
+        APITypeAnalyzer(),
         DependencyManifestAnalyzer(),
         LockfileAnalyzer(),
         LicenseAnalyzer(),

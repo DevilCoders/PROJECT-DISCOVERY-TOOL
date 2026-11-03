@@ -52,7 +52,7 @@ _DOMAINS = (
     AnalyzerDomain("orchestration", "Orchestration Intelligence", "Kubernetes resources, pod containers, Helm charts and security context indicators.", "partial"),
     AnalyzerDomain("infrastructure_as_code", "Infrastructure as Code", "Terraform block inventory and selected CloudFormation resource declarations.", "partial"),
     AnalyzerDomain("cloud_services", "Cloud Service Intelligence", "Cloud resources, service bindings, IAM references and deployment topology."),
-    AnalyzerDomain("networking", "Network Architecture", "Static port, ingress, service and network exposure indicators from deployment manifests.", "partial"),
+    AnalyzerDomain("networking", "Network Architecture", "Static IPv4/IPv6, CIDR, port, URL/URI, hostname, subdomain and protocol indicator inventory.", "partial"),
     AnalyzerDomain("performance", "Performance Hotspots", "Complexity indicators, expensive patterns, bottlenecks and profiling artifacts."),
     AnalyzerDomain("concurrency", "Concurrency and Parallelism", "Threads, tasks, locks, races, async flows and synchronization."),
     AnalyzerDomain("memory", "Memory and Resource Management", "Allocation, ownership, leaks, lifetimes, handles and resource cleanup."),
@@ -78,7 +78,10 @@ _DOMAINS = (
     AnalyzerDomain("architecture", "Architecture and Boundaries", "Layers, components, coupling, cohesion, patterns and boundary violations.", "partial"),
     AnalyzerDomain("multi_project", "Multi-Project Intelligence", "Cross-repository comparison, shared capabilities, conflicts and integration maps."),
     AnalyzerDomain("supply_chain", "Software Supply Chain", "Mutable container base-image and CI action reference indicators.", "partial"),
-    AnalyzerDomain("privacy", "Privacy and Data Governance", "Initial mobile privacy usage-description and permission declaration inventory.", "partial"),
+    AnalyzerDomain("privacy", "Privacy and Data Governance", "Mobile privacy declarations, PII field names and redacted email-shaped value indicators.", "partial"),
+    AnalyzerDomain("archives", "Archive and Container Intelligence", "ZIP/TAR member inventory, symlink/permission metadata, traversal and compression-ratio indicators.", "partial"),
+    AnalyzerDomain("filesystem_inventory", "Filesystem Intelligence", "Typed file/directory/symlink inventory, hidden entries, file signatures, size buckets and development directory markers.", "partial"),
+    AnalyzerDomain("operating_systems", "Operating System Intelligence", "Host OS metadata and static target-platform indicators from source, build and deployment manifests.", "partial"),
 )
 
 
