@@ -88,8 +88,10 @@ def test_html_report_has_interactive_paged_inventory_and_findings(tmp_path: Path
         'id="open-all"', 'id="close-all"', 'id="load-more"',
         'id="file-search"', 'id="symlink-rows"', 'id="directory-rows"',
         'id="special-rows"', 'id="stat-special"',
-        'id="vulnerability-findings"', 'id="vcs-findings"', 'id="vuln-db-state"',
-        "FINDING_PAGE=100", "FILE_PAGE=100", "REPORT =", "textContent",
+        'id="symlink-more"', 'id="symlink-page-info"', 'id="special-more"',
+        'id="special-page-info"', 'id="vulnerability-findings"', 'id="vcs-findings"',
+        'id="vuln-db-state"', "FINDING_PAGE=100", "FILE_PAGE=100",
+        "SYMLINK_PAGE=100", "SPECIAL_PAGE=100", "REPORT =", "textContent",
     ):
         assert expected in content
     assert "&lt;script&gt;" not in content or "alert" in content
