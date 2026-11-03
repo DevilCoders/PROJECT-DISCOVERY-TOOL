@@ -134,6 +134,19 @@ def run_scan(
         "analyzer_domain_catalog": domain_catalog,
         "analyzer_domain_count": analyzer_domain_count(),
         "plugin_diagnostics": analyzer_load.diagnostics,
+        "active_analyzer_domains": sorted({
+            domain for analyzer in analyzers for domain in analyzer.domains
+        }),
+        "analyzer_registry": [
+            {
+                "name": analyzer.name,
+                "version": analyzer.version,
+                "api_version": analyzer.api_version,
+                "domains": list(analyzer.domains),
+                "languages": list(analyzer.languages),
+            }
+            for analyzer in analyzers
+        ],
         "implemented_analyzer_domains": [
             item["id"] for item in domain_catalog if item["status"] == "implemented"
         ],

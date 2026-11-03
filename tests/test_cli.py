@@ -15,7 +15,12 @@ def test_default_report_output_is_sibling_of_target(tmp_path: Path):
     project.mkdir()
     (project / "app.py").write_text("def greet():\n    return 'hello'\n", encoding="utf-8")
     assert run_scan(project, None, {"json"}, 1) == 0
-    assert (tmp_path / "project-pdt-report" / "discovery-report.json").is_file()
+    report = tmp_path / "project-pdt-report" / "discovery-report.json"
+    assert report.is_file()
+    import json
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert "analyzer_registry" in payload["metrics"]
+    assert "source_structure" in payload["metrics"]["active_analyzer_domains"]
 
 
 def test_scan_writes_reports_without_touching_target(tmp_path: Path):
