@@ -289,11 +289,11 @@ The baseline is not production-ready:
 
 ## Security finding evidence and developer remediation (new release gate)
 
-- [x] Extend the finding schema with redacted source-line evidence, exact line numbers, attacker-impact explanation and actionable remediation guidance.
+- [x] Extend the finding schema with redacted source-line evidence, exact line numbers, attacker-impact explanation and actionable remediation guidance across secure-code, Python AST security, secret, privacy and risky-configuration analyzers.
 - [x] Add rule-specific impact descriptions for credential exposure, command/code injection, unsafe deserialization, SQL injection, SSRF, path traversal, weak cryptography, TLS/JWT misconfiguration, unsafe C APIs and other supported security rules.
 - [x] Render vulnerable source lines in red in the HTML report using safe text nodes (never inject source as HTML); show file path, line number, severity, confidence, impact and remediation together.
 - [x] Bring JSON and Markdown outputs to schema parity; Markdown visibly marks vulnerable lines and includes impact/remediation.
-- [x] Redact passwords, tokens, private keys, credential URL values, email addresses and common identity literals at the source-excerpt/model boundary; test report escaping against HTML/script payloads.
+- [x] Redact passwords, tokens, private keys, credential URL values, email addresses, phone/address/birth-date/government-ID fields and common identity literals at the source-excerpt/model boundary; test report escaping against HTML/script payloads.
 - [ ] Keep severity evidence-driven: explain realistic consequences conditionally and never describe a heuristic marker as confirmed exploitability or runtime exposure.
 
 ## Phase 12 — Large-project and adversarial verification
