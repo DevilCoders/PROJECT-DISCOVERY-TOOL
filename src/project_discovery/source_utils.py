@@ -68,3 +68,22 @@ def read_python_source_bounded(path: Path, max_bytes: int) -> str:
     encoding, _ = tokenize.detect_encoding(io.BytesIO(raw_source).readline)
     return raw_source.decode(encoding)
 
+
+def read_text_bounded(
+    path: Path,
+    max_bytes: int,
+    *,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+) -> str:
+    """Read a text artifact with a race-safe max_bytes + 1 content budget."""
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    with path.open("rb") as stream:
+        raw_content = stream.read(max_bytes + 1)
+    if len(raw_content) > max_bytes:
+        raise SourceBudgetExceeded(
+            f"content grew beyond the {max_bytes:,}-byte analyzer budget while being read"
+        )
+    return raw_content.decode(encoding, errors=errors)
+
