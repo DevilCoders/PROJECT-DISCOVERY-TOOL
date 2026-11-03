@@ -117,18 +117,47 @@ def _read_member_sample(
 
 
 def _member_content_findings(
-    archive_path: str, member_name: str, sample: bytes,
-) -> list[Finding]:
-    """Return redacted member source lines and conditional impact; discard matched values."""
+    archive_path: str,
+    member_name: str,
+    sample: bytes,
+    deadline: float | None = None,
+) -> tuple[list[Finding], bool]:
+    """Return bounded redacted member findings and whether matching hit the deadline."""
     if not sample:
-        return []
+        return [], False
     text = sample.decode("utf-8", errors="replace")
-    source_lines = text.splitlines()
     hits: dict[tuple[str, str], set[int]] = {}
+    excerpts: dict[tuple[str, str, int], str] = {}
+    timed_out = False
+
     for label, pattern, category in _CONTENT_RULES:
+        line_number = 1
+        position_cursor = 0
         for match in pattern.finditer(text):
-            line = text.count("\n", 0, match.start()) + 1
-            hits.setdefault((category, label), set()).add(line)
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                break
+
+            # Each pattern yields ordered matches. Count only the not-yet-visited
+            # segment so repeated matches do not rescan the start of a large sample.
+            line_number += text.count("\n", position_cursor, match.start())
+            position_cursor = match.start()
+            key = (category, label)
+            hits.setdefault(key, set()).add(line_number)
+            evidence_key = (category, label, line_number)
+            if evidence_key not in excerpts and len(excerpts) < len(_CONTENT_RULES) * 20:
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                line_end = text.find("\n", match.end())
+                if line_end < 0:
+                    line_end = len(text)
+                excerpts[evidence_key] = redact_source_excerpt(text[line_start:line_end])
+
+        if timed_out or (
+            deadline is not None and time.monotonic() >= deadline
+        ):
+            timed_out = True
+            break
+
     findings: list[Finding] = []
     for (category, label), lines in sorted(hits.items()):
         if category == "secrets":
@@ -167,15 +196,15 @@ def _member_content_findings(
             code_evidence=[
                 CodeEvidence(
                     line_number=line,
-                    code=redact_source_excerpt(source_lines[line - 1]),
+                    code=excerpts[(category, label, line)],
                 )
                 for line in selected_lines[:20]
-                if 0 < line <= len(source_lines)
+                if (category, label, line) in excerpts
             ],
             impact=impact,
             recommendation=recommendation,
         ))
-    return findings
+    return findings, timed_out
 
 _MAX_EVIDENCE = 100
 _PATH_DRIVE = re.compile(r"^[A-Za-z]:")
@@ -337,9 +366,12 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             if target and _unsafe_member_path(target):
                                 unsafe_paths.append(f"{info.filename} -> {target}")
                         else:
-                            content_findings.extend(
-                                _member_content_findings(record.path, info.filename, sample)
+                            member_findings, member_timed_out = _member_content_findings(
+                                record.path, info.filename, sample, deadline
                             )
+                            content_findings.extend(member_findings)
+                            if member_timed_out:
+                                time_budget_reached = True
                     except (
                         OSError, RuntimeError, NotImplementedError,
                         zipfile.BadZipFile, EOFError,
@@ -481,9 +513,12 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                     time_budget_reached = True
                                 if member_incomplete:
                                     content_truncated += 1
-                                content_findings.extend(
-                                    _member_content_findings(record.path, member.name, sample)
+                                member_findings, member_timed_out = _member_content_findings(
+                                    record.path, member.name, sample, deadline
                                 )
+                                content_findings.extend(member_findings)
+                                if member_timed_out:
+                                    time_budget_reached = True
                                 if member_incomplete or time_budget_reached:
                                     break
                         except (OSError, tarfile.TarError, EOFError):
