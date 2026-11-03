@@ -5,7 +5,7 @@ from pathlib import Path
 MAX_AST_FILE_BYTES = 16 * 1024 * 1024
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import read_python_source
+from ..source_utils import SourceBudgetExceeded, read_python_source_bounded
 
 class PythonAnalyzer(Analyzer):
     name = "python-ast"
@@ -30,23 +30,67 @@ class PythonAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            source = read_python_source(path)
+            source = read_python_source_bounded(path, MAX_AST_FILE_BYTES)
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "code", f"Python AST resource limit: {record.path}", str(exc),
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
+        except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
+            return [Finding(
+                "code", f"Python source parse error: {record.path}", str(exc),
+                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
+            )]
+        try:
             tree = ast.parse(source, filename=record.path)
-        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
-            return [Finding("code","Python source parse error",str(exc),evidence=[record.path],analyzer=self.name)]
-        classes, functions, imports = [], [], set()
+        except (SyntaxError, RecursionError, MemoryError) as exc:
+            return [Finding(
+                "code", f"Python source parse error: {record.path}", str(exc),
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
+
+        classes: list[str] = []
+        functions: list[str] = []
+        imports: set[str] = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef): classes.append(node.name)
-            elif isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)): functions.append(node.name)
-            elif isinstance(node,ast.Import): imports.update(a.name.split(".")[0] for a in node.names)
-            elif isinstance(node,ast.ImportFrom) and node.module: imports.add(node.module.split(".")[0])
-        findings = [Finding("code",f"Python module: {record.path}",
-            f"{len(source.splitlines())} lines; {len(classes)} classes; {len(functions)} functions; {len(imports)} imports.",
-            evidence=[record.path],analyzer=self.name)]
-        findings.extend(Finding("code_structure",f"Class: {name}",f"Declaration in {record.path}",
-            evidence=[record.path],analyzer=self.name) for name in classes)
-        findings.extend(Finding("code_structure",f"Function: {name}",f"Declaration in {record.path}",
-            evidence=[record.path],analyzer=self.name) for name in functions)
-        findings.extend(Finding("dependency",f"Python import: {name}",f"Static import in {record.path}",
-            evidence=[record.path],analyzer=self.name) for name in sorted(imports))
+            if isinstance(node, ast.ClassDef):
+                classes.append(node.name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.append(node.name)
+            elif isinstance(node, ast.Import):
+                imports.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module.split(".")[0])
+
+        findings = [Finding(
+            "code",
+            f"Python module: {record.path}",
+            f"{len(source.splitlines())} lines; {len(classes)} classes; "
+            f"{len(functions)} functions; {len(imports)} imports.",
+            evidence=[record.path],
+            analyzer=self.name,
+        )]
+        findings.extend(
+            Finding(
+                "code_structure", f"Class: {name}", f"Declaration in {record.path}",
+                evidence=[record.path], analyzer=self.name,
+            )
+            for name in classes
+        )
+        findings.extend(
+            Finding(
+                "code_structure", f"Function: {name}", f"Declaration in {record.path}",
+                evidence=[record.path], analyzer=self.name,
+            )
+            for name in functions
+        )
+        findings.extend(
+            Finding(
+                "dependency", f"Python import: {name}", f"Static import in {record.path}",
+                evidence=[record.path], analyzer=self.name,
+            )
+            for name in sorted(imports)
+        )
         return findings
