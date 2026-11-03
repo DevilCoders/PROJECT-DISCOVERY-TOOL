@@ -6,6 +6,7 @@ from ..models import FileRecord, Finding
 
 class PythonAnalyzer(Analyzer):
     name = "python-ast"
+    domains = ("source_structure", "symbol_index", "imports",)
     def supports(self, record: FileRecord) -> bool:
         return record.extension in {".py",".pyi"} and record.error is None
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:

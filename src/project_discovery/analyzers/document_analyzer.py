@@ -88,6 +88,7 @@ class DocumentAnalyzer(Analyzer):
     """Extract document structure and text metrics without asserting implementation."""
 
     name = "document-formats"
+    domains = ("documentation",)
     _extensions = {".html", ".htm", ".rst", ".txt", ".adoc", ".asciidoc", ".tex", ".pdf", ".docx"}
 
     def supports(self, record: FileRecord) -> bool:

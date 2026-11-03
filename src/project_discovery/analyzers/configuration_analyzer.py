@@ -92,6 +92,7 @@ class ConfigurationAnalyzer(Analyzer):
     """Inventory configuration keys without exposing their values."""
 
     name = "configuration-intelligence"
+    domains = ("configuration",)
 
     def supports(self, record: FileRecord) -> bool:
         name = Path(record.path).name.lower()

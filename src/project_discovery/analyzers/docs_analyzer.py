@@ -8,6 +8,7 @@ LINK = re.compile(r"!?(?:\[[^\]]*\])\(([^)]+)\)")
 
 class MarkdownAnalyzer(Analyzer):
     name = "markdown"
+    domains = ("documentation",)
     def supports(self, record: FileRecord) -> bool:
         return record.extension == ".md" and record.error is None
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:

@@ -46,6 +46,7 @@ class DependencyManifestAnalyzer(Analyzer):
     """Extract explicitly declared dependencies from common project manifests."""
 
     name = "dependency-manifests"
+    domains = ("dependency_manifests",)
     _supported_names = {
         "pyproject.toml", "cargo.toml", "go.mod", "package.json", "composer.json",
     }
