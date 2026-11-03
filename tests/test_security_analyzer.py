@@ -156,3 +156,16 @@ def test_code_evidence_model_redacts_values_from_custom_analyzers():
     assert secret not in evidence.code
     assert "dev@example.com" not in evidence.code
     assert "[REDACTED]" in evidence.code
+
+def test_model_boundary_redacts_prefixed_secret_and_identity_keys():
+    from project_discovery.models import CodeEvidence
+
+    token = "real-token-value-123"
+    email = "alice@example.invalid"
+    evidence = CodeEvidence(
+        line_number=4,
+        code=f"SERVICE_TOKEN={token}; CUSTOMER_FIRST_NAME=Alice; OWNER_EMAIL={email}",
+    )
+    for value in (token, "Alice", email):
+        assert value not in evidence.code
+    assert "[REDACTED]" in evidence.code
