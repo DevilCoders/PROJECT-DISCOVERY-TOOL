@@ -114,7 +114,8 @@ def _xml_summary(root: ET.Element) -> dict[str, tuple[int, int]] | None:
                 if kind in {"LINE", "BRANCH"}:
                     covered = int(element.attrib.get("covered", 0))
                     missed = int(element.attrib.get("missed", 0))
-                    counters[kind.lower()] = (covered, covered + missed)
+                    label = "lines" if kind == "LINE" else "branches"
+                    counters[label] = (covered, covered + missed)
         if counters:
             return counters
 

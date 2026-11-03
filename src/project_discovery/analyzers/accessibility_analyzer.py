@@ -43,12 +43,15 @@ class _AccessibilityParser(HTMLParser):
             if not (tag == "input" and input_type == "hidden"):
                 nested_label = any(frame["tag"] == "label" for frame in self.stack)
                 self.controls.append((line, attrs, nested_label))
-        if tag in {"button", "a"}:
+        if tag in {"button", "a", "label"}:
             if tag == "a" and not attrs.get("href"):
                 return
             self.stack.append({
                 "tag": tag, "attrs": attrs, "line": line, "text": "",
             })
+        if tag == "img" and attrs.get("alt"):
+            for frame in self.stack:
+                frame["text"] = str(frame["text"]) + str(attrs["alt"])
 
     def handle_startendtag(self, tag: str, attrs) -> None:
         self.handle_starttag(tag, attrs)
@@ -59,14 +62,32 @@ class _AccessibilityParser(HTMLParser):
             for frame in self.stack:
                 frame["text"] = str(frame["text"]) + data.strip()
 
+    def _check_interactive(self, frame: dict[str, object]) -> None:
+        tag = str(frame["tag"])
+        if tag not in {"button", "a"}:
+            return
+        attrs = frame["attrs"]
+        has_name = (
+            bool(attrs.get("aria-label"))
+            or bool(attrs.get("aria-labelledby"))
+            or bool(attrs.get("title"))
+            or bool(str(frame["text"]).strip())
+        )
+        if not has_name:
+            code = "button_name_missing" if tag == "button" else "link_name_missing"
+            self.issues[code].append(int(frame["line"]))
+
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index]["tag"] == tag:
+                self._check_interactive(self.stack[index])
                 del self.stack[index:]
                 return
 
     def finish(self) -> dict[str, list[int]]:
+        for frame in self.stack:
+            self._check_interactive(frame)
         for line, attrs, nested_label in self.controls:
             labelled = (
                 nested_label
@@ -77,18 +98,6 @@ class _AccessibilityParser(HTMLParser):
             )
             if not labelled:
                 self.issues["form_control_label_missing"].append(line)
-        for frame in self.stack:
-            tag = str(frame["tag"])
-            attrs = frame["attrs"]
-            has_name = (
-                bool(attrs.get("aria-label"))
-                or bool(attrs.get("aria-labelledby"))
-                or bool(attrs.get("title"))
-                or bool(str(frame["text"]).strip())
-            )
-            if not has_name:
-                code = "button_name_missing" if tag == "button" else "link_name_missing"
-                self.issues[code].append(int(frame["line"]))
         return dict(self.issues)
 
 
