@@ -113,5 +113,6 @@ class SQLSchemaAnalyzer(Analyzer):
                     confidence="INFERRED",
                     evidence=[f"{record.path}:{line}"],
                     analyzer=self.name,
+                    severity="HIGH",
                 ))
         return findings

@@ -135,5 +135,11 @@ class ConfigurationAnalyzer(Analyzer):
                 confidence="INFERRED",
                 evidence=[f"{record.path}:{line_number}"],
                 analyzer=self.name,
+                severity=(
+                    "HIGH" if risk_name in {
+                        "tls_verification_disabled", "privileged_container",
+                        "privilege_escalation_enabled", "host_network_enabled", "wildcard_cors"
+                    } else "MEDIUM"
+                ),
             ))
         return findings

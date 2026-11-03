@@ -95,5 +95,13 @@ class SecretPatternAnalyzer(Analyzer):
                     confidence="INFERRED",
                     evidence=[f"{record.path}:{line_number}"],
                     analyzer=self.name,
+                    severity=(
+                        "CRITICAL" if pattern_name == "private_key"
+                        else "HIGH" if pattern_name in {
+                            "github_token", "github_fine_grained_token", "aws_access_key_id",
+                            "credential_url", "credential_assignment",
+                        }
+                        else "MEDIUM"
+                    ),
                 ))
         return findings

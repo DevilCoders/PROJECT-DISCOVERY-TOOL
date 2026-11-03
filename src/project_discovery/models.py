@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 @dataclass(slots=True)
 class Finding:
