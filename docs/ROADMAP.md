@@ -105,7 +105,8 @@ The baseline is not production-ready:
 - [x] Implement Linux x86-64 SIMD Assembly byte counting with runtime SSE2/POPCNT detection and scalar C/Python fallbacks.
 - [x] Implement and integrate the C++17 native file-signature classifier with Python fallback.
 - [x] Extract the offline report client into a packaged JavaScript source asset bundled into standalone HTML.
-- [ ] Implement the Rust native walker/indexer/stream engine with bounded producer-consumer queues and resumable checkpoints.
+- [x] Implement and integrate the Rust PyO3 no-follow directory iterator with native metadata and bounded active-directory state.
+- [ ] Replace in-memory inventory/results with persistent streaming index storage, bounded analyzer queues and resumable checkpoints.
 - [ ] Cross-compile/test native modules on Linux, Windows and macOS; fuzz FFI boundaries and test graceful fallback.
 - [ ] Benchmark 2GB, 10GB, 50GB and 100GB+ corpora with varied file counts/sizes, deep trees, large dependency directories, archives and symlink-heavy layouts.
 - [ ] Publish wall time, files/sec, bytes/sec, cache hit rate, peak RSS, CPU, I/O, archive budgets and report-generation memory.
