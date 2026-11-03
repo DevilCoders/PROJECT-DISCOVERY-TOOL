@@ -8,6 +8,7 @@ from . import __version__
 from .analyzers import load_analyzers
 from .cache import ScanCache
 from .models import ScanResult
+from .python_graph import analyze_python_dependencies
 from .reporting import write_reports
 from .scanner import discover_files, sha256_file
 
@@ -60,16 +61,19 @@ def run_scan(root: Path, output: Path, formats: set[str], max_file_mb: int) -> i
             if index % 250 == 0 or index == len(records):
                 print(f"[ PROGRESS ] {index}/{len(records)} files")
 
+    python_graph, graph_findings = analyze_python_dependencies(root, records)
+    findings.extend(graph_findings)
     metrics = {
         "file_count": len(records),
         "total_bytes": walk_stats.get("total_bytes", 0),
         "walk_errors": walk_stats.get("walk_errors", 0),
         "oversized_files": walk_stats.get("oversized", 0),
         "languages": dict(sorted(counts.items())),
+        "python_dependency_graph": python_graph,
     }
     result = ScanResult(
         str(root), started, now(), records, findings, metrics, errors,
-        [analyzer.name for analyzer in analyzers],
+        [analyzer.name for analyzer in analyzers] + ["python-module-graph"],
     )
     for report in write_reports(result, output, formats):
         print("[ SUCCESS ] Report: " + str(report))
