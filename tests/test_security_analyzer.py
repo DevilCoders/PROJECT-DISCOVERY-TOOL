@@ -133,12 +133,13 @@ def test_source_excerpt_redacts_secrets_identity_and_credential_urls():
     sensitive = (
         'first_name = "Alice"; email = "alice@example.com"; '
         'password = "super-secret-value"; token = "ghp_' + "A" * 36 + '"; '
-        'DATABASE_URL = "postgres://admin:db-password@db.internal/app"'
+        'DATABASE_URL = "postgres://admin:db-password@db.internal/app"; '
+        'Authorization: Bearer bearer-secret-value'
     )
     excerpt = redact_source_excerpt(sensitive)
     for value in (
         "Alice", "alice@example.com", "super-secret-value",
-        "ghp_" + "A" * 36, "db-password",
+        "ghp_" + "A" * 36, "db-password", "Bearer", "bearer-secret-value",
     ):
         assert value not in excerpt
     assert excerpt.count("[REDACTED]") >= 3
