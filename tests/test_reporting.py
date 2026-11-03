@@ -140,3 +140,16 @@ def test_html_report_uses_bounded_page_rendering_without_full_match_copies(tmp_p
     assert "findingScanIndex" in content
     assert "REPORT.files.slice().sort" not in content
     assert "findings.filter" not in content
+
+def test_json_and_html_report_writers_do_not_materialize_scanresult_dict(tmp_path: Path):
+    result = _result()
+
+    def forbidden_materialization():
+        raise AssertionError("report writers must stream records instead of calling ScanResult.to_dict")
+
+    result.to_dict = forbidden_materialization  # type: ignore[method-assign]
+    paths = write_reports(result, tmp_path, {"json", "html"})
+    assert {path.suffix for path in paths} == {".json", ".html"}
+    payload = json.loads((tmp_path / "discovery-report.json").read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "1.2"
+    assert "const REPORT =" in (tmp_path / "discovery-report.html").read_text(encoding="utf-8")
