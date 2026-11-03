@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 from . import __version__
@@ -46,8 +53,10 @@ def run_scan(
     started = now()
     records, walk_stats = discover_files(root, max_file_bytes=max_file_mb * 1024 * 1024)
     analyzers = load_analyzers()
-    findings, errors = [], []
+    findings = []
+    errors = []
     counts = Counter()
+    cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
 
     progress_columns = (
         SpinnerColumn(),
@@ -56,7 +65,7 @@ def run_scan(
         MofNCompleteColumn(),
         TimeElapsedColumn(),
     )
-    with ScanCache(output / ".pdt-cache" / "fingerprints.sqlite3") as cache:
+    with ScanCache(cache_path) as cache:
         with Progress(*progress_columns, console=console) as progress:
             task = progress.add_task("Analyzing project files", total=len(records))
             for record in records:
@@ -67,19 +76,29 @@ def run_scan(
                     path = root / record.path
                     stat = path.stat()
                     cached = cache.get(str(root), record.path)
-                    if (cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns\n                        and cached[2] == stat.st_ctime_ns and cached[3] == stat.st_ino):
-                        record.sha256 = cached[2]
+                    if (
+                        cached
+                        and cached[0] == stat.st_size
+                        and cached[1] == stat.st_mtime_ns
+                        and cached[2] == stat.st_ctime_ns
+                        and cached[3] == stat.st_ino
+                    ):
+                        record.sha256 = cached[4]
                     else:
                         record.sha256 = sha256_file(path)
                         cache.put(
-                            str(root), record.path, stat.st_size, stat.st_mtime_ns,
+                            str(root),
+                            record.path,
+                            stat.st_size,
+                            stat.st_mtime_ns,
+                            stat.st_ctime_ns,
+                            stat.st_ino,
                             record.sha256,
                         )
                     for analyzer in analyzers:
                         if analyzer.supports(record):
                             try:
-                                new_findings = analyzer.analyze(path, record)
-                                findings.extend(new_findings)
+                                findings.extend(analyzer.analyze(path, record))
                                 record.analyzed = True
                             except Exception as exc:
                                 message = (
@@ -94,7 +113,10 @@ def run_scan(
                 finally:
                     progress.advance(task)
 
-    if walk_stats.get("walk_errors", 0) == 0:\n        with ScanCache(output / ".pdt-cache" / "fingerprints.sqlite3") as cache:\n            cache.prune_missing(str(root), (record.path for record in records))\n\n    python_graph, graph_findings = analyze_python_dependencies(root, records)
+        if walk_stats.get("walk_errors", 0) == 0:
+            cache.prune_missing(str(root), (record.path for record in records))
+
+    python_graph, graph_findings = analyze_python_dependencies(root, records)
     findings.extend(graph_findings)
     domain_catalog = analyzer_domain_catalog()
     metrics = {
@@ -121,7 +143,11 @@ def run_scan(
     for report in reports:
         _status(console, "SUCCESS", "Report: " + str(report), "green")
 
-    summary = Table(title="PROJECT DISCOVERY SUMMARY", show_header=True, header_style="bold cyan")
+    summary = Table(
+        title="PROJECT DISCOVERY SUMMARY",
+        show_header=True,
+        header_style="bold cyan",
+    )
     summary.add_column("Metric")
     summary.add_column("Value", justify="right")
     summary.add_row("Files inventoried", str(len(records)))
@@ -133,12 +159,18 @@ def run_scan(
     summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
     console.print(summary)
     _status(
-        console, "SUCCESS",
+        console,
+        "SUCCESS",
         f"Scan complete: {len(records)} files; {len(findings)} findings; reports in {output}",
         "green",
     )
     if errors:
-        _status(console, "WARNING", f"{len(errors)} file/analyzer errors recorded in JSON report.", "yellow")
+        _status(
+            console,
+            "WARNING",
+            f"{len(errors)} file/analyzer errors recorded in JSON report.",
+            "yellow",
+        )
     return 0
 
 
