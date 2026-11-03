@@ -6,6 +6,7 @@ from importlib.metadata import entry_points
 
 from .api_analyzer import APIContractAnalyzer
 from .api_source_analyzer import APIEndpointAnalyzer
+from .accessibility_analyzer import AccessibilityAnalyzer
 from .base import Analyzer
 from .build_analyzer import BuildManifestAnalyzer
 from .configuration_analyzer import ConfigurationAnalyzer
@@ -56,6 +57,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         CoverageArtifactAnalyzer(),
         APIContractAnalyzer(),
         APIEndpointAnalyzer(),
+        AccessibilityAnalyzer(),
         SQLSchemaAnalyzer(),
         MigrationIntelligenceAnalyzer(),
         PrismaSchemaAnalyzer(),

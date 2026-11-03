@@ -19,3 +19,8 @@ The built-in observability analyzer inventories static logging, metrics, tracing
 ## Implemented coverage artifact slice
 
 The coverage analyzer reads LCOV, Cobertura, JaCoCo, Clover, OpenCover, Go cover profiles and Istanbul/coverage JSON. It extracts recorded line, statement, function and branch counters where the format provides them. The report does not prove which source revision was tested, that all tests ran, or that coverage instrumentation was complete.
+
+
+## Implemented accessibility markup slice
+
+The built-in accessibility analyzer checks HTML and common component-template files for missing document language, image alternative-text attributes, iframe titles, form-control labels, button names and link names. Findings are inferred from static markup and do not replace browser accessibility-tree inspection, keyboard testing or assistive-technology testing.

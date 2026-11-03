@@ -72,7 +72,7 @@ _DOMAINS = (
     AnalyzerDomain("game_engines", "Game Engine Intelligence", "Initial Unity, Unreal, Godot, GameMaker, Defold, Bevy, Ren'Py, Roblox and web-engine project/script inventory.", "partial"),
     AnalyzerDomain("frontend", "Frontend Application Intelligence", "Components, routes, state, rendering, bundlers and client dependencies."),
     AnalyzerDomain("mobile", "Mobile Application Intelligence", "Android manifests, iOS property lists and entitlements, Gradle, CocoaPods, Flutter and React Native declarations.", "partial"),
-    AnalyzerDomain("accessibility", "Accessibility", "Semantic structure, labels, keyboard navigation and accessibility metadata."),
+    AnalyzerDomain("accessibility", "Accessibility", "Semantic structure, labels, keyboard navigation and accessibility metadata.", "partial"),
     AnalyzerDomain("localization", "Localization", "Translation catalogs, locale fallback, missing keys and formatting."),
     AnalyzerDomain("assets", "Asset and Media Intelligence", "Initial Unity serialized asset and Unreal binary asset inventory.", "partial"),
     AnalyzerDomain("architecture", "Architecture and Boundaries", "Layers, components, coupling, cohesion, patterns and boundary violations."),
