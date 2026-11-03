@@ -29,18 +29,21 @@ def count_byte(data: bytes | bytearray | memoryview, needle: int) -> int:
 
 
 def capabilities() -> dict[str, Any]:
-    """Report the native backend selected on this machine."""
+    """Report native backends selected or available on this machine."""
     if _native is not None:
-        return dict(_native.capabilities())
-    import os
-    import platform
-
-    return {
-        "architecture": platform.machine().lower() or "unknown",
-        "backend": "python-fallback",
-        "hardware_threads": os.cpu_count() or 1,
-        "assembly_compiled": False,
-    }
+        info = dict(_native.capabilities())
+    else:
+        import os
+        import platform
+        info = {
+            "architecture": platform.machine().lower() or "unknown",
+            "backend": "python-fallback",
+            "hardware_threads": os.cpu_count() or 1,
+            "assembly_compiled": False,
+        }
+    info["cpp_signature_classifier"] = _native_cpp is not None
+    info["rust_filesystem_walker"] = _walker is not None
+    return info
 
 
 def native_available() -> bool:
