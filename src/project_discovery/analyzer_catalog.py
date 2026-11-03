@@ -45,7 +45,7 @@ _DOMAINS = (
     AnalyzerDomain("migrations", "Data Migration Intelligence", "Flyway, Liquibase, Alembic, Django, Rails, Prisma, TypeORM, Knex, EF Core, Laravel and Ecto migration ordering, operations, rollback markers and destructive-change evidence.", "partial"),
     AnalyzerDomain("messaging", "Messaging and Event Systems", "Static client and producer/consumer API references for Kafka, RabbitMQ, NATS, MQTT, Celery, SQS/SNS and related brokers.", "partial"),
     AnalyzerDomain("tests", "Test Intelligence", "Test discovery, frameworks, fixtures, suites and test-to-code relationships.", "partial"),
-    AnalyzerDomain("coverage", "Coverage Intelligence", "Coverage artifacts, untested code indicators and coverage trends."),
+    AnalyzerDomain("coverage", "Coverage Intelligence", "Coverage artifacts, untested code indicators and coverage trends.", "partial"),
     AnalyzerDomain("build_systems", "Build Systems", "Build graphs, targets, toolchains, generated code and build dependencies.", "partial"),
     AnalyzerDomain("ci_cd", "CI/CD Intelligence", "Workflow jobs, action references, permissions and pipeline stages.", "partial"),
     AnalyzerDomain("containers", "Container Intelligence", "Docker build instructions, Compose services, images, ports and privilege settings.", "partial"),

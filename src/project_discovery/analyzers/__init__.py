@@ -9,6 +9,7 @@ from .api_source_analyzer import APIEndpointAnalyzer
 from .base import Analyzer
 from .build_analyzer import BuildManifestAnalyzer
 from .configuration_analyzer import ConfigurationAnalyzer
+from .coverage_analyzer import CoverageArtifactAnalyzer
 from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
 from .ml_analyzer import AIMLIntelligenceAnalyzer
@@ -52,6 +53,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         IdentityIntelligenceAnalyzer(),
         GameEngineIntelligenceAnalyzer(),
         ConfigurationAnalyzer(),
+        CoverageArtifactAnalyzer(),
         APIContractAnalyzer(),
         APIEndpointAnalyzer(),
         SQLSchemaAnalyzer(),
