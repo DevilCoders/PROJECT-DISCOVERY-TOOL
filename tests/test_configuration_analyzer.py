@@ -164,7 +164,7 @@ def test_configuration_budget_detects_growth_after_inventory(tmp_path: Path, mon
     from project_discovery.analyzers import configuration_analyzer
 
     path = tmp_path / "growing.yaml"
-    path.write_text("debug: true\\n" * 20, encoding="utf-8")
+    path.write_text("\\n".join(["debug: true"] * 20), encoding="utf-8")
     monkeypatch.setattr(configuration_analyzer, "_MAX_CONFIG_FILE_BYTES", 8)
     record = FileRecord(path.name, 1, ".yaml", "Configuration")
     findings = ConfigurationAnalyzer().analyze(path, record)
@@ -189,3 +189,28 @@ def test_configuration_parser_exception_diagnostics_are_redacted(tmp_path: Path,
     assert findings[0].confidence == "UNKNOWN"
     assert secret not in repr([item.to_dict() for item in findings])
     assert "[REDACTED]" in findings[0].detail
+
+
+def test_configuration_key_count_budget_is_unknown(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import configuration_analyzer
+
+    monkeypatch.setattr(configuration_analyzer, "_MAX_CONFIG_KEYS", 2)
+    findings = _scan(
+        tmp_path,
+        "settings.json",
+        '{"alpha":1,"beta":2,"gamma":3}',
+    )
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "inventory resource limit" in findings[0].title.lower()
+
+
+def test_configuration_risk_evidence_is_bounded_per_rule(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import configuration_analyzer
+
+    monkeypatch.setattr(configuration_analyzer, "_MAX_CONFIG_RISK_LINES", 10)
+    content = "\\n".join(["debug: true"] * 250)
+    findings = _scan(tmp_path, "application.yml", content)
+    risks = [item for item in findings if item.category == "security"]
+    assert len(risks) == 10
+    assert [item.code_evidence[0].line_number for item in risks] == list(range(1, 11))
