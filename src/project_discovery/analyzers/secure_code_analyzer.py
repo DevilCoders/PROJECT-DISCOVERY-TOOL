@@ -6,7 +6,9 @@ lines are not copied into reports, preventing accidental disclosure of secrets.
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from pathlib import Path
 
 from .base import Analyzer
@@ -142,6 +144,7 @@ _PATTERNS = (
     ),
 )
 _PYTHON_UNSAFE_LOADERS = {"UnsafeLoader", "Loader", "FullLoader"}
+_MAX_SECURE_CODE_FILE_BYTES = 16 * 1024 * 1024
 
 _IMPACTS = {
     "dynamic_code_execution": (
@@ -295,13 +298,41 @@ class SecureCodePatternAnalyzer(Analyzer):
         return record.error is None and is_source_path(record.path)
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > _MAX_SECURE_CODE_FILE_BYTES:
+            return [Finding(
+                "security",
+                f"Secure-code analysis resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the secure-code analyzer's "
+                f"{_MAX_SECURE_CODE_FILE_BYTES:,}-byte content budget. This is not a clean result.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"size: {record.size_bytes} bytes"],
+                analyzer=self.name,
+                severity="LOW",
+            )]
         try:
-            source = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            with path.open("rb") as stream:
+                raw_source = stream.read(_MAX_SECURE_CODE_FILE_BYTES + 1)
+            if len(raw_source) > _MAX_SECURE_CODE_FILE_BYTES:
+                return [Finding(
+                    "security",
+                    f"Secure-code analysis resource limit: {record.path}",
+                    f"Content grew beyond the {_MAX_SECURE_CODE_FILE_BYTES:,}-byte analyzer budget "
+                    "while being read. This is not a clean result.",
+                    confidence="UNKNOWN",
+                    evidence=[record.path, f"read_limit: {_MAX_SECURE_CODE_FILE_BYTES} bytes"],
+                    analyzer=self.name,
+                    severity="LOW",
+                )]
+            if record.extension in {".py", ".pyi"}:
+                encoding, _ = tokenize.detect_encoding(io.BytesIO(raw_source).readline)
+                source = raw_source.decode(encoding)
+            else:
+                source = raw_source.decode("utf-8")
+        except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
             return [Finding(
                 "security",
                 f"Secure-code scan unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
@@ -312,11 +343,11 @@ class SecureCodePatternAnalyzer(Analyzer):
         if record.extension in {".py", ".pyi"}:
             try:
                 matches = _python_rules(ast.parse(source, filename=record.path))
-            except SyntaxError as exc:
+            except (SyntaxError, RecursionError, MemoryError) as exc:
                 return [Finding(
                     "security",
                     f"Secure-code parse error: {record.path}",
-                    f"{type(exc).__name__}: {exc}",
+                    redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
                     confidence="UNKNOWN",
                     evidence=[record.path],
                     analyzer=self.name,
