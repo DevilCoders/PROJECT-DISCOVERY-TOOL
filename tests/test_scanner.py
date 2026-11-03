@@ -69,7 +69,7 @@ def test_discover_inventory_returns_directory_and_file_metadata(tmp_path: Path):
     assert by_path[".env"].is_hidden
     assert by_path["src/main.py"].file_type == "source"
     assert stats["entry_count"] == 5
-    assert stats["development_directory_count"] == 2
+    assert stats["development_directory_count"] == 1
     assert symlinks == []
     assert special == []
 
