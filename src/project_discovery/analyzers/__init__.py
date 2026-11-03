@@ -47,7 +47,7 @@ def load_analyzers() -> AnalyzerLoadResult:
     for point in sorted(entry_points(group="pdt.analyzers"), key=lambda item: item.name):
         try:
             loaded = point.load()
-            candidate = loaded() if isinstance(loaded, type) else loaded
+            candidate = loaded() if callable(loaded) and not isinstance(loaded, Analyzer) else loaded
             if not isinstance(candidate, Analyzer):
                 raise TypeError("entry point must load an Analyzer subclass or instance")
             if candidate.api_version != 1:
