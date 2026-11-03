@@ -6,7 +6,8 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..language_catalog import is_textual_path, textual_language_names
-from ..models import FileRecord, Finding
+from ..models import CodeEvidence, FileRecord, Finding
+from ..source_utils import redact_source_excerpt
 from ..native_backend import count_byte as native_count_byte
 
 
@@ -46,7 +47,7 @@ _SENSITIVE_FILENAMES = {
     "id_ecdsa", "id_dsa", "credentials",
 }
 _SENSITIVE_EXTENSIONS = {".pem", ".key", ".p12", ".pfx"}
-_CHUNK_BYTES = 64 * 1024
+_CHUNK_BYTES = 8 * 1024 * 1024
 _MAX_SCAN_BYTES = 64 * 1024 * 1024
 _OVERLAP_CHARS = 4096
 _MAX_FINDINGS = 10_000
@@ -65,6 +66,24 @@ def _is_placeholder(value: str) -> bool:
 
 def _assignment_value(match: re.Match[str]) -> str:
     return next((value for value in match.groups() if value is not None), "")
+
+def _credential_impact(pattern_name: str) -> str:
+    if pattern_name == "private_key":
+        return (
+            "If the private key is valid and trusted, an attacker may impersonate the "
+            "associated user or service, sign forged data, decrypt protected material or "
+            "access connected systems."
+        )
+    if pattern_name == "jwt":
+        return (
+            "If the token is live and accepted, an attacker may replay it as the represented "
+            "user or service and inherit its permissions until expiry or revocation."
+        )
+    return (
+        "If the credential is valid and active, an attacker who obtains it may access the "
+        "linked API, cloud account or database, read or alter data, invoke privileged "
+        "operations, incur charges or pivot into connected services."
+    )
 
 
 class SecretPatternAnalyzer(Analyzer):
@@ -138,6 +157,11 @@ class SecretPatternAnalyzer(Analyzer):
                                 }
                                 else "MEDIUM"
                             )
+                            line_start = combined.rfind("\\n", 0, match.start()) + 1
+                            line_end = combined.find("\\n", match.start())
+                            if line_end < 0:
+                                line_end = len(combined)
+                            excerpt = redact_source_excerpt(combined[line_start:line_end])
                             findings.append(Finding(
                                 "security",
                                 f"Potential hardcoded credential: {pattern_name}",
@@ -148,6 +172,17 @@ class SecretPatternAnalyzer(Analyzer):
                                 evidence=[f"{record.path}:{line_number}"],
                                 analyzer=self.name,
                                 severity=severity,
+                                code_evidence=[
+                                    CodeEvidence(line_number=line_number, code=excerpt)
+                                ],
+                                impact=_credential_impact(pattern_name),
+                                recommendation=(
+                                    "Revoke and rotate the credential, move the replacement "
+                                    "to an approved secret manager or protected environment "
+                                    "injection path, remove it from active source/configuration "
+                                    "and repository history where appropriate, then audit "
+                                    "access logs for possible use."
+                                ),
                             ))
                             if len(findings) >= _MAX_FINDINGS:
                                 stop_reason = "finding limit reached"
