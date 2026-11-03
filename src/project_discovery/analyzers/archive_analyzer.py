@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import stat
+import struct
 import tarfile
 import zipfile
 from collections import Counter
@@ -18,6 +19,36 @@ _ARCHIVE_EXTENSIONS = {
     ".cab", ".iso", ".deb", ".rpm",
 }
 _MAX_ARCHIVE_ENTRIES = 200_000
+_MAX_ARCHIVE_INDEX_BYTES = 64 * 1024 * 1024
+
+
+def _zip_index_hint(path: Path) -> tuple[int, int] | None:
+    """Read ZIP/ZIP64 central-directory size/count without materializing entries."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            tail_size = min(size, 65_557)
+            stream.seek(size - tail_size)
+            tail = stream.read(tail_size)
+            eocd = tail.rfind(b"PK\\x05\\x06")
+            if eocd < 0 or eocd + 22 > len(tail):
+                return None
+            entry_count = struct.unpack_from("<H", tail, eocd + 10)[0]
+            directory_size = struct.unpack_from("<I", tail, eocd + 12)[0]
+            if entry_count == 0xFFFF or directory_size == 0xFFFFFFFF:
+                locator = eocd - 20
+                if locator < 0 or tail[locator:locator + 4] != b"PK\\x06\\x07":
+                    return None
+                zip64_offset = struct.unpack_from("<Q", tail, locator + 8)[0]
+                stream.seek(zip64_offset)
+                zip64 = stream.read(56)
+                if len(zip64) < 56 or zip64[:4] != b"PK\\x06\\x06":
+                    return None
+                entry_count = struct.unpack_from("<Q", zip64, 32)[0]
+                directory_size = struct.unpack_from("<Q", zip64, 40)[0]
+            return int(entry_count), int(directory_size)
+    except (OSError, ValueError, struct.error):
+        return None
 
 
 _MAX_MEMBER_SCAN_BYTES = 1024 * 1024
@@ -161,6 +192,26 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         )]
 
     def _zip(self, path: Path, record: FileRecord) -> list[Finding]:
+        index_hint = _zip_index_hint(path)
+        if index_hint is not None:
+            entry_count, index_bytes = index_hint
+            if entry_count > _MAX_ARCHIVE_ENTRIES or index_bytes > _MAX_ARCHIVE_INDEX_BYTES:
+                return [Finding(
+                    "archive",
+                    f"ZIP central-directory budget exceeded: {record.path}",
+                    "The archive index was not materialized because its declared entry count "
+                    "or central-directory byte size exceeds the configured safety budget. "
+                    "No members were extracted or decompressed.",
+                    confidence="UNKNOWN",
+                    evidence=[
+                        f"declared entries: {entry_count:,}",
+                        f"central-directory bytes: {index_bytes:,}",
+                        f"entry limit: {_MAX_ARCHIVE_ENTRIES:,}",
+                        f"index-byte limit: {_MAX_ARCHIVE_INDEX_BYTES:,}",
+                    ],
+                    analyzer=self.name,
+                    severity="MEDIUM",
+                )]
         counts: Counter[str] = Counter()
         unsafe_paths: list[str] = []
         symlinks: list[str] = []
