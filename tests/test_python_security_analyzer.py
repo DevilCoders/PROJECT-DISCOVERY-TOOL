@@ -75,3 +75,19 @@ def test_python_ast_findings_include_redacted_source_and_impact(tmp_path: Path):
     assert "[REDACTED]" in finding.code_evidence[0].code
     assert finding.impact
     assert finding.recommendation
+
+
+def test_python_security_finding_includes_redacted_line_impact_and_fix(tmp_path: Path):
+    source = (
+        'password = "should-not-appear"\n'
+        'eval(user_input)  # email = "developer@example.com"\n'
+    )
+    findings = _scan(tmp_path, source)
+    finding = next(item for item in findings if "dynamic_code_execution" in item.title)
+    assert finding.evidence == ["service.py:2"]
+    assert finding.code_evidence[0].line_number == 2
+    assert "eval(user_input)" in finding.code_evidence[0].code
+    assert "developer@example.com" not in finding.code_evidence[0].code
+    assert "should-not-appear" not in repr(finding.to_dict())
+    assert "arbitrary Python code" in finding.impact
+    assert finding.recommendation
