@@ -5,7 +5,19 @@ import platform
 import sys
 
 from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext as setuptools_build_ext
 from setuptools_rust import Binding, RustExtension
+
+
+class PDTBuildExt(setuptools_build_ext):
+    """Teach setuptools' C compiler to pass preprocessed assembly sources to GCC/Clang."""
+
+    def build_extensions(self) -> None:
+        if self.compiler.compiler_type == "unix":
+            if ".S" not in self.compiler.src_extensions:
+                self.compiler.src_extensions.append(".S")
+            self.compiler.language_map[".S"] = "c"
+        super().build_extensions()
 
 
 native_sources = ["native/pdt_native.c"]
@@ -39,4 +51,5 @@ rust_walker = RustExtension(
 setup(
     ext_modules=[native_extension, cpp_extension],
     rust_extensions=[rust_walker],
+    cmdclass={"build_ext": PDTBuildExt},
 )
