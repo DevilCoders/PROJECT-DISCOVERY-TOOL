@@ -235,3 +235,22 @@ def test_inventory_output_order_is_deterministic_without_sorted_scandir_buffers(
     assert [item.path for item in directories] == [
         ".", "Alpha_dir", "middle_dir", "zeta_dir",
     ]
+
+def test_inventory_order_has_exact_path_tiebreak_for_casefold_collisions(
+    tmp_path: Path, monkeypatch,
+):
+    import pytest
+    import project_discovery.scanner as scanner
+
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *args, **kwargs: None)
+    for name in ("A.py", "a.py", "ss.py", "ß.py"):
+        try:
+            (tmp_path / name).write_text("pass\n", encoding="utf-8")
+        except OSError:
+            pytest.skip("Filesystem cannot represent the casefold-collision fixture")
+    files, _, _, _, _ = scanner.discover_inventory(tmp_path)
+    paths = [item.path for item in files]
+    expected = sorted(paths, key=lambda value: (value.casefold(), value))
+    assert paths == expected
+    assert len(paths) == 4
+
