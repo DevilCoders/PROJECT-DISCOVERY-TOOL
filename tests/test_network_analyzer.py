@@ -60,3 +60,21 @@ def test_ipv4_mapped_ipv6_literal_is_recognized(tmp_path: Path):
     findings = _scan(tmp_path, 'HOST = "::ffff:192.0.2.128"\n')
     ipv6 = next(item for item in findings if "IPv6 address" in item.title)
     assert "::ffff:c000:280" in repr(ipv6.evidence)
+
+def test_network_analyzer_reports_oversized_and_growing_sources_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.network_analyzer as module
+
+    path = tmp_path / "large-network.py"
+    path.write_text('HOST = "192.0.2.1"\n' * 10, encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_NETWORK_FILE_BYTES", 24)
+    record = FileRecord(path.name, 1, ".py", "Python", file_type="text")
+    findings = NetworkIndicatorAnalyzer().analyze(path, record)
+    assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
+
+
+def test_network_analyzer_caps_unique_indicator_cardinality(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.network_analyzer as module
+
+    monkeypatch.setattr(module, "_MAX_NETWORK_INDICATORS", 1)
+    findings = _scan(tmp_path, 'HOSTS = "192.0.2.1 198.51.100.2"\n')
+    assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
