@@ -444,7 +444,7 @@ def _markdown_report(result: ScanResult) -> str:
         if item.code_evidence:
             lines.extend(["", "**Vulnerable source lines (redacted):**", ""])
             lines.extend(
-                f"- 🔴 Line {code.line_number}: `{code.code}`"
+                f"- 🔴 Line {code.line_number}: `{code.code.replace(chr(92), chr(92) * 2).replace(chr(96), chr(92) + chr(96))}`"
                 for code in item.code_evidence
             )
         lines.append("")
