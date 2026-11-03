@@ -180,3 +180,16 @@ def test_discover_inventory_rejects_symlink_root_without_following_it(tmp_path: 
 
     with pytest.raises(ValueError, match="scan root itself is a symlink"):
         discover_inventory(link_root)
+
+def test_python_inventory_fallback_remains_available_without_rust(tmp_path: Path, monkeypatch):
+    import project_discovery.scanner as scanner
+
+    root = tmp_path / "fallback-project"
+    root.mkdir()
+    (root / "main.py").write_text("print('fallback')\\n", encoding="utf-8")
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *args, **kwargs: None)
+
+    records, directories, _, _, stats = scanner.discover_inventory(root)
+    assert [record.path for record in records] == ["main.py"]
+    assert len(directories) == 1
+    assert stats["file_count"] == 1
