@@ -8,6 +8,7 @@ MAX_AST_FILE_BYTES = 16 * 1024 * 1024
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_python_source
 
 
 class PythonSecurityAnalyzer(Analyzer):
@@ -37,7 +38,7 @@ class PythonSecurityAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=record.path)
+            tree = ast.parse(read_python_source(path), filename=record.path)
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             return [Finding(
                 "security",
