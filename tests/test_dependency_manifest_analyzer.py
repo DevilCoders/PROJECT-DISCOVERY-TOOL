@@ -166,3 +166,33 @@ def test_ros_manifest_and_malformed_xml_are_supported(tmp_path: Path):
     assert any("rclcpp" in item.title for item in ros)
     assert any("sensor_msgs" in item.title for item in ros)
     assert malformed[0].confidence == "UNKNOWN"
+
+
+def test_rebar_platformio_and_lua_rockspec_manifests_are_supported(tmp_path: Path):
+    rebar = _analyze(
+        tmp_path, "rebar.config",
+        '{deps, [{cowboy, "2.10.0"}, {jsx, "3.1.0"}]}.\n',
+    )
+    platformio = _analyze(
+        tmp_path, "platformio.ini",
+        "[env:native]\nlib_deps =\n  knolleary/PubSubClient@^2.8\n"
+        "  bblanchon/ArduinoJson@^6.21\n",
+    )
+    rockspec = _analyze(
+        tmp_path, "sample-1.0-1.rockspec",
+        'dependencies = { "lua >= 5.1", "luasocket >= 3.0" }\n',
+    )
+    assert any("cowboy" in item.title for item in rebar)
+    assert any("PubSubClient" in item.title for item in platformio)
+    assert any("ArduinoJson" in item.title for item in platformio)
+    assert any("luasocket" in item.title for item in rockspec)
+
+
+def test_ruby_gemspec_dependencies_are_extracted(tmp_path: Path):
+    findings = _analyze(
+        tmp_path, "sample.gemspec",
+        'spec.add_dependency "rack", ">= 3.0"\n'
+        'spec.add_development_dependency "rspec", "~> 3.13"\n',
+    )
+    assert any("rack" in item.title for item in findings)
+    assert any("rspec" in item.title for item in findings)

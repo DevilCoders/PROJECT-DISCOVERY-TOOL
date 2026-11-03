@@ -64,3 +64,6 @@ Initial archive intelligence reads ZIP/TAR metadata without extracting members. 
 Network intelligence statically inventories IPv4/IPv6/CIDR, common port declarations, URL/URI, host/domain/subdomain candidates and protocol markers. URL evidence removes userinfo, path, query and fragment. It does not probe or resolve hosts. API type classification adds initial REST, GraphQL, gRPC/protobuf, JSON-RPC, SOAP/WSDL, WebSocket and event markers.
 
 Privacy intelligence inventories PII field-name categories and email-shaped values without retaining the matched values. Existing secret-pattern analysis remains responsible for high-signal credential formats. These are partial static indicators, not a full DLP engine.
+
+
+Additional dependency manifests include Erlang rebar configuration, PlatformIO embedded firmware library declarations, Lua rockspec dependencies and Ruby gemspec runtime/development dependencies.

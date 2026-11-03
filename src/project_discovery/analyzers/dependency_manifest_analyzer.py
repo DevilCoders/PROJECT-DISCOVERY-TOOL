@@ -1,6 +1,7 @@
 """Static dependency manifest analysis; declarations are not treated as installed packages."""
 from __future__ import annotations
 
+import configparser
 import json
 import re
 import tomllib
@@ -215,10 +216,14 @@ class DependencyManifestAnalyzer(Analyzer):
             for explicit_name, url, constraint in pattern.findall(source):
                 dep_name = explicit_name or url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
                 add(dep_name, constraint, "Package.swift")
-        elif name == "gemfile" or name.endswith(".gemspec"):
+        elif name == "gemfile":
             pattern = re.compile(r"""(?m)^\s*gem\s+["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
             for dep_name, constraint in pattern.findall(path.read_text(encoding="utf-8")):
                 add(dep_name, constraint or "unspecified", "Gemfile")
+        elif name.endswith(".gemspec"):
+            pattern = re.compile(r"""(?m)\.add_(?:development_)?dependency\s*\(?\s*["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
+            for dep_name, constraint in pattern.findall(path.read_text(encoding="utf-8")):
+                add(dep_name, constraint or "unspecified", "Ruby gemspec")
         elif name == "mix.exs":
             pattern = re.compile(r"""\{\s*:([A-Za-z0-9_]+)\s*,\s*["']([^"']+)["']""")
             for dep_name, constraint in pattern.findall(path.read_text(encoding="utf-8")):
@@ -367,4 +372,34 @@ class DependencyManifestAnalyzer(Analyzer):
             data = tomllib.loads(path.read_text(encoding="utf-8"))
             for dep_name, constraint in data.get("dependencies", {}).items():
                 add(dep_name, constraint, "Fortran fpm dependencies")
+        elif name == "rebar.config":
+            source = path.read_text(encoding="utf-8")
+            block = re.search(r"\{\s*deps\s*,\s*\[(.*?)\]\s*\}", source, re.S)
+            if block:
+                for dep_name, constraint in re.findall(
+                    r"""\{\s*([A-Za-z0-9_]+)\s*,\s*["']([^"']+)["']\s*\}""",
+                    block.group(1),
+                ):
+                    add(dep_name, constraint, "rebar.config deps")
+        elif name == "platformio.ini":
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read_string(path.read_text(encoding="utf-8"))
+            for section in parser.sections():
+                if parser.has_option(section, "lib_deps"):
+                    for line in parser.get(section, "lib_deps").splitlines():
+                        item = line.strip()
+                        if not item or item.startswith(";"):
+                            continue
+                        coordinate, separator, version = item.partition("@")
+                        add(coordinate.strip(), version.strip() if separator else "unspecified",
+                            f"PlatformIO {section} lib_deps")
+        elif name.endswith(".rockspec"):
+            source = path.read_text(encoding="utf-8")
+            block = re.search(r"dependencies\s*=\s*\{(.*?)\}", source, re.S)
+            if block:
+                for item in re.findall(r"""["']([^"']+)["']""", block.group(1)):
+                    match = re.match(r"([A-Za-z0-9_.-]+)\s*(.*)", item)
+                    if match:
+                        add(match.group(1), match.group(2).strip() or "unspecified",
+                            "Lua rockspec dependencies")
         return sorted(set(declarations), key=lambda item: (item[2], item[0].lower(), item[1]))
