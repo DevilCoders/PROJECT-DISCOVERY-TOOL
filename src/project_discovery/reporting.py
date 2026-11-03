@@ -266,7 +266,7 @@ def _write_json_array(
 
 
 def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
-    stream.write('{"findings":')
+    stream.write('{"schema_version":"1.3","findings":')
     _write_json_array(stream, result.findings, lambda item: item.to_dict(), script_safe=True)
     stream.write(',"files":')
     _write_json_array(
@@ -349,6 +349,7 @@ def _markdown_report(result: ScanResult) -> str:
         "# Project Discovery Report",
         "",
         f"- Root: {result.root}",
+        "- Schema version: 1.3",
         f"- Completed: {result.finished_at}",
         f"- Files: {len(result.files):,}",
         f"- Directories: {max(0, len(result.directories) - 1):,}",
