@@ -86,3 +86,17 @@ def test_data_exposure_retains_only_bounded_evidence_samples(tmp_path: Path):
     assert len(email.code_evidence) <= 20
     serialized = repr([item.to_dict() for item in findings])
     assert "user299@example.test" not in serialized
+
+
+def test_data_exposure_stops_on_overlong_physical_line_as_unknown(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import data_exposure_analyzer
+
+    path = tmp_path / "long-line.json"
+    path.write_text("x" * 65 + '{"email":"hidden@example.test"}', encoding="utf-8")
+    monkeypatch.setattr(data_exposure_analyzer, "_MAX_LINE_BYTES", 64)
+    monkeypatch.setattr(data_exposure_analyzer, "_MAX_DATA_EXPOSURE_FILE_BYTES", 1024)
+    record = FileRecord(path.name, path.stat().st_size, ".json", "JSON", file_type="text")
+    findings = DataExposureAnalyzer().analyze(path, record)
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "line-length budget" in findings[0].title.lower()
