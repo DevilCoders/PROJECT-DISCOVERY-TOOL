@@ -174,7 +174,11 @@ function renderFiles(reset){
  $("file-page-info").textContent="Showing "+number(fileOffset)+" of "+number(fileMatchCount)+" matching files";
  fileMore.disabled=fileScanIndex>=files.length;fileMore.textContent=fileMore.disabled?"End of inventory":"Load next page";
 }
-fileSearch.addEventListener("input",function(){renderFiles(true);});
+let fileSearchTimer=0;
+fileSearch.addEventListener("input",function(){
+ clearTimeout(fileSearchTimer);
+ fileSearchTimer=setTimeout(function(){renderFiles(true);},120);
+});
 fileKind.addEventListener("change",function(){renderFiles(true);});
 fileMore.addEventListener("click",function(){renderFiles(false);});
 $("file-reset").addEventListener("click",function(){fileSearch.value="";fileKind.value="";renderFiles(true);});
@@ -235,7 +239,11 @@ function appendFindings(){
  $("page-count").textContent="Rendered "+number(findingOffset)+" / "+number(findingMatchCount);
  loadMore.disabled=findingScanIndex>=findings.length;loadMore.textContent=loadMore.disabled?"All filtered findings loaded":"Load next page";
 }
-search.addEventListener("input",function(){updateFindingFilter(true);});
+let findingSearchTimer=0;
+search.addEventListener("input",function(){
+ clearTimeout(findingSearchTimer);
+ findingSearchTimer=setTimeout(function(){updateFindingFilter(true);},120);
+});
 category.addEventListener("change",function(){updateFindingFilter(true);});
 confidence.addEventListener("change",function(){updateFindingFilter(true);});
 severity.addEventListener("change",function(){updateFindingFilter(true);});
