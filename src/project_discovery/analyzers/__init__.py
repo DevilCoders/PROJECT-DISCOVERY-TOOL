@@ -1,4 +1,7 @@
-"""Built-in and third-party analyzer discovery."""
+"""Built-in analyzer loading and plugin entry-point discovery."""
+from __future__ import annotations
+
+from dataclasses import dataclass
 from importlib.metadata import entry_points
 
 from .api_analyzer import APIContractAnalyzer
@@ -16,8 +19,15 @@ from .test_analyzer import TestDiscoveryAnalyzer
 from .tree_sitter_analyzer import TreeSitterAnalyzer
 
 
-def load_analyzers() -> list[Analyzer]:
-    result: list[Analyzer] = [
+@dataclass(slots=True)
+class AnalyzerLoadResult:
+    analyzers: list[Analyzer]
+    diagnostics: list[str]
+
+
+def load_analyzers() -> AnalyzerLoadResult:
+    """Load built-ins and validated third-party plugins without hiding failures."""
+    analyzers: list[Analyzer] = [
         PythonAnalyzer(),
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
@@ -31,12 +41,27 @@ def load_analyzers() -> list[Analyzer]:
         SecretPatternAnalyzer(),
         TreeSitterAnalyzer(),
     ]
-    for point in entry_points(group="pdt.analyzers"):
+    diagnostics: list[str] = []
+    names = {analyzer.name for analyzer in analyzers}
+
+    for point in sorted(entry_points(group="pdt.analyzers"), key=lambda item: item.name):
         try:
-            candidate = point.load()()
-            if isinstance(candidate, Analyzer):
-                result.append(candidate)
-        except Exception:
-            # A broken optional plugin must not abort core discovery.
-            continue
-    return result
+            loaded = point.load()
+            candidate = loaded() if isinstance(loaded, type) else loaded
+            if not isinstance(candidate, Analyzer):
+                raise TypeError("entry point must load an Analyzer subclass or instance")
+            if candidate.api_version != 1:
+                raise ValueError(
+                    f"unsupported analyzer API version: {candidate.api_version!r}"
+                )
+            if not candidate.name or candidate.name == "unnamed":
+                raise ValueError("plugin analyzer must define a stable non-empty name")
+            if candidate.name in names:
+                raise ValueError(f"duplicate analyzer name: {candidate.name}")
+            names.add(candidate.name)
+            analyzers.append(candidate)
+        except Exception as exc:
+            diagnostics.append(
+                f"Plugin {point.name!r} failed to load: {type(exc).__name__}: {exc}"
+            )
+    return AnalyzerLoadResult(analyzers, diagnostics)

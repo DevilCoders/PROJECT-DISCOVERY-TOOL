@@ -1,11 +1,30 @@
-"""Public analyzer plugin contract."""
+"""Stable public analyzer plugin contract."""
 from abc import ABC, abstractmethod
 from pathlib import Path
+
 from ..models import FileRecord, Finding
 
+
 class Analyzer(ABC):
+    """Base class for local, read-only project analyzers.
+
+    Plugins run in-process with PDT permissions. Implementations must not mutate
+    target files, execute target code, or perform network access during analysis.
+    """
+
+    api_version = 1
     name = "unnamed"
+    version = "0.1.0"
+    description = ""
+    domains: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+
     @abstractmethod
-    def supports(self, record: FileRecord) -> bool: ...
+    def supports(self, record: FileRecord) -> bool:
+        """Return whether this analyzer can inspect the inventoried record."""
+        raise NotImplementedError
+
     @abstractmethod
-    def analyze(self, path: Path, record: FileRecord) -> list[Finding]: ...
+    def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        """Return evidence-backed findings without modifying the target file."""
+        raise NotImplementedError

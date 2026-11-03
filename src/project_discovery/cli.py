@@ -53,9 +53,10 @@ def run_scan(
     _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
     started = now()
     records, walk_stats = discover_files(root, max_file_bytes=max_file_mb * 1024 * 1024)
-    analyzers = load_analyzers()
+    analyzer_load = load_analyzers()
+    analyzers = analyzer_load.analyzers
     findings = []
-    errors = []
+    errors = list(analyzer_load.diagnostics)
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
 
@@ -131,6 +132,7 @@ def run_scan(
         "local_parser_capabilities": parser_capabilities(set(counts)),
         "analyzer_domain_catalog": domain_catalog,
         "analyzer_domain_count": analyzer_domain_count(),
+        "plugin_diagnostics": analyzer_load.diagnostics,
         "implemented_analyzer_domains": [
             item["id"] for item in domain_catalog if item["status"] == "implemented"
         ],
