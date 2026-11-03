@@ -44,13 +44,34 @@ _SIZE_BUCKETS = (
 )
 
 
-def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    """Hash a file with bounded memory."""
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(chunk_size), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def sha256_file(
+    path: Path,
+    chunk_size: int = 1024 * 1024,
+    expected_info: os.stat_result | None = None,
+) -> str:
+    """Hash a regular file through a verified no-follow descriptor with bounded memory."""
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    before = expected_info if expected_info is not None else path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(f"refusing to hash non-regular entry: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(f"entry changed to a non-regular file: {path}")
+        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(opened, key) != getattr(before, key) for key in identity):
+            raise OSError(f"file identity changed before hashing: {path}")
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            for chunk in iter(lambda: stream.read(chunk_size), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def _size_bucket(size: int) -> str:
