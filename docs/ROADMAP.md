@@ -101,6 +101,7 @@ The baseline is not production-ready:
 
 ### Bounded thread-pool concurrency and C/OpenCL GPU execution (new release gate)
 - [x] Add bounded concurrent thread-pool file-analysis scheduling with configurable worker count, back-pressure and deterministic result ordering; keep SQLite cache operations on the coordinator thread.
+- [x] Stream Python fallback `os.scandir` entries directly without allocating and sorting a second per-directory entry list; retain deterministic ordering at the public inventory boundary and cover it with regression tests.
 - [x] Add `pdt scan --jobs N` and `--jobs 0` auto-sizing; expose selected worker count and queue limits in scan metrics and every report format.
 - [x] Extend the C extension with runtime OpenCL loader/device discovery without requiring GPU SDK headers or a GPU at build time.
 - [x] Implement a bounded C/OpenCL byte-count/reduction kernel for large immutable byte buffers; dispatch to an available GPU only above a configured threshold and only for supported kernels. Device-specific threshold benchmarking remains open.
