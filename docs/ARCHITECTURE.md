@@ -29,3 +29,8 @@ Documentation text is not treated as proof that a described feature exists in co
 
 ## Privacy and safety
 No telemetry or network requests are implemented. Target files are read only; generated reports and SQLite cache are written to the output directory. Symlinks are not followed. Files above the configured size limit are inventoried but not parsed. This is a static analyzer, not a sandbox: trusted plugins execute with the permissions of the PDT process.
+
+
+## Full inventory contract
+
+The scanner's inventory API returns file, directory and symlink records plus deterministic counters. It records hidden entries, directory markers, file types, size buckets, permissions and modification times. Symlinks are classified but never traversed. Common generated/vendor directories are represented as pruned directory records. Oversized files remain inventoried and are content-scanned by default; content skipping is an explicit CLI opt-in.
