@@ -100,3 +100,22 @@ def test_tar_member_content_is_scanned_without_extracting(tmp_path: Path):
     assert "credentials.tar::config/.env" in serialized
     assert path.read_bytes() == before
     assert not (tmp_path / "config").exists()
+
+def test_zip_central_directory_limit_is_checked_before_materializing_entries(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.archive_analyzer as archive_module
+
+    path = tmp_path / "many-entries.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("one.txt", "1")
+        archive.writestr("two.txt", "2")
+
+    monkeypatch.setattr(archive_module, "_MAX_ARCHIVE_ENTRIES", 1)
+
+    def forbidden_materialization(*args, **kwargs):
+        raise AssertionError("ZipFile must not materialize an over-budget central directory")
+
+    monkeypatch.setattr(archive_module.zipfile, "ZipFile", forbidden_materialization)
+    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "many-entries.zip"))
+    assert findings[0].confidence == "UNKNOWN"
+    assert "central-directory budget exceeded" in findings[0].title
+    assert "declared entries: 2" in " ".join(findings[0].evidence)
