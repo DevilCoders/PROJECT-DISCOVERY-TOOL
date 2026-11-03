@@ -165,3 +165,18 @@ def test_symlink_scope_is_lexical_and_does_not_resolve_chained_links(tmp_path: P
     alias_record = next(item for item in symlinks if item.path == "alias")
     assert alias_record.target_scope == "internal"
     assert alias_record.target_state == "unverified"
+
+def test_discover_inventory_rejects_symlink_root_without_following_it(tmp_path: Path):
+    import pytest
+
+    real_root = tmp_path / "real-project"
+    real_root.mkdir()
+    (real_root / "source.txt").write_text("content", encoding="utf-8")
+    link_root = tmp_path / "project-link"
+    try:
+        link_root.symlink_to(real_root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is not available on this runner")
+
+    with pytest.raises(ValueError, match="scan root itself is a symlink"):
+        discover_inventory(link_root)
