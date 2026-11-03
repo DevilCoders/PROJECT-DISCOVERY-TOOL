@@ -131,3 +131,12 @@ def test_html_report_exposes_symlink_scope_verification_and_permissions(tmp_path
     assert "<th>Permissions</th>" in content
     assert 'item.target_state||"unverified"' in content
     assert "const REPORT =" in content
+
+def test_html_report_uses_bounded_page_rendering_without_full_match_copies(tmp_path: Path):
+    path = write_reports(_result(), tmp_path, {"html"})[0]
+    content = path.read_text(encoding="utf-8")
+    assert "const files=REPORT.files;" in content
+    assert "fileScanIndex" in content
+    assert "findingScanIndex" in content
+    assert "REPORT.files.slice().sort" not in content
+    assert "findings.filter" not in content
