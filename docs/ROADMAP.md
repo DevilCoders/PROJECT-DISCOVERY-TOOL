@@ -1,125 +1,271 @@
-# Roadmap
+# Production Roadmap
 
-## Mission and non-negotiable scope
+## Mission
 
-PDT is a local-first, read-only, comprehensive polyglot project intelligence system. It must analyze heterogeneous repositories from a few GB to 100GB+ without assuming a single language, framework, OS, build system, architecture, or deployment model.
+PROJECT DISCOVERY TOOL (PDT) is a local-first, read-only, comprehensive polyglot project intelligence platform. It must discover the actual contents and structure of heterogeneous codebases—from multi-gigabyte repositories through 100GB+ workspaces—without assuming one programming language, one framework, one operating system, one architecture, or one deployment model.
 
-The tool must inventory first, analyze second, and report evidence third. It must not silently omit files, symlinks, hidden entries, directories, archives, development dependency trees, or oversized files. Any exclusion or resource limit must be explicit, observable, and represented in the report.
+The pipeline is:
 
-Language and analyzer catalogs are coverage contracts. The presence of a language or domain in a catalog is not proof of parser support or completed semantic analysis. Every adapter must declare its capability level and uncertainty.
+1. **Inventory:** account for filesystem entries and project artifacts.
+2. **Analyze:** run independent language/domain analyzers against bounded inputs.
+3. **Correlate:** connect evidence across files, APIs, dependencies, build systems and projects.
+4. **Report:** produce comprehensive offline JSON/Markdown/HTML and a focused terminal experience.
 
-## Current implementation baseline
+No scan may silently omit an entry. Exclusions, parser gaps, budget limits, unsupported archive formats and errors must be represented in the results.
 
-The current branch contains an initial Python-based orchestration/scanner, Rich CLI, SQLite cache, reporting pipeline, plugin API, 40+ language recognition, 60+ optional Tree-sitter grammar mappings, and initial analyzer families for dependencies, documentation, configuration, security, APIs, SQL/NoSQL, ORM/migrations, tests/build/CI/CD, deployment, AI/ML, ROS, mobile, game engines, frontend/accessibility, localization, observability, coverage, and multi-project comparison.
+## Release rules
 
-These are initial implementations of varying depth. Production readiness is not implied. Keep the full current tests and CI matrix green as each feature is added.
+- Work only on `feat/discovery-engine-foundation` and PR #1.
+- Never merge into `master`; do not close the PR as complete until release gates pass.
+- Keep all proprietary project data local. Only publish PDT implementation, tests and public documentation.
+- Target repositories are read-only. Never follow symlinks during traversal, write inside targets, execute code/build scripts, extract archive members, or contact discovered endpoints.
+- Findings must include evidence and confidence. A lexical marker is never presented as proof of exploitability, reachability, deployment, user identity or runtime behavior.
+- Catalog entries and parser mappings are not completed capabilities. Every capability status must be truthful and test-backed.
 
-## Phase 0 — Documentation and release contract
+## Capability-state definitions
 
-- [x] Update root README to describe the complete local-first/polyglot scope, privacy boundaries, report UX requirements, and pre-production status.
-- [x] Update this roadmap before feature implementation.
-- [ ] Keep README feature claims synchronized with tested implementations; mark partial capability honestly.
-- [ ] Maintain a capability matrix by language, format, analyzer domain, confidence behavior, parser dependency, and fixture coverage.
+| State | Meaning |
+|---|---|
+| `recognized` | File extension/name/signature is classified. No semantic support implied. |
+| `parser_mapped` | A parser adapter/grammar mapping exists. |
+| `parser_available` | Required parser is provisioned locally. |
+| `parsed` | Input parsed successfully within documented limits. |
+| `partial` | Useful evidence extraction exists but substantial domain coverage is missing. |
+| `implemented` | Declared scope has conformance fixtures and accepted behavior. |
+| `unknown` | Analysis unavailable, inconclusive or stopped by a resource budget. |
+| `excluded` / `skipped` | Content was intentionally omitted with a recorded reason. |
 
-## Phase 1 — Filesystem inventory and resource model
+## Current branch baseline
 
-- [x] Replace lossy file-only discovery with separate regular-file, directory and symlink records; special entries are currently counted by type but do not yet have full per-entry records.
-- [x] Record symlinks without following them: link path, target text, lexical target scope (internal/external/unknown), hidden flag and mode metadata.
-- [x] Detect hidden files/directories on POSIX and Windows, including dotfiles and Windows hidden attributes where available.
-- [ ] Expand the initial bounded signature/MIME classifier into a complete artifact taxonomy for source, configuration, documents, archives, executables/shared libraries, images/audio/video, model/dataset, firmware and unknown binary formats.
-- [x] Add file-size buckets, exact size in bytes and per-directory aggregate bytes; add richer per-extension/per-language size summaries.
-- [x] Add directory inventory: depth, direct child counts, aggregate file counts/bytes and hidden state; add empty-directory and large-fan-out scoring.
-- [x] Detect initial development dependency/generated/cache tree markers including `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, `target`, IDE indexes, compiler outputs, fuzz corpora and ecosystem-specific stores.
-- [ ] Do not silently prune dependency trees by default. Provide explicit tree exclusion/deep-analysis controls and always report detected skipped/excluded trees.
-- [x] Make oversized-file skipping opt-in through `pdt scan PATH --skip`; default scanning does not globally skip oversized files. Initial Python AST analyzers and the Python dependency graph report `UNKNOWN` when their independent 16 MiB parser budget is exceeded. Expand per-analyzer budgets and reporting.
-- [x] Preserve the read-only guarantee, deterministic ordering, per-entry error isolation, and no-follow symlink behavior.
-- [ ] Add filesystem tests for permissions, broken links, external links, loops, hidden paths, special files, Windows attributes, unreadable paths, deep nesting and huge fan-out.
+The current feature branch has first-pass implementations for filesystem inventory, symlink records, hidden-name markers, directory aggregates, size buckets, common development-directory markers, SQLite fingerprints, Python AST/import graph, language recognition and optional Tree-sitter support. It also contains initial analyzers for documentation, dependencies/licenses, configuration, secrets/PII, secure-code patterns, REST/API contracts and route markers, SQL/NoSQL/ORM/migrations, test/build/CI, containers/deployment/IaC, archives, network indicators, OS/platform markers, ML/AI, ROS, mobile, game engines, frontend/accessibility, localization, observability, coverage and multi-project comparison.
 
-## Phase 2 — Large-repository engine and native acceleration
+The baseline is not production-ready:
+- scanner inventory, pending directories and result objects are still materialized in memory;
+- default scanner ignore names implicitly prune several development/dependency/build trees;
+- file type classification is still mostly extension/language-family based, not a complete signature classifier;
+- special files are counted but do not have full records;
+- Windows hidden attributes and several permission/ownership fields need cross-platform validation;
+- archive index inspection is substantive only for ZIP/TAR; other recognized formats are detection-only;
+- archive entry-count and member-byte caps exist, but full time/depth/ratio/metadata budgets and adversarial testing remain;
+- some domain analyzers are lexical/heuristic and do not yet resolve symbols, types, dataflow or framework semantics;
+- report and CLI have a working first-pass command-center design, but still need completeness, scale, accessibility and usability gates.
 
-- [ ] Convert file discovery to bounded-memory, streaming iteration; avoid materializing every file's full content or an unbounded in-memory work queue.
-- [ ] Add configurable concurrency, bounded queues, back-pressure, cancellation, progress phases and resumable checkpoints.
-- [ ] Stream hashing and regex-oriented scanning; make parser-specific memory/time budgets explicit.
-- [ ] Add incremental cache invalidation using stable file identity and metadata with safe fallbacks on platforms lacking inode/ctime semantics.
-- [ ] Build repeatable benchmarks for 2GB, 10GB, 50GB and 100GB synthetic/representative repositories; measure wall time, peak RSS, throughput, cache hit rate and report generation memory.
-- [ ] Implement a Rust native walker/indexer only where benchmarks demonstrate a bottleneck; expose a stable interface and retain a portable fallback.
-- [ ] Use C only for a narrow measured interoperability/hot-path requirement. Consider assembly only after profiling demonstrates a meaningful architecture-specific win. No decorative low-level code.
-- [ ] Stress test concurrent scans, cancellation, cache corruption, network filesystems, huge directories and changing files.
+## Phase 0 — Documentation and capability governance
 
-## Phase 3 — Archives and artifact intelligence
+- [x] Refresh root README with current capabilities, limitations, privacy policy, CLI and production criteria.
+- [x] Refresh this roadmap before the next implementation block.
+- [ ] Maintain a generated language/domain capability matrix: status, parser, optional dependency, supported syntax, limitations and fixtures.
+- [ ] Ensure README/roadmap claims are generated or reviewed against the analyzer registry and tests.
+- [ ] Add release-note and change-log discipline for feature, schema and plugin API changes.
 
-- [x] Detect archive/container candidates through extensions and selected signatures: ZIP/JAR/WAR/EAR/APK/AAB/IPA, TAR/TAR.GZ/TGZ, GZIP/BZIP2/XZ, 7z, RAR, CAB, ISO, Zstandard, DEB/RPM and common package archives. Extend signatures for all supported subformats.
-- [x] Inspect ZIP central directories and TAR metadata without extracting members to disk; other archive formats are currently detection-only.
-- [x] Record ZIP/TAR member paths and types, compression metadata where available, timestamps, permissions/modes, link types, duplicate names, and encryption indicators; expand owner/CRC/index fields.
-- [x] Detect ZIP/TAR symlink/hardlink entries, absolute/drive-prefixed/parent-traversal paths, duplicate ZIP names and TAR special devices/FIFOs; expand path normalization and collision analysis.
-- [ ] Add configurable archive entry-count, metadata-size, nesting-depth, parsing-time and compression-ratio limits to resist archive bombs.
-- [x] Add bounded in-memory inspection of ZIP/TAR member samples for credential/PII markers without writing members to disk. Metadata-only and content-sampled states are distinguished. Expand content scanners, per-format support, and scan coverage accounting.
-- [ ] Expand fixtures for malformed, encrypted, nested, huge, truncated, malicious-path, high-ratio and symlink archives. Initial ZIP/TAR content and path-risk fixtures exist.
+## Phase 1 — Filesystem inventory correctness
 
-## Phase 4 — Network, API and OS intelligence
+### Entry model
+- [x] Separate file, directory and symlink records.
+- [x] Record symlink target text, lexical scope and link permissions without traversing the target.
+- [x] Record hidden-name indicators for dotfiles/directories.
+- [ ] Record Windows hidden/system attributes and platform-specific metadata.
+- [ ] Add full records for FIFO, socket, block device, character device, junction/reparse point and unknown entry types.
+- [ ] Add broken-link, self-link, cyclic-link, dangling-relative-link and external-target fixtures.
+- [ ] Harden symlink target classification against loops, permission failures, path races and platform-specific resolution behavior.
+- [x] Record directory depth, child counts, aggregate regular-file counts/bytes, marker and pruned state.
+- [ ] Add empty-directory, fan-out, inode/owner/group and timestamp aggregates where supported.
+- [x] Record per-file byte size, extension, language label, hidden-name flag, mode and size bucket.
+- [ ] Add robust file signature/MIME detection for executables, libraries, images, audio/video, documents, archives, model/dataset files, firmware and unknown binaries.
+- [ ] Keep extension-based recognition distinct from verified magic-byte detection.
 
-- [x] Detect IPv4/IPv6 literals, CIDR ranges, common port declarations, URL ports, host:port pairs and common network protocol references; expand socket API, bind/listen/connect extraction.
-- [x] Detect URLs/URIs in recognized text/source/config files; evidence redacts userinfo, paths, query tokens and fragments.
-- [x] Detect hostname/FQDN/domain candidates and probable subdomains without DNS queries; improve template and public-suffix false-positive handling.
-- [x] Add initial source endpoint patterns and API-style classification for REST, GraphQL, gRPC/protobuf, JSON-RPC, SOAP/WSDL, WebSocket and event-driven APIs. Expand API endpoint discovery across source languages/frameworks: REST methods/routes, GraphQL operations, gRPC/RPC, WebSocket, SOAP, event APIs, generated clients and route middleware.
-- [ ] Build static API inventories and code-to-contract cross references with CONFIRMED/INFERRED/UNKNOWN semantics.
-- [x] Add host OS metadata and initial inferred target-OS markers from text/config/build files; expand platform manifests, package managers, shells, service definitions, sysroots and cross-toolchains.
-- [ ] Add tests for IPv4/IPv6 edge cases, IPv4-mapped IPv6, ports, URL userinfo, internationalized domains, subdomains, templated hosts and false-positive-heavy source text.
+### Development and generated dependency trees
+- [x] Initial marker catalog for `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, build outputs and other common workspaces.
+- [ ] Remove implicit default pruning of dependency/build/cache trees.
+- [ ] Traverse all recognized trees by default unless the operator explicitly opts out or a documented safety policy marks an entry unknown.
+- [ ] Add `--exclude-dir NAME` and optional profile presets; retain a directory record and exact exclusion reason for every pruned subtree.
+- [ ] Add optional directory-only / inventory-only / deep-analysis controls with explicit semantics.
+- [ ] Extend markers for pnpm/npm/yarn/bun, pip/uv/poetry/conda, Maven/Gradle, Cargo, Go modules, NuGet, Composer, Ruby/Bundler, SwiftPM/CocoaPods, Dart/Flutter, .NET, Bazel/Buck/Pants, SCons, CMake, IDE, compiler, fuzzing, model caches and language server caches.
+- [ ] Add marker confidence and distinguish known dependency stores from arbitrary directories with similar names.
 
-## Phase 5 — Security, secrets and personal-data indicators
+### Oversized files
+- [x] Global oversized-file content skipping is opt-in through `pdt scan PATH --skip`.
+- [x] Keep all oversized files in inventory when `--skip` is active.
+- [ ] Ensure `--skip` is the only global size threshold gate; default scanning must not silently skip content based only on size.
+- [ ] Give every analyzer a documented per-file byte/time/memory budget and an explicit `UNKNOWN`/partial result when it cannot continue.
+- [ ] Support per-domain override budgets and show them in JSON/HTML/terminal reports.
+- [ ] Test 128MiB, 1GiB, sparse, changing and non-seekable files without unbounded memory use.
 
-- [ ] Expand secret detection across source/config/docs/build files and 40+ language syntaxes: passwords, passphrases, API keys, cloud credentials, tokens, JWTs, private keys, certificates, database credentials, signing material and service-account files.
-- [ ] Detect identity/PII field names and values: first name, given name, middle name, last name, surname, username, email, phone, address, account/user IDs and related records.
-- [ ] Treat field-name recognition as metadata evidence; treat value-shaped matches as heuristic PII indicators. Never copy full raw credential/PII values into findings.
-- [x] Add initial value redaction for PII and secret field-name findings. Add keyed local fingerprints, false-positive suppression and context-aware confidence.
-- [ ] Expand secure-code analysis for injection, command execution, path traversal, SSRF, unsafe deserialization, authn/authz, cryptography, TLS, insecure randomness, data exposure, cloud/IaC, containers, CI/CD and supply-chain weaknesses.
-- [ ] Never claim exploitability from a lexical match. Add severity, evidence, remediation context and dataflow path only when traceable.
-- [ ] Add regression corpus for secret formats, PII edge cases, encoded values, multiline keys, false positives and report redaction.
+## Phase 2 — High-throughput engine for 2GB–100GB+
 
-## Phase 6 — Polyglot analyzer coverage (40+ languages)
+- [ ] Replace the all-in-memory `files/directories/symlinks/pending` model with a streaming inventory iterator and bounded producer/consumer queues.
+- [ ] Persist inventory rows incrementally to a local SQLite or append-only spool store; stream report assembly from it.
+- [ ] Implement bounded concurrency, work stealing only if justified, back-pressure, cancellation and resumable checkpoints.
+- [ ] Stream SHA-256 and content scanning; avoid repeated passes when analyzers can share a bounded decoded stream safely.
+- [ ] Add content fingerprint cache with metadata validation, file identity where reliable, stale-entry pruning and corruption recovery.
+- [ ] Separate metadata-only inventory from content analyzers so the same file is not read repeatedly without purpose.
+- [ ] Add configurable CPU, memory, I/O and per-analyzer budgets.
+- [ ] Make progress phase-based: inventory, hashing, analyzer domains, archive inspection, correlation, reporting.
+- [ ] Add a Rust native walker/indexer/stream engine only after the benchmark identifies Python as a bottleneck; maintain a portable Python fallback and stable ABI/IPC boundary.
+- [ ] Use C only for measured native interop or a proven hot path; introduce assembly only for a reproducible architecture-specific win. No decorative C/ASM.
+- [ ] Cross-compile/test native modules on Linux, Windows and macOS; fuzz FFI boundaries and test graceful fallback.
+- [ ] Benchmark 2GB, 10GB, 50GB and 100GB+ corpora with varied file counts/sizes, deep trees, large dependency directories, archives and symlink-heavy layouts.
+- [ ] Publish wall time, files/sec, bytes/sec, cache hit rate, peak RSS, CPU, I/O, archive budgets and report-generation memory.
 
-- [ ] Maintain language packs for 40+ actual source languages, including mainstream, legacy, scientific, functional, scripting, mobile, game, embedded, HDL, GPU and smart-contract ecosystems.
-- [ ] For each pack, support declarations, imports/exports, module resolution, types, call sites, common framework APIs and test/build patterns to the depth claimed in its capability metadata.
-- [ ] Build ecosystem fixture repositories for mixed-language and monorepo configurations.
-- [ ] Expand security/configuration/API/database/ORM/messaging/test/build analyzers across languages rather than shipping language-name-only adapters.
-- [ ] Cover SQL, NoSQL, graph, search, time-series, vector databases, ORMs, migrations, schema registries and data-pipeline formats.
-- [ ] Cover REST, GraphQL, RPC/gRPC, SOAP/WSDL, WebSocket, event/messaging, OpenAPI/AsyncAPI/OpenRPC, API collections and generated clients.
-- [ ] Cover build systems and toolchains across native, managed, scripting, mobile, game, embedded, FPGA, GPU and robotics workspaces.
-- [ ] Add analyzer conformance tests, parser-version fixtures, graceful optional dependency behavior and explicit unsupported-feature reporting.
+## Phase 3 — Archives and content without extraction
 
-## Phase 7 — Comprehensive reports and terminal experience
+- [x] Recognize common archive/package extensions and ZIP/TAR signatures.
+- [x] Inspect ZIP central directory and TAR member metadata without writing files to disk.
+- [x] Record member path/name/type, timestamps, modes/permissions, compressed/uncompressed sizes, duplicate names, encryption and link/special-entry indicators where available.
+- [x] Detect absolute paths, drive-prefixed paths, parent traversal, ZIP symlinks and TAR symlink/hardlink/device entries.
+- [x] Perform bounded in-memory content samples for ZIP/TAR members with redacted secret/PII indicators.
+- [ ] Make archive inspection states explicit: detected, index-read, metadata-complete, sample-read, sample-truncated, encrypted, unsupported, malformed, budget-stopped.
+- [ ] Add configurable maximum archive bytes, entries, nested depth, total uncompressed bytes, per-member sample bytes, total sample bytes, compression ratio and wall time.
+- [ ] Validate ZIP data descriptors, ZIP64, encrypted members, duplicate/case-colliding paths, Unicode path normalization and truncated directories.
+- [ ] Add safe metadata readers for 7z, RAR, CAB, ISO, Zstandard, DEB/RPM and language package formats through optional offline dependencies where appropriate.
+- [ ] No archive backend may extract members to disk or follow archive links.
+- [ ] Add malicious fixture set: archive bombs, high-ratio entries, nested bombs, malformed headers, encrypted archives, path traversal, absolute paths, hardlinks, symlink loops, sparse TAR, huge entry counts and corrupt checksums.
+- [ ] Report every archive budget hit and content coverage percentage.
 
-- [ ] Extend the report schema for entries/directories, symlinks, hidden entries, file types, size buckets, dependency trees, OS indicators, network endpoints, secrets/PII, archives and archive-member risks.
-- [ ] Add dashboard metrics, largest files/directories, file-type/extension/language distributions, directory tree summaries and analysis coverage/skip diagnostics.
-- [x] Add an initial offline dark command-center HTML design with responsive navigation and summary dashboards; continue visual polish and accessibility validation.
-- [x] Add global finding search and category/severity/confidence filters with 100-item client-side finding pages; improve search indexing for very large data.
-- [x] Add working open-all/close-all controls for rendered findings, per-finding collapse, evidence details and stable section navigation; add per-category expand/collapse.
-- [x] Ensure the report does not eagerly create a DOM node for every finding; validate and optimize with 100k+ synthetic findings.
-- [x] Add an ASCII banner, phase progress and compact summary; clear screen only for interactive TTY sessions. Continue advanced terminal panels, theme controls and grouped status taxonomy.
-- [ ] Add terminal accessibility, color/no-color mode, narrow terminal tests and CI log readability.
+## Phase 4 — Network and endpoint intelligence
 
-## Phase 8 — Project architecture and intelligence depth
+### Network and identifiers
+- [x] IPv4 and IPv6 literal patterns with IP validation.
+- [x] IPv4/IPv6 CIDR candidates with IP-network validation.
+- [x] Port declarations, host:port strings, URL ports and common service-port labels.
+- [x] URL/URI schemes and evidence redaction for userinfo, path, query and fragment.
+- [x] FQDN/domain and probable subdomain candidates without DNS requests.
+- [x] Common HTTP, WebSocket, gRPC, GraphQL, SOAP, MQTT, AMQP, Kafka, SSH and DNS markers.
+- [ ] Add IPv4-mapped IPv6, zone-scoped IPv6, bracketed literals, URL edge cases, Unicode/IDNA domains and public-suffix-aware subdomain classification.
+- [ ] Detect listen/bind/connect/accept/socket creation APIs and distinguish declaration/configuration from code call sites.
+- [ ] Correlate host, address, port, protocol and service declarations across Docker, Kubernetes, Compose, Terraform and source code.
+- [ ] Keep all network discovery passive: no DNS, scanning, probing or connection attempts.
 
-- [ ] Expand cross-language symbol/module graphs, API/dataflow links and architecture boundary detection.
-- [ ] Cross-reference documentation claims to implementation evidence without treating docs as proof.
-- [ ] Expand ML/AI architecture, model metadata, tokenizer/config, training/inference, datasets and accelerator analysis without deserializing untrusted model payloads.
+### API types, contracts and endpoints
+- [x] API-style classification for REST, GraphQL, gRPC/protobuf, JSON-RPC, SOAP/WSDL, WebSocket, event-driven APIs and webhooks.
+- [x] Contract inventory for selected OpenAPI, GraphQL, protobuf, Thrift and API schema formats.
+- [x] Initial source endpoint recognition in selected frameworks/languages.
+- [ ] Expand endpoint adapters across Python, JS/TS, Go, Java/Kotlin, C#, PHP, Ruby, Rust, Swift, Dart and other supported languages.
+- [ ] Resolve REST method/path/decorator/annotation/attribute and framework router registration patterns.
+- [ ] Discover GraphQL schemas, operations, resolvers, directives, federation and subscriptions.
+- [ ] Discover gRPC services, methods, protobuf messages, RPC frameworks and generated clients.
+- [ ] Discover JSON-RPC, SOAP/WSDL, WebSocket, SSE, webhook, AsyncAPI, OpenRPC, MQTT and message-driven endpoints.
+- [ ] Cross-reference source route handlers to API contracts and generated clients.
+- [ ] Detect auth middleware, versioning, rate-limit and validation declarations where evidence exists.
+- [ ] Build endpoint catalog with method, path, framework, handler symbol, contract, auth marker, source evidence and confidence. Never imply reachability.
+
+## Phase 5 — Secrets, credentials and personal-data indicators
+
+- [x] Field-name indicators for first/given/middle/last/family name, username, email, phone, address, date of birth and government-ID fields.
+- [x] Email-shaped value indicators with raw values omitted.
+- [x] Credential-related field-name indicators for password/passphrase, API key, client secret, tokens and private key.
+- [x] Initial secret-pattern scanner and archive member secret-pattern scanner with redacted evidence.
+- [ ] Expand detectors for actual high-confidence secret value shapes: cloud keys, provider tokens, database URLs, private-key blocks, certificates, JWTs, OAuth credentials, signing keys, service-account credentials, webhook secrets and generic entropy/context-assisted tokens.
+- [ ] Add password/passphrase assignment value detection without ever storing or logging the matched value; support YAML, JSON, TOML, INI, XML, dotenv, HCL, source literals and multiline formats.
+- [ ] Extend PII field/value detectors for firstname, first_name, givenName, middleName, lastname, surname, username, user_name, email, phone, address, account ID and related schemas in 40+ language syntaxes and data formats.
+- [ ] Distinguish key-name evidence, placeholder/example values and likely non-placeholder values. Never label a field name alone as an exposed credential.
+- [ ] Add optional local keyed HMAC fingerprints to correlate repeated values without exposing reversible data; store no raw match in cache.
+- [ ] Add strict redaction tests for JSON/HTML/Markdown/terminal/exception logs and archive member findings.
+- [ ] Add allowlists/false-positive controls that do not suppress genuine findings silently; record suppression rules in the report.
+
+## Phase 6 — Polyglot language and framework intelligence
+
+- [ ] Maintain 40+ language packs with real conformance fixtures, not just extension recognition: mainstream, legacy, scientific, functional, scripting, mobile, game, embedded, HDL, GPU and smart-contract languages.
+- [ ] Leverage Tree-sitter where grammar coverage is robust; add dedicated parsers/SDKs where Tree-sitter is insufficient or unavailable.
+- [ ] Support declarations, imports/exports, module resolution, symbol indexes, types, call sites, common framework APIs and test/build patterns to each declared capability.
+- [ ] Include JS/TS, Python, Rust, Go, C/C++, Java/Kotlin, C#/F#, Swift, Objective-C, Dart, PHP, Ruby, Perl, R, Julia, Lua, Shell, PowerShell, Elixir/Erlang, Haskell, OCaml, Clojure, Scala, Groovy, Fortran, COBOL, Pascal, Ada, Zig, Nim, Crystal, D, Odin/V, Solidity/Move, SQL and HDL/GPU ecosystems.
+- [ ] Handle ambiguous extensions (for example `.m`, `.v`, `.h`) with path/build/manifest context; retain ambiguous/unknown instead of overclaiming.
+- [ ] Add a language-agnostic symbol/module interface and analyzer SDK with source span, syntax node, parser version and capability status.
+- [ ] Add mixed-language monorepo fixtures and projects containing generated, vendored and nested workspace trees.
+- [ ] Every unsupported or partially supported language must report capability gaps explicitly.
+
+## Phase 7 — Security, configuration, API, database, test and build coverage
+
+- [ ] Security: credentials, injection, command execution, traversal, SSRF, unsafe deserialization, authentication, authorization, cryptography, TLS, insecure randomness, dataflow/taint, container/IaC and supply-chain indicators.
+- [ ] Configuration: environment variables, defaults, overrides, secrets references, configuration layering, schema validation, drift and cross-file key references.
+- [ ] APIs: routes, handlers, contracts, clients, middleware, protocols, versioning and security controls.
+- [ ] Databases: SQL, NoSQL, graph, search, time-series, vector databases, ORMs, migrations, connection config, schema/lineage and query indicators.
+- [ ] Tests: 40+ language test naming/framework patterns, fixtures, setup/teardown, mocks, coverage data, test-to-code links and untested-code candidates.
+- [ ] Builds: Make/CMake/Meson/Ninja, Bazel/Buck/Pants, Gradle/Maven/Ant, Cargo/Go, npm/pnpm/yarn/bun, Python packaging, .NET, SwiftPM/CocoaPods, Flutter, game/embedded/FPGA/GPU toolchains and CI/CD.
+- [ ] Build analyzer capability must separate recognized manifest, extracted target/task, resolved dependency, and executed build; PDT never runs the build.
+- [ ] Add tests for common, legacy, proprietary and custom project conventions; support safe custom rules through plugins.
+
+## Phase 8 — Domain extensions
+
+- [ ] Expand AI/ML model architecture, tokenizer/config, training/inference, datasets, accelerators, distributed training and checkpoint metadata without deserializing untrusted payloads.
 - [ ] Expand ROS 1/ROS 2 packages, nodes, topics, services, actions, launch compositions, QoS and message/interface relationships.
-- [ ] Expand game engine, mobile, embedded, firmware, FPGA/HDL, GPU, observability, accessibility, localization and asset intelligence.
-- [ ] Compare independent project reports for overlaps, dependencies, complementary capabilities, conflicts and integration opportunities without merging repository identities.
+- [ ] Expand mobile platform manifests, permissions, entitlements, build variants, native bridges and privacy/data declarations.
+- [ ] Expand Unity, Unreal, Godot, GameMaker, Defold, Bevy, Roblox and web-game engine project/asset intelligence.
+- [ ] Expand frontend frameworks, component graphs, routes, state, accessibility, localization and asset pipelines.
+- [ ] Add embedded/firmware, RTOS, board-support, cross-compilation, boot images, memory maps and hardware interfaces.
+- [ ] Add Verilog/SystemVerilog/VHDL and FPGA module/port/testbench graph analysis.
+- [ ] Add CUDA/OpenCL/Metal/shader kernel and host-device relationship analysis.
+- [ ] Expand observability/logging/metrics/tracing, cloud service binding, supply chain, SBOM/provenance and privacy/data governance.
+- [ ] Expand multi-project comparison and integration planning while keeping each project independent.
 
-## Phase 9 — Production quality and release
+## Phase 9 — Comprehensive report schema and report UX
 
-- [ ] Full cross-platform CI matrix for supported OS/Python versions and native builds.
-- [ ] Coverage gates plus focused regression/negative tests for every analyzer and format.
-- [ ] Reproducible wheel/sdist build, package metadata checks, clean installation and CLI smoke tests.
-- [ ] Security review of parsers, archive handling, plugins, output encoding, symlink races and path handling.
-- [ ] Performance and peak-memory budgets for large repositories and large report output.
-- [ ] Offline behavior, read-only guarantees, privacy/redaction and cache/report safety verified.
-- [ ] Plugin SDK, analyzer contract versioning, compatibility policy and third-party fixture suite.
-- [ ] Release notes, support matrix, threat model, architecture guide, benchmark report and production operations documentation.
+### Data model
+- [ ] Version the JSON schema and retain migration support for older report versions.
+- [ ] Add explicit inventory records for every entry type, including special files and excluded/pruned subtree summaries.
+- [ ] Add archive summary/member risk records, network endpoint records, API endpoint records, OS/platform indicators, credential/PII classifications and analyzer coverage.
+- [ ] Add per-file analyzer status: not applicable, completed, partial, unsupported, budget-stopped, excluded, error.
+- [ ] Add evidence spans/source locations, redaction state, confidence and severity.
+- [ ] Stream large JSON/NDJSON datasets without duplicating large in-memory structures.
+
+### HTML report
+- [x] Standalone offline dark UI baseline with responsive navigation and summary panels.
+- [x] Search, category/severity/confidence filters and paginated finding display.
+- [x] Per-finding disclosure plus open-all/close-all controls.
+- [ ] Add dedicated sections for subdirectories, hidden entries, development dependency trees, symlinks, file type/signature, size categories, network/IP/port/URL/subdomain, API routes/types, OS, archive/member content, secrets/PII and analysis coverage.
+- [ ] Add hierarchical directory explorer and archive member browser without flattening everything into one list.
+- [ ] Add progressive/lazy loading from external local report data or chunked embedded data; keep 100k+ finding DOM bounded.
+- [ ] Make all large tables sortable, searchable and paginated with stable row keys.
+- [ ] Add severity heatmaps, category summaries, per-domain completion and unknown/skipped/error accounting.
+- [ ] Security-test HTML/JS data embedding, escaping, content security policy and offline isolation.
+- [ ] Add keyboard accessibility, focus handling, contrast and screen-reader-friendly disclosure controls.
+- [ ] Add golden screenshots and browser-based tests at desktop/tablet/mobile sizes.
+
+### Terminal interface and CLI
+- [x] ASCII banner and Rich progress/summary panels.
+- [x] Clear screen only on an interactive TTY; never emit terminal control codes to redirected output.
+- [ ] Create advanced command-center visual system: phase timeline, domain status matrix, live counters, warning/error stream, confidence/severity legend and final scan-health panel.
+- [ ] Group output by phase/domain; do not print every file as an unbounded line list.
+- [ ] Add `--quiet`, `--no-color`, `--json-lines`, verbosity levels and stable exit codes.
+- [ ] Add CLI commands for capability catalog, analyzer diagnostics, archive policy, budgets and report inspection.
+- [ ] Test TTY, no-TTY, narrow terminals, Windows console, ANSI-disabled terminals and large CI logs.
+
+## Phase 10 — Large-project and adversarial verification
+
+- [ ] Build synthetic and representative corpora at 2GB, 10GB, 50GB and 100GB+.
+- [ ] Include high file count, deep nesting, huge fan-out, large development dependency trees, mixed file size distributions and binary-heavy projects.
+- [ ] Include malformed and adversarial archive corpus, symlink loops, special files, permissions, Unicode/case-colliding paths, race conditions and files changing mid-scan.
+- [ ] Include polyglot monorepos with 40+ languages and many build/API/database/test/security domains.
+- [ ] Measure wall time, throughput, peak RSS, descriptor count, thread count, cache overhead, archive budgets, HTML/JSON output and memory during report rendering.
+- [ ] Set explicit resource SLOs by scan mode; fail CI when budgets regress materially.
+- [ ] Run fuzzers/property tests for archive parsers, path normalization, language/file-type recognition and report serialization.
+
+## Phase 11 — Production release
+
+- [ ] Full supported OS and Python CI matrix, plus native build matrix where Rust/C modules exist.
+- [ ] Analyzer conformance and regression coverage for all claimed capabilities.
+- [ ] Reproducible source/wheel builds, clean install, package metadata, dependency/license inventory and CLI smoke tests.
+- [ ] Security review of filesystem races, symlink handling, parsers, archive streams, plugin execution, cache databases, output paths and HTML serialization.
+- [ ] Verified read-only, offline and privacy guarantees.
+- [ ] Verified secret/PII redaction across every output surface.
+- [ ] Verified 100k+ report usability and large-project performance/resource limits.
+- [ ] Plugin SDK documentation, API versioning, compatibility policy, sandbox/isolation guidance and conformance suite.
+- [ ] User-facing threat model, architecture guide, support matrix, benchmark report, operations guide and release notes.
+- [ ] Production gate signed off before PR #1 can be merged.
+
+## Acceptance standard
+
+A task is complete only when:
+1. implementation exists in the feature branch;
+2. behavior and limitations are documented;
+3. focused positive, negative and malformed-input tests exist;
+4. platform-sensitive cases run in the supported CI matrix;
+5. resource bounds and error states are explicit;
+6. evidence and redaction behavior are verified;
+7. the final PR head has green CI.
 
 ## Release gate
 
-PDT is not production-ready until all mandatory phases have accepted implementations and passing tests, all partial/planned capability states are documented, cross-platform CI is green on the final head commit, large-repository benchmarks meet declared resource budgets, reports remain usable at 100k+ findings, and security/privacy/read-only/offline guarantees are verified.
+PDT is **not production-ready** while any mandatory acceptance item remains open, any core behavior silently skips project content, any capability is advertised beyond its evidence, the 2GB–100GB+ resource budget is unverified, report UX fails at large scale, or the final CI head is not green.
 
-The feature branch and PR remain unmerged. Only the repository owner decides when the production-ready PR is merged into `master`.
+PR #1 remains open and unmerged. The repository owner alone decides when the verified production-ready branch is merged into `master`.
