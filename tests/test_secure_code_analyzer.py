@@ -162,7 +162,7 @@ def test_secure_code_analyzer_reports_oversized_source_as_unknown(tmp_path: Path
     from project_discovery.analyzers import secure_code_analyzer
 
     path = tmp_path / "large.py"
-    path.write_text("eval(user_input)\\n", encoding="utf-8")
+    path.write_text("eval(user_input)", encoding="utf-8")
     monkeypatch.setattr(secure_code_analyzer, "_MAX_SECURE_CODE_FILE_BYTES", 4)
     record = FileRecord(path.name, 100, ".py", "Python")
     findings = SecureCodePatternAnalyzer().analyze(path, record)
@@ -175,7 +175,7 @@ def test_secure_code_analyzer_detects_growth_after_inventory(tmp_path: Path, mon
     from project_discovery.analyzers import secure_code_analyzer
 
     path = tmp_path / "growing.py"
-    path.write_text("eval(user_input)\\n", encoding="utf-8")
+    path.write_text("eval(user_input)", encoding="utf-8")
     monkeypatch.setattr(secure_code_analyzer, "_MAX_SECURE_CODE_FILE_BYTES", 4)
     record = FileRecord(path.name, 1, ".py", "Python")
     findings = SecureCodePatternAnalyzer().analyze(path, record)
@@ -185,7 +185,10 @@ def test_secure_code_analyzer_detects_growth_after_inventory(tmp_path: Path, mon
 
 def test_secure_code_analyzer_honors_python_encoding_cookie(tmp_path: Path):
     path = tmp_path / "latin.py"
-    path.write_bytes(b"# -*- coding: latin-1 -*-\\neval(user_input)  # caf\\xe9\\n")
+    path.write_bytes(
+        b"# -*- coding: latin-1 -*-" + bytes([10])
+        + b"eval(user_input)  # caf" + bytes([0xE9, 10])
+    )
     record = FileRecord(path.name, path.stat().st_size, ".py", "Python")
     findings = SecureCodePatternAnalyzer().analyze(path, record)
     assert any("Dynamic code execution" in item.title for item in findings)
