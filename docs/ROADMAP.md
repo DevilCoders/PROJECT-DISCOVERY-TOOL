@@ -197,7 +197,7 @@ The baseline is not production-ready:
 - [x] Match resolved package/version pairs from supported lockfiles against OSV affected package coordinates.
 - [x] Support explicit affected-version lists and initial SEMVER/ECOSYSTEM event-range evaluation, including introduced/fixed/last_affected/limit boundaries.
 - [x] Report advisory identifiers, CVE/GHSA aliases, severity, modified date, fixed-version boundary, lockfile evidence and confidence.
-- [x] Treat unsupported range schemes, unreadable/malformed lockfiles, missing versions and parser-budget limits as UNKNOWN; do not label them clean.
+- [x] Treat unsupported range schemes, unreadable/malformed lockfiles, missing versions, 128 MiB input limits and 250,000-package extraction limits as UNKNOWN; do not label them clean.
 - [x] Add dedicated JSON/Markdown/HTML vulnerability sections and CLI database import/status.
 - [ ] Extend resolved lockfile coverage for all catalogued language ecosystems and package managers.
 - [ ] Add adapters for local NVD JSON feeds, GHSA exports, distro advisories (Debian, Ubuntu, Alpine, Red Hat), OS package DBs, container/SBOM advisories and vendor bulletins.
@@ -296,7 +296,7 @@ The baseline is not production-ready:
 
 ## Security finding evidence and developer remediation (new release gate)
 
-- [x] Extend the finding schema with redacted source-line evidence, exact line numbers, attacker-impact explanation and actionable remediation guidance across secure-code, Python AST security, secret, privacy and risky-configuration analyzers.
+- [x] Extend the finding schema with redacted source-line evidence, exact line numbers, attacker-impact explanation and actionable remediation guidance across secure-code, Python AST security, secret, privacy, risky-configuration and ZIP/TAR member analyzers; local OSV dependency findings also include conditional impact and fixed-version remediation.
 - [x] Add rule-specific impact descriptions for credential exposure, command/code injection, unsafe deserialization, SQL injection, SSRF, path traversal, weak cryptography, TLS/JWT misconfiguration, unsafe C APIs and other supported security rules.
 - [x] Render vulnerable source lines in red in the HTML report using safe text nodes (never inject source as HTML); show file path, line number, severity, confidence, impact and remediation together.
 - [x] Bring JSON and Markdown outputs to schema parity; Markdown visibly marks vulnerable lines and includes impact/remediation.
@@ -353,7 +353,7 @@ The next implementation block follows this dependency order. Documentation is up
 4. **Analyzer completeness:** expand security, configuration, API style/route/contracts, database/ORM/migrations, test/build/CI, OS/platform, network and identity/credential analyzers across the 40+ language-family catalog. Separate lexical evidence from parser-backed semantics.
 5. **Report schema and UX:** expose every inventory/analyzer state in JSON; provide grouped domain dashboards and lazy/chunked HTML rendering, stable pagination, global search, keyboard-accessible disclosures and open/close-all without unbounded DOM creation.
 6. **Terminal experience:** retain the ASCII banner and command-center presentation; group progress by phase/domain, keep TTY clearing conditional, and add quiet/no-color/JSON-lines/verbosity modes with stable exit codes.
-7. **Native execution acceleration:** implement C/OpenCL runtime GPU detection and a measured large-buffer kernel, bounded asynchronous file workers, deterministic output, CPU fallback and capability/dispatch reporting. GPU use is limited to supported kernels; GPU absence must be transparent and harmless.
+7. **Native execution acceleration:** bounded asynchronous file analysis (`--jobs N`/automatic sizing), runtime C/OpenCL GPU detection, a supported large-buffer byte-count kernel, deterministic collection, CPU/SIMD/Python fallback and capability/dispatch reporting are implemented. Remaining release gates are GPU-hardware/fault-injection tests, per-device threshold benchmarks and 2GB–100GB+ throughput/peak-RSS measurements; GPU use remains limited to explicitly supported kernels.
 8. **Security evidence and reporting:** attach safely redacted vulnerable source lines, precise line numbers, severity, attacker-impact context and remediation to findings; synchronize JSON, Markdown and HTML output and test XSS/secret redaction.
 9. **Verification and release:** adversarial filesystem/archive fixtures, redaction tests, GPU/CPU parity and fallback tests, concurrent-scan/cache tests, cross-platform native builds, parser conformance, packaging checks, 2GB/10GB/50GB/100GB+ performance and peak-RSS benchmarks, and green CI on the final PR head.
 
