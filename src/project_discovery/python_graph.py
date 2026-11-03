@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import FileRecord, Finding
-from .source_utils import read_python_source
+from .source_utils import SourceBudgetExceeded, read_python_source_bounded
 
 MAX_GRAPH_AST_FILE_BYTES = 16 * 1024 * 1024
 
@@ -140,11 +140,31 @@ def analyze_python_dependencies(
         if source_module not in unique_modules:
             continue
         try:
-            tree = ast.parse(
-                read_python_source(root / record.path),
-                filename=record.path,
+            source_text = read_python_source_bounded(
+                root / record.path, MAX_GRAPH_AST_FILE_BYTES
             )
-        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+        except SourceBudgetExceeded as exc:
+            unresolved.append({
+                "source": source_module,
+                "path": record.path,
+                "line": None,
+                "import": None,
+                "reason": "source_budget_exceeded",
+                "detail": str(exc),
+                "confidence": "UNKNOWN",
+            })
+            findings.append(Finding(
+                "architecture",
+                f"Python dependency graph budget reached: {record.path}",
+                "The module was inventoried but its import graph could not be extracted: "
+                + str(exc),
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer="python-module-graph",
+                severity="LOW",
+            ))
+            continue
+        except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
             unresolved.append({
                 "source": source_module,
                 "path": record.path,
@@ -153,6 +173,28 @@ def analyze_python_dependencies(
                 "reason": f"source_parse_error: {type(exc).__name__}",
                 "confidence": "UNKNOWN",
             })
+            continue
+        try:
+            tree = ast.parse(source_text, filename=record.path)
+        except (SyntaxError, RecursionError, MemoryError) as exc:
+            unresolved.append({
+                "source": source_module,
+                "path": record.path,
+                "line": getattr(exc, "lineno", None),
+                "import": None,
+                "reason": f"source_parse_error: {type(exc).__name__}",
+                "confidence": "UNKNOWN",
+            })
+            findings.append(Finding(
+                "architecture",
+                f"Python dependency graph parse unavailable: {record.path}",
+                "The module could not be parsed within interpreter limits: "
+                + type(exc).__name__,
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer="python-module-graph",
+                severity="LOW",
+            ))
             continue
 
         is_package = Path(record.path).stem == "__init__"
