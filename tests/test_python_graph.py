@@ -102,3 +102,22 @@ def test_graph_detects_source_growth_after_inventory(tmp_path: Path, monkeypatch
     graph, findings = analyze_python_dependencies(tmp_path, [record])
     assert graph["unresolved_imports"][0]["reason"] == "source_budget_exceeded"
     assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
+
+
+def test_graph_reports_unknown_when_source_grows_after_inventory(tmp_path: Path, monkeypatch):
+    from project_discovery import python_graph
+
+    path = tmp_path / "growing.py"
+    path.write_text("import os\n", encoding="utf-8")
+    record = _record(tmp_path, "growing.py")
+    record.size_bytes = 1
+    monkeypatch.setattr(python_graph, "MAX_GRAPH_AST_FILE_BYTES", 4)
+
+    graph, findings = analyze_python_dependencies(tmp_path, [record])
+
+    assert graph["summary"]["edge_count"] == 0
+    assert any(
+        item["reason"] == "source_budget_exceeded"
+        for item in graph["unresolved_imports"]
+    )
+    assert any(item.confidence == "UNKNOWN" for item in findings)
