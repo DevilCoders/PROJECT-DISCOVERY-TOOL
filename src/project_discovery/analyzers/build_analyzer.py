@@ -184,15 +184,18 @@ class BuildManifestAnalyzer(Analyzer):
                 ".gitlab-ci.yml", "azure-pipelines.yml", "azure-pipelines.yaml",
                 "bitbucket-pipelines.yml", ".travis.yml", "appveyor.yml",
             }:
+                ci_jobs = re.findall(
+                    r"(?m)^\s*-\s*job:\s*([A-Za-z0-9_.-]+)\s*$", content
+                )
+                ci_jobs.extend(re.findall(
+                    r"(?m)^([A-Za-z0-9_.-]+):\s*$", content
+                ))
                 targets = [
-                    f"job: {job}" for job in re.findall(
-                        r"(?m)^(?:\s{0,2}-\s*job:\s*|\s{0,2})([A-Za-z0-9_.-]+):\s*$",
-                        content,
-                    )
+                    f"job: {job}" for job in dict.fromkeys(ci_jobs)
                     if job not in {
                         "name", "on", "permissions", "env", "defaults", "stages",
                         "variables", "image", "services", "cache", "before_script",
-                        "after_script", "workflow", "jobs", "steps",
+                        "after_script", "workflow", "jobs", "steps", "trigger",
                     }
                 ]
                 metadata.append("CI pipeline manifest")
