@@ -41,3 +41,8 @@ The NoSQL analyzer now recognizes additional vector/search and multi-model datas
 The source-level API endpoint analyzer and NoSQL/vector datastore analyzer now use the central source-language extension catalog instead of a hard-coded short list. Their static pattern checks therefore run across every source family recognized by PDT, while language-specific semantic extraction remains explicitly bounded by implemented rules.
 
 Migration discovery likewise accepts migration scripts written in any recognized source language and adds explicit framework identification for Goose, Atlas, Dbmate, Drizzle ORM, Diesel, SeaORM and SQLx. A recognized migration file is not evidence that it has been applied to a database.
+
+
+## Implemented project architecture layout slice
+
+PDT now builds a project-level architecture layout inventory from repository paths. It recognizes common presentation, application, domain, infrastructure, persistence, API, testing, documentation, robotics, game-engine, machine-learning and delivery directory conventions. Results are explicitly INFERRED from naming and do not claim dependency direction, runtime boundaries, deployment topology or architectural compliance.

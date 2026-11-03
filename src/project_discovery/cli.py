@@ -25,6 +25,7 @@ from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
 from .models import ScanResult
 from .python_graph import analyze_python_dependencies
+from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
 from .scanner import discover_files, sha256_file
 
@@ -121,6 +122,8 @@ def run_scan(
 
     python_graph, graph_findings = analyze_python_dependencies(root, records)
     findings.extend(graph_findings)
+    architecture_layout, architecture_findings = analyze_project_architecture(records)
+    findings.extend(architecture_findings)
     domain_catalog = analyzer_domain_catalog()
     metrics = {
         "file_count": len(records),
@@ -154,6 +157,7 @@ def run_scan(
             item["id"] for item in domain_catalog if item["status"] == "partial"
         ],
         "python_dependency_graph": python_graph,
+        "architecture_layout": architecture_layout,
     }
     result = ScanResult(
         str(root), started, now(), records, findings, metrics, errors,

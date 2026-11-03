@@ -75,7 +75,7 @@ _DOMAINS = (
     AnalyzerDomain("accessibility", "Accessibility", "Semantic structure, labels, keyboard navigation and accessibility metadata.", "partial"),
     AnalyzerDomain("localization", "Localization", "Translation catalogs, locale fallback, missing keys and formatting.", "partial"),
     AnalyzerDomain("assets", "Asset and Media Intelligence", "Initial Unity serialized asset and Unreal binary asset inventory.", "partial"),
-    AnalyzerDomain("architecture", "Architecture and Boundaries", "Layers, components, coupling, cohesion, patterns and boundary violations."),
+    AnalyzerDomain("architecture", "Architecture and Boundaries", "Layers, components, coupling, cohesion, patterns and boundary violations.", "partial"),
     AnalyzerDomain("multi_project", "Multi-Project Intelligence", "Cross-repository comparison, shared capabilities, conflicts and integration maps."),
     AnalyzerDomain("supply_chain", "Software Supply Chain", "Mutable container base-image and CI action reference indicators.", "partial"),
     AnalyzerDomain("privacy", "Privacy and Data Governance", "Initial mobile privacy usage-description and permission declaration inventory.", "partial"),
