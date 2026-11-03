@@ -87,6 +87,7 @@ The current branch contains first-pass implementations of:
 - JSON/Markdown reports and an offline dark HTML report with search, filters, pagination and collapsible findings.
 - A Rich CLI with an ASCII banner, progress phases, compact summary panels and TTY-aware screen clearing.
 - Bounded concurrent file analysis through a ThreadPoolExecutor (`--jobs 0` auto or `--jobs N`) plus a C-native OpenCL GPU byte-count path for large immutable buffers, with runtime detection and C/SIMD/Python fallback.
+- An initial SQLite `InventoryStore` primitive for bounded-batch persistence of inventory metadata, deterministic streaming reads, scan metadata, explicit cursor/close behavior, symlink database-path rejection and private POSIX database permissions. It is not yet wired into scanner traversal or report generation.
 
 These are initial implementations with varying depth. In particular, the filesystem inventory is currently retained in memory, dependency/cache/build directories are traversed by default unless explicitly excluded, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
 
