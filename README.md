@@ -20,7 +20,7 @@ PDT inventories and analyzes heterogeneous software repositories without importi
 - Machine-readable analyzer domain catalog spanning 50+ domains, including security, APIs, databases, infrastructure, CI/CD, AI/ML, robotics, embedded, game engines, mobile and multi-project intelligence.
 - Rich terminal progress and summary output, plus JSON, Markdown and standalone dark HTML reports with search, category/confidence filters, collapsible findings and raw metrics.
 
-The language and domain catalogs are coverage maps, not claims that every language-specific semantic analyzer or every domain analyzer is complete. Current implementation status is included in scan metrics.
+The language and domain catalogs are coverage maps, not claims that every language-specific semantic analyzer or every domain analyzer is complete. Domain status is explicitly classified as implemented, partial or planned in scan metrics.
 
 ## Install
 
@@ -59,7 +59,16 @@ pdt scan /path/to/project --output /path/to/reports --format json,markdown,html
 
 The output directory must be outside the analyzed project. PDT does not modify target files.
 
-Compare independent scan reports without merging project identities:
+Register reports in the local project catalog and compare all registered projects without merging project identities:
+
+```bash
+pdt catalog-add /reports/project-a/discovery-report.json
+pdt catalog-add /reports/project-b/discovery-report.json
+pdt catalog-list
+pdt catalog-compare --output /reports/project-comparison
+```
+
+Or compare report files directly:
 
 ```bash
 pdt compare project-a-report/discovery-report.json project-b-report/discovery-report.json --output comparison-report

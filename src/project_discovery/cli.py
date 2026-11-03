@@ -137,6 +137,9 @@ def run_scan(
         "implemented_analyzer_domains": [
             item["id"] for item in domain_catalog if item["status"] == "implemented"
         ],
+        "partial_analyzer_domains": [
+            item["id"] for item in domain_catalog if item["status"] == "partial"
+        ],
         "python_dependency_graph": python_graph,
     }
     result = ScanResult(

@@ -20,6 +20,8 @@
 - [x] Prisma ORM model, enum, datasource and relation inventory
 - [x] Initial test-suite declaration discovery
 - [x] Initial Make, CMake, package, Python, Cargo, Maven, Docker and CI manifest inventory
+- [x] Local SQLite catalog for independent project reports
+- [x] N-project comparison with all-project intersections and pairwise overlap
 - [x] Interactive standalone HTML report with search and filters
 - [x] Rich terminal progress and summary
 - [x] Metadata-aware cache validation, legacy migration and stale-entry pruning
