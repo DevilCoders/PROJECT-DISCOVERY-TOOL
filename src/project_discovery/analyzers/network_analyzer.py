@@ -38,6 +38,12 @@ _PROTOCOL_PATTERNS = {
     "SSH": re.compile(r"\b(?:ssh|sftp|scp)\b", re.I),
     "DNS": re.compile(r"\b(?:dns|nameserver|resolve\(\))\b", re.I),
 }
+_MAX_NETWORK_FILE_BYTES = 64 * 1024 * 1024
+_MAX_NETWORK_LINE_BYTES = 256 * 1024
+_MAX_NETWORK_INDICATORS = 25_000
+_MAX_NETWORK_EVIDENCE = 100
+_MAX_NETWORK_PROTOCOL_LINES = 20
+
 _COMMON_PORTS = {
     20: "FTP-data", 21: "FTP", 22: "SSH", 25: "SMTP", 53: "DNS",
     80: "HTTP", 110: "POP3", 123: "NTP", 143: "IMAP", 389: "LDAP",
@@ -99,87 +105,191 @@ class NetworkIndicatorAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > _MAX_NETWORK_FILE_BYTES:
+            return [Finding(
+                "network",
+                f"Network indicator resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the network analyzer's "
+                f"{_MAX_NETWORK_FILE_BYTES:,}-byte scan budget.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"size: {record.size_bytes} bytes"],
+                analyzer=self.name,
+                severity="LOW",
+            )]
+
         addresses: dict[str, set[tuple[str, int]]] = {"IPv4": set(), "IPv6": set()}
         cidrs: set[tuple[str, int]] = set()
         ports: set[tuple[int, int]] = set()
         uris: set[tuple[str, int]] = set()
         domains: set[tuple[str, int]] = set()
-        protocols: dict[str, set[int]] = {}
-        for number, line in _bounded_lines(path):
-            for candidate in _CIDR.findall(line):
-                try:
-                    network = ipaddress.ip_network(candidate, strict=False)
-                    cidrs.add((str(network), number))
-                except ValueError:
-                    pass
-            for candidate in _IPV4.findall(line):
-                try:
-                    parsed = ipaddress.ip_address(candidate)
-                    addresses["IPv4"].add((str(parsed), number))
-                except ValueError:
-                    pass
-            for pattern in (_IPV6, _IPV6_MAPPED):
-                for candidate in pattern.findall(line):
-                    try:
-                        parsed = ipaddress.ip_address(candidate)
-                        if parsed.version == 6 and parsed.ipv4_mapped is not None:
-                            mapped = int(parsed.ipv4_mapped)
-                            normalized = f"::ffff:{mapped >> 16:x}:{mapped & 0xFFFF:x}"
-                        else:
-                            normalized = parsed.compressed
-                        addresses["IPv6"].add((normalized, number))
-                    except ValueError:
-                        pass
-            for match in _PORT_KEY.finditer(line):
-                value = int(match.group(1))
-                if 1 <= value <= 65535:
-                    ports.add((value, number))
-            for pattern in (_HOST_PORT, _BARE_PORT):
-                for match in pattern.finditer(line):
-                    value = int(match.group(1))
-                    if 1 <= value <= 65535:
-                        ports.add((value, number))
-            for match in _URI.finditer(line):
-                raw_uri = match.group(0).rstrip(".,;:)]}")
-                safe = _safe_uri(raw_uri)
-                if safe:
-                    uris.add((safe, number))
-                    try:
-                        host = urlsplit(raw_uri).hostname
-                    except ValueError:
-                        host = None
-                    if host:
+        protocols: dict[str, list[int]] = {}
+        protocol_counts: dict[str, int] = {}
+        unique_indicator_count = 0
+        bytes_scanned = 0
+        budget_reason: str | None = None
+
+        def retain(bucket: set, value: tuple) -> bool:
+            nonlocal unique_indicator_count, budget_reason
+            if value in bucket:
+                return True
+            if unique_indicator_count >= _MAX_NETWORK_INDICATORS:
+                budget_reason = (
+                    f"unique indicator cap of {_MAX_NETWORK_INDICATORS:,} reached"
+                )
+                return False
+            bucket.add(value)
+            unique_indicator_count += 1
+            return True
+
+        def retain_protocol(label: str, line_number: int) -> None:
+            protocol_counts[label] = protocol_counts.get(label, 0) + 1
+            samples = protocols.setdefault(label, [])
+            if len(samples) < _MAX_NETWORK_PROTOCOL_LINES:
+                samples.append(line_number)
+
+        line_number = 1
+        try:
+            with path.open("rb") as stream:
+                while bytes_scanned < _MAX_NETWORK_FILE_BYTES:
+                    remaining = _MAX_NETWORK_FILE_BYTES - bytes_scanned
+                    raw_line = stream.readline(
+                        min(_MAX_NETWORK_LINE_BYTES, remaining + 1)
+                    )
+                    if not raw_line:
+                        break
+                    if len(raw_line) > remaining:
+                        budget_reason = "file byte budget reached"
+                        break
+                    bytes_scanned += len(raw_line)
+                    line = raw_line.decode("utf-8", errors="replace")
+
+                    for candidate in _CIDR.findall(line):
                         try:
-                            ipaddress.ip_address(host)
+                            network = ipaddress.ip_network(candidate, strict=False)
+                            if not retain(cidrs, (str(network), line_number)):
+                                break
                         except ValueError:
-                            domains.add((host.lower().rstrip("."), number))
-                    try:
-                        uri_port = urlsplit(raw_uri).port
-                    except ValueError:
-                        uri_port = None
-                    if uri_port is not None and 1 <= uri_port <= 65535:
-                        ports.add((uri_port, number))
-            for match in _DOMAIN.finditer(line):
-                domain = match.group(0).lower().rstrip(".")
-                if domain not in {"example.com", "example.org", "example.net", "localhost.localdomain"}:
-                    domains.add((domain, number))
-            for label, pattern in _PROTOCOL_PATTERNS.items():
-                if pattern.search(line):
-                    protocols.setdefault(label, set()).add(number)
+                            pass
+                    if budget_reason:
+                        break
+
+                    for candidate in _IPV4.findall(line):
+                        try:
+                            parsed = ipaddress.ip_address(candidate)
+                            if not retain(addresses["IPv4"], (str(parsed), line_number)):
+                                break
+                        except ValueError:
+                            pass
+                    if budget_reason:
+                        break
+
+                    for pattern in (_IPV6, _IPV6_MAPPED):
+                        for candidate in pattern.findall(line):
+                            try:
+                                parsed = ipaddress.ip_address(candidate)
+                                if parsed.version == 6 and parsed.ipv4_mapped is not None:
+                                    mapped = int(parsed.ipv4_mapped)
+                                    normalized = f"::ffff:{mapped >> 16:x}:{mapped & 0xFFFF:x}"
+                                else:
+                                    normalized = parsed.compressed
+                                if not retain(addresses["IPv6"], (normalized, line_number)):
+                                    break
+                            except ValueError:
+                                pass
+                        if budget_reason:
+                            break
+                    if budget_reason:
+                        break
+
+                    for match in _PORT_KEY.finditer(line):
+                        value = int(match.group(1))
+                        if 1 <= value <= 65535 and not retain(ports, (value, line_number)):
+                            break
+                    if budget_reason:
+                        break
+                    for pattern in (_HOST_PORT, _BARE_PORT):
+                        for match in pattern.finditer(line):
+                            value = int(match.group(1))
+                            if 1 <= value <= 65535 and not retain(ports, (value, line_number)):
+                                break
+                        if budget_reason:
+                            break
+                    if budget_reason:
+                        break
+
+                    for match in _URI.finditer(line):
+                        raw_uri = match.group(0).rstrip(".,;:)]}")
+                        safe = _safe_uri(raw_uri)
+                        if safe:
+                            if not retain(uris, (safe, line_number)):
+                                break
+                            try:
+                                host = urlsplit(raw_uri).hostname
+                            except ValueError:
+                                host = None
+                            if host:
+                                try:
+                                    ipaddress.ip_address(host)
+                                except ValueError:
+                                    if not retain(domains, (host.lower().rstrip("."), line_number)):
+                                        break
+                            try:
+                                uri_port = urlsplit(raw_uri).port
+                            except ValueError:
+                                uri_port = None
+                            if uri_port is not None and 1 <= uri_port <= 65535:
+                                if not retain(ports, (uri_port, line_number)):
+                                    break
+                        if budget_reason:
+                            break
+                    if budget_reason:
+                        break
+
+                    for match in _DOMAIN.finditer(line):
+                        domain = match.group(0).lower().rstrip(".")
+                        if domain not in {
+                            "example.com", "example.org", "example.net",
+                            "localhost.localdomain",
+                        }:
+                            if not retain(domains, (domain, line_number)):
+                                break
+                    if budget_reason:
+                        break
+
+                    for label, pattern in _PROTOCOL_PATTERNS.items():
+                        if pattern.search(line):
+                            retain_protocol(label, line_number)
+
+                    if raw_line.endswith((b"\n", b"\r")):
+                        line_number += 1
+
+                if budget_reason is None and bytes_scanned >= _MAX_NETWORK_FILE_BYTES:
+                    if stream.read(1):
+                        budget_reason = "file byte budget reached"
+        except OSError as exc:
+            return [Finding(
+                "network",
+                f"Network indicator scan unavailable: {record.path}",
+                f"{type(exc).__name__}: {exc}",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+            )]
 
         findings: list[Finding] = []
         for version, values in addresses.items():
             if values:
-                unique = sorted({value for value, _ in values})
+                unique = {value for value, _ in values}
                 findings.append(Finding(
                     "network",
                     f"{version} address indicators: {record.path}",
-                    f"Detected {len(unique)} distinct {version} literal(s). These are static "
-                    "references, not evidence of active interfaces or reachability.",
+                    f"Detected at least {len(unique):,} distinct {version} literal(s) "
+                    "within the scanned portion. These are static references, not evidence "
+                    "of active interfaces or reachability.",
                     confidence="CONFIRMED",
                     evidence=[
                         f"{record.path}:{line} ({value})"
-                        for value, line in sorted(values)[:100]
+                        for value, line in sorted(values)[:_MAX_NETWORK_EVIDENCE]
                     ],
                     analyzer=self.name,
                 ))
@@ -187,11 +297,12 @@ class NetworkIndicatorAnalyzer(Analyzer):
             findings.append(Finding(
                 "network",
                 f"CIDR network indicators: {record.path}",
-                f"Detected {len({value for value, _ in cidrs})} distinct CIDR range(s).",
+                f"Detected at least {len({value for value, _ in cidrs}):,} distinct CIDR range(s) "
+                "within the scanned portion.",
                 confidence="CONFIRMED",
                 evidence=[
                     f"{record.path}:{line} ({value})"
-                    for value, line in sorted(cidrs)[:100]
+                    for value, line in sorted(cidrs)[:_MAX_NETWORK_EVIDENCE]
                 ],
                 analyzer=self.name,
             ))
@@ -204,12 +315,13 @@ class NetworkIndicatorAnalyzer(Analyzer):
             findings.append(Finding(
                 "network",
                 f"Port indicators: {record.path}",
-                f"Detected {len(values)} distinct port number(s): " + ", ".join(descriptions[:50])
+                f"Detected at least {len(values):,} distinct port number(s): "
+                + ", ".join(descriptions[:50])
                 + ". A port declaration does not prove a listener is active.",
                 confidence="INFERRED",
                 evidence=[
                     f"{record.path}:{line} (port {value})"
-                    for value, line in sorted(ports)[:100]
+                    for value, line in sorted(ports)[:_MAX_NETWORK_EVIDENCE]
                 ],
                 analyzer=self.name,
             ))
@@ -217,12 +329,12 @@ class NetworkIndicatorAnalyzer(Analyzer):
             findings.append(Finding(
                 "network",
                 f"URL/URI indicators: {record.path}",
-                f"Detected {len(uris)} URI references. Userinfo, paths, query strings and "
-                "fragments are redacted from evidence.",
+                f"Detected at least {len(uris):,} URI reference(s) within the scanned portion. "
+                "Userinfo, paths, query strings and fragments are redacted from evidence.",
                 confidence="CONFIRMED",
                 evidence=[
                     f"{record.path}:{line} ({value})"
-                    for value, line in sorted(uris)[:100]
+                    for value, line in sorted(uris)[:_MAX_NETWORK_EVIDENCE]
                 ],
                 analyzer=self.name,
             ))
@@ -232,13 +344,13 @@ class NetworkIndicatorAnalyzer(Analyzer):
             findings.append(Finding(
                 "network",
                 f"Hostname and domain indicators: {record.path}",
-                f"Detected {len(domain_values)} distinct FQDN/domain candidate(s), including "
-                f"{len(subdomains)} probable subdomain(s). Public suffixes and DNS ownership "
-                "are not resolved.",
+                f"Detected at least {len(domain_values):,} distinct FQDN/domain candidate(s), "
+                f"including {len(subdomains):,} probable subdomain(s) within the scanned portion. "
+                "Public suffixes and DNS ownership are not resolved.",
                 confidence="INFERRED",
                 evidence=[
                     f"{record.path}:{line} ({value})"
-                    for value, line in sorted(domains)[:100]
+                    for value, line in sorted(domains)[:_MAX_NETWORK_EVIDENCE]
                 ],
                 analyzer=self.name,
             ))
@@ -247,14 +359,33 @@ class NetworkIndicatorAnalyzer(Analyzer):
             findings.append(Finding(
                 "network",
                 f"Network protocol references: {record.path}",
-                "Detected protocol/API markers: " + ", ".join(detected)
+                "Detected protocol/API markers: " + ", ".join(
+                    f"{label} ({protocol_counts.get(label, 0):,} line(s))"
+                    for label in detected
+                )
                 + ". Marker presence does not confirm protocol implementation or use.",
                 confidence="INFERRED",
                 evidence=[
                     f"{record.path}:{line} ({label})"
                     for label, lines in sorted(protocols.items())
-                    for line in sorted(lines)[:20]
-                ][:100],
+                    for line in lines
+                ][:_MAX_NETWORK_EVIDENCE],
                 analyzer=self.name,
+            ))
+        if budget_reason:
+            findings.append(Finding(
+                "network",
+                f"Network indicator scan budget reached: {record.path}",
+                f"Analysis stopped after {bytes_scanned:,} bytes because the {budget_reason}. "
+                "Indicators collected before the limit are partial; remaining content was "
+                "not inspected.",
+                confidence="UNKNOWN",
+                evidence=[
+                    record.path,
+                    f"bytes_scanned: {bytes_scanned:,}",
+                    f"unique_indicators_retained: {unique_indicator_count:,}",
+                ],
+                analyzer=self.name,
+                severity="LOW",
             ))
         return findings
