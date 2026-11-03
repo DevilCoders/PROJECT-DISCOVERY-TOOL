@@ -3,6 +3,7 @@ import argparse
 import os
 import platform
 import sqlite3
+import stat
 import threading
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +43,22 @@ from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _verified_regular_file_stat(path: Path, expected=None):
+    """Reject symlink/non-regular substitutions and detect file identity changes.
+
+    This narrows path-based TOCTOU exposure. Analyzer adapters still open paths
+    independently, so descriptor-pinned reads remain a separate hardening task.
+    """
+    current = path.lstat()
+    if not stat.S_ISREG(current.st_mode):
+        raise OSError(f"refusing to analyze non-regular or symlink entry: {path}")
+    if expected is not None:
+        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(current, key) != getattr(expected, key) for key in identity):
+            raise OSError(f"file identity changed during scan; refusing analysis: {path}")
+    return current
 
 
 def _status(console: Console, label: str, message: str, style: str) -> None:
@@ -198,12 +215,16 @@ def run_scan(
         if not getattr(analyzer, "concurrent_safe", True)
     }
 
-    def analyze_one(record, path, digest_hint):
+    def analyze_one(record, path, digest_hint, expected_stat):
         local_findings = []
         local_errors = []
         digest = digest_hint
-        if digest is None:
-            digest = sha256_file(path)
+        try:
+            _verified_regular_file_stat(path, expected_stat)
+            if digest is None:
+                digest = sha256_file(path)
+        except OSError as exc:
+            return None, [], [f"{record.path}: {type(exc).__name__}: {exc}"]
         for analyzer in analyzers:
             try:
                 lock = analyzer_locks.get(id(analyzer))
@@ -222,6 +243,13 @@ def run_scan(
                 local_errors.append(
                     f"{record.path} [{analyzer.name}]: {type(exc).__name__}: {exc}"
                 )
+        try:
+            _verified_regular_file_stat(path, expected_stat)
+        except OSError as exc:
+            # Findings produced while the path changed are not trustworthy.
+            local_findings.clear()
+            record.analyzed = False
+            local_errors.append(f"{record.path}: {type(exc).__name__}: {exc}")
         return digest, local_findings, local_errors
 
     progress_columns = (
@@ -245,7 +273,7 @@ def run_scan(
                     if file_errors:
                         record.error = file_errors[0]
                     if cache_miss and digest:
-                        current_stat = (root / record.path).stat()
+                        current_stat = _verified_regular_file_stat(root / record.path, file_stat)
                         stable = (
                             current_stat.st_size == file_stat.st_size
                             and current_stat.st_mtime_ns == file_stat.st_mtime_ns
@@ -279,7 +307,12 @@ def run_scan(
                         continue
                     path = root / record.path
                     try:
-                        file_stat = path.stat()
+                        file_stat = _verified_regular_file_stat(path)
+                        if (
+                            file_stat.st_size != record.size_bytes
+                            or (record.mtime_ns is not None and file_stat.st_mtime_ns != record.mtime_ns)
+                        ):
+                            raise OSError(f"file changed after inventory; refusing analysis: {record.path}")
                         cached = cache.get(str(root), record.path)
                         cache_hit = bool(
                             cached
@@ -289,7 +322,7 @@ def run_scan(
                             and cached[3] == file_stat.st_ino
                         )
                         digest_hint = cached[4] if cache_hit else None
-                        future = executor.submit(analyze_one, record, path, digest_hint)
+                        future = executor.submit(analyze_one, record, path, digest_hint, file_stat)
                         pending.append((future, record, file_stat, not cache_hit))
                         if len(pending) >= max_pending:
                             collect_one()
