@@ -64,3 +64,17 @@ def test_compare_many_reports_finds_overlap_across_all_projects():
     assert len(result["pairwise_comparisons"]) == 3
     assert len(result["duplicate_file_content"]) == 1
     assert len(result["duplicate_file_content"][0]["projects"]) == 3
+
+
+def test_multi_project_markdown_writer(tmp_path):
+    from project_discovery.comparison import compare_many_reports, write_comparison
+
+    reports = [
+        _report(f"/{name}", ["Python"], ["common"], [], [])
+        for name in ("a", "b", "c")
+    ]
+    comparison = compare_many_reports(reports)
+    paths = write_comparison(comparison, tmp_path, {"markdown"})
+    markdown = paths[0].read_text(encoding="utf-8")
+    assert "Shared across all projects" in markdown
+    assert "/a" in markdown and "/b" in markdown and "/c" in markdown

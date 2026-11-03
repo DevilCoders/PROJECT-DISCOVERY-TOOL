@@ -209,35 +209,82 @@ def write_comparison(
         written.append(path)
     if "markdown" in formats:
         path = output / "project-comparison.md"
-        left, right = comparison["projects"]
-        lines = [
-            "# Independent Project Comparison",
-            "",
-            f"- Project A: {left['root']}",
-            f"- Project B: {right['root']}",
-            "",
-            "## Shared languages",
-            "",
-            *[f"- {item}" for item in comparison["language_overlap"]["shared"]],
-            "",
-            "## Shared declared dependencies",
-            "",
-            *[f"- {item}" for item in comparison["dependency_overlap"]["shared_declared_dependencies"]],
-            "",
-            "## Shared Python module names",
-            "",
-            *[f"- {item}" for item in comparison["python_module_overlap"]["shared_module_names"]],
-            "",
-            "## Byte-identical files",
-            "",
-            *[
-                f"- {item['sha256']}: A={', '.join(item['left_paths'])}; "
-                f"B={', '.join(item['right_paths'])}"
-                for item in comparison["duplicate_file_content"]
-            ],
-            "",
-            "> Similarity is evidence for review, not a recommendation to merge independent projects.",
-        ]
+        if "all_projects_shared" in comparison:
+            shared = comparison["all_projects_shared"]
+            lines = [
+                "# Independent Project Comparison",
+                "",
+                "## Projects",
+                "",
+                *[
+                    f"- {project['root']} ({project['file_count']} files)"
+                    for project in comparison["projects"]
+                ],
+                "",
+                "## Shared across all projects",
+                "",
+                "### Languages",
+                *[f"- {item}" for item in shared["languages"]],
+                "",
+                "### Declared dependencies",
+                *[f"- {item}" for item in shared["declared_dependencies"]],
+                "",
+                "### Python module names",
+                *[f"- {item}" for item in shared["python_module_names"]],
+                "",
+                "## Pairwise overlap",
+                "",
+                *[
+                    f"- {item['left_project']} ↔ {item['right_project']}: "
+                    f"{len(item['shared_languages'])} languages, "
+                    f"{len(item['shared_declared_dependencies'])} dependencies, "
+                    f"{item['duplicate_file_count']} duplicate files"
+                    for item in comparison["pairwise_comparisons"]
+                ],
+                "",
+                "## Byte-identical content",
+                "",
+                *[
+                    f"- {item['sha256']}: "
+                    + "; ".join(
+                        f"{project}: {', '.join(paths)}"
+                        for project, paths in item["projects"].items()
+                    )
+                    for item in comparison["duplicate_file_content"]
+                ],
+                "",
+                "> Similarity is evidence for review, not a recommendation to merge independent projects.",
+            ]
+        else:
+            left, right = comparison["projects"]
+            lines = [
+                "# Independent Project Comparison",
+                "",
+                f"- Project A: {left['root']}",
+                f"- Project B: {right['root']}",
+                "",
+                "## Shared languages",
+                "",
+                *[f"- {item}" for item in comparison["language_overlap"]["shared"]],
+                "",
+                "## Shared declared dependencies",
+                "",
+                *[f"- {item}" for item in comparison["dependency_overlap"]["shared_declared_dependencies"]],
+                "",
+                "## Shared Python module names",
+                "",
+                *[f"- {item}" for item in comparison["python_module_overlap"]["shared_module_names"]],
+                "",
+                "## Byte-identical files",
+                "",
+                *[
+                    f"- {item['sha256']}: A={', '.join(item['left_paths'])}; "
+                    f"B={', '.join(item['right_paths'])}"
+                    for item in comparison["duplicate_file_content"]
+                ],
+                "",
+                "> Similarity is evidence for review, not a recommendation to merge independent projects.",
+            ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         written.append(path)
     return written

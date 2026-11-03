@@ -186,7 +186,7 @@ def main() -> None:
     scan.add_argument("--output", type=Path, default=None)
     scan.add_argument("--format", default="json,markdown,html")
     scan.add_argument("--max-file-mb", type=int, default=8)
-    compare = sub.add_parser("compare", help="Compare two independent PDT JSON reports")
+    compare = sub.add_parser("compare", help="Compare two or more independent PDT JSON reports")
     compare.add_argument("reports", type=Path, nargs="+")
     compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
     compare.add_argument("--format", default="json,markdown")
