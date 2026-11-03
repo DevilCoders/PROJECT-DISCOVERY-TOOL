@@ -144,29 +144,35 @@ for(const item of specialEntries){
 }
 $("no-special").classList.toggle("hidden",specialEntries.length!==0);
 
-const files=REPORT.files.slice().sort(function(a,b){return a.path.localeCompare(b.path);});
+const files=REPORT.files;
 const fileSearch=$("file-search"),fileKind=$("file-kind"),fileRows=$("file-rows"),fileMore=$("file-more");
-const fileTypes=Array.from(new Set(files.map(function(item){return item.file_type||"unknown";}))).sort();
-for(const type of fileTypes){const option=document.createElement("option");option.value=type;option.textContent=type;fileKind.append(option);}
-const FILE_PAGE=100;let fileMatches=files,fileOffset=0;
+const fileTypeSet=new Set();
+for(const item of files)fileTypeSet.add(item.file_type||"unknown");
+for(const type of Array.from(fileTypeSet).sort()){const option=document.createElement("option");option.value=type;option.textContent=type;fileKind.append(option);}
+const FILE_PAGE=100;let fileOffset=0,fileScanIndex=0,fileMatchCount=0;
+function fileMatchesFilter(item,query,kind){
+ return (!query||(item.path+" "+item.language+" "+item.file_type).toLowerCase().includes(query))&&
+  (!kind||(item.file_type||"unknown")===kind);
+}
+function countMatchingFiles(query,kind){
+ let count=0;for(const item of files)if(fileMatchesFilter(item,query,kind))count++;return count;
+}
 function renderFiles(reset){
- if(reset){fileOffset=0;fileRows.replaceChildren();}
- const query=fileSearch.value.trim().toLowerCase();
- fileMatches=files.filter(function(item){
-  return (!query||(item.path+" "+item.language+" "+item.file_type).toLowerCase().includes(query))&&
-   (!fileKind.value||(item.file_type||"unknown")===fileKind.value);
- });
- const end=Math.min(fileOffset+FILE_PAGE,fileMatches.length);
- for(let i=fileOffset;i<end;i++){
-  const item=fileMatches[i],tr=document.createElement("tr");
+ const query=fileSearch.value.trim().toLowerCase(),kind=fileKind.value;
+ if(reset){fileOffset=0;fileScanIndex=0;fileRows.replaceChildren();fileMatchCount=countMatchingFiles(query,kind);}
+ let rendered=0;
+ while(fileScanIndex<files.length&&rendered<FILE_PAGE){
+  const item=files[fileScanIndex++];
+  if(!fileMatchesFilter(item,query,kind))continue;
+  const tr=document.createElement("tr");
   const flags=[item.is_hidden?"hidden":null,item.content_skipped_reason?"content skipped":null,item.error?"error":null].filter(Boolean).join(" / ")||"—";
   for(const pair of [[item.path,"path"],[formatBytes(item.size_bytes),""],[item.file_type||"unknown",""],[item.language,""],[flags,""]]){
    const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
   }
-  fileRows.append(tr);
+  fileRows.append(tr);rendered++;fileOffset++;
  }
- fileOffset=end;$("file-page-info").textContent="Showing "+number(fileOffset)+" of "+number(fileMatches.length)+" matching files";
- fileMore.disabled=fileOffset>=fileMatches.length;fileMore.textContent=fileMore.disabled?"End of inventory":"Load next page";
+ $("file-page-info").textContent="Showing "+number(fileOffset)+" of "+number(fileMatchCount)+" matching files";
+ fileMore.disabled=fileScanIndex>=files.length;fileMore.textContent=fileMore.disabled?"End of inventory":"Load next page";
 }
 fileSearch.addEventListener("input",function(){renderFiles(true);});
 fileKind.addEventListener("change",function(){renderFiles(true);});
@@ -174,11 +180,23 @@ fileMore.addEventListener("click",function(){renderFiles(false);});
 $("file-reset").addEventListener("click",function(){fileSearch.value="";fileKind.value="";renderFiles(true);});
 renderFiles(true);
 
-const findings=REPORT.findings||[],categories=Array.from(new Set(findings.map(function(item){return item.category;}))).sort();
-for(const value of categories){const option=document.createElement("option");option.value=value;option.textContent=value;$("category").append(option);}
+const findings=REPORT.findings||[],categorySet=new Set();
+for(const item of findings)categorySet.add(item.category);
+for(const value of Array.from(categorySet).sort()){const option=document.createElement("option");option.value=value;option.textContent=value;$("category").append(option);}
 const search=$("search"),category=$("category"),confidence=$("confidence"),severity=$("severity");
 const list=$("finding-list"),loadMore=$("load-more"),FINDING_PAGE=100;
-let matches=[],findingOffset=0,expandFuture=false;
+let findingOffset=0,findingScanIndex=0,findingMatchCount=0,expandFuture=false;
+let activeFindingFilter={query:"",category:"",confidence:"",severity:""};
+function findingMatchesFilter(item,filter){
+ const haystack=[item.title,item.detail,(item.evidence||[]).join(" ")].join(" ").toLowerCase();
+ return (!filter.query||haystack.includes(filter.query))&&
+  (!filter.category||item.category===filter.category)&&
+  (!filter.confidence||item.confidence===filter.confidence)&&
+  (!filter.severity||item.severity===filter.severity);
+}
+function countMatchingFindings(filter){
+ let count=0;for(const item of findings)if(findingMatchesFilter(item,filter))count++;return count;
+}
 function makeFinding(item){
  const article=document.createElement("article");article.className="finding";
  const details=document.createElement("details");details.open=expandFuture;
@@ -198,23 +216,24 @@ function makeFinding(item){
  body.append(description,evidence,analyzer);details.append(summary,body);article.append(details);return article;
 }
 function updateFindingFilter(reset){
- if(reset){findingOffset=0;list.replaceChildren();}
- const q=search.value.trim().toLowerCase();
- matches=findings.filter(function(item){
-  return (!q||[item.title,item.detail,(item.evidence||[]).join(" ")].join(" ").toLowerCase().includes(q))&&
-   (!category.value||item.category===category.value)&&
-   (!confidence.value||item.confidence===confidence.value)&&
-   (!severity.value||item.severity===severity.value);
- });
- $("finding-count").textContent=number(matches.length)+" matching findings";
- $("no-findings").classList.toggle("hidden",matches.length!==0);
+ if(reset){
+  activeFindingFilter={query:search.value.trim().toLowerCase(),category:category.value,confidence:confidence.value,severity:severity.value};
+  findingOffset=0;findingScanIndex=0;list.replaceChildren();
+  findingMatchCount=countMatchingFindings(activeFindingFilter);
+ }
+ $("finding-count").textContent=number(findingMatchCount)+" matching findings";
+ $("no-findings").classList.toggle("hidden",findingMatchCount!==0);
  appendFindings();
 }
 function appendFindings(){
- const end=Math.min(findingOffset+FINDING_PAGE,matches.length);
- for(let i=findingOffset;i<end;i++)list.append(makeFinding(matches[i]));
- findingOffset=end;$("page-count").textContent="Rendered "+number(findingOffset)+" / "+number(matches.length);
- loadMore.disabled=findingOffset>=matches.length;loadMore.textContent=loadMore.disabled?"All filtered findings loaded":"Load next page";
+ let rendered=0;
+ while(findingScanIndex<findings.length&&rendered<FINDING_PAGE){
+  const item=findings[findingScanIndex++];
+  if(!findingMatchesFilter(item,activeFindingFilter))continue;
+  list.append(makeFinding(item));rendered++;findingOffset++;
+ }
+ $("page-count").textContent="Rendered "+number(findingOffset)+" / "+number(findingMatchCount);
+ loadMore.disabled=findingScanIndex>=findings.length;loadMore.textContent=loadMore.disabled?"All filtered findings loaded":"Load next page";
 }
 search.addEventListener("input",function(){updateFindingFilter(true);});
 category.addEventListener("change",function(){updateFindingFilter(true);});
