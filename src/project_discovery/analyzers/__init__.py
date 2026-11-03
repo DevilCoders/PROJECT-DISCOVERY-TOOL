@@ -12,6 +12,7 @@ from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
 from .ml_analyzer import AIMLIntelligenceAnalyzer
 from .document_analyzer import DocumentAnalyzer
+from .lockfile_analyzer import LockfileAnalyzer
 from .prisma_analyzer import PrismaSchemaAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .security_analyzer import SecretPatternAnalyzer
@@ -33,6 +34,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
         DependencyManifestAnalyzer(),
+        LockfileAnalyzer(),
         ConfigurationAnalyzer(),
         APIContractAnalyzer(),
         SQLSchemaAnalyzer(),

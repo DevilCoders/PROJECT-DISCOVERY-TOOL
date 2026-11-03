@@ -24,7 +24,7 @@ _DOMAINS = (
     AnalyzerDomain("type_systems", "Type Systems", "Declared types, generics, traits, interfaces, protocols and type references."),
     AnalyzerDomain("documentation", "Documentation Intelligence", "Markdown, HTML, PDF, office documents, references, stale claims and contradictions.", "partial"),
     AnalyzerDomain("dependency_manifests", "Dependency Manifests", "Declared packages, versions, optional groups, workspaces and lockfiles.", "partial"),
-    AnalyzerDomain("dependency_resolution", "Dependency Resolution", "Resolved dependency trees, conflicts, version constraints and provenance."),
+    AnalyzerDomain("dependency_resolution", "Dependency Resolution", "Resolved dependency trees, conflicts, version constraints and provenance.", "partial"),
     AnalyzerDomain("licenses", "License Intelligence", "License declarations, notices, compatibility and attribution evidence."),
     AnalyzerDomain("secrets", "Secret Exposure", "Potential credentials, keys, tokens and sensitive material with redaction.", "partial"),
     AnalyzerDomain("vulnerabilities", "Vulnerability Intelligence", "Known vulnerable dependency versions and local advisory matching."),
