@@ -348,7 +348,7 @@ def _html_report(result: ScanResult) -> str:
 def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     """Write Markdown incrementally without duplicating the complete report in RAM."""
     def line(value: str = "") -> None:
-        stream.write(value + "\\n")
+        stream.write(value + "\n")
 
     metrics = result.metrics
     native = metrics.get("native_backend", {})
@@ -490,7 +490,7 @@ def _markdown_report(result: ScanResult) -> str:
     """Compatibility helper for callers/tests that explicitly need a string."""
     buffer = io.StringIO()
     _write_markdown_report(buffer, result)
-    return buffer.getvalue().rstrip() + "\\n"
+    return buffer.getvalue().rstrip() + "\n"
 
 
 def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[Path]:
