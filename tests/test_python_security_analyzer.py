@@ -61,3 +61,17 @@ def test_ast_security_budget_reports_unknown_not_clean_result(tmp_path: Path):
     assert len(findings) == 1
     assert findings[0].confidence == "UNKNOWN"
     assert "AST resource limit" in findings[0].title
+
+def test_python_ast_findings_include_redacted_source_and_impact(tmp_path: Path):
+    secret = "ast-evidence-secret-876"
+    findings = _scan(
+        tmp_path,
+        "eval(user_input)  # SERVICE_TOKEN=ast-evidence-secret-876\\n",
+    )
+    assert findings
+    finding = findings[0]
+    assert finding.code_evidence
+    assert secret not in repr(finding.to_dict())
+    assert "[REDACTED]" in finding.code_evidence[0].code
+    assert finding.impact
+    assert finding.recommendation
