@@ -104,3 +104,15 @@ def test_python_security_detects_growth_beyond_parser_budget(tmp_path: Path, mon
     assert len(findings) == 1
     assert findings[0].confidence == "UNKNOWN"
     assert "resource limit" in findings[0].title.lower()
+
+def test_python_security_analyzer_honors_pep263_source_encoding_cookie(tmp_path: Path):
+    path = tmp_path / "latin_service.py"
+    path.write_bytes(
+        b"# -*- coding: latin-1 -*-\n"
+        b"eval(user_input)  # caf\xe9\n"
+    )
+    record = FileRecord(path.name, path.stat().st_size, ".py", "Python")
+    findings = PythonSecurityAnalyzer().analyze(path, record)
+    assert any("dynamic_code_execution" in item.title for item in findings)
+    assert all(item.confidence != "UNKNOWN" for item in findings)
+
