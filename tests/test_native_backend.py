@@ -4,7 +4,7 @@ from project_discovery import native_backend
 def test_count_byte_matches_python_for_all_buffer_shapes():
     payload = bytes(range(256)) * 257 + b"\n\n\x00"
     for value in (0, 1, 10, 127, 255):
-    expected = payload.count(bytes([10]))
+        expected = payload.count(bytes([value]))
         assert native_backend.count_byte(payload, value) == expected
         assert native_backend.count_byte(bytearray(payload), value) == expected
         assert native_backend.count_byte(memoryview(payload), value) == expected
@@ -90,7 +90,7 @@ def test_native_byte_counter_is_safe_under_concurrent_calls():
 def test_large_mutable_buffers_use_safe_cpu_path():
     payload = bytearray(bytes(range(256)) * 32768)
     before = native_backend.capabilities()["gpu_dispatches"]
-    expected = payload.count(b"\\x0a")
+    expected = payload.count(bytes([10]))
     assert native_backend.count_byte(payload, 10) == expected
     assert native_backend.count_byte(memoryview(payload), 10) == expected
     after = native_backend.capabilities()["gpu_dispatches"]
