@@ -38,7 +38,7 @@ _LOCK_NAMES = {
     "pipfile.lock", "pnpm-lock.yaml", "yarn.lock", "gemfile.lock",
     "go.sum", "mix.lock",
 }
-_YARN_HEADER = re.compile(r"""(?m)^"?([^"\n]+?)@[^:\n]+:\s*$""")
+_YARN_HEADER = re.compile(r"""(?m)^"?(.+?)"?:\s*$""")
 _YARN_VERSION = re.compile(r'(?m)^\s+version\s+"?([^"\s]+)"?')
 _GEM_SPEC = re.compile(r"(?m)^\s{4}([A-Za-z0-9_.-]+)\s+\(([^)]+)\)")
 _GO_SUM = re.compile(r"(?m)^([A-Za-z0-9_./-]+)\s+(v[^\s]+?)(?:/go.mod)?\s+")
@@ -123,17 +123,19 @@ class LockfileAnalyzer(Analyzer):
                     header = _YARN_HEADER.match(line)
                     if header:
                         header_value = header.group(1)
-                        selectors = [
-                            value.strip().strip('"')
-                            for value in header_value.split(",")
-                            if value.strip()
-                        ]
+                        selectors = []
+                        for value in header_value.split(","):
+                            selector = value.strip().strip('"')
+                            parsed = re.match(
+                                r"^(@[^/]+/[^@]+|[^@]+)@(.+)$", selector
+                            )
+                            if parsed:
+                                selectors.append(parsed.group(1))
                         continue
                     if selectors:
                         version_match = _YARN_VERSION.match(line)
                         if version_match:
-                            for selector in selectors:
-                                package = selector.split("@", 1)[0] if not selector.startswith("@") else selector.rsplit("@", 1)[0]
+                            for package in selectors:
                                 _append_package(packages, package, version_match.group(1))
                             selectors = []
             elif name == "gemfile.lock":
