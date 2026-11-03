@@ -17,7 +17,7 @@ _MIGRATION_EXTENSIONS = source_extensions() | {".xml", ".yaml", ".yml", ".json"}
 
 _MIGRATION_DIRS = {
     "migration", "migrations", "migrate", "versions", "changelog",
-    "changelogs", "changeset", "changesets", "flyway", "liquibase",
+    "changelogs", "changeset", "changesets", "flyway", "liquibase", "drizzle",
 }
 _FLYWAY_NAME = re.compile(r"^(?P<identifier>(?:V\d+|R|U\d+)__.+)\.sql$", re.I)
 _REVISION = re.compile(r"(?m)^\s*revision\s*=\s*['\"]([^'\"]+)['\"]")
