@@ -18,7 +18,7 @@ PyObject* classify(std::string_view data) {
         starts_with(data, "PK\x07\x08")) return emit("archive/zip");
     if (starts_with(data, "\x1f\x8b")) return emit("archive/gzip");
     if (starts_with(data, "BZh")) return emit("archive/bzip2");
-    if (starts_with(data, "\xfd7zXZ\x00")) return emit("archive/xz");
+    if (starts_with(data, "\xfd" "7zXZ\x00")) return emit("archive/xz");
     if (starts_with(data, "\x28\xb5\x2f\xfd")) return emit("archive/zstandard");
     if (starts_with(data, "7z\xbc\xaf\x27\x1c")) return emit("archive/7z");
     if (starts_with(data, "Rar!\x1a\x07")) return emit("archive/rar");
@@ -32,12 +32,12 @@ PyObject* classify(std::string_view data) {
     if (starts_with(data, "\xfe\xed\xfa\xce") || starts_with(data, "\xce\xfa\xed\xfe") ||
         starts_with(data, "\xfe\xed\xfa\xcf") || starts_with(data, "\xcf\xfa\xed\xfe") ||
         starts_with(data, "\xca\xfe\xba\xbe")) return emit("executable/mach-o-or-fat");
-    if (starts_with(data, "SQLite format 3\0")) return emit("database/sqlite");
+    if (starts_with(data, std::string_view("SQLite format 3\0", 16))) return emit("database/sqlite");
     if (starts_with(data, "\x89PNG\r\n\x1a\n")) return emit("image/png");
     if (starts_with(data, "\xff\xd8\xff")) return emit("image/jpeg");
     if (starts_with(data, "GIF87a") || starts_with(data, "GIF89a")) return emit("image/gif");
     if (starts_with(data, "BM")) return emit("image/bmp");
-    if (starts_with(data, "II*\0") || starts_with(data, "MM\0*")) return emit("image/tiff");
+    if (starts_with(data, std::string_view("II*\0", 4)) || starts_with(data, std::string_view("MM\0*", 4))) return emit("image/tiff");
     if (data.size() >= 12 && data.substr(0, 4) == "RIFF" && data.substr(8, 4) == "WEBP")
         return emit("image/webp");
     if (data.size() >= 12 && data.substr(0, 4) == "RIFF" && data.substr(8, 4) == "WAVE")
@@ -49,7 +49,7 @@ PyObject* classify(std::string_view data) {
     if (starts_with(data, "wOF2")) return emit("font/woff2");
     if (starts_with(data, "wOFF")) return emit("font/woff");
     if (starts_with(data, "OTTO")) return emit("font/otf");
-    if (starts_with(data, "\0\1\0\0")) return emit("font/ttf");
+    if (starts_with(data, std::string_view("\0\1\0\0", 4))) return emit("font/ttf");
     Py_RETURN_NONE;
 }
 
