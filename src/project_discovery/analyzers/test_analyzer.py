@@ -75,7 +75,7 @@ _TEST_FILENAMES = (
     re.compile(r"(^|/)[^/]+\.t$", re.I),
     re.compile(r"(^|/)Spec\.hs$", re.I),
     re.compile(r"(^|/)(?:test_[^/]+|[^/]+_(?:test|tests|spec))\.(?:dart|exs|r|jl|scala|clj|lua|ps1|sol|sv|bats)$", re.I),
-    re.compile(r"(^|/)[^/]+Tests?\.(?:java|kt|cs|fs|vb|swift|dart|groovy|m)$", re.I),
+    re.compile(r"(^|/)[^/]+Tests?\.(?:java|kt|cs|fs|vb|swift|dart|groovy|m|ps1)$", re.I),
     re.compile(r"(^|/)[^/]+(?:Spec|Suite)\.(?:scala|hs)$", re.I),
     re.compile(r"(^|/)[^/]+\.t\.sol$", re.I),
     re.compile(r"(^|/)tb_[^/]+\.(?:v|sv|vhd|vhdl)$", re.I),
