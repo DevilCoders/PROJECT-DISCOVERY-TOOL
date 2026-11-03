@@ -45,3 +45,22 @@ def test_comparison_handles_no_overlap():
     comparison = compare_reports(left, right)
     assert comparison["language_overlap"]["shared"] == []
     assert comparison["duplicate_file_content"] == []
+
+
+def test_compare_many_reports_finds_overlap_across_all_projects():
+    from project_discovery.comparison import compare_many_reports
+
+    reports = [
+        _report(
+            f"/projects/{name}", ["Python", "Rust"], ["shared-lib", f"only-{name}"],
+            ["common.module"], [{"path": "common.py", "sha256": "shared-bytes"}],
+        )
+        for name in ("one", "two", "three")
+    ]
+    result = compare_many_reports(reports)
+    assert len(result["projects"]) == 3
+    assert result["all_projects_shared"]["languages"] == ["Python", "Rust"]
+    assert result["all_projects_shared"]["declared_dependencies"] == ["shared-lib"]
+    assert len(result["pairwise_comparisons"]) == 3
+    assert len(result["duplicate_file_content"]) == 1
+    assert len(result["duplicate_file_content"][0]["projects"]) == 3

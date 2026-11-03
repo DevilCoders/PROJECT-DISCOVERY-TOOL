@@ -116,6 +116,85 @@ def compare_reports(
     }
 
 
+
+
+def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare two or more independent project reports pairwise and collectively."""
+    if len(reports) < 2:
+        raise ValueError("At least two project reports are required.")
+    projects = [
+        {"root": report.get("root"), "file_count": len(report.get("files", []))}
+        for report in reports
+    ]
+    language_sets = [
+        set(report.get("metrics", {}).get("languages", {})) for report in reports
+    ]
+    dependency_sets = [_declared_dependencies(report) for report in reports]
+    module_sets = [_python_modules(report) for report in reports]
+    api_sets = [
+        {
+            evidence
+            for item in report.get("findings", []) if item.get("category") == "api"
+            for evidence in item.get("evidence", [])
+        }
+        for report in reports
+    ]
+    shared_hashes: dict[str, dict[int, list[str]]] = defaultdict(dict)
+    for index, report in enumerate(reports):
+        for digest, paths in _file_hashes(report).items():
+            shared_hashes[digest][index] = paths
+
+    common_languages = set.intersection(*language_sets) if language_sets else set()
+    common_dependencies = set.intersection(*dependency_sets) if dependency_sets else set()
+    common_modules = set.intersection(*module_sets) if module_sets else set()
+    common_api = set.intersection(*api_sets) if api_sets else set()
+    duplicates = []
+    for digest, locations in sorted(shared_hashes.items()):
+        if len(locations) >= 2:
+            duplicates.append({
+                "sha256": digest,
+                "projects": {
+                    str(projects[index]["root"]): sorted(paths)
+                    for index, paths in sorted(locations.items())
+                },
+                "confidence": "CONFIRMED",
+            })
+
+    pairwise = []
+    for left_index in range(len(reports)):
+        for right_index in range(left_index + 1, len(reports)):
+            result = compare_reports(reports[left_index], reports[right_index])
+            pairwise.append({
+                "left_project": projects[left_index]["root"],
+                "right_project": projects[right_index]["root"],
+                "shared_languages": result["language_overlap"]["shared"],
+                "shared_declared_dependencies": result["dependency_overlap"]["shared_declared_dependencies"],
+                "shared_python_module_names": result["python_module_overlap"]["shared_module_names"],
+                "duplicate_file_count": len(result["duplicate_file_content"]),
+            })
+
+    return {
+        "schema_version": "1.0",
+        "comparison_type": "independent_project_reports",
+        "projects": projects,
+        "all_projects_shared": {
+            "languages": sorted(common_languages),
+            "declared_dependencies": sorted(common_dependencies),
+            "python_module_names": sorted(common_modules),
+            "api_evidence": sorted(common_api),
+        },
+        "pairwise_comparisons": pairwise,
+        "duplicate_file_content": duplicates,
+        "interpretation": {
+            "shared_dependencies": "CONFIRMED declarations; not proof of compatible versions or runtime use.",
+            "shared_module_names": "INFERRED naming overlap; not proof of equivalent implementation.",
+            "shared_api_evidence": "CONFIRMED matching evidence strings; not proof of API compatibility.",
+            "duplicate_file_content": "CONFIRMED byte-identical content based on SHA-256 report fingerprints.",
+            "integration_recommendation": "Not generated. Similarity is evidence for human review, not authorization to merge projects.",
+        },
+    }
+
+
 def write_comparison(
     comparison: dict[str, Any], output: Path, formats: set[str]
 ) -> list[Path]:

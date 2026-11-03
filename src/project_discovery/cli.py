@@ -20,7 +20,7 @@ from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
 from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
-from .comparison import compare_reports, load_report, write_comparison
+from .comparison import compare_many_reports, load_report, write_comparison
 from .language_catalog import language_catalog, recognized_language_count
 from .models import ScanResult
 from .python_graph import analyze_python_dependencies
@@ -187,8 +187,7 @@ def main() -> None:
     scan.add_argument("--format", default="json,markdown,html")
     scan.add_argument("--max-file-mb", type=int, default=8)
     compare = sub.add_parser("compare", help="Compare two independent PDT JSON reports")
-    compare.add_argument("left", type=Path)
-    compare.add_argument("right", type=Path)
+    compare.add_argument("reports", type=Path, nargs="+")
     compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
     compare.add_argument("--format", default="json,markdown")
     args = parser.parse_args()
@@ -205,7 +204,9 @@ def main() -> None:
 
         if not formats or formats - {"json", "markdown"}:
             parser.error("compare --format accepts json, markdown")
-        comparison = compare_reports(load_report(args.left), load_report(args.right))
+        if len(args.reports) < 2:
+            parser.error("compare requires at least two report JSON files")
+        comparison = compare_many_reports([load_report(path) for path in args.reports])
         for report in write_comparison(comparison, args.output, formats):
             print("[ SUCCESS ] Comparison report: " + str(report))
         raise SystemExit(0)
