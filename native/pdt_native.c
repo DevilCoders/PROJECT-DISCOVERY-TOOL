@@ -557,7 +557,7 @@ static PyObject *pdt_native_capabilities(PyObject *self, PyObject *Py_UNUSED(arg
 
     gpu_available = pdt_opencl_initialize();
     return Py_BuildValue(
-        "{s:s,s:s,s:l,s:O,s:O,s:O,s:s,s:s,s:I,s:K,s:K,s:K,s:K,s:K}",
+        "{s:s,s:s,s:l,s:O,s:O,s:O,s:s,s:s,s:I,s:s,s:K,s:K,s:K,s:K,s:K}",
         "architecture", architecture,
         "backend", pdt_backend_name(),
         "hardware_threads", hardware_threads,
