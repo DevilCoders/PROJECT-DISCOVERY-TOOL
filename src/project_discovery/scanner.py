@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 
 from .language_catalog import detect_language, is_source_path, is_textual_path
 from .native_backend import count_byte as native_count_byte
+from .native_backend import detect_signature as native_detect_signature
 from .models import (
     DirectoryRecord,
     FileRecord,
@@ -75,8 +76,11 @@ def _signature_type(path: Path, relative_path: str) -> str | None:
         return None
     if not head:
         return None
+    native_type = native_detect_signature(head)
+    if native_type:
+        return native_type
 
-    # Archive/container signatures.
+    # Portable fallback signature catalog.
     if head.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
         return "archive/zip"
     if head.startswith(b"\x1f\x8b"):
