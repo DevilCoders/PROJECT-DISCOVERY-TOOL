@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import html
+import io
 import json
 from importlib.resources import files as resource_files
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from .models import ScanResult
 
@@ -49,9 +50,8 @@ def _report_data(result: ScanResult) -> dict[str, Any]:
     }
 
 
-def _html_report(result: ScanResult) -> str:
-    data = _script_json(_report_data(result))
-    report_js = resource_files("project_discovery").joinpath("web/report.js").read_text(encoding="utf-8").replace("__DATA__", data)
+def _html_template(result: ScanResult) -> str:
+    report_js = resource_files("project_discovery").joinpath("web/report.js").read_text(encoding="utf-8")
     root = html.escape(result.root)
     generated = html.escape(result.finished_at)
     template = """<!doctype html>
@@ -260,6 +260,108 @@ __REPORT_JS__
     )
 
 
+def _write_json_value(stream: TextIO, value: Any, *, script_safe: bool = False) -> None:
+    if script_safe:
+        stream.write(_script_json(value))
+    else:
+        stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _write_json_array(
+    stream: TextIO,
+    values,
+    serializer,
+    *,
+    script_safe: bool = False,
+) -> None:
+    stream.write("[")
+    first = True
+    for item in values:
+        if not first:
+            stream.write(",")
+        first = False
+        _write_json_value(stream, serializer(item), script_safe=script_safe)
+    stream.write("]")
+
+
+def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
+    stream.write('{"findings":')
+    _write_json_array(stream, result.findings, lambda item: item.to_dict(), script_safe=True)
+    stream.write(',"files":')
+    _write_json_array(
+        stream,
+        result.files,
+        lambda item: {
+            "path": item.path,
+            "size_bytes": item.size_bytes,
+            "extension": item.extension,
+            "language": item.language,
+            "file_type": item.file_type,
+            "size_bucket": item.size_bucket,
+            "is_hidden": item.is_hidden,
+            "permissions": item.permissions,
+            "content_skipped_reason": item.content_skipped_reason,
+            "error": item.error,
+        },
+        script_safe=True,
+    )
+    stream.write(',"directories":')
+    _write_json_array(stream, result.directories, lambda item: item.to_dict(), script_safe=True)
+    stream.write(',"symlinks":')
+    _write_json_array(stream, result.symlinks, lambda item: item.to_dict(), script_safe=True)
+    stream.write(',"special_entries":')
+    _write_json_array(stream, result.special_entries, lambda item: item.to_dict(), script_safe=True)
+    stream.write(',"metrics":')
+    _write_json_value(stream, result.metrics, script_safe=True)
+    stream.write(',"errors":')
+    _write_json_value(stream, result.errors, script_safe=True)
+    stream.write(',"analyzers":')
+    _write_json_value(stream, result.analyzer_names, script_safe=True)
+    stream.write("}")
+
+
+def _write_json_report(stream: TextIO, result: ScanResult) -> None:
+    stream.write('{"schema_version":"1.2","root":')
+    _write_json_value(stream, result.root)
+    stream.write(',"started_at":')
+    _write_json_value(stream, result.started_at)
+    stream.write(',"finished_at":')
+    _write_json_value(stream, result.finished_at)
+    stream.write(',"files":')
+    _write_json_array(stream, result.files, lambda item: item.to_dict())
+    stream.write(',"directories":')
+    _write_json_array(stream, result.directories, lambda item: item.to_dict())
+    stream.write(',"symlinks":')
+    _write_json_array(stream, result.symlinks, lambda item: item.to_dict())
+    stream.write(',"special_entries":')
+    _write_json_array(stream, result.special_entries, lambda item: item.to_dict())
+    stream.write(',"findings":')
+    _write_json_array(stream, result.findings, lambda item: item.to_dict())
+    stream.write(',"metrics":')
+    _write_json_value(stream, result.metrics)
+    stream.write(',"errors":')
+    _write_json_value(stream, result.errors)
+    stream.write(',"analyzers":')
+    _write_json_value(stream, result.analyzer_names)
+    stream.write("}\n")
+
+
+def _write_html_report(stream: TextIO, result: ScanResult) -> None:
+    template = _html_template(result)
+    before, separator, after = template.partition("__DATA__")
+    if not separator:
+        raise RuntimeError("HTML report template is missing the report data placeholder")
+    stream.write(before)
+    _write_html_payload(stream, result)
+    stream.write(after)
+
+
+def _html_report(result: ScanResult) -> str:
+    buffer = io.StringIO()
+    _write_html_report(buffer, result)
+    return buffer.getvalue()
+
+
 def _markdown_report(result: ScanResult) -> str:
     metrics = result.metrics
     lines = [
@@ -370,9 +472,8 @@ def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[P
     written: list[Path] = []
     if "json" in formats:
         path = output / "discovery-report.json"
-        path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        with path.open("w", encoding="utf-8", newline="\n") as stream:
+            _write_json_report(stream, result)
         written.append(path)
     if "markdown" in formats:
         path = output / "discovery-report.md"
@@ -380,6 +481,7 @@ def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[P
         written.append(path)
     if "html" in formats:
         path = output / "discovery-report.html"
-        path.write_text(_html_report(result), encoding="utf-8")
+        with path.open("w", encoding="utf-8", newline="\n") as stream:
+            _write_html_report(stream, result)
         written.append(path)
     return written
