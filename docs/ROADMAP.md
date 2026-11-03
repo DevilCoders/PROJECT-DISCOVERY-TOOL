@@ -10,6 +10,7 @@
 - [x] Analyzer entry-point extension contract
 - [x] Python module registry and confirmed internal import graph
 - [x] Strongly connected component detection for Python import cycles
+- [x] Dependency manifest inventory (Python, Node, Rust, Go, Composer)
 - [ ] Rich terminal UI and CLI ergonomics
 - [ ] CI coverage gates
 

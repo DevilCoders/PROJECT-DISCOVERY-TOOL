@@ -8,7 +8,7 @@ PDT is a local-first, read-only analyzer. The core owns traversal, shared models
 2. Walk the target deterministically, pruning common generated/vendor directories and skipping symlinks.
 3. Fingerprint files and reuse cached hashes when size and nanosecond mtime match.
 4. Dispatch eligible files to analyzers.
-5. Build static language-specific dependency graphs from inventoried source.
+5. Build static language-specific dependency graphs from inventoried source and extract declared dependency manifests.
 6. Serialize findings, graph evidence and inventory to local report formats.
 
 ## Analyzer contract
@@ -16,6 +16,9 @@ Implement `project_discovery.analyzers.base.Analyzer`, then expose a no-argument
 
 ## Python module graph
 The first dependency graph is Python AST based. It maps unambiguous `.py` and `.pyi` paths to module names, resolves absolute and relative imports only against inventoried modules, and records source path and line evidence. Strongly connected components identify circular dependencies. External, missing and ambiguous imports remain UNKNOWN; they are not presented as confirmed internal edges. Target modules are parsed, never imported or executed.
+
+## Dependency manifests
+The manifest analyzer reads `pyproject.toml`, `requirements*.txt`, `package.json`, `Cargo.toml`, `go.mod`, and `composer.json`. Findings confirm that a dependency is declared in a manifest; they do not claim that it is installed, imported, or used at runtime. Malformed manifests produce UNKNOWN findings.
 
 ## Confidence
 - CONFIRMED: directly observed in source or configuration.

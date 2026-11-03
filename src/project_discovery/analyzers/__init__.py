@@ -1,11 +1,18 @@
 """Built-in and third-party analyzer discovery."""
 from importlib.metadata import entry_points
+
 from .base import Analyzer
 from .python_analyzer import PythonAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
+from .dependency_manifest_analyzer import DependencyManifestAnalyzer
+
 
 def load_analyzers() -> list[Analyzer]:
-    result: list[Analyzer] = [PythonAnalyzer(), MarkdownAnalyzer()]
+    result: list[Analyzer] = [
+        PythonAnalyzer(),
+        MarkdownAnalyzer(),
+        DependencyManifestAnalyzer(),
+    ]
     for point in entry_points(group="pdt.analyzers"):
         try:
             candidate = point.load()()
