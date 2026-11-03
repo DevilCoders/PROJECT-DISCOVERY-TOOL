@@ -61,3 +61,26 @@ def test_identity_analyzer_reports_oversized_source_as_unknown(tmp_path: Path, m
     findings = IdentityIntelligenceAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "resource limit" in findings[0].title.lower()
+
+def test_identity_analyzer_detects_growth_after_inventory(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import identity_analyzer
+
+    path = tmp_path / "growing_auth.py"
+    path.write_text("from jwt import decode\n", encoding="utf-8")
+    monkeypatch.setattr(identity_analyzer, "_MAX_IDENTITY_SOURCE_BYTES", 8)
+    record = FileRecord(path.name, 1, ".py", "Python")
+    findings = IdentityIntelligenceAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
+
+
+def test_identity_analyzer_honors_python_encoding_cookie(tmp_path: Path):
+    path = tmp_path / "latin_auth.py"
+    path.write_bytes(
+        b"# -*- coding: latin-1 -*-" + bytes([10])
+        + b"from jwt import decode  # caf" + bytes([0xE9, 10])
+    )
+    record = FileRecord(path.name, path.stat().st_size, ".py", "Python")
+    findings = IdentityIntelligenceAnalyzer().analyze(path, record)
+    assert any("Identity framework references" in item.title for item in findings)
+    assert all(item.confidence != "UNKNOWN" for item in findings)
