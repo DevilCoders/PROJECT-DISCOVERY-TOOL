@@ -249,7 +249,7 @@ def write_comparison(
     if "json" in formats:
         path = output / "project-comparison.json"
         path.write_text(
-            json.dumps(comparison, indent=2, ensure_ascii=False) + "\n",
+            json.dumps(comparison, indent=2, ensure_ascii=False) + "\\n",
             encoding="utf-8",
         )
         written.append(path)
@@ -262,45 +262,41 @@ def write_comparison(
                 "",
                 "## Projects",
                 "",
-                *[
-                    f"- {project['root']} ({project['file_count']} files)"
-                    for project in comparison["projects"]
-                ],
-                "",
-                "## Shared across all projects",
-                "",
-                "### Languages",
-                *[f"- {item}" for item in shared["languages"]],
-                "",
-                "### Declared dependencies",
-                *[f"- {item}" for item in shared["declared_dependencies"]],
-                "",
-                "### Python module names",
-                *[f"- {item}" for item in shared["python_module_names"]],
-                "",
-                "## Pairwise overlap",
-                "",
-                *[
+            ]
+            lines.extend(
+                f"- {project['root']} ({project['file_count']} files)"
+                for project in comparison["projects"]
+            )
+            lines.extend(["", "## Shared across all projects", "", "### Languages"])
+            lines.extend(f"- {item}" for item in shared["languages"])
+            lines.extend(["", "### Declared dependencies"])
+            lines.extend(f"- {item}" for item in shared["declared_dependencies"])
+            lines.extend(["", "### Resolved dependency versions"])
+            for item in shared["resolved_dependencies"]:
+                versions = "; ".join(
+                    "{}={}".format(project, ", ".join(values))
+                    for project, values in item["versions_by_project"].items()
+                )
+                suffix = " (version conflict)" if item["version_conflict"] else ""
+                lines.append(f"- {item['name']}: {versions}{suffix}")
+            lines.extend(["", "### Python module names"])
+            lines.extend(f"- {item}" for item in shared["python_module_names"])
+            lines.extend(["", "## Pairwise overlap", ""])
+            for item in comparison["pairwise_comparisons"]:
+                lines.append(
                     f"- {item['left_project']} ↔ {item['right_project']}: "
                     f"{len(item['shared_languages'])} languages, "
                     f"{len(item['shared_declared_dependencies'])} dependencies, "
-                    f"{item['duplicate_file_count']} duplicate files"
-                    for item in comparison["pairwise_comparisons"]
-                ],
-                "",
-                "## Byte-identical content",
-                "",
-                *[
-                    f"- {item['sha256']}: "
-                    + "; ".join(
-                        f"{project}: {', '.join(paths)}"
-                        for project, paths in item["projects"].items()
-                    )
-                    for item in comparison["duplicate_file_content"]
-                ],
-                "",
-                "> Similarity is evidence for review, not a recommendation to merge independent projects.",
-            ]
+                    f"{item['duplicate_file_count']} duplicate files, "
+                    f"{item['dependency_version_conflict_count']} version conflicts"
+                )
+            lines.extend(["", "## Byte-identical content", ""])
+            for item in comparison["duplicate_file_content"]:
+                locations = "; ".join(
+                    "{}: {}".format(project, ", ".join(paths))
+                    for project, paths in item["projects"].items()
+                )
+                lines.append(f"- {item['sha256']}: {locations}")
         else:
             left, right = comparison["projects"]
             lines = [
@@ -311,26 +307,36 @@ def write_comparison(
                 "",
                 "## Shared languages",
                 "",
-                *[f"- {item}" for item in comparison["language_overlap"]["shared"]],
-                "",
-                "## Shared declared dependencies",
-                "",
-                *[f"- {item}" for item in comparison["dependency_overlap"]["shared_declared_dependencies"]],
-                "",
-                "## Shared Python module names",
-                "",
-                *[f"- {item}" for item in comparison["python_module_overlap"]["shared_module_names"]],
-                "",
-                "## Byte-identical files",
-                "",
-                *[
+            ]
+            lines.extend(f"- {item}" for item in comparison["language_overlap"]["shared"])
+            lines.extend(["", "## Shared declared dependencies", ""])
+            lines.extend(
+                f"- {item}"
+                for item in comparison["dependency_overlap"]["shared_declared_dependencies"]
+            )
+            lines.extend(["", "## Resolved dependency versions", ""])
+            for item in comparison["resolved_dependency_overlap"]:
+                left_versions = ", ".join(item["left_versions"])
+                right_versions = ", ".join(item["right_versions"])
+                suffix = " (version conflict)" if item["version_conflict"] else ""
+                lines.append(
+                    f"- {item['name']}: A={left_versions}; B={right_versions}{suffix}"
+                )
+            lines.extend(["", "## Shared Python module names", ""])
+            lines.extend(
+                f"- {item}"
+                for item in comparison["python_module_overlap"]["shared_module_names"]
+            )
+            lines.extend(["", "## Byte-identical files", ""])
+            for item in comparison["duplicate_file_content"]:
+                lines.append(
                     f"- {item['sha256']}: A={', '.join(item['left_paths'])}; "
                     f"B={', '.join(item['right_paths'])}"
-                    for item in comparison["duplicate_file_content"]
-                ],
-                "",
-                "> Similarity is evidence for review, not a recommendation to merge independent projects.",
-            ]
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                )
+        lines.extend([
+            "",
+            "> Similarity is evidence for review, not a recommendation to merge independent projects.",
+        ])
+        path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
         written.append(path)
     return written
