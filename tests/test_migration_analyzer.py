@@ -152,6 +152,6 @@ def test_goose_drizzle_and_diesel_migrations_are_discovered(tmp_path: Path):
     assert "Goose" in goose[0].detail
     assert any("Potentially destructive" in item.title for item in goose)
     assert "Drizzle ORM" in drizzle[0].detail
-    assert "create_table" in drizzle[0].detail
+    assert any("operation: create_table" in item for item in drizzle[0].evidence)
     assert "Diesel" in diesel[0].detail
     assert any("Potentially destructive" in item.title for item in diesel)
