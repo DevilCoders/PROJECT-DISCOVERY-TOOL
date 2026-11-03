@@ -255,6 +255,9 @@ class TreeSitterAnalyzer(Analyzer):
     """Provide generic syntax-tree metrics for any locally provisioned grammar."""
 
     name = "tree-sitter-polyglot"
+    domains = ("source_structure", "symbol_index", "imports")
+    languages = tuple(GRAMMARS)
+    domains = ("source_structure", "symbol_index", "imports",)
 
     def supports(self, record: FileRecord) -> bool:
         return (

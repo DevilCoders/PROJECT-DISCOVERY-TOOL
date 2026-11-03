@@ -51,6 +51,7 @@ class SecretPatternAnalyzer(Analyzer):
     """Detect likely embedded credentials; never persist matched secret values."""
 
     name = "secret-patterns"
+    domains = ("secrets",)
 
     def supports(self, record: FileRecord) -> bool:
         name = Path(record.path).name.lower()
