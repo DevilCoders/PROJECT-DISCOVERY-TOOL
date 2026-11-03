@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -112,3 +114,12 @@ def test_inventory_store_metadata_rejects_use_after_close(tmp_path: Path):
     store.close()
     with pytest.raises(RuntimeError, match="closed"):
         store.get_metadata("root")
+
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file mode semantics")
+def test_inventory_store_database_is_private_by_default(tmp_path: Path):
+    path = tmp_path / "private.sqlite3"
+    with InventoryStore(path):
+        mode = stat.S_IMODE(path.stat().st_mode)
+        assert mode == 0o600
