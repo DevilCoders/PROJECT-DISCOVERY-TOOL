@@ -286,6 +286,18 @@ class TreeSitterAnalyzer(Analyzer):
                 analyzer=self.name,
                 severity="LOW",
             )]
+        try:
+            source = read_text_bounded(path, _MAX_TREE_SITTER_FILE_BYTES)
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "code",
+                f"Tree-sitter resource limit: {record.path}",
+                str(exc),
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            )]
         grammar = GRAMMARS[record.language]
         try:
             pack = importlib.import_module("tree_sitter_language_pack")
@@ -312,7 +324,6 @@ class TreeSitterAnalyzer(Analyzer):
                     analyzer=self.name,
                 )]
             parser = pack.get_parser(grammar)
-            source = read_text_bounded(path, _MAX_TREE_SITTER_FILE_BYTES)
             tree = parser.parse(source)
             if tree is None:
                 raise RuntimeError("Tree-sitter parser returned no syntax tree")
