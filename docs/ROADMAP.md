@@ -304,6 +304,7 @@ The baseline is not production-ready:
 - [x] Bring JSON and Markdown outputs to schema parity; Markdown visibly marks vulnerable lines and includes impact/remediation.
 - [x] Redact passwords, tokens, private keys, credential URL values, email addresses, phone/address/birth-date/government-ID fields and common identity literals at the source-excerpt/model boundary; test report escaping against HTML/script payloads.
 - [x] Add focused regression tests for password/identity assignments, authorization headers, credential URLs, email addresses, provider-token formats, PEM headers and standalone base64 payload lines, excerpt length bounds and model-boundary redaction. Full analyzer/plugin/report-surface redaction verification remains a release gate.
+- [x] Add analyzer-level PEP 263 regression coverage for both Python AST structure analysis and Python AST security analysis; malformed/unsupported encodings remain explicit UNKNOWN outcomes.
 - [ ] Keep severity evidence-driven: explain realistic consequences conditionally and never describe a heuristic marker as confirmed exploitability or runtime exposure.
 
 ## Phase 12 — Large-project and adversarial verification
