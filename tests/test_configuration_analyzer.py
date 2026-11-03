@@ -84,11 +84,11 @@ def test_extended_application_and_platform_configuration_names(tmp_path: Path):
 def test_nginx_and_dockerfile_risky_directives_are_reported(tmp_path: Path):
     nginx = _scan(
         tmp_path, "nginx.conf",
-        "server {\\n  listen 443 ssl;\\n  ssl_verify_client off;\\n}\\n",
+        "server {\n  listen 443 ssl;\n  ssl_verify_client off;\n}\n",
     )
     docker = _scan(
         tmp_path, "Dockerfile",
-        "FROM alpine:3\\nUSER root\\nENV DEBUG=true\\n",
+        "FROM alpine:3\nUSER root\nENV DEBUG=true\n",
     )
     risk_titles = [item.title for item in nginx + docker if item.category == "security"]
     assert any("nginx_client_verification_disabled" in title for title in risk_titles)
@@ -98,11 +98,11 @@ def test_nginx_and_dockerfile_risky_directives_are_reported(tmp_path: Path):
 def test_yaml_and_nix_config_keys_are_inventoried(tmp_path: Path):
     yaml = _scan(
         tmp_path, "application.yml",
-        "server:\\n  port: 8080\\n  ssl:\\n    enabled: true\\n",
+        "server:\n  port: 8080\n  ssl:\n    enabled: true\n",
     )
     nix = _scan(
         tmp_path, "default.nix",
-        "{\\n  services.nginx.enable = true;\\n  environment.systemPackages = [];\\n}\\n",
+        "{\n  services.nginx.enable = true;\n  environment.systemPackages = [];\n}\n",
     )
     assert yaml
     assert nix
