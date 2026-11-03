@@ -5,6 +5,7 @@ import platform
 import sys
 
 from setuptools import Extension, setup
+from setuptools_rust import Binding, RustExtension
 
 
 native_sources = ["native/pdt_native.c"]
@@ -28,4 +29,14 @@ cpp_extension = Extension(
     optional=True,
 )
 
-setup(ext_modules=[native_extension, cpp_extension])
+rust_walker = RustExtension(
+    "project_discovery._walker",
+    path="native/rust/Cargo.toml",
+    binding=Binding.PyO3,
+    optional=True,
+)
+
+setup(
+    ext_modules=[native_extension, cpp_extension],
+    rust_extensions=[rust_walker],
+)
