@@ -206,9 +206,10 @@ def main() -> None:
     catalog_compare.add_argument("--output", type=Path, default=Path("./pdt-catalog-comparison"))
     catalog_compare.add_argument("--format", default="json,markdown")
     args = parser.parse_args()
-    formats = {
-        item.strip().lower() for item in args.format.split(",") if item.strip()
-    }
+    formats = (
+        {item.strip().lower() for item in args.format.split(",") if item.strip()}
+        if hasattr(args, "format") else set()
+    )
     try:
         if args.command == "catalog-add":
             with ProjectCatalog(args.db) as catalog:

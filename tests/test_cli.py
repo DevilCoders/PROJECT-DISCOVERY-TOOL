@@ -57,3 +57,15 @@ def test_compare_cli_writes_independent_project_report(tmp_path: Path, monkeypat
         main()
     assert result.value.code == 0
     assert (output / "project-comparison.json").is_file()
+
+
+def test_catalog_list_cli_without_format_argument(tmp_path: Path, monkeypatch):
+    import sys
+    from project_discovery.cli import main
+
+    monkeypatch.setattr(
+        sys, "argv", ["pdt", "catalog-list", "--db", str(tmp_path / "catalog.sqlite3")]
+    )
+    with pytest.raises(SystemExit) as result:
+        main()
+    assert result.value.code == 0
