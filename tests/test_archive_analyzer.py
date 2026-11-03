@@ -173,3 +173,38 @@ def test_tar_archive_wall_time_budget_returns_unknown(tmp_path: Path, monkeypatc
     monkeypatch.setattr(archive_module, "_MAX_ARCHIVE_WALL_SECONDS", 0.0)
     findings = ArchiveIntelligenceAnalyzer()._tar(path, _record(path, "timed.tar"))
     assert any(item.confidence == "UNKNOWN" and "wall-time budget" in item.title for item in findings)
+
+
+def test_archive_member_regex_matching_stops_at_wall_time_deadline():
+    import project_discovery.analyzers.archive_analyzer as archive_module
+
+    findings, timed_out = archive_module._member_content_findings(
+        "sample.zip",
+        ".env",
+        b"PASSWORD=secret-value\nEMAIL=person@example.test\n",
+        deadline=0.0,
+    )
+    assert timed_out is True
+    assert findings == []
+
+
+def test_archive_member_matcher_reports_distinct_line_numbers_and_bounded_excerpts():
+    import project_discovery.analyzers.archive_analyzer as archive_module
+
+    findings, timed_out = archive_module._member_content_findings(
+        "sample.zip",
+        ".env",
+        (
+            b"PASSWORD=secret-one\n"
+            b"PASSWORD=secret-two\n"
+            b"EMAIL=first@example.test\n"
+            b"EMAIL=second@example.test\n"
+        ),
+    )
+    assert timed_out is False
+    credential = next(item for item in findings if item.category == "secrets")
+    email = next(item for item in findings if item.category == "privacy")
+    assert [line.line_number for line in credential.code_evidence] == [1, 2]
+    assert [line.line_number for line in email.code_evidence] == [3, 4]
+    assert all("secret-" not in line.code for line in credential.code_evidence)
+    assert all("@example.test" not in line.code for line in email.code_evidence)
