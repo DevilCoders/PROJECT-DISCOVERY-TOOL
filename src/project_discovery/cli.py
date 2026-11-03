@@ -74,7 +74,7 @@ def run_scan(
     _render_banner(console)
     _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
     started = now()
-    records, directories, symlinks, walk_stats = discover_inventory(
+    records, directories, symlinks, special_entries, walk_stats = discover_inventory(
         root,
         max_file_bytes=max_file_mb * 1024 * 1024,
         skip_oversized=skip_oversized,
@@ -154,6 +154,12 @@ def run_scan(
         "file_count": len(records),
         "directory_count": len(directories) - 1,
         "symlink_count": len(symlinks),
+        "special_entry_count": len(special_entries),
+        "special_entry_types": {
+            key.split(":", 1)[1]: value
+            for key, value in walk_stats.items() if key.startswith("special_type:")
+        },
+        "pruned_directory_count": walk_stats.get("pruned_directory_count", 0),
         "entry_count": walk_stats.get("entry_count", 0) + 1,
         "hidden_entry_count": walk_stats.get("hidden_entry_count", 0),
         "development_directory_count": walk_stats.get("development_directory_count", 0),
@@ -212,6 +218,7 @@ def run_scan(
         [analyzer.name for analyzer in analyzers] + ["python-module-graph"],
         directories=directories,
         symlinks=symlinks,
+        special_entries=special_entries,
     )
     reports = write_reports(result, output, formats)
     for report in reports:
@@ -227,6 +234,8 @@ def run_scan(
     summary.add_row("Files inventoried", str(len(records)))
     summary.add_row("Directories inventoried", str(metrics["directory_count"]))
     summary.add_row("Symbolic links", str(metrics["symlink_count"]))
+    summary.add_row("Special filesystem entries", str(metrics["special_entry_count"]))
+    summary.add_row("Explicitly pruned directories", str(metrics["pruned_directory_count"]))
     summary.add_row("Hidden entries", str(metrics["hidden_entry_count"]))
     summary.add_row("Development/cache trees", str(metrics["development_directory_count"]))
     summary.add_row("Total size", f"{metrics['total_bytes']:,} bytes")
@@ -273,7 +282,7 @@ def main() -> None:
     scan.add_argument(
         "--exclude-dir", action="append", default=[],
         metavar="NAME",
-        help="Explicitly prune a directory name; its marker remains in the inventory",
+        help="Explicitly prune a directory name or relative path; the directory remains inventoried",
     )
     compare = sub.add_parser("compare", help="Compare two or more independent PDT JSON reports")
     compare.add_argument("reports", type=Path, nargs="+")

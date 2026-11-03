@@ -59,6 +59,7 @@ class DirectoryRecord:
     permissions: int | None = None
     development_marker: str | None = None
     pruned: bool = False
+    prune_reason: str | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -78,6 +79,18 @@ class SymlinkRecord:
 
 
 @dataclass(slots=True)
+class SpecialEntryRecord:
+    path: str
+    entry_type: str
+    is_hidden: bool = False
+    permissions: int | None = None
+    size_bytes: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class ScanResult:
     root: str
     started_at: str
@@ -89,16 +102,18 @@ class ScanResult:
     analyzer_names: list[str] = field(default_factory=list)
     directories: list[DirectoryRecord] = field(default_factory=list)
     symlinks: list[SymlinkRecord] = field(default_factory=list)
+    special_entries: list[SpecialEntryRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "1.1",
+            "schema_version": "1.2",
             "root": self.root,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "files": [item.to_dict() for item in self.files],
             "directories": [item.to_dict() for item in self.directories],
             "symlinks": [item.to_dict() for item in self.symlinks],
+            "special_entries": [item.to_dict() for item in self.special_entries],
             "findings": [item.to_dict() for item in self.findings],
             "metrics": self.metrics,
             "errors": self.errors,

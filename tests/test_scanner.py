@@ -1,77 +1,149 @@
 from pathlib import Path
-from project_discovery.scanner import discover_files
 
-def test_discovers_files_and_prunes_generated_dirs(tmp_path: Path):
-    (tmp_path/"main.py").write_text("print('hello')",encoding="utf-8")
-    (tmp_path/"node_modules").mkdir()
-    (tmp_path/"node_modules"/"hidden.js").write_text("x",encoding="utf-8")
-    records,stats = discover_files(tmp_path,max_file_bytes=1024)
-    assert [r.path for r in records] == ["main.py"]
+from project_discovery.scanner import discover_files, discover_inventory
+
+
+def test_discovers_generated_dependency_trees_by_default(tmp_path: Path):
+    (tmp_path / "main.py").write_text("print('hello')", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "hidden.js").write_text("x", encoding="utf-8")
+    records, stats = discover_files(tmp_path)
+    assert {item.path for item in records} == {"main.py", "node_modules/hidden.js"}
     assert stats["total_bytes"] > 0
+    assert stats["development_directory_count"] >= 1
 
-def test_oversized_file_is_inventoried_but_marked(tmp_path: Path):
-    (tmp_path/"large.bin").write_bytes(b"x"*20)
-    records,_ = discover_files(tmp_path,max_file_bytes=10)
-    assert len(records) == 1
-    assert records[0].error is not None
+
+def test_explicit_exclusion_prunes_matching_subtree_and_records_reason(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("pass", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "large.js").write_text("x", encoding="utf-8")
+    files, directories, _, _, stats = discover_inventory(
+        tmp_path, ignores={"node_modules"},
+    )
+    node_modules = next(item for item in directories if item.path == "node_modules")
+    assert node_modules.pruned is True
+    assert node_modules.prune_reason == "explicit --exclude-dir name: node_modules"
+    assert {item.path for item in files} == {"src/main.py"}
+    assert stats["pruned_directory_count"] == 1
+
+
+def test_explicit_relative_path_exclusion_does_not_hide_other_same_named_tree(tmp_path: Path):
+    for folder in ("apps/a/node_modules", "apps/b/node_modules"):
+        (tmp_path / folder).mkdir(parents=True)
+        (tmp_path / folder / "package.js").write_text("x", encoding="utf-8")
+    files, directories, _, _, _ = discover_inventory(
+        tmp_path, ignores={"apps/a/node_modules"},
+    )
+    assert "apps/a/node_modules/package.js" not in {item.path for item in files}
+    assert "apps/b/node_modules/package.js" in {item.path for item in files}
+    assert next(item for item in directories if item.path == "apps/a/node_modules").pruned
+    assert not next(item for item in directories if item.path == "apps/b/node_modules").pruned
+
+
+def test_oversized_file_is_content_skipped_only_when_explicit(tmp_path: Path):
+    (tmp_path / "large.bin").write_bytes(b"x" * 20)
+    normal, _ = discover_files(tmp_path, max_file_bytes=10)
+    skipped, _ = discover_files(
+        tmp_path, max_file_bytes=10, skip_oversized=True,
+    )
+    assert normal[0].content_skipped_reason is None
+    assert skipped[0].content_skipped_reason.startswith("Explicit --skip")
 
 
 def test_discover_inventory_returns_directory_and_file_metadata(tmp_path: Path):
-    from project_discovery.scanner import discover_inventory
-
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("print('ok')", encoding="utf-8")
     (tmp_path / ".env").write_text("TOKEN=redacted", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "ignored.js").write_text("ignored", encoding="utf-8")
 
-    files, directories, symlinks, stats = discover_inventory(
-        tmp_path, max_file_bytes=1024,
-    )
+    files, directories, symlinks, special, stats = discover_inventory(tmp_path)
 
-    assert [item.path for item in files] == [".env", "src/main.py"]
+    by_path = {item.path: item for item in files}
+    assert set(by_path) == {".env", "src/main.py", "node_modules/ignored.js"}
     assert directories[0].path == "."
-    assert any(item.path == "node_modules" and item.pruned for item in directories)
-    assert any(item.path == "src" and item.development_marker == "src" for item in directories)
-    assert files[0].is_hidden
-    assert files[1].file_type == "source"
-    assert stats["entry_count"] == 4
-    assert stats["development_directory_count"] == 1
+    marker = next(item for item in directories if item.path == "node_modules")
+    assert marker.development_marker == "node_modules"
+    assert marker.pruned is False
+    assert by_path[".env"].is_hidden
+    assert by_path["src/main.py"].file_type == "source"
+    assert stats["entry_count"] == 5
+    assert stats["development_directory_count"] == 2
     assert symlinks == []
+    assert special == []
 
 
 def test_discover_inventory_large_file_skip_is_explicit(tmp_path: Path):
-    from project_discovery.scanner import discover_inventory
-
     (tmp_path / "large.bin").write_bytes(b"x" * 128)
     normal, *_ = discover_inventory(tmp_path, max_file_bytes=16)
-    skipped, _, _, stats = discover_inventory(
+    skipped, _, _, _, stats = discover_inventory(
         tmp_path, max_file_bytes=16, skip_oversized=True,
     )
-
     assert normal[0].content_skipped_reason is None
     assert skipped[0].content_skipped_reason.startswith("Explicit --skip")
     assert stats["oversized_content_skipped"] == 1
 
 
 def test_discover_inventory_records_symlinks_without_following_them(tmp_path: Path):
-    from project_discovery.scanner import discover_inventory
-    import pytest
-
     target = tmp_path.parent / f"{tmp_path.name}-outside"
     target.mkdir()
     link = tmp_path / "linked"
     try:
         link.symlink_to(target, target_is_directory=True)
     except (OSError, NotImplementedError):
+        import pytest
         pytest.skip("Directory symlink creation is not available on this runner")
 
-    files, directories, symlinks, stats = discover_inventory(
-        tmp_path, max_file_bytes=1024,
-    )
+    files, directories, symlinks, special, stats = discover_inventory(tmp_path)
 
     assert not any(item.path.startswith("linked/") for item in files)
-    assert not any(item.path == "linked" and not item.pruned for item in directories)
+    assert not any(item.path == "linked" for item in directories)
     assert len(symlinks) == 1
     assert symlinks[0].target_scope == "external"
-    assert stats["entry_count"] == 1
+    assert stats["symlink_count"] == 1
+    assert special == []
+
+
+def test_magic_bytes_override_generic_binary_classification(tmp_path: Path):
+    cases = {
+        "archive.zip": (b"PK\x03\x04" + b"0" * 20, "archive/zip"),
+        "manual.pdf": (b"%PDF-1.7" + b"0" * 20, "document/pdf"),
+        "image.png": (b"\x89PNG\r\n\x1a\n" + b"0" * 20, "image/png"),
+        "program.elf": (b"\x7fELF" + b"0" * 20, "executable/elf"),
+        "index.db": (b"SQLite format 3\x00" + b"0" * 20, "database/sqlite"),
+    }
+    for name, (payload, expected) in cases.items():
+        (tmp_path / name).write_bytes(payload)
+    files, *_ = discover_inventory(tmp_path)
+    observed = {item.path: item.file_type for item in files}
+    for name, (_, expected) in cases.items():
+        assert observed[name] == expected
+
+
+def test_directory_markers_cover_common_and_unusual_caches(tmp_path: Path):
+    names = ("node_modules", ".cache", ".yarn", ".pnpm-store", ".fuff", ".fuzz", ".gradle", ".m2")
+    for name in names:
+        (tmp_path / name).mkdir()
+    _, directories, _, _, stats = discover_inventory(tmp_path)
+    markers = {item.development_marker for item in directories if item.development_marker}
+    assert set(names) <= markers
+    assert stats["development_directory_count"] == len(names)
+
+
+def test_special_files_are_recorded_when_platform_supports_fifo(tmp_path: Path):
+    import os
+    import pytest
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO entries are not supported on this platform")
+    fifo = tmp_path / "events.pipe"
+    try:
+        os.mkfifo(fifo)
+    except OSError:
+        pytest.skip("FIFO creation is not permitted on this runner")
+    _, _, _, special, stats = discover_inventory(tmp_path)
+    assert len(special) == 1
+    assert special[0].path == "events.pipe"
+    assert special[0].entry_type == "fifo"
+    assert stats["special_type:fifo"] == 1

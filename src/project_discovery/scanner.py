@@ -1,20 +1,48 @@
-"""Safe, deterministic filesystem inventory. Never follows symlinks."""
+"""Safe, deterministic filesystem inventory with no-follow symlink semantics."""
+from __future__ import annotations
+
 import hashlib
 import os
+import stat
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
-from .language_catalog import detect_language
-from .models import DirectoryRecord, FileRecord, SymlinkRecord
+from .language_catalog import detect_language, is_source_path, is_textual_path
+from .models import (
+    DirectoryRecord,
+    FileRecord,
+    SpecialEntryRecord,
+    SymlinkRecord,
+)
 
-DEFAULT_IGNORES = {
-    ".git", ".hg", ".svn", ".venv", "venv", "__pycache__", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", "node_modules", "vendor", "dist", "build",
-    ".next", ".nuxt", "coverage", ".tox",
+# Kept as a compatibility constant. No directory is excluded by default.
+DEFAULT_IGNORES: set[str] = set()
+
+_DEVELOPMENT_MARKERS = {
+    ".cache", ".cargo", ".gradle", ".m2", ".ivy2", ".coursier", ".npm",
+    ".pnpm-store", ".yarn", ".venv", ".tox", ".nox", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".next", ".nuxt", ".svelte-kit",
+    ".angular", ".parcel-cache", ".turbo", ".vite", ".webpack",
+    ".nyc_output", ".fuff", ".fuzz", ".fuzzing", ".idea", ".vscode",
+    ".git", ".hg", ".svn", "node_modules", "bower_components", "vendor",
+    "packages", "target", "build", "dist", "out", "coverage", "htmlcov",
+    "venv", "env", "site-packages", "third_party", "third-party",
+    "bazel-out", "bazel-bin", "bazel-testlogs", "Pods", "Carthage",
+    "DerivedData", "gradle", "maven", "go", "pkg", "obj", "bin",
+    "__pycache__", "_build", "_opam", "_site", "artifacts", "generated",
+    "generated_code", "gen", "tmp", "temp", "cache", "caches",
+    "fuzz", "corpus", "corpora", "crashers", "seeds",
 }
+_SIZE_BUCKETS = (
+    (1024, "under_1_kib"),
+    (1024 * 1024, "1_kib_to_1_mib"),
+    (10 * 1024 * 1024, "1_to_10_mib"),
+    (100 * 1024 * 1024, "10_to_100_mib"),
+)
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Hash a file with bounded memory."""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(chunk_size), b""):
@@ -22,115 +50,200 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def discover_files(
-    root: Path, *, max_file_bytes: int, ignores: set[str] | None = None
-) -> tuple[list[FileRecord], dict[str, int]]:
-    root = root.expanduser().resolve(strict=True)
-    if not root.is_dir():
-        raise NotADirectoryError(root)
-    ignored = DEFAULT_IGNORES | (ignores or set())
-    records: list[FileRecord] = []
-    stats: Counter[str] = Counter()
-
-    def onerror(_: OSError) -> None:
-        stats["walk_errors"] += 1
-
-    for current, dirs, names in os.walk(
-        root, topdown=True, followlinks=False, onerror=onerror
-    ):
-        dirs[:] = sorted(
-            name for name in dirs
-            if name not in ignored and not (Path(current) / name).is_symlink()
-        )
-        for name in sorted(names):
-            path = Path(current) / name
-            try:
-                if path.is_symlink() or not path.is_file():
-                    stats["skipped_special"] += 1
-                    continue
-                size = path.stat().st_size
-                extension = path.suffix.lower()
-                language = detect_language(path.relative_to(root).as_posix())
-                record = FileRecord(
-                    path.relative_to(root).as_posix(), size, extension, language
-                )
-                if size > max_file_bytes:
-                    record.error = f"Content analysis skipped: exceeds {max_file_bytes} bytes"
-                    stats["oversized"] += 1
-                records.append(record)
-                stats["total_bytes"] += size
-                stats[f"language:{language}"] += 1
-            except OSError as exc:
-                stats["file_errors"] += 1
-                records.append(FileRecord(
-                    path.relative_to(root).as_posix(), 0, path.suffix.lower(),
-                    "Unknown", error=str(exc),
-                ))
-    return records, dict(stats)
-
-
-
-_DEVELOPMENT_MARKERS = {
-    "src", "source", "tests", "test", "spec", "specs", "docs", "documentation",
-    "examples", "benchmarks", "scripts", "tools", "build", "dist", "target",
-    "vendor", "infra", "infrastructure", "deploy", "deployment", "migrations",
-    "migration", "assets", "models", "datasets", "notebooks", "robot", "robots",
-    "firmware", "hardware", "shaders", "scenes", "packages", "apps", "services",
-    "modules", "plugins", "extensions", "config", "configs",
-}
-
-
 def _size_bucket(size: int) -> str:
-    if size < 1024:
-        return "under_1_kib"
-    if size < 1024 * 1024:
-        return "1_kib_to_1_mib"
-    if size < 10 * 1024 * 1024:
-        return "1_to_10_mib"
-    if size < 100 * 1024 * 1024:
-        return "10_to_100_mib"
+    for boundary, label in _SIZE_BUCKETS:
+        if size < boundary:
+            return label
     return "over_100_mib"
 
 
-def _file_type(relative_path: str) -> str:
-    from .language_catalog import is_source_path, is_textual_path
+def _is_hidden(name: str, info: os.stat_result) -> bool:
+    """Recognize dot-hidden entries and the Windows FILE_ATTRIBUTE_HIDDEN bit."""
+    if name.startswith("."):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & 0x2)
 
+
+def _signature_type(path: Path, relative_path: str) -> str | None:
+    """Classify common binary formats from a bounded signature sample."""
+    try:
+        with path.open("rb") as stream:
+            head = stream.read(512)
+    except OSError:
+        return None
+    if not head:
+        return None
+
+    # Archive/container signatures.
+    if head.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        return "archive/zip"
+    if head.startswith(b"\x1f\x8b"):
+        return "archive/gzip"
+    if head.startswith(b"BZh"):
+        return "archive/bzip2"
+    if head.startswith(b"\xfd7zXZ\x00"):
+        return "archive/xz"
+    if head.startswith(b"\x28\xb5\x2f\xfd"):
+        return "archive/zstandard"
+    if head.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return "archive/7z"
+    if head.startswith(b"Rar!\x1a\x07"):
+        return "archive/rar"
+    if head.startswith(b"MSCF"):
+        return "archive/cab"
+    if head.startswith(b"!<arch>"):
+        return "archive/ar"
+    if head.startswith(b"\xed\xab\xee\xdb"):
+        return "archive/rpm"
+    if len(head) >= 262 and head[257:262] == b"ustar":
+        return "archive/tar"
+
+    # Documents, executable formats, databases and media.
+    if head.startswith(b"%PDF-"):
+        return "document/pdf"
+    if head.startswith(b"\x7fELF"):
+        return "executable/elf"
+    if head.startswith(b"MZ"):
+        return "executable/pe"
+    if head[:4] in {
+        b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+    }:
+        return "executable/mach-o-or-fat"
+    if head.startswith(b"SQLite format 3\x00"):
+        return "database/sqlite"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    if head.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head.startswith(b"RIFF") and head[8:12] == b"WAVE":
+        return "audio/wav"
+    if head.startswith(b"ID3") or head[:2] in {b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"}:
+        return "audio/mpeg"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return "video/mp4"
+    if head.startswith(b"wOFF"):
+        return "font/woff"
+    if head.startswith(b"wOF2"):
+        return "font/woff2"
+    if head.startswith(b"OTTO"):
+        return "font/otf"
+    if head.startswith(b"\x00\x01\x00\x00"):
+        return "font/ttf"
+
+    # TAR and package formats with extension-specific signatures/containers.
+    lower = relative_path.lower()
+    if lower.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")):
+        return "archive/tar-or-compressed-tar"
+    if lower.endswith(".deb") and head.startswith(b"!<arch>"):
+        return "archive/deb"
+    if lower.endswith(".iso"):
+        return "archive/iso-detected-by-extension"
+    if b"\x00" in head:
+        return "binary/unknown"
+    return None
+
+
+def _file_type(path: Path, relative_path: str) -> str:
+    signature = _signature_type(path, relative_path)
+    if signature:
+        return signature
     if is_source_path(relative_path):
         return "source"
     if is_textual_path(relative_path):
         return "text"
-    return "binary_or_unclassified"
+    return "binary/unclassified"
+
+
+def _normalise_exclusions(ignores: set[str] | None) -> tuple[set[str], set[str]]:
+    names: set[str] = set()
+    paths: set[str] = set()
+    for raw in ignores or ():
+        value = raw.replace("\\", "/").strip("/")
+        if not value:
+            continue
+        if "/" in value:
+            paths.add(value.casefold())
+        else:
+            names.add(value.casefold())
+    return names, paths
+
+
+def _exclusion_match(
+    relative_path: str, name: str, excluded_names: set[str], excluded_paths: set[str],
+) -> str | None:
+    if name.casefold() in excluded_names:
+        return f"explicit --exclude-dir name: {name}"
+    if relative_path.casefold() in excluded_paths:
+        return f"explicit --exclude-dir path: {relative_path}"
+    return None
+
+
+def discover_files(
+    root: Path,
+    *,
+    max_file_bytes: int = 128 * 1024 * 1024,
+    ignores: set[str] | None = None,
+    skip_oversized: bool = False,
+) -> tuple[list[FileRecord], dict[str, int]]:
+    """Compatibility file iterator; no implicit ignore list or global size skip."""
+    files, _, _, _, stats = discover_inventory(
+        root,
+        max_file_bytes=max_file_bytes,
+        skip_oversized=skip_oversized,
+        ignores=ignores,
+    )
+    return files, stats
 
 
 def discover_inventory(
     root: Path,
     *,
-    max_file_bytes: int,
+    max_file_bytes: int = 128 * 1024 * 1024,
     skip_oversized: bool = False,
     ignores: set[str] | None = None,
-) -> tuple[list[FileRecord], list[DirectoryRecord], list[SymlinkRecord], dict[str, int]]:
-    """Inventory files, directories and symlinks without following links.
+) -> tuple[
+    list[FileRecord],
+    list[DirectoryRecord],
+    list[SymlinkRecord],
+    list[SpecialEntryRecord],
+    dict[str, int],
+]:
+    """Inventory all entries by default; only explicit excludes prune subtrees.
 
-    Large files remain part of the inventory by default. Content skipping is an
-    explicit opt-in so a caller cannot silently lose coverage of a project.
+    The traversal never follows symlinks. The current implementation still retains
+    inventory records in memory; Phase 2 replaces this with a bounded streaming store.
     """
-    import stat
-
     root = root.expanduser().resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(root)
     if max_file_bytes < 1:
         raise ValueError("max_file_bytes must be >= 1")
 
-    ignored = DEFAULT_IGNORES | (ignores or set())
+    excluded_names, excluded_paths = _normalise_exclusions(ignores)
     stats: Counter[str] = Counter()
+    try:
+        root_info = root.stat()
+        root_mode = stat.S_IMODE(root_info.st_mode)
+        root_hidden = _is_hidden(root.name, root_info) if root.name else False
+    except OSError:
+        root_mode, root_hidden = None, False
     directories_by_path: dict[str, DirectoryRecord] = {
-        ".": DirectoryRecord(
-            ".", 0, permissions=stat.S_IMODE(root.stat().st_mode), is_hidden=False,
-        )
+        ".": DirectoryRecord(".", 0, permissions=root_mode, is_hidden=root_hidden)
     }
     files: list[FileRecord] = []
     symlinks: list[SymlinkRecord] = []
+    special_entries: list[SpecialEntryRecord] = []
     pending: list[tuple[Path, str, int]] = [(root, ".", 0)]
 
     while pending:
@@ -138,25 +251,23 @@ def discover_inventory(
         directory_record = directories_by_path[relative_dir]
         try:
             with os.scandir(current) as iterator:
-                entries = sorted(iterator, key=lambda entry: entry.name)
+                entries = sorted(iterator, key=lambda entry: entry.name.casefold())
         except OSError as exc:
-            directory_record.error = str(exc)
+            directory_record.error = f"{type(exc).__name__}: {exc}"
             stats["walk_errors"] += 1
             continue
 
         for entry in entries:
-            relative = (
-                entry.name if relative_dir == "."
-                else f"{relative_dir}/{entry.name}"
-            )
+            relative = entry.name if relative_dir == "." else f"{relative_dir}/{entry.name}"
             stats["entry_count"] += 1
-            hidden = entry.name.startswith(".")
-            if hidden:
-                stats["hidden_entry_count"] += 1
             directory_record.direct_child_count += 1
-
             try:
-                if entry.is_symlink():
+                info = entry.stat(follow_symlinks=False)
+                hidden = _is_hidden(entry.name, info)
+                if hidden:
+                    stats["hidden_entry_count"] += 1
+
+                if stat.S_ISLNK(info.st_mode):
                     try:
                         target = os.readlink(entry.path)
                         resolved = (Path(entry.path).parent / target).resolve(strict=False)
@@ -166,68 +277,97 @@ def discover_inventory(
                             scope = "internal"
                         else:
                             scope = "external"
-                        mode = stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode)
-                    except OSError:
-                        target, scope, mode = "", "unknown", None
+                    except (OSError, RuntimeError):
+                        target, scope = "", "unknown"
                     symlinks.append(SymlinkRecord(
-                        relative, target, scope, is_hidden=hidden, permissions=mode,
+                        relative, target, scope, is_hidden=hidden,
+                        permissions=stat.S_IMODE(info.st_mode),
                     ))
+                    stats["symlink_count"] += 1
+                    stats[f"symlink_scope:{scope}"] += 1
                     continue
 
-                if entry.is_dir(follow_symlinks=False):
-                    marker = entry.name.lower() if entry.name.lower() in _DEVELOPMENT_MARKERS else None
-                    try:
-                        mode = stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode)
-                    except OSError:
-                        mode = None
+                if stat.S_ISDIR(info.st_mode):
+                    marker = entry.name.casefold() if entry.name.casefold() in _DEVELOPMENT_MARKERS else None
+                    exclusion = _exclusion_match(
+                        relative, entry.name, excluded_names, excluded_paths,
+                    )
                     record = DirectoryRecord(
-                        relative, depth + 1, is_hidden=hidden,
-                        permissions=mode, development_marker=marker,
-                        pruned=entry.name in ignored,
+                        relative,
+                        depth + 1,
+                        is_hidden=hidden,
+                        permissions=stat.S_IMODE(info.st_mode),
+                        development_marker=marker,
+                        pruned=exclusion is not None,
+                        prune_reason=exclusion,
                     )
                     directories_by_path[relative] = record
                     if marker:
                         stats["development_directory_count"] += 1
                         stats[f"development_dir:{marker}"] += 1
-                    if not record.pruned:
+                    if exclusion:
+                        stats["pruned_directory_count"] += 1
+                        stats[f"pruned_dir:{entry.name.casefold()}"] += 1
+                    else:
                         pending.append((Path(entry.path), relative, depth + 1))
                     continue
 
-                if not entry.is_file(follow_symlinks=False):
-                    stats["skipped_special"] += 1
+                if stat.S_ISREG(info.st_mode):
+                    size = info.st_size
+                    file_type = _file_type(Path(entry.path), relative)
+                    language = detect_language(relative)
+                    file_record = FileRecord(
+                        relative,
+                        size,
+                        Path(entry.name).suffix.lower(),
+                        language,
+                        file_type=file_type,
+                        size_bucket=_size_bucket(size),
+                        is_hidden=hidden,
+                        permissions=stat.S_IMODE(info.st_mode),
+                        mtime_ns=info.st_mtime_ns,
+                    )
+                    if size > max_file_bytes and skip_oversized:
+                        file_record.content_skipped_reason = (
+                            f"Explicit --skip: exceeds {max_file_bytes} bytes"
+                        )
+                        stats["oversized_content_skipped"] += 1
+                    files.append(file_record)
+                    stats["total_bytes"] += size
+                    stats[f"file_type:{file_type}"] += 1
+                    stats[f"size_bucket:{file_record.size_bucket}"] += 1
+                    stats[f"language:{language}"] += 1
                     continue
 
-                info = entry.stat(follow_symlinks=False)
-                size = info.st_size
-                language = detect_language(relative)
-                file_record = FileRecord(
+                if stat.S_ISFIFO(info.st_mode):
+                    kind = "fifo"
+                elif stat.S_ISSOCK(info.st_mode):
+                    kind = "socket"
+                elif stat.S_ISBLK(info.st_mode):
+                    kind = "block_device"
+                elif stat.S_ISCHR(info.st_mode):
+                    kind = "character_device"
+                else:
+                    kind = "unknown_special"
+                special_entries.append(SpecialEntryRecord(
                     relative,
-                    size,
-                    Path(entry.name).suffix.lower(),
-                    language,
-                    file_type=_file_type(relative),
-                    size_bucket=_size_bucket(size),
+                    kind,
                     is_hidden=hidden,
                     permissions=stat.S_IMODE(info.st_mode),
-                    mtime_ns=info.st_mtime_ns,
-                )
-                if size > max_file_bytes and skip_oversized:
-                    file_record.content_skipped_reason = (
-                        f"Explicit --skip-oversized-content: exceeds {max_file_bytes} bytes"
-                    )
-                    stats["oversized_content_skipped"] += 1
-                files.append(file_record)
-                stats["total_bytes"] += size
-                stats[f"file_type:{file_record.file_type}"] += 1
-                stats[f"size_bucket:{file_record.size_bucket}"] += 1
-                stats[f"language:{language}"] += 1
+                    size_bytes=getattr(info, "st_size", 0),
+                ))
+                stats["special_entry_count"] += 1
+                stats[f"special_type:{kind}"] += 1
             except OSError as exc:
-                stats["file_errors"] += 1
+                stats["entry_errors"] += 1
                 files.append(FileRecord(
                     relative, 0, Path(entry.name).suffix.lower(), "Unknown",
-                    error=str(exc), is_hidden=hidden,
+                    error=f"{type(exc).__name__}: {exc}",
+                    is_hidden=entry.name.startswith("."),
                 ))
 
+    # Aggregate regular files into every inventoried ancestor. Pruned subtrees
+    # intentionally do not acquire file totals because their content is unscanned.
     for file_record in files:
         parent = PurePosixPath(file_record.path).parent
         while True:
@@ -241,8 +381,9 @@ def discover_inventory(
             parent = parent.parent
 
     return (
-        sorted(files, key=lambda item: item.path),
-        sorted(directories_by_path.values(), key=lambda item: (item.depth, item.path)),
-        sorted(symlinks, key=lambda item: item.path),
+        sorted(files, key=lambda item: item.path.casefold()),
+        sorted(directories_by_path.values(), key=lambda item: (item.depth, item.path.casefold())),
+        sorted(symlinks, key=lambda item: item.path.casefold()),
+        sorted(special_entries, key=lambda item: item.path.casefold()),
         dict(stats),
     )

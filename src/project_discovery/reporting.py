@@ -41,6 +41,7 @@ def _report_data(result: ScanResult) -> dict[str, Any]:
         ],
         "directories": [item.to_dict() for item in result.directories],
         "symlinks": [item.to_dict() for item in result.symlinks],
+        "special_entries": [item.to_dict() for item in result.special_entries],
         "metrics": result.metrics,
         "errors": result.errors,
         "analyzers": result.analyzer_names,
@@ -155,6 +156,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
    <div class="stat cyan"><span>Files</span><strong id="stat-files">0</strong></div>
    <div class="stat"><span>Directories</span><strong id="stat-dirs">0</strong></div>
    <div class="stat"><span>Symlinks</span><strong id="stat-links">0</strong></div>
+   <div class="stat"><span>Special entries</span><strong id="stat-special">0</strong></div>
    <div class="stat green"><span>Findings</span><strong id="stat-findings">0</strong></div>
    <div class="stat amber"><span>Hidden entries</span><strong id="stat-hidden">0</strong></div>
    <div class="stat"><span>Scan errors</span><strong id="stat-errors">0</strong></div>
@@ -165,8 +167,8 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
    <h3>Navigation</h3>
    <a href="#overview">01 // Overview</a><a href="#inventory">02 // Inventory</a>
    <a href="#directories">03 // Directories</a><a href="#symlinks">04 // Symlinks</a>
-   <a href="#files">05 // File browser</a><a href="#findings">06 // Findings</a>
-   <a href="#diagnostics">07 // Diagnostics</a>
+   <a href="#special">05 // Special entries</a><a href="#files">06 // File browser</a>
+   <a href="#findings">07 // Findings</a><a href="#diagnostics">08 // Diagnostics</a>
   </aside>
   <main class="content">
    <section class="section" id="overview">
@@ -191,6 +193,11 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
     <div class="section-head"><h2>Symbolic links</h2><span class="kicker">04 / NO-FOLLOW INVENTORY</span></div>
     <div class="table-wrap"><table><thead><tr><th>Link path</th><th>Target</th><th>Scope</th><th>Hidden</th></tr></thead><tbody id="symlink-rows"></tbody></table></div>
     <div id="no-symlinks" class="empty hidden">No symbolic links were detected.</div>
+   </section>
+   <section class="section" id="special">
+    <div class="section-head"><h2>Special filesystem entries</h2><span class="kicker">05 / FIFO SOCKET DEVICE</span></div>
+    <div class="table-wrap"><table><thead><tr><th>Path</th><th>Type</th><th>Permissions</th><th>Hidden</th><th>Size</th></tr></thead><tbody id="special-rows"></tbody></table></div>
+    <div id="no-special" class="empty hidden">No FIFO, socket, device or other special entries were detected.</div>
    </section>
    <section class="section" id="files">
     <div class="section-head"><h2>File browser</h2><span class="kicker">05 / SEARCHABLE INVENTORY</span></div>
@@ -255,6 +262,7 @@ const metrics=REPORT.metrics||{};
 $("stat-files").textContent=number(REPORT.files.length);
 $("stat-dirs").textContent=number(Math.max(0,REPORT.directories.length-1));
 $("stat-links").textContent=number(REPORT.symlinks.length);
+$("stat-special").textContent=number((REPORT.special_entries||[]).length);
 $("stat-findings").textContent=number(REPORT.findings.length);
 $("stat-hidden").textContent=number(metrics.hidden_entry_count||0);
 $("stat-errors").textContent=number((REPORT.errors||[]).length+(metrics.walk_errors||0));
@@ -263,7 +271,7 @@ fillBars("development-dirs",metrics.development_directories);
 $("host-os").textContent=JSON.stringify(metrics.host_os||{},null,2);
 $("inventory-summary").textContent=number(REPORT.files.length)+" files • "+
  number(Math.max(0,REPORT.directories.length-1))+" directories • "+number(REPORT.symlinks.length)+
- " links • "+formatBytes(metrics.total_bytes)+" • "+number(metrics.hidden_entry_count||0)+
+ " links • "+number((REPORT.special_entries||[]).length)+" special entries • "+formatBytes(metrics.total_bytes)+" • "+number(metrics.hidden_entry_count||0)+
  " hidden entries • "+number(metrics.development_directory_count||0)+" development/cache trees";
 $("raw-metrics").textContent=JSON.stringify(metrics,null,2);
 $("raw-errors").textContent=JSON.stringify(REPORT.errors||[],null,2);
@@ -289,6 +297,17 @@ for(const item of REPORT.symlinks){
  symlinkRows.append(tr);
 }
 $("no-symlinks").classList.toggle("hidden",REPORT.symlinks.length!==0);
+
+const specialRows=$("special-rows"),specialEntries=REPORT.special_entries||[];
+for(const item of specialEntries){
+ const tr=document.createElement("tr");
+ const mode=item.permissions===null||item.permissions===undefined?"unknown":Number(item.permissions).toString(8);
+ for(const pair of [[item.path,"path"],[item.entry_type,""],[mode,"mono"],[item.is_hidden?"yes":"no",""],[formatBytes(item.size_bytes||0),""]]){
+  const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
+ }
+ specialRows.append(tr);
+}
+$("no-special").classList.toggle("hidden",specialEntries.length!==0);
 
 const files=REPORT.files.slice().sort(function(a,b){return a.path.localeCompare(b.path);});
 const fileSearch=$("file-search"),fileKind=$("file-kind"),fileRows=$("file-rows"),fileMore=$("file-more");
@@ -391,6 +410,8 @@ def _markdown_report(result: ScanResult) -> str:
         f"- Files: {len(result.files):,}",
         f"- Directories: {max(0, len(result.directories) - 1):,}",
         f"- Symbolic links: {len(result.symlinks):,}",
+        f"- Special filesystem entries: {len(result.special_entries):,}",
+        f"- Explicitly pruned directories: {metrics.get('pruned_directory_count', 0):,}",
         f"- Findings: {len(result.findings):,}",
         f"- Total file size: {metrics.get('total_bytes', 0):,} bytes",
         f"- Hidden entries: {metrics.get('hidden_entry_count', 0):,}",
@@ -428,6 +449,16 @@ def _markdown_report(result: ScanResult) -> str:
             lines.append(
                 f"- {item.path} -> {item.target} "
                 f"(scope: {item.target_scope}, hidden: {item.is_hidden})"
+            )
+    lines.extend(["", "## Special Filesystem Entries", ""])
+    if not result.special_entries:
+        lines.append("No special filesystem entries were detected.")
+    else:
+        for item in result.special_entries:
+            mode = "unknown" if item.permissions is None else oct(item.permissions)
+            lines.append(
+                f"- {item.path} — {item.entry_type}, permissions {mode}, "
+                f"hidden: {item.is_hidden}, size: {item.size_bytes:,} bytes"
             )
     lines.extend(["", "## Findings", ""])
     if not result.findings:

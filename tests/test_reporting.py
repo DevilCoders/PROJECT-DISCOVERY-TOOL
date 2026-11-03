@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from project_discovery.models import (
-    DirectoryRecord, FileRecord, Finding, ScanResult, SymlinkRecord,
+    DirectoryRecord, FileRecord, Finding, ScanResult, SpecialEntryRecord, SymlinkRecord,
 )
 from project_discovery.reporting import write_reports
 
@@ -47,6 +47,7 @@ def _result() -> ScanResult:
             DirectoryRecord("src", 1, direct_child_count=1, file_count=1, total_bytes=128),
         ],
         symlinks=[SymlinkRecord("current", "releases/v1", "internal")],
+        special_entries=[SpecialEntryRecord("events.pipe", "fifo", permissions=0o600)],
     )
 
 
@@ -57,6 +58,7 @@ def test_html_report_has_interactive_paged_inventory_and_findings(tmp_path: Path
         'id="search"', 'id="category"', 'id="confidence"', 'id="severity"',
         'id="open-all"', 'id="close-all"', 'id="load-more"',
         'id="file-search"', 'id="symlink-rows"', 'id="directory-rows"',
+        'id="special-rows"', 'id="stat-special"',
         "FINDING_PAGE=100", "FILE_PAGE=100", "REPORT =", "textContent",
     ):
         assert expected in content
@@ -65,6 +67,7 @@ def test_html_report_has_interactive_paged_inventory_and_findings(tmp_path: Path
     assert "config.py:12" in content
     assert "192.0.2.1" in content
     assert "current" in content
+    assert "events.pipe" in content
     assert "node_dependencies" in content
 
 
@@ -85,6 +88,7 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "## File Type Distribution" in content
     assert "## Largest Directories" in content
     assert "## Symbolic Links" in content
+    assert "## Special Filesystem Entries" in content
     assert "current" in content
     assert "node_dependencies" in content
 
@@ -92,6 +96,7 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
 def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
     path = write_reports(_result(), tmp_path, {"json"})[0]
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.1"
+    assert payload["schema_version"] == "1.2"
     assert payload["directories"][1]["path"] == "src"
     assert payload["symlinks"][0]["target_scope"] == "internal"
+    assert payload["special_entries"][0]["entry_type"] == "fifo"
