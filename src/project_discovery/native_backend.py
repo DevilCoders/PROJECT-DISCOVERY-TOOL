@@ -13,6 +13,11 @@ try:
 except ImportError:
     _native_cpp = None
 
+try:
+    from . import _walker
+except ImportError:
+    _walker = None
+
 
 def count_byte(data: bytes | bytearray | memoryview, needle: int) -> int:
     """Count a byte using SIMD/C if built, otherwise use the portable fallback."""
@@ -53,3 +58,15 @@ def detect_signature(data: bytes | bytearray | memoryview) -> str | None:
 def signature_backend_available() -> bool:
     """Return whether the compiled C++ signature classifier is loaded."""
     return _native_cpp is not None
+
+
+def rust_walker_available() -> bool:
+    """Return whether the compiled Rust filesystem walker is loaded."""
+    return _walker is not None
+
+
+def create_walker(root, excluded_names, excluded_paths):
+    """Create the Rust no-follow walker, or return None for the Python fallback."""
+    if _walker is None:
+        return None
+    return _walker.Walker(str(root), sorted(excluded_names), sorted(excluded_paths))
