@@ -192,4 +192,4 @@ def test_python_inventory_fallback_remains_available_without_rust(tmp_path: Path
     records, directories, _, _, stats = scanner.discover_inventory(root)
     assert [record.path for record in records] == ["main.py"]
     assert len(directories) == 1
-    assert stats["file_count"] == 1
+    assert stats["entry_count"] == 2
