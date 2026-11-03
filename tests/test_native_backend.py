@@ -51,3 +51,26 @@ def test_cpp_signature_classifier_is_compiled_and_recognizes_binary_formats():
 
 def test_rust_filesystem_walker_is_built_and_available():
     assert native_backend.rust_walker_available()
+
+
+def test_gpu_capability_fields_are_available_with_or_without_hardware():
+    info = native_backend.capabilities()
+    assert isinstance(info["gpu_available"], bool)
+    assert info["gpu_status"] in {"online", "cpu-fallback"}
+    assert isinstance(info["gpu_threshold_bytes"], int)
+    assert info["gpu_threshold_bytes"] >= 1024 * 1024
+    assert isinstance(info["gpu_dispatches"], int)
+    assert isinstance(info["gpu_fallbacks"], int)
+    if info["gpu_available"]:
+        assert info["gpu_backend"] == "opencl"
+        assert info["gpu_name"]
+        assert info["gpu_compute_units"] >= 1
+    else:
+        assert info["gpu_backend"] == "none"
+
+
+def test_large_buffer_automatic_backend_matches_python_reference():
+    payload = bytes(range(256)) * 32768 + b"\n\x00"
+    assert len(payload) >= 8 * 1024 * 1024
+    for value in (0, 10, 127, 255):
+        assert native_backend.count_byte(payload, value) == payload.count(bytes([value]))
