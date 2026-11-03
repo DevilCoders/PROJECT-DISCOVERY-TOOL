@@ -19,7 +19,7 @@
 - [x] SQL DDL inventory and destructive migration pattern checks
 - [x] Prisma ORM model, enum, datasource and relation inventory
 - [x] Initial test-suite declaration discovery
-- [x] Initial Make, CMake, package, Python, Cargo, Maven, Docker and CI manifest inventory
+- [x] Initial build/CI inventory across Make, CMake, package, Python, Cargo, Maven, Docker, Bazel, Buck, SCons, Ant, Ninja, QMake, SwiftPM, .NET, Autotools and common CI systems
 - [x] Local SQLite catalog for independent project reports
 - [x] N-project comparison with all-project intersections and pairwise overlap
 - [x] Interactive standalone HTML report with search and filters
