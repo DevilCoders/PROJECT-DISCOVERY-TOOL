@@ -13,6 +13,8 @@ from typing import Any
 
 from .models import FileRecord, Finding
 
+MAX_GRAPH_AST_FILE_BYTES = 16 * 1024 * 1024
+
 
 def _module_name(relative_path: str) -> str | None:
     path = Path(relative_path)
@@ -81,13 +83,34 @@ def analyze_python_dependencies(
     """Build a local Python import graph from inventoried source files."""
     module_paths: dict[str, list[str]] = defaultdict(list)
     eligible: list[tuple[FileRecord, str]] = []
+    skipped_modules: list[dict[str, str | int]] = []
+    skipped_findings: list[Finding] = []
     for record in records:
         if record.extension not in {".py", ".pyi"} or record.error:
             continue
         module = _module_name(record.path)
-        if module is not None:
-            module_paths[module].append(record.path)
-            eligible.append((record, module))
+        if module is None:
+            continue
+        if record.content_skipped_reason or record.size_bytes > MAX_GRAPH_AST_FILE_BYTES:
+            reason = record.content_skipped_reason or (
+                f"exceeds {MAX_GRAPH_AST_FILE_BYTES} byte graph AST budget"
+            )
+            skipped_modules.append({
+                "name": module, "path": record.path, "reason": reason,
+                "confidence": "UNKNOWN",
+            })
+            skipped_findings.append(Finding(
+                "architecture",
+                f"Python dependency graph skipped: {record.path}",
+                "The module is inventoried, but its import graph could not be extracted: " + reason,
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer="python-module-graph",
+                severity="LOW",
+            ))
+            continue
+        module_paths[module].append(record.path)
+        eligible.append((record, module))
 
     unique_modules = {
         name: paths[0] for name, paths in module_paths.items() if len(paths) == 1
@@ -99,7 +122,7 @@ def analyze_python_dependencies(
     edges: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
     adjacency: dict[str, set[str]] = {name: set() for name in unique_modules}
-    findings: list[Finding] = []
+    findings: list[Finding] = list(skipped_findings)
 
     def record_unresolved(
         source: str, path: str, line: int, target: str, reason: str
@@ -240,12 +263,14 @@ def analyze_python_dependencies(
             {"name": name, "path": path, "confidence": "CONFIRMED"}
             for name, path in sorted(unique_modules.items())
         ],
+        "skipped_modules": skipped_modules,
         "duplicate_modules": duplicate_modules,
         "edges": edges,
         "unresolved_imports": unresolved,
         "cycles": cycles,
         "summary": {
             "module_count": len(unique_modules),
+            "skipped_module_count": len(skipped_modules),
             "duplicate_module_count": len(duplicate_modules),
             "edge_count": len(edges),
             "unresolved_import_count": len(unresolved),

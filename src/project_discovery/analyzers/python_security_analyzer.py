@@ -4,6 +4,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+MAX_AST_FILE_BYTES = 16 * 1024 * 1024
+
 from .base import Analyzer
 from ..models import FileRecord, Finding
 
@@ -16,9 +18,24 @@ class PythonSecurityAnalyzer(Analyzer):
     languages = ("Python",)
 
     def supports(self, record: FileRecord) -> bool:
-        return record.extension in {".py", ".pyi"} and record.error is None
+        return (
+            record.extension in {".py", ".pyi"}
+            and record.error is None
+            and record.content_skipped_reason is None
+        )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > MAX_AST_FILE_BYTES:
+            return [Finding(
+                "security",
+                f"Python security AST resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds this analyzer's "
+                f"{MAX_AST_FILE_BYTES:,}-byte AST budget. This is not a clean security result.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"size: {record.size_bytes} bytes"],
+                analyzer=self.name,
+                severity="LOW",
+            )]
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=record.path)
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:

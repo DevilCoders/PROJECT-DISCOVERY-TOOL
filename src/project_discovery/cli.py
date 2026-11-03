@@ -40,14 +40,10 @@ def _status(console: Console, label: str, message: str, style: str) -> None:
 
 
 _BANNER = r"""
- ____  ____ _____
-|  _ \\/ ___|_   _|
-| |_) \\___ \\ | |
-|  __/ ___) || |
-|_|   |____/ |_|
-
-PROJECT DISCOVERY TOOL  //  POLYGLOT INTELLIGENCE
-LOCAL-FIRST  •  READ-ONLY  •  EVIDENCE-DRIVEN
++====================================================================+
+|  P D T  //  PROJECT DISCOVERY TOOL                                  |
+|  POLYGLOT INTELLIGENCE  //  LOCAL-FIRST  //  READ-ONLY              |
++====================================================================+
 """
 
 
@@ -237,7 +233,7 @@ def run_scan(
     summary.add_row("Languages / formats detected", str(len(counts)))
     summary.add_row("Findings", str(len(findings)))
     summary.add_row("Scan errors", str(len(errors) + metrics["walk_errors"]))
-    summary.add_row("Oversized files skipped", str(metrics["oversized_files"]))
+    summary.add_row("Large files skipped by request", str(metrics["oversized_files"]))
     summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
     console.print(summary)
     _status(

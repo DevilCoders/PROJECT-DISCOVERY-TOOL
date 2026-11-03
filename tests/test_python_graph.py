@@ -68,3 +68,26 @@ def test_scc_traversal_handles_deep_graphs_without_recursion():
     components = _strongly_connected_components(nodes, adjacency)
     assert len(components) == 1
     assert set(components[0]) == set(nodes)
+
+
+
+def test_graph_records_explicitly_skipped_modules_as_unknown(tmp_path: Path):
+    path = tmp_path / "large.py"
+    path.write_text("import os\n", encoding="utf-8")
+    record = _record(tmp_path, "large.py")
+    record.content_skipped_reason = "Explicit --skip"
+    result, findings = analyze_python_dependencies(tmp_path, [record])
+    assert result["modules"] == []
+    assert result["skipped_modules"][0]["name"] == "large"
+    assert result["summary"]["skipped_module_count"] == 1
+    assert findings[0].confidence == "UNKNOWN"
+
+
+def test_graph_applies_independent_ast_resource_budget(tmp_path: Path):
+    path = tmp_path / "large.py"
+    path.write_text("import os\n", encoding="utf-8")
+    record = _record(tmp_path, "large.py")
+    record.size_bytes = 20 * 1024 * 1024
+    result, findings = analyze_python_dependencies(tmp_path, [record])
+    assert result["summary"]["skipped_module_count"] == 1
+    assert findings[0].confidence == "UNKNOWN"

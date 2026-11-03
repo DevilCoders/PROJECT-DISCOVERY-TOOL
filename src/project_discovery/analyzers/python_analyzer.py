@@ -1,6 +1,8 @@
 """Static Python AST analysis. Target modules are never imported or executed."""
 import ast
 from pathlib import Path
+
+MAX_AST_FILE_BYTES = 16 * 1024 * 1024
 from .base import Analyzer
 from ..models import FileRecord, Finding
 
@@ -8,8 +10,24 @@ class PythonAnalyzer(Analyzer):
     name = "python-ast"
     domains = ("source_structure", "symbol_index", "imports",)
     def supports(self, record: FileRecord) -> bool:
-        return record.extension in {".py",".pyi"} and record.error is None
+        return (
+            record.extension in {".py", ".pyi"}
+            and record.error is None
+            and record.content_skipped_reason is None
+        )
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > MAX_AST_FILE_BYTES:
+            return [Finding(
+                "code",
+                f"Python AST resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds this analyzer's "
+                f"{MAX_AST_FILE_BYTES:,}-byte AST budget. Other bounded/streaming "
+                "analyzers may still inspect the file.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"size: {record.size_bytes} bytes"],
+                analyzer=self.name,
+                severity="LOW",
+            )]
         try:
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=record.path)

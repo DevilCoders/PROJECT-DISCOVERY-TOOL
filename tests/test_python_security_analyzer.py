@@ -50,3 +50,14 @@ def test_python_security_never_executes_target_code(tmp_path: Path):
     )
     assert findings == []
     assert not marker.exists()
+
+
+
+def test_ast_security_budget_reports_unknown_not_clean_result(tmp_path: Path):
+    path = tmp_path / "oversized.py"
+    path.write_text("pass\n", encoding="utf-8")
+    record = FileRecord(path.name, 20 * 1024 * 1024, ".py", "Python")
+    findings = PythonSecurityAnalyzer().analyze(path, record)
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "AST resource limit" in findings[0].title
