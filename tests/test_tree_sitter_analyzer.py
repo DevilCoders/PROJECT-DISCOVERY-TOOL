@@ -121,3 +121,21 @@ def test_unmapped_grammar_returns_no_semantic_claims():
 
     root = SimpleNamespace(type="program", children=[])
     assert _extract_declarations(root, "unmapped_grammar") == []
+
+
+def test_generic_declaration_fallback_covers_unmapped_grammar():
+    from types import SimpleNamespace
+    from project_discovery.analyzers.tree_sitter_analyzer import _extract_declarations
+
+    point = SimpleNamespace(row=0, column=0)
+    name = SimpleNamespace(type="identifier", text=b"Widget", children=[])
+    declaration = SimpleNamespace(
+        type="class_declaration",
+        children=[name],
+        start_point=point,
+        child_by_field_name=lambda _field: None,
+    )
+    root = SimpleNamespace(type="program", children=[declaration])
+    symbols = _extract_declarations(root, "unmapped_language")
+    assert symbols[0]["name"] == "Widget"
+    assert symbols[0]["kind"] == "class_declaration"

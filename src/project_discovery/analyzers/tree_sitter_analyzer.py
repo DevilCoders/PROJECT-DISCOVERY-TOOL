@@ -115,13 +115,14 @@ _IDENTIFIER_TYPES = {
 def _extract_declarations(root_node, grammar: str) -> list[dict[str, str | int]]:
     """Extract conservative declaration names for grammars with known node schemas."""
     node_kinds = DECLARATION_NODE_TYPES.get(grammar, {})
-    if not node_kinds:
-        return []
     declarations: list[dict[str, str | int]] = []
     stack = [root_node]
     while stack:
         node = stack.pop()
         kind = node_kinds.get(node.type)
+        if kind is None and node.type.endswith(("_declaration", "_definition", "_item")):
+            if not node.type.startswith(("import_", "use_", "include_")):
+                kind = node.type
         if kind:
             try:
                 name_node = node.child_by_field_name("name")
