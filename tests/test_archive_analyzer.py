@@ -119,3 +119,21 @@ def test_zip_central_directory_limit_is_checked_before_materializing_entries(tmp
     assert findings[0].confidence == "UNKNOWN"
     assert "central-directory budget exceeded" in findings[0].title
     assert "declared entries: 2" in " ".join(findings[0].evidence)
+
+def test_zip_index_is_not_materialized_when_preflight_bounds_are_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.archive_analyzer as archive_module
+
+    path = tmp_path / "unbounded-index.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("one.txt", "small payload")
+
+    monkeypatch.setattr(archive_module, "_zip_index_hint", lambda _path: None)
+
+    def forbidden_materialization(*args, **kwargs):
+        raise AssertionError("ZipFile must not be opened after an unknown preflight")
+
+    monkeypatch.setattr(archive_module.zipfile, "ZipFile", forbidden_materialization)
+    findings = ArchiveIntelligenceAnalyzer()._zip(path, _record(path, "unbounded-index.zip"))
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "bounds unavailable" in findings[0].title
