@@ -57,3 +57,11 @@ def test_aws_secret_access_key_value_is_redacted(tmp_path: Path):
     findings = _scan(tmp_path, "deployment.env", "AWS_SECRET_ACCESS_KEY=" + value + "\n")
     assert findings
     assert value not in repr([item.to_dict() for item in findings])
+
+
+def test_secret_findings_have_actionable_severity(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "private.pem",
+        "-----BEGIN PRIVATE KEY-----\n",
+    )
+    assert findings[0].severity == "CRITICAL"
