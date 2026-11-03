@@ -10,6 +10,8 @@ class Analyzer(ABC):
 
     Plugins run in-process with PDT permissions. Implementations must not mutate
     target files, execute target code, or perform network access during analysis.
+    Analyzer instances may be called concurrently for different files. Plugins with
+    shared mutable state must set ``concurrent_safe = False``.
     """
 
     api_version = 1
@@ -18,6 +20,7 @@ class Analyzer(ABC):
     description = ""
     domains: tuple[str, ...] = ()
     languages: tuple[str, ...] = ()
+    concurrent_safe = True
 
     @abstractmethod
     def supports(self, record: FileRecord) -> bool:
