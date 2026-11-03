@@ -38,16 +38,23 @@ $("host-os").textContent=JSON.stringify({
  native_backend:metrics.native_backend||{backend:"not reported"}
 },null,2);
 const vulnMeta=metrics.vulnerability_intelligence||{enabled:false};
-const vulnFindings=(REPORT.findings||[]).filter(item=>item.category==="vulnerabilities");
+const allFindings=REPORT.findings||[];
+const vulnFindings=[];let vulnFindingCount=0;
+for(const item of allFindings){
+ if(item.category==="vulnerabilities"){
+  vulnFindingCount++;
+  if(vulnFindings.length<200)vulnFindings.push(item);
+ }
+}
 $("vuln-summary").textContent=vulnMeta.enabled
- ? number(vulnMeta.advisory_count||0)+" local advisories • "+number(vulnFindings.length)+" matched finding(s)"
+ ? number(vulnMeta.advisory_count||0)+" local advisories • "+number(vulnFindingCount)+" matched finding(s)"
  : "Offline advisory database not configured";
 $("vuln-db-state").textContent=vulnMeta.enabled?"LOCAL DATABASE ACTIVE":"NO LOCAL DATABASE";
 $("vuln-db-updated").textContent=vulnMeta.last_imported_at
  ? "Last local import: "+vulnMeta.last_imported_at
  : "No local advisory snapshot metadata";
 const vulnTarget=$("vulnerability-findings");
-for(const item of vulnFindings.slice(0,200)){
+for(const item of vulnFindings){
  const card=document.createElement("article");card.className="finding";
  const details=document.createElement("details"),summary=document.createElement("summary");
  const title=document.createElement("span");title.className="finding-title";title.textContent=item.title;
@@ -65,21 +72,28 @@ for(const item of vulnFindings.slice(0,200)){
  }
  details.append(body);card.append(details);vulnTarget.append(card);
 }
-$("no-vulnerabilities").classList.toggle("hidden",vulnFindings.length!==0);
-if(vulnFindings.length>200){
+$("no-vulnerabilities").classList.toggle("hidden",vulnFindingCount!==0);
+if(vulnFindingCount>200){
  const note=document.createElement("div");note.className="empty";
  note.textContent="Showing first 200 vulnerability matches here. The global findings view and JSON report contain the complete set.";
  vulnTarget.append(note);
 }
 const vcsCategories=new Set(["vcs","hosting_providers","ci_cd","cloud_services"]);
-const vcsFindings=(REPORT.findings||[]).filter(item=>vcsCategories.has(item.category));
-const providerNames=[...new Set(vcsFindings.map(item=>item.title.split(":")[0]))].sort();
-$("vcs-summary").textContent=vcsFindings.length
- ? number(vcsFindings.length)+" evidence item(s) • "+providerNames.slice(0,8).join(" / ")
+const vcsFindings=[],providerNameSet=new Set();let vcsFindingCount=0;
+for(const item of allFindings){
+ if(vcsCategories.has(item.category)){
+  vcsFindingCount++;
+  providerNameSet.add(item.title.split(":")[0]);
+  if(vcsFindings.length<100)vcsFindings.push(item);
+ }
+}
+const providerNames=Array.from(providerNameSet).sort();
+$("vcs-summary").textContent=vcsFindingCount
+ ? number(vcsFindingCount)+" evidence item(s) • "+providerNames.slice(0,8).join(" / ")
    +(providerNames.length>8?" / +"+(providerNames.length-8)+" more":"")
  : "No VCS/provider evidence";
 const vcsTarget=$("vcs-findings");
-for(const item of vcsFindings.slice(0,100)){
+for(const item of vcsFindings){
  const card=document.createElement("article");card.className="finding";
  const details=document.createElement("details"),summary=document.createElement("summary");
  const title=document.createElement("span");title.className="finding-title";title.textContent=item.title;
@@ -97,8 +111,8 @@ for(const item of vcsFindings.slice(0,100)){
  }
  details.append(body);card.append(details);vcsTarget.append(card);
 }
-$("no-vcs").classList.toggle("hidden",vcsFindings.length!==0);
-if(vcsFindings.length>100){
+$("no-vcs").classList.toggle("hidden",vcsFindingCount!==0);
+if(vcsFindingCount>100){
  const note=document.createElement("div");note.className="empty";
  note.textContent="Showing first 100 VCS/provider findings. Use the global findings view or JSON report for the complete set.";
  vcsTarget.append(note);
