@@ -8,6 +8,11 @@ try:
 except ImportError:
     _native = None
 
+try:
+    from . import _native_cpp
+except ImportError:
+    _native_cpp = None
+
 
 def count_byte(data: bytes | bytearray | memoryview, needle: int) -> int:
     """Count a byte using SIMD/C if built, otherwise use the portable fallback."""
@@ -35,3 +40,16 @@ def capabilities() -> dict[str, Any]:
 
 def native_available() -> bool:
     return _native is not None
+
+
+def detect_signature(data: bytes | bytearray | memoryview) -> str | None:
+    """Classify a bounded byte sample with the optional C++ signature engine."""
+    if _native_cpp is None:
+        return None
+    result = _native_cpp.detect_signature(data)
+    return str(result) if result is not None else None
+
+
+def signature_backend_available() -> bool:
+    """Return whether the compiled C++ signature classifier is loaded."""
+    return _native_cpp is not None
