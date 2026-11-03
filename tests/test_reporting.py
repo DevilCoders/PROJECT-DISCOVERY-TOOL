@@ -17,6 +17,7 @@ def test_html_report_has_search_filters_and_escaped_content(tmp_path: Path):
                 confidence="INFERRED",
                 evidence=["config.py:12"],
                 analyzer="secret-patterns",
+                severity="HIGH",
             )
         ],
         metrics={"file_count": 4},
@@ -27,6 +28,9 @@ def test_html_report_has_search_filters_and_escaped_content(tmp_path: Path):
     assert 'id="search"' in html_text
     assert 'id="category"' in html_text
     assert 'id="confidence"' in html_text
+    assert 'id="severity"' in html_text
+    assert 'data-severity="HIGH"' in html_text
+    assert "severity-high" in html_text
     assert "applyFilters" in html_text
     assert "&lt;script&gt;" in html_text
     assert "<script>alert" not in html_text
