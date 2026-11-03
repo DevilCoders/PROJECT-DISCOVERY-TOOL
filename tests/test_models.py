@@ -1,10 +1,33 @@
-from project_discovery.models import Finding
+from project_discovery.models import DirectoryRecord, FileRecord, Finding, ScanResult, SymlinkRecord
+
+
+def test_inventory_models_serialize_additive_metadata():
+    file = FileRecord(
+        "src/main.rs", 42, ".rs", "Rust",
+        file_type="text", size_bucket="4-64KiB", is_hidden=False,
+    )
+    directory = DirectoryRecord("src", 1, direct_child_count=1, file_count=1, total_bytes=42)
+    link = SymlinkRecord("current", "releases/v1", "internal")
+    result = ScanResult(
+        root="/work/project",
+        started_at="start",
+        finished_at="finish",
+        files=[file],
+        directories=[directory],
+        symlinks=[link],
+    )
+    payload = result.to_dict()
+    assert payload["schema_version"] == "1.1"
+    assert payload["files"][0]["file_type"] == "text"
+    assert payload["directories"][0]["total_bytes"] == 42
+    assert payload["symlinks"][0]["target_scope"] == "internal"
 
 
 def test_security_categories_receive_triage_severity_by_default():
     assert Finding("security", "risk", "detail").severity == "MEDIUM"
     assert Finding("supply_chain", "risk", "detail").severity == "MEDIUM"
     assert Finding("migration", "risk", "detail").severity == "MEDIUM"
+    assert Finding("privacy", "risk", "detail").severity == "MEDIUM"
     assert Finding("code", "info", "detail").severity == "INFO"
 
 

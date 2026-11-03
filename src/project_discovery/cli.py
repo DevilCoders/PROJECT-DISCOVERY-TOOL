@@ -1,5 +1,6 @@
 """PDT command line."""
 import argparse
+import platform
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ from .models import ScanResult
 from .python_graph import analyze_python_dependencies
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
-from .scanner import discover_files, sha256_file
+from .scanner import discover_inventory, sha256_file
 
 
 def now() -> str:
@@ -38,8 +39,30 @@ def _status(console: Console, label: str, message: str, style: str) -> None:
     console.print(f"[bold {style}][ {label} ][/bold {style}] {message}")
 
 
+_BANNER = r"""
+ ____  ____ _____
+|  _ \\/ ___|_   _|
+| |_) \\___ \\ | |
+|  __/ ___) || |
+|_|   |____/ |_|
+
+PROJECT DISCOVERY TOOL  //  POLYGLOT INTELLIGENCE
+LOCAL-FIRST  •  READ-ONLY  •  EVIDENCE-DRIVEN
+"""
+
+
+def _render_banner(console: Console) -> None:
+    if console.is_terminal:
+        console.clear()
+    console.print(f"[bold bright_cyan]{_BANNER}[/bold bright_cyan]")
+    console.print(
+        "[dim]Filesystem intelligence  |  Security telemetry  |  Architecture discovery[/dim]\n"
+    )
+
+
 def run_scan(
-    root: Path, output: Path | None, formats: set[str], max_file_mb: int
+    root: Path, output: Path | None, formats: set[str], max_file_mb: int,
+    *, skip_oversized: bool = False, ignores: set[str] | None = None,
 ) -> int:
     console = Console(stderr=True)
     root = root.expanduser().resolve(strict=True)
@@ -52,9 +75,15 @@ def run_scan(
     if output == root or root in output.parents:
         raise ValueError("Report output must be outside the analyzed project directory.")
 
+    _render_banner(console)
     _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
     started = now()
-    records, walk_stats = discover_files(root, max_file_bytes=max_file_mb * 1024 * 1024)
+    records, directories, symlinks, walk_stats = discover_inventory(
+        root,
+        max_file_bytes=max_file_mb * 1024 * 1024,
+        skip_oversized=skip_oversized,
+        ignores=ignores,
+    )
     analyzer_load = load_analyzers()
     analyzers = analyzer_load.analyzers
     findings = []
@@ -75,17 +104,17 @@ def run_scan(
             for record in records:
                 counts[record.language] += 1
                 try:
-                    if record.error:
+                    if record.error or record.content_skipped_reason:
                         continue
                     path = root / record.path
-                    stat = path.stat()
+                    file_stat = path.stat()
                     cached = cache.get(str(root), record.path)
                     if (
                         cached
-                        and cached[0] == stat.st_size
-                        and cached[1] == stat.st_mtime_ns
-                        and cached[2] == stat.st_ctime_ns
-                        and cached[3] == stat.st_ino
+                        and cached[0] == file_stat.st_size
+                        and cached[1] == file_stat.st_mtime_ns
+                        and cached[2] == file_stat.st_ctime_ns
+                        and cached[3] == file_stat.st_ino
                     ):
                         record.sha256 = cached[4]
                     else:
@@ -93,10 +122,10 @@ def run_scan(
                         cache.put(
                             str(root),
                             record.path,
-                            stat.st_size,
-                            stat.st_mtime_ns,
-                            stat.st_ctime_ns,
-                            stat.st_ino,
+                            file_stat.st_size,
+                            file_stat.st_mtime_ns,
+                            file_stat.st_ctime_ns,
+                            file_stat.st_ino,
                             record.sha256,
                         )
                     for analyzer in analyzers:
@@ -127,9 +156,32 @@ def run_scan(
     domain_catalog = analyzer_domain_catalog()
     metrics = {
         "file_count": len(records),
+        "directory_count": len(directories) - 1,
+        "symlink_count": len(symlinks),
+        "entry_count": walk_stats.get("entry_count", 0) + 1,
+        "hidden_entry_count": walk_stats.get("hidden_entry_count", 0),
+        "development_directory_count": walk_stats.get("development_directory_count", 0),
+        "development_directories": {
+            key.split(":", 1)[1]: value
+            for key, value in walk_stats.items() if key.startswith("development_dir:")
+        },
+        "file_types": {
+            key.split(":", 1)[1]: value
+            for key, value in walk_stats.items() if key.startswith("file_type:")
+        },
+        "size_buckets": {
+            key.split(":", 1)[1]: value
+            for key, value in walk_stats.items() if key.startswith("size_bucket:")
+        },
         "total_bytes": walk_stats.get("total_bytes", 0),
         "walk_errors": walk_stats.get("walk_errors", 0),
-        "oversized_files": walk_stats.get("oversized", 0),
+        "oversized_files": walk_stats.get("oversized_content_skipped", 0),
+        "content_skip_enabled": skip_oversized,
+        "host_os": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+        },
         "languages": dict(sorted(counts.items())),
         "language_catalog": language_catalog(),
         "recognized_language_count": recognized_language_count(),
@@ -162,6 +214,8 @@ def run_scan(
     result = ScanResult(
         str(root), started, now(), records, findings, metrics, errors,
         [analyzer.name for analyzer in analyzers] + ["python-module-graph"],
+        directories=directories,
+        symlinks=symlinks,
     )
     reports = write_reports(result, output, formats)
     for report in reports:
@@ -175,6 +229,10 @@ def run_scan(
     summary.add_column("Metric")
     summary.add_column("Value", justify="right")
     summary.add_row("Files inventoried", str(len(records)))
+    summary.add_row("Directories inventoried", str(metrics["directory_count"]))
+    summary.add_row("Symbolic links", str(metrics["symlink_count"]))
+    summary.add_row("Hidden entries", str(metrics["hidden_entry_count"]))
+    summary.add_row("Development/cache trees", str(metrics["development_directory_count"]))
     summary.add_row("Total size", f"{metrics['total_bytes']:,} bytes")
     summary.add_row("Languages / formats detected", str(len(counts)))
     summary.add_row("Findings", str(len(findings)))
@@ -208,7 +266,19 @@ def main() -> None:
     scan.add_argument("path", type=Path)
     scan.add_argument("--output", type=Path, default=None)
     scan.add_argument("--format", default="json,markdown,html")
-    scan.add_argument("--max-file-mb", type=int, default=8)
+    scan.add_argument(
+        "--skip", action="store_true",
+        help="Opt in to skipping content analysis for files above --max-file-mb",
+    )
+    scan.add_argument(
+        "--max-file-mb", type=int, default=128,
+        help="Size threshold used only with --skip (default: 128 MiB)",
+    )
+    scan.add_argument(
+        "--exclude-dir", action="append", default=[],
+        metavar="NAME",
+        help="Explicitly prune a directory name; its marker remains in the inventory",
+    )
     compare = sub.add_parser("compare", help="Compare two or more independent PDT JSON reports")
     compare.add_argument("reports", type=Path, nargs="+")
     compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
@@ -265,7 +335,10 @@ def main() -> None:
                 parser.error("scan --format accepts json, markdown, html")
             if args.max_file_mb < 1:
                 parser.error("--max-file-mb must be >= 1")
-            raise SystemExit(run_scan(args.path, args.output, formats, args.max_file_mb))
+            raise SystemExit(run_scan(
+                args.path, args.output, formats, args.max_file_mb,
+                skip_oversized=args.skip, ignores=set(args.exclude_dir),
+            ))
 
         if not formats or formats - {"json", "markdown"}:
             parser.error("compare --format accepts json, markdown")

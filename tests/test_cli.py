@@ -74,3 +74,29 @@ def test_catalog_list_cli_without_format_argument(tmp_path: Path, monkeypatch):
     with pytest.raises(SystemExit) as result:
         main()
     assert result.value.code == 0
+
+
+def test_large_file_content_skip_is_opt_in(tmp_path: Path):
+    import json
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "large.bin").write_bytes(b"x" * 128)
+    default_output = tmp_path / "default-report"
+    assert run_scan(project, default_output, {"json"}, 1) == 0
+    default_payload = json.loads(
+        (default_output / "discovery-report.json").read_text(encoding="utf-8")
+    )
+    assert default_payload["files"][0]["content_skipped_reason"] is None
+    assert default_payload["metrics"]["content_skip_enabled"] is False
+
+    skip_output = tmp_path / "skip-report"
+    assert run_scan(
+        project, skip_output, {"json"}, 1, skip_oversized=True
+    ) == 0
+    skip_payload = json.loads(
+        (skip_output / "discovery-report.json").read_text(encoding="utf-8")
+    )
+    assert "Explicit --skip" in skip_payload["files"][0]["content_skipped_reason"]
+    assert skip_payload["metrics"]["oversized_files"] == 1
+    assert skip_payload["metrics"]["content_skip_enabled"] is True
