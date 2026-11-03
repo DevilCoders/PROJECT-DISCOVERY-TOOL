@@ -122,13 +122,12 @@ class NetworkIndicatorAnalyzer(Analyzer):
                 for candidate in pattern.findall(line):
                     try:
                         parsed = ipaddress.ip_address(candidate)
-                        if parsed.version == 6:
-                            if parsed.ipv4_mapped is not None:
-                        mapped = int(parsed.ipv4_mapped)
-                        normalized = f"::ffff:{mapped >> 16:x}:{mapped & 0xFFFF:x}"
-                    else:
-                        normalized = parsed.compressed
-                    addresses["IPv6"].add((normalized, number))
+                        if parsed.version == 6 and parsed.ipv4_mapped is not None:
+                            mapped = int(parsed.ipv4_mapped)
+                            normalized = f"::ffff:{mapped >> 16:x}:{mapped & 0xFFFF:x}"
+                        else:
+                            normalized = parsed.compressed
+                        addresses["IPv6"].add((normalized, number))
                     except ValueError:
                         pass
             for match in _PORT_KEY.finditer(line):
