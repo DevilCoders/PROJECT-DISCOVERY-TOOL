@@ -84,3 +84,19 @@ def test_identity_analyzer_honors_python_encoding_cookie(tmp_path: Path):
     findings = IdentityIntelligenceAnalyzer().analyze(path, record)
     assert any("Identity framework references" in item.title for item in findings)
     assert all(item.confidence != "UNKNOWN" for item in findings)
+
+
+def test_identity_analyzer_caps_retained_marker_locations(tmp_path: Path):
+    source = "".join(
+        "passport.authenticate('jwt');\n"
+        for _ in range(250)
+    )
+    findings = _scan(tmp_path, "auth.js", source)
+    framework = next(
+        item for item in findings if "Identity framework references" in item.title
+    )
+    authentication = next(
+        item for item in findings if item.category == "authentication"
+    )
+    assert len(framework.evidence) <= 100
+    assert len(authentication.evidence) <= 100
