@@ -193,7 +193,7 @@ class ConfigurationAnalyzer(Analyzer):
                 f"Observed {len(keys)} configuration keys; {sensitive_key_count} key names "
                 "appear credential-related. Values are not included in the report.",
                 confidence="CONFIRMED",
-                evidence=[record.path],
+                evidence=[record.path] + [f"key: {key}" for key in keys[:100]],
                 analyzer=self.name,
             ))
         for line_number, risk_name in risks:
