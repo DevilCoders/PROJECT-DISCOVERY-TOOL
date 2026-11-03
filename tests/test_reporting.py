@@ -233,3 +233,26 @@ def test_html_report_escapes_untrusted_source_code_inside_script_payload(tmp_pat
     assert "</script><script>window.pwned" not in content
     assert "\\u003c/script\\u003e" in content
     assert "textContent=String(sourceLine.code" in content
+
+
+
+def test_markdown_largest_directory_summary_keeps_only_top_100(tmp_path: Path):
+    result = _result()
+    result.directories.extend(
+        DirectoryRecord(
+            path=f"synthetic-{index:03}",
+            depth=1,
+            file_count=index,
+            total_bytes=index,
+        )
+        for index in range(150)
+    )
+    path = write_reports(result, tmp_path, {"markdown"})[0]
+    content = path.read_text(encoding="utf-8")
+    section = content.split("## Largest Directories\\n", 1)[1].split(
+        "## Symbolic Links\\n", 1
+    )[0]
+    rows = [line for line in section.splitlines() if line.startswith("- synthetic-")]
+    assert len(rows) == 100
+    assert any("synthetic-149" in line for line in rows)
+    assert not any("synthetic-000 " in line for line in rows)
