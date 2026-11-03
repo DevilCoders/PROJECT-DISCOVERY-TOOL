@@ -14,7 +14,7 @@ _IDENTITY_ASSIGNMENT = re.compile(
 )
 _CREDENTIAL_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/@\s]+:)[^@\s/]+(@)")
 _AUTHORIZATION_HEADER = re.compile(
-    r"(?i)(\\bauthorization\\s*[:=]\\s*)[^,\\r\\n;]+"
+    r"(?i)(\bauthorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)[^,\s]+"
 )
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _TOKEN = re.compile(
