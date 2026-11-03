@@ -99,9 +99,10 @@ The baseline is not production-ready:
 - [x] Add `pdt scan --jobs N` and `--jobs 0` auto-sizing; expose selected worker count and queue limits in scan metrics and every report format.
 - [x] Extend the C extension with runtime OpenCL loader/device discovery without requiring GPU SDK headers or a GPU at build time.
 - [x] Implement a bounded C/OpenCL byte-count/reduction kernel for large buffers; dispatch to an available GPU only above a configured threshold and only for supported kernels. Device-specific threshold benchmarking remains open.
-- [x] Fall back to portable C/SIMD/Python on missing OpenCL loader, no GPU device, device memory limits, kernel/build/dispatch failure, unsupported platforms or small workloads. GPU absence must never fail a scan.
+- [x] Fall back to portable C/SIMD/Python on missing OpenCL loader, no GPU device, unknown/insufficient device memory limits, kernel/build/dispatch failure, unsupported platforms or small workloads. GPU absence must never fail a scan.
+- [x] Restrict GIL-releasing GPU reads to immutable bytes; mutable bytearray and other buffer exporters stay on the GIL-held CPU path.
 - [x] Report GPU vendor/device/compute units/memory, threshold, actual dispatch counts and fallback counts without exposing device-specific private data. Detailed per-failure reason telemetry remains open.
-- [ ] Add fake/no-device and kernel-failure tests plus hardware-backed GPU-present, threshold, large-buffer and CPU-equivalence runs; benchmark GPU versus CPU and tune the default threshold. Current CI verifies fallback and CPU-equivalence; it does not provision a GPU.
+- [ ] Add fake/no-device and kernel-failure tests plus hardware-backed GPU-present, threshold and fault-injection runs; benchmark GPU versus CPU and tune the default threshold. Current CI covers large-buffer CPU-equivalence, concurrent calls and safe mutable-buffer fallback; it does not provision a GPU.
 - [x] Keep GPU scope explicit: analyzer semantics remain CPU-side unless a specific C/OpenCL kernel is implemented and validated.
 
 
