@@ -42,7 +42,7 @@ _DOMAINS = (
     AnalyzerDomain("databases_sql", "SQL Database Intelligence", "Schemas, queries, indexes, constraints, stored procedures and migrations.", "partial"),
     AnalyzerDomain("databases_nosql", "NoSQL Intelligence", "Static client import and selected operation discovery for MongoDB, Redis, Neo4j, Elasticsearch, Cassandra and related stores.", "partial"),
     AnalyzerDomain("orm", "ORM and Data Mapping", "Models, relations, query builders, mappings and schema drift.", "partial"),
-    AnalyzerDomain("migrations", "Data Migration Intelligence", "Migration ordering, reversibility, destructive operations and version state.", "partial"),
+    AnalyzerDomain("migrations", "Data Migration Intelligence", "Flyway, Liquibase, Alembic, Django, Rails, Prisma, TypeORM, Knex, EF Core, Laravel and Ecto migration ordering, operations, rollback markers and destructive-change evidence.", "partial"),
     AnalyzerDomain("messaging", "Messaging and Event Systems", "Static client and producer/consumer API references for Kafka, RabbitMQ, NATS, MQTT, Celery, SQS/SNS and related brokers.", "partial"),
     AnalyzerDomain("tests", "Test Intelligence", "Test discovery, frameworks, fixtures, suites and test-to-code relationships.", "partial"),
     AnalyzerDomain("coverage", "Coverage Intelligence", "Coverage artifacts, untested code indicators and coverage trends."),

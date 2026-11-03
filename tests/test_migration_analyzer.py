@@ -1,0 +1,84 @@
+from pathlib import Path
+
+from project_discovery.analyzers.migration_analyzer import MigrationIntelligenceAnalyzer
+from project_discovery.models import FileRecord
+
+
+def _scan(tmp_path: Path, relative: str, content: str):
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    record = FileRecord(relative, path.stat().st_size, path.suffix.lower(), "Migration")
+    analyzer = MigrationIntelligenceAnalyzer()
+    assert analyzer.supports(record), relative
+    return analyzer.analyze(path, record)
+
+
+def test_flyway_versioned_sql_migration_is_identified(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "db/migration/V12__add_user_email.sql",
+        "ALTER TABLE users ADD COLUMN email TEXT;\n",
+    )
+    inventory = findings[0]
+    assert "Framework: Flyway" in inventory.detail
+    assert "identifier: V12__add_user_email" in inventory.detail
+    assert any("operation: add_column" in item for item in inventory.evidence)
+
+
+def test_alembic_revision_and_destructive_operation_are_identified(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "alembic/versions/abc_remove_legacy.py",
+        'revision = "abc123"\ndown_revision = "abc122"\n'
+        "def upgrade():\n    op.drop_column('users', 'legacy')\n"
+        "def downgrade():\n    op.add_column('users', sa.Column('legacy', sa.String()))\n",
+    )
+    assert "Framework: Alembic" in findings[0].detail
+    assert "identifier: abc123" in findings[0].detail
+    assert "rollback marker: present" in findings[0].detail
+    assert any("Potentially destructive" in item.title for item in findings)
+
+
+def test_rails_and_laravel_migration_apis_are_recognized(tmp_path: Path):
+    rails = _scan(
+        tmp_path, "db/migrate/20261103120000_add_users.rb",
+        "class AddUsers < ActiveRecord::Migration[7.1]\n"
+        "  def change\n    create_table :users\n  end\nend\n",
+    )
+    laravel = _scan(
+        tmp_path, "database/migrations/2026_create_users.php",
+        '<?php\nSchema::create(\'users\', function (Blueprint $table) {});\n'
+        "Schema::dropIfExists('users');\n",
+    )
+    assert "Rails Active Record" in rails[0].detail
+    assert "Laravel" in laravel[0].detail
+    assert any("Potentially destructive" in item.title for item in laravel)
+
+
+def test_liquibase_and_entity_framework_migrations_are_recognized(tmp_path: Path):
+    liquibase = _scan(
+        tmp_path, "db/changelog/001-users.xml",
+        '<databaseChangeLog><changeSet id="001" author="team">'
+        '<createTable tableName="users"/><dropTable tableName="old_users"/>'
+        '</changeSet></databaseChangeLog>',
+    )
+    ef = _scan(
+        tmp_path, "Migrations/2026_RemoveLegacy.cs",
+        'using Microsoft.EntityFrameworkCore.Migrations;\n'
+        'public class RemoveLegacy : Migration { '
+        'protected override void Up(MigrationBuilder migrationBuilder) { '
+        'migrationBuilder.DropTable(name: "legacy"); } }',
+    )
+    assert "Liquibase" in liquibase[0].detail
+    assert "identifier: 001" in liquibase[0].detail
+    assert any("Potentially destructive" in item.title for item in liquibase)
+    assert "Entity Framework Core" in ef[0].detail
+    assert any("Potentially destructive" in item.title for item in ef)
+
+
+def test_migration_analyzer_does_not_claim_execution_or_rollback_safety(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "prisma/migrations/2026_init/migration.sql",
+        "CREATE TABLE users (id INTEGER);\n",
+    )
+    assert "Prisma" in findings[0].detail
+    assert "Static markers do not prove rollback safety" in findings[0].detail

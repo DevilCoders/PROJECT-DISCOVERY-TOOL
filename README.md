@@ -12,7 +12,7 @@ PDT inventories and analyzes heterogeneous software repositories without importi
 - Structural documentation analysis for Markdown, HTML, reStructuredText and text formats; optional PDF and DOCX extraction.
 - Conservative secret-pattern detection with strict value redaction, Python AST security heuristics, severity-rated findings, plus expanded configuration inventory for environment files, JSON/JSON5/JSONC, YAML, TOML, INI, XML/plist, Nix, HCL/Terraform, Nginx, Dockerfile, systemd and common application/platform config names, with values excluded from key inventories.
 - Static API contract inventory for OpenAPI/Swagger, AsyncAPI, OpenRPC, GraphQL, Protocol Buffers, Thrift, WSDL, RAML and nested Postman collections (request URLs and values are excluded from collection evidence).
-- SQL DDL/schema inventory, Prisma ORM models/relations and inferred destructive migration indicators.
+- SQL DDL/schema inventory, Prisma ORM models/relations, plus cross-framework migration recognition for Flyway, Liquibase, Alembic, Django, Rails, Prisma, TypeORM, Knex, EF Core, Laravel and Ecto. Destructive operations are evidence-backed indicators, not claims about execution or rollback safety.
 - Test-suite candidate discovery across the central polyglot source catalog; build/CI manifest inventory across Bazel, Buck, SCons, Ant, Ninja, QMake, SwiftPM, .NET, Autotools, Jenkins, GitHub Actions, GitLab, Azure Pipelines and other ecosystems.
 - Dependency declaration extraction for Python, Node.js, Rust, Go and Composer manifests.
 - Static AI/ML discovery for framework imports, training/inference/data-pipeline markers, selected model metadata and model/dataset artifact inventories. Binary model and dataset payloads are never deserialized.

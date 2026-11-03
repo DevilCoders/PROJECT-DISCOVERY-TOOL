@@ -12,6 +12,7 @@ from .configuration_analyzer import ConfigurationAnalyzer
 from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
 from .ml_analyzer import AIMLIntelligenceAnalyzer
+from .migration_analyzer import MigrationIntelligenceAnalyzer
 from .mobile_analyzer import MobileIntelligenceAnalyzer
 from .messaging_analyzer import MessagingIntelligenceAnalyzer
 from .nosql_analyzer import NoSQLIntelligenceAnalyzer
@@ -53,6 +54,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         APIContractAnalyzer(),
         APIEndpointAnalyzer(),
         SQLSchemaAnalyzer(),
+        MigrationIntelligenceAnalyzer(),
         PrismaSchemaAnalyzer(),
         TestDiscoveryAnalyzer(),
         BuildManifestAnalyzer(),
