@@ -95,14 +95,14 @@ The baseline is not production-ready:
 ## Phase 2 — High-throughput engine for 2GB–100GB+
 
 ### C-native asynchronous and GPU execution (new release gate)
-- [ ] Add bounded asynchronous file-analysis scheduling with configurable worker count, back-pressure and deterministic result ordering; keep SQLite cache operations on the coordinator thread.
-- [ ] Add `pdt scan --jobs N` and `--jobs 0` auto-sizing; expose selected worker count and queue limits in scan metrics and every report format.
-- [ ] Extend the C extension with runtime OpenCL loader/device discovery without requiring GPU SDK headers or a GPU at build time.
-- [ ] Implement a bounded C/OpenCL byte-count/reduction kernel for large buffers; dispatch to an available GPU only above a measured threshold and only for supported kernels.
-- [ ] Fall back to portable C/SIMD/Python on missing OpenCL loader, no GPU device, device memory limits, kernel/build/dispatch failure, unsupported platforms or small workloads. GPU absence must never fail a scan.
-- [ ] Report GPU vendor/device/compute units/memory, acceleration eligibility, actual dispatch counts and fallback reason without exposing device-specific private data.
+- [x] Add bounded asynchronous file-analysis scheduling with configurable worker count, back-pressure and deterministic result ordering; keep SQLite cache operations on the coordinator thread.
+- [x] Add `pdt scan --jobs N` and `--jobs 0` auto-sizing; expose selected worker count and queue limits in scan metrics and every report format.
+- [x] Extend the C extension with runtime OpenCL loader/device discovery without requiring GPU SDK headers or a GPU at build time.
+- [x] Implement a bounded C/OpenCL byte-count/reduction kernel for large buffers; dispatch to an available GPU only above a configured threshold and only for supported kernels. Device-specific threshold benchmarking remains open.
+- [x] Fall back to portable C/SIMD/Python on missing OpenCL loader, no GPU device, device memory limits, kernel/build/dispatch failure, unsupported platforms or small workloads. GPU absence must never fail a scan.
+- [x] Report GPU vendor/device/compute units/memory, threshold, actual dispatch counts and fallback counts without exposing device-specific private data. Detailed per-failure reason telemetry remains open.
 - [ ] Add fake/no-device, GPU-present, kernel-failure, threshold, concurrent-call, large-buffer and CPU-equivalence tests; benchmark GPU versus CPU before selecting default thresholds.
-- [ ] Do not claim all analyzers execute on GPU: analyzer semantics remain CPU-side unless a specific C/OpenCL kernel is implemented and validated.
+- [x] Keep GPU scope explicit: analyzer semantics remain CPU-side unless a specific C/OpenCL kernel is implemented and validated.
 
 
 - [ ] Replace the all-in-memory `files/directories/symlinks/pending` model with a streaming inventory iterator and bounded producer/consumer queues.
@@ -288,11 +288,11 @@ The baseline is not production-ready:
 
 ## Security finding evidence and developer remediation (new release gate)
 
-- [ ] Extend the finding schema with redacted source-line evidence, exact line numbers, attacker-impact explanation and actionable remediation guidance.
-- [ ] Add rule-specific impact descriptions for credential exposure, command/code injection, unsafe deserialization, SQL injection, SSRF, path traversal, weak cryptography, TLS/JWT misconfiguration, unsafe C APIs and other supported security rules.
-- [ ] Render vulnerable source lines in red in the HTML report using safe text nodes (never inject source as HTML); show file path, line number, severity, confidence, impact and remediation together.
-- [ ] Bring JSON and Markdown outputs to schema parity; Markdown must visibly mark the vulnerable line and include impact/remediation even though terminal Markdown cannot guarantee red text.
-- [ ] Redact passwords, tokens, private keys, credential URL values, email addresses and other sensitive literals from all source excerpts; test report escaping against HTML/script payloads.
+- [x] Extend the finding schema with redacted source-line evidence, exact line numbers, attacker-impact explanation and actionable remediation guidance.
+- [x] Add rule-specific impact descriptions for credential exposure, command/code injection, unsafe deserialization, SQL injection, SSRF, path traversal, weak cryptography, TLS/JWT misconfiguration, unsafe C APIs and other supported security rules.
+- [x] Render vulnerable source lines in red in the HTML report using safe text nodes (never inject source as HTML); show file path, line number, severity, confidence, impact and remediation together.
+- [x] Bring JSON and Markdown outputs to schema parity; Markdown visibly marks vulnerable lines and includes impact/remediation.
+- [x] Redact passwords, tokens, private keys, credential URL values, email addresses and common identity literals at the source-excerpt/model boundary; test report escaping against HTML/script payloads.
 - [ ] Keep severity evidence-driven: explain realistic consequences conditionally and never describe a heuristic marker as confirmed exploitability or runtime exposure.
 
 ## Phase 12 — Large-project and adversarial verification
