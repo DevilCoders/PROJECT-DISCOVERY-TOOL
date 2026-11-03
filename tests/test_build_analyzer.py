@@ -173,3 +173,24 @@ def test_build_manifest_reports_oversized_and_growing_source_as_unknown(tmp_path
     findings = BuildManifestAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "grew beyond" in findings[0].detail
+
+
+def test_build_manifest_reports_growth_as_unknown_and_redacts_parse_errors(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import build_analyzer
+
+    path = tmp_path / "package.json"
+    path.write_text('{"name":"sample","scripts":{"build":"webpack"}}', encoding="utf-8")
+    record = FileRecord(path.name, 1, ".json", "JSON")
+    monkeypatch.setattr(build_analyzer, "_MAX_BUILD_MANIFEST_BYTES", 8)
+    budget = BuildManifestAnalyzer().analyze(path, record)
+    assert len(budget) == 1 and budget[0].confidence == "UNKNOWN"
+    assert "resource limit" in budget[0].title.lower()
+
+    monkeypatch.setattr(build_analyzer, "_MAX_BUILD_MANIFEST_BYTES", 1024)
+    monkeypatch.setattr(
+        build_analyzer.json, "loads",
+        lambda _: (_ for _ in ()).throw(ValueError('token="build-parser-secret"')),
+    )
+    error = BuildManifestAnalyzer().analyze(path, record)
+    assert error[0].confidence == "UNKNOWN"
+    assert "build-parser-secret" not in error[0].detail
