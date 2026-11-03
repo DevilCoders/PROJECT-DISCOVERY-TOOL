@@ -345,6 +345,8 @@ def _html_report(result: ScanResult) -> str:
 
 def _markdown_report(result: ScanResult) -> str:
     metrics = result.metrics
+    native = metrics.get("native_backend", {})
+    execution = metrics.get("execution", {})
     lines = [
         "# Project Discovery Report",
         "",
@@ -360,6 +362,12 @@ def _markdown_report(result: ScanResult) -> str:
         f"- Total file size: {metrics.get('total_bytes', 0):,} bytes",
         f"- Hidden entries: {metrics.get('hidden_entry_count', 0):,}",
         f"- Development/cache trees: {metrics.get('development_directory_count', 0):,}",
+        f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
+        f"- Native CPU backend: {native.get('backend', 'not reported')}",
+        f"- GPU status: {native.get('gpu_status', 'not reported')}",
+        f"- GPU device: {native.get('gpu_name') or 'not detected'}",
+        f"- GPU byte-count dispatches: {native.get('gpu_dispatches', 0):,}",
+        f"- GPU CPU fallbacks: {native.get('gpu_fallbacks', 0):,}",
         "",
         "## File Type Distribution",
         "",
