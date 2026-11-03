@@ -21,6 +21,7 @@ from .analyzers import load_analyzers
 from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
 from .comparison import compare_many_reports, load_report, write_comparison
+from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
 from .models import ScanResult
 from .python_graph import analyze_python_dependencies
@@ -192,11 +193,52 @@ def main() -> None:
     compare.add_argument("reports", type=Path, nargs="+")
     compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
     compare.add_argument("--format", default="json,markdown")
+    catalog_add = sub.add_parser("catalog-add", help="Register a local PDT JSON report")
+    catalog_add.add_argument("report", type=Path)
+    catalog_add.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
+    catalog_list = sub.add_parser("catalog-list", help="List locally registered projects")
+    catalog_list.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
+    catalog_remove = sub.add_parser("catalog-remove", help="Remove a project from the local catalog")
+    catalog_remove.add_argument("root", type=Path)
+    catalog_remove.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
+    catalog_compare = sub.add_parser("catalog-compare", help="Compare every registered project report")
+    catalog_compare.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
+    catalog_compare.add_argument("--output", type=Path, default=Path("./pdt-catalog-comparison"))
+    catalog_compare.add_argument("--format", default="json,markdown")
     args = parser.parse_args()
     formats = {
         item.strip().lower() for item in args.format.split(",") if item.strip()
     }
     try:
+        if args.command == "catalog-add":
+            with ProjectCatalog(args.db) as catalog:
+                item = catalog.add_report(args.report)
+            print("[ SUCCESS ] Registered project: " + item["root"])
+            raise SystemExit(0)
+        if args.command == "catalog-list":
+            with ProjectCatalog(args.db) as catalog:
+                projects = catalog.list_projects()
+            for item in projects:
+                print(
+                    f"[ PROJECT ] {item['name']} | {item['file_count']} files | "
+                    f"{item['finding_count']} findings | {item['root']}"
+                )
+            print(f"[ INFO ] {len(projects)} projects registered")
+            raise SystemExit(0)
+        if args.command == "catalog-remove":
+            with ProjectCatalog(args.db) as catalog:
+                removed = catalog.remove_project(args.root)
+            print("[ SUCCESS ] Project removed" if removed else "[ INFO ] Project not found")
+            raise SystemExit(0)
+        if args.command == "catalog-compare":
+            if not formats or formats - {"json", "markdown"}:
+                parser.error("catalog-compare --format accepts json, markdown")
+            with ProjectCatalog(args.db) as catalog:
+                reports = catalog.load_reports()
+            comparison = compare_many_reports(reports)
+            for report in write_comparison(comparison, args.output, formats):
+                print("[ SUCCESS ] Catalog comparison: " + str(report))
+            raise SystemExit(0)
         if args.command == "scan":
             if not formats or formats - {"json", "markdown", "html"}:
                 parser.error("scan --format accepts json, markdown, html")
