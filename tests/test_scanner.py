@@ -256,3 +256,40 @@ def test_inventory_order_has_exact_path_tiebreak_for_casefold_collisions(
     assert paths == expected
     assert len(paths) == 4
 
+def test_signature_reader_rejects_symlink_entries(tmp_path: Path):
+    import pytest
+    from project_discovery.scanner import _read_signature_sample
+
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    link = tmp_path / "linked.bin"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+    with pytest.raises(OSError, match="non-regular"):
+        _read_signature_sample(link)
+
+
+def test_signature_reader_rejects_file_identity_changes(tmp_path: Path):
+    import pytest
+    from project_discovery.scanner import _read_signature_sample
+
+    path = tmp_path / "sample.bin"
+    path.write_bytes(b"first version")
+    observed = path.stat()
+    path.write_bytes(b"second version with changed identity")
+    with pytest.raises(OSError, match="identity changed"):
+        _read_signature_sample(path, observed)
+
+
+def test_signature_reader_uses_bounded_descriptor_read(tmp_path: Path):
+    from project_discovery.scanner import _read_signature_sample
+
+    path = tmp_path / "large.bin"
+    path.write_bytes(b"\x7fELF" + b"x" * (1024 * 1024))
+    observed = path.stat()
+    sample = _read_signature_sample(path, observed)
+    assert sample == b"\x7fELF" + b"x" * 508
+    assert len(sample) == 512
+
