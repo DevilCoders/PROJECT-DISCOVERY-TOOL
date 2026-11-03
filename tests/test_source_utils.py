@@ -41,6 +41,7 @@ def test_bounded_reader_rejects_non_positive_budget(tmp_path: Path):
         ('contact = "person@example.test"', "person@example.test"),
         ('token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"', "ghp_"),
         ('key = "-----BEGIN PRIVATE KEY-----MIIEvQIBADANBg"', "MIIEvQIBADANBg"),
+        ("MIIEvQIBADANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA", "MIIEvQIBADANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA"),
     ],
 )
 def test_redact_source_excerpt_removes_sensitive_values(line: str, sensitive: str):
