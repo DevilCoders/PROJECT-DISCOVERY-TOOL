@@ -86,7 +86,7 @@ The current branch contains first-pass implementations of:
 - Local-only OSV advisory database import and lockfile-based vulnerability matching when an operator supplies `--vuln-db`.
 - JSON/Markdown reports and an offline dark HTML report with search, filters, pagination and collapsible findings.
 - A Rich CLI with an ASCII banner, progress phases, compact summary panels and TTY-aware screen clearing.
-- Bounded asynchronous file analysis (`--jobs 0` auto or `--jobs N`) plus a C-native OpenCL GPU byte-count path for large buffers, with runtime detection and C/SIMD/Python fallback.
+- Bounded concurrent file analysis through a ThreadPoolExecutor (`--jobs 0` auto or `--jobs N`) plus a C-native OpenCL GPU byte-count path for large immutable buffers, with runtime detection and C/SIMD/Python fallback.
 
 These are initial implementations with varying depth. In particular, the filesystem inventory is currently retained in memory, dependency/cache/build directories are traversed by default unless explicitly excluded, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
 
@@ -157,7 +157,7 @@ The output directory must remain outside the analyzed project. PDT never changes
 
 The terminal is an analysis console, not an append-only file dump. On an interactive TTY, a new scan starts from a clean screen and displays the ASCII brand, phase progress, grouped statuses and a concise end summary. Redirected output must remain deterministic and must not emit terminal-control sequences. A no-color mode, narrow-terminal layouts and stable machine-readable logging remain in the roadmap.
 
-## Asynchronous execution and GPU acceleration
+## Concurrent execution and GPU acceleration
 
 The scan pipeline now schedules file analysis through a bounded worker pool and exposes `pdt scan --jobs N`; `--jobs 0` selects a bounded automatic worker count based on detected hardware concurrency. Pending tasks are capped at twice the worker count, results are collected in deterministic submission order, and SQLite fingerprint-cache access stays on the coordinator thread. Stateful third-party analyzers can declare `concurrent_safe = False` to serialize their own calls.
 
