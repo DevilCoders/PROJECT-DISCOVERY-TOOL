@@ -150,7 +150,7 @@ The output directory must remain outside the analyzed project. PDT never changes
 
 ### Exclusions and skip accounting
 
-`--skip` controls only global oversized-file content skipping. `--exclude-dir NAME` is an explicit directory-pruning request. Production behavior must not silently omit development dependency directories: they must be inventoried, counted and either traversed or marked as explicitly pruned with a reason. The current branch still has implicit default pruning for several common generated/dependency trees; removal of that behavior is a release-blocking task.
+`--skip` controls only global oversized-file content skipping. `--exclude-dir NAME` is an explicit directory-pruning request. The current scanner traverses development dependency, cache and build directories by default; the marker catalog classifies these trees without excluding them. Explicitly excluded directories remain in the inventory with a prune reason. This behavior is covered by scanner tests, including `node_modules`, `.cache`, `.yarn` and `.fuff`.
 
 ### Clean terminal behavior
 
