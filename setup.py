@@ -20,5 +20,12 @@ native_extension = Extension(
     extra_compile_args=["/O2"] if sys.platform == "win32" else ["-O3", "-std=c11"],
     optional=True,
 )
+cpp_extension = Extension(
+    "project_discovery._native_cpp",
+    sources=["native/pdt_signatures.cpp"],
+    language="c++",
+    extra_compile_args=["/O2", "/std:c++17"] if sys.platform == "win32" else ["-O3", "-std=c++17"],
+    optional=True,
+)
 
-setup(ext_modules=[native_extension])
+setup(ext_modules=[native_extension, cpp_extension])
