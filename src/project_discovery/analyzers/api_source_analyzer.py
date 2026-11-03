@@ -8,6 +8,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..language_catalog import source_extensions, source_language_names
+from ..source_utils import read_python_source
 
 
 _SOURCE_EXTENSIONS = source_extensions()
@@ -138,7 +139,7 @@ class APIEndpointAnalyzer(Analyzer):
                     severity="LOW",
                 )]
             try:
-                source = path.read_text(encoding="utf-8")
+                source = read_python_source(path)
                 routes = _python_routes(source, record.path)
             except (OSError, UnicodeDecodeError) as exc:
                 return [Finding(
