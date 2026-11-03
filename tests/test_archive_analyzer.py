@@ -81,6 +81,15 @@ def test_zip_member_content_is_scanned_in_memory_with_redaction(tmp_path: Path):
     assert "super-secret-value" not in serialized
     assert "person@example.test" not in serialized
     assert "secrets.zip::.env" in serialized
+    credential = next(item for item in findings if "Credential-Like Assignment" in item.title)
+    email = next(item for item in findings if "Email-Shaped Value" in item.title)
+    assert credential.code_evidence[0].line_number == 1
+    assert "PASSWORD=" in credential.code_evidence[0].code
+    assert "super-secret-value" not in credential.code_evidence[0].code
+    assert credential.impact and credential.recommendation
+    assert email.code_evidence[0].line_number == 2
+    assert "person@example.test" not in email.code_evidence[0].code
+    assert email.impact and email.recommendation
     assert path.read_bytes() == before
     assert not (tmp_path / ".env").exists()
 
@@ -98,6 +107,10 @@ def test_tar_member_content_is_scanned_without_extracting(tmp_path: Path):
     serialized = repr([item.to_dict() for item in findings])
     assert "AKIAABCDEFGHIJKLMNOP" not in serialized
     assert "credentials.tar::config/.env" in serialized
+    credential = next(item for item in findings if "Cloud Access-Key Identifier" in item.title)
+    assert credential.code_evidence[0].line_number == 1
+    assert "AKIAABCDEFGHIJKLMNOP" not in credential.code_evidence[0].code
+    assert credential.impact and credential.recommendation
     assert path.read_bytes() == before
     assert not (tmp_path / "config").exists()
 
