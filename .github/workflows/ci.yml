@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: pdt-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -38,3 +38,10 @@ jobs:
       - name: Validate distribution metadata
         shell: bash
         run: python -m twine check dist/*
+      - name: Install wheel and smoke-test the console entry point
+        shell: bash
+        run: |
+          python -c "import glob,subprocess,sys; wheel=glob.glob('dist/*.whl')[0]; subprocess.check_call([sys.executable,'-m','pip','install','--force-reinstall',wheel])"
+          pdt --version
+          pdt --help
+          pdt scan --help

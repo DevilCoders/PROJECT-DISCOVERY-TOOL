@@ -70,7 +70,7 @@ class DependencyManifestAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             declarations = self._extract(path, record)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, ET.ParseError, ValueError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, ET.ParseError, configparser.Error, ValueError) as exc:
             return [Finding(
                 "configuration",
                 "Dependency manifest parse error",
