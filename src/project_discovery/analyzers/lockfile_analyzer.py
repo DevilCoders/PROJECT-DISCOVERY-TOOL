@@ -1,6 +1,7 @@
 """Offline dependency lockfile inventory."""
 from __future__ import annotations
 
+import io
 import json
 import re
 import tomllib
@@ -9,10 +10,28 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import SourceBudgetExceeded, read_text_bounded
+from ..source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
 
 
 _MAX_LOCKFILE_INVENTORY_BYTES = 128 * 1024 * 1024
+_MAX_LOCKFILE_PACKAGE_ENTRIES = 250_000
+
+
+class LockfileEntryBudgetExceeded(ValueError):
+    """Raised when a lockfile contains more package entries than the analyzer can retain."""
+
+
+def _append_package(
+    result: list[tuple[str, str]], package: Any, version: Any
+) -> None:
+    if not package or not version:
+        return
+    if len(result) >= _MAX_LOCKFILE_PACKAGE_ENTRIES:
+        raise LockfileEntryBudgetExceeded(
+            f"lockfile exceeded the {_MAX_LOCKFILE_PACKAGE_ENTRIES:,}-package entry budget"
+        )
+    result.append((str(package), str(version)))
+
 
 _LOCK_NAMES = {
     "package-lock.json", "composer.lock", "cargo.lock", "poetry.lock",
@@ -35,26 +54,31 @@ def _json_packages(data: Any, name: str) -> list[tuple[str, str]]:
             for path, item in packages.items():
                 if path and isinstance(item, dict) and item.get("version"):
                     package_name = item.get("name") or path.rsplit("node_modules/", 1)[-1]
-                    result.append((str(package_name), str(item["version"])))
+                    _append_package(result, package_name, item["version"])
         if not result and isinstance(data.get("dependencies"), dict):
-            stack = list(data["dependencies"].items())
+            stack = [iter(data["dependencies"].items())]
             while stack:
-                package, item = stack.pop()
+                try:
+                    package, item = next(stack[-1])
+                except StopIteration:
+                    stack.pop()
+                    continue
                 if isinstance(item, dict):
-                    if item.get("version"):
-                        result.append((str(package), str(item["version"])))
-                    stack.extend(item.get("dependencies", {}).items())
+                    _append_package(result, package, item.get("version"))
+                    dependencies = item.get("dependencies", {})
+                    if isinstance(dependencies, dict) and dependencies:
+                        stack.append(iter(dependencies.items()))
     elif name == "composer.lock":
         for group in ("packages", "packages-dev"):
             for item in data.get(group, []):
                 if item.get("name") and item.get("version"):
-                    result.append((str(item["name"]), str(item["version"])))
+                    _append_package(result, item["name"], item["version"])
     elif name == "pipfile.lock":
         for group in ("default", "develop"):
             for package, item in data.get(group, {}).items():
                 version = item.get("version") if isinstance(item, dict) else item
                 if version:
-                    result.append((str(package), str(version).lstrip("=")))
+                    _append_package(result, package, str(version).lstrip("="))
     return result
 
 
@@ -62,7 +86,7 @@ def _toml_packages(data: dict[str, Any]) -> list[tuple[str, str]]:
     result = []
     for item in data.get("package", []):
         if item.get("name") and item.get("version"):
-            result.append((str(item["name"]), str(item["version"])))
+            _append_package(result, item["name"], item["version"])
     return result
 
 
@@ -94,47 +118,53 @@ class LockfileAnalyzer(Analyzer):
                 packages = _toml_packages(tomllib.loads(content))
             elif name == "yarn.lock":
                 packages = []
-                lines = content.splitlines()
-                index = 0
-                while index < len(lines):
-                    header = _YARN_HEADER.match(lines[index])
+                selectors: list[str] = []
+                for line in io.StringIO(content, newline=None):
+                    header = _YARN_HEADER.match(line)
                     if header:
-                        version = None
-                        cursor = index + 1
-                        while cursor < len(lines) and (
-                            not lines[cursor].strip() or lines[cursor][:1].isspace()
-                        ):
-                            version_match = _YARN_VERSION.match(lines[cursor])
-                            if version_match:
-                                version = version_match.group(1)
-                                break
-                            cursor += 1
-                        if version:
-                            selector = header.group(1).split(",", 1)[0].strip().strip('"')
-                            package = selector
-                            packages.append((package, version))
-                    index += 1
+                        header_value = header.group(1)
+                        selectors = [
+                            value.strip().strip('"')
+                            for value in header_value.split(",")
+                            if value.strip()
+                        ]
+                        continue
+                    if selectors:
+                        version_match = _YARN_VERSION.match(line)
+                        if version_match:
+                            for selector in selectors:
+                                package = selector.split("@", 1)[0] if not selector.startswith("@") else selector.rsplit("@", 1)[0]
+                                _append_package(packages, package, version_match.group(1))
+                            selectors = []
             elif name == "gemfile.lock":
-                packages = _GEM_SPEC.findall(content)
+                packages = []
+                for match in _GEM_SPEC.finditer(content):
+                    _append_package(packages, match.group(1), match.group(2))
             elif name == "go.sum":
-                packages = _GO_SUM.findall(content)
+                packages = []
+                for match in _GO_SUM.finditer(content):
+                    _append_package(packages, match.group(1), match.group(2))
             elif name == "pnpm-lock.yaml":
-                packages = _PNPM_PACKAGE.findall(content)
+                packages = []
+                for match in _PNPM_PACKAGE.finditer(content):
+                    _append_package(packages, match.group(1), match.group(2))
             elif name == "mix.lock":
-                packages = _MIX_PACKAGE.findall(content)
+                packages = []
+                for match in _MIX_PACKAGE.finditer(content):
+                    _append_package(packages, match.group(1), match.group(2))
             else:
                 packages = []
-        except SourceBudgetExceeded as exc:
+        except (SourceBudgetExceeded, LockfileEntryBudgetExceeded) as exc:
             return [Finding(
                 "dependency", f"Lockfile inventory resource limit: {record.path}",
-                str(exc), confidence="UNKNOWN", evidence=[record.path],
+                redact_source_excerpt(str(exc)), confidence="UNKNOWN", evidence=[record.path],
                 analyzer=self.name, severity="LOW",
             )]
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
             return [Finding(
                 "dependency",
                 f"Lockfile parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
