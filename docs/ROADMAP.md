@@ -42,9 +42,9 @@ The current feature branch has first-pass implementations for filesystem invento
 The baseline is not production-ready:
 - scanner inventory, pending directories and result objects are still materialized in memory;
 - all development/cache/build trees are traversed by default and only explicitly excluded subtrees are pruned;
-- file type classification is still mostly extension/language-family based, not a complete signature classifier;
+- C++ now provides first-pass magic-byte classification for common archive, executable, document, database, image, audio/video and font formats; the signature catalog is not exhaustive;
 - FIFO/socket/device/unknown special entries have inventory records;
-- Windows hidden attributes and several permission/ownership fields need cross-platform validation;
+- Windows hidden attributes are captured by the native walker and Python fallback, but system attributes, ACLs and ownership metadata still need cross-platform validation;
 - archive index inspection is substantive only for ZIP/TAR; other recognized formats are detection-only;
 - archive entry-count and member-byte caps exist, but full time/depth/ratio/metadata budgets and adversarial testing remain;
 - some domain analyzers are lexical/heuristic and do not yet resolve symbols, types, dataflow or framework semantics;
@@ -64,7 +64,8 @@ The baseline is not production-ready:
 - [x] Separate file, directory and symlink records.
 - [x] Record symlink target text, lexical scope and link permissions without traversing the target.
 - [x] Record hidden-name indicators for dotfiles/directories.
-- [ ] Record Windows hidden/system attributes and platform-specific metadata.
+- [x] Record Windows hidden attributes in the Rust walker and Python fallback.
+- [ ] Record Windows system attributes, ACLs and platform-specific ownership metadata.
 - [ ] Add full records for FIFO, socket, block device, character device, junction/reparse point and unknown entry types.
 - [ ] Add broken-link, self-link, cyclic-link, dangling-relative-link and external-target fixtures.
 - [ ] Harden symlink target classification against loops, permission failures, path races and platform-specific resolution behavior.
@@ -101,10 +102,12 @@ The baseline is not production-ready:
 - [ ] Separate metadata-only inventory from content analyzers so the same file is not read repeatedly without purpose.
 - [ ] Add configurable CPU, memory, I/O and per-analyzer budgets.
 - [ ] Make progress phase-based: inventory, hashing, analyzer domains, archive inspection, correlation, reporting.
-- [x] Implement portable C byte counting and host capability reporting, used in scanner signature classification and streaming secret analysis.
+- [x] Implement portable C byte counting and host capability reporting, used by streaming secret analysis.
+- [x] Implement a C++17 magic-byte signature classifier used by scanner file-type detection.
 - [x] Implement Linux x86-64 SIMD Assembly byte counting with runtime SSE2/POPCNT detection and scalar C/Python fallbacks.
 - [x] Implement and integrate the C++17 native file-signature classifier with Python fallback.
 - [x] Extract the offline report client into a packaged JavaScript source asset bundled into standalone HTML.
+- [x] Use cursor-based bounded DOM pagination for file inventory and findings without allocating full filtered-match arrays.
 - [x] Implement and integrate the Rust PyO3 no-follow directory iterator with native metadata and bounded active-directory state.
 - [ ] Replace in-memory inventory/results with persistent streaming index storage, bounded analyzer queues and resumable checkpoints.
 - [ ] Cross-compile/test native modules on Linux, Windows and macOS; fuzz FFI boundaries and test graceful fallback.
@@ -262,7 +265,8 @@ The baseline is not production-ready:
 ### Terminal interface and CLI
 - [x] ASCII banner and Rich progress/summary panels.
 - [x] Clear screen only on an interactive TTY; never emit terminal control codes to redirected output.
-- [ ] Create advanced command-center visual system: phase timeline, domain status matrix, live counters, warning/error stream, confidence/severity legend and final scan-health panel.
+- [x] Add a command-center dashboard showing Python orchestration and C/Assembly/C++/Rust backend status.
+- [ ] Add phase timeline, domain status matrix, live counters, warning/error stream, confidence/severity legend and final scan-health panel.
 - [ ] Group output by phase/domain; do not print every file as an unbounded line list.
 - [ ] Add `--quiet`, `--no-color`, `--json-lines`, verbosity levels and stable exit codes.
 - [ ] Add CLI commands for capability catalog, analyzer diagnostics, archive policy, budgets and report inspection.
@@ -322,7 +326,7 @@ The next implementation block follows this dependency order. Documentation is up
 
 ### Polyglot implementation acceptance
 
-A language is part of the implementation only when source files exist, it is built or provisioned reproducibly, a production code path invokes it, its boundary is documented, and tests exercise success/failure/fallback behavior. The required language-family coverage is 40+; Python is not the sole implementation language. C and x86-64 Assembly are already integrated for narrow low-level primitives. Rust traversal/indexing is a mandatory release gate, not a documentation-only aspiration. C++ and JavaScript/TypeScript must likewise be integrated where assigned responsibilities require them; unused language folders or placeholder wrappers do not count.
+A language is part of the implementation only when source files exist, it is built or provisioned reproducibly, a production code path invokes it, its boundary is documented, and tests exercise success/failure/fallback behavior. The required language-family coverage is 40+; Python is not the sole implementation language. C and x86-64 Assembly provide native byte-counting/hardware paths; the Rust no-follow iterator, C++ signature classifier and JavaScript report client are integrated and tested in CI. Persistent Rust-backed inventory/indexing remains a release gate. TypeScript is not currently a runtime dependency; unused language folders or placeholder wrappers do not count.
 
 ### Oversized-file invariant
 
