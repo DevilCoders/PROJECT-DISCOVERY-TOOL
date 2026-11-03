@@ -22,6 +22,7 @@ _MIGRATION_DIRS = {
 }
 _FLYWAY_NAME = re.compile(r"^(?P<identifier>(?:V\d+|R|U\d+)__.+)\.sql$", re.I)
 _REVISION = re.compile(r"(?m)^\s*revision\s*=\s*['\"]([^'\"]+)['\"]")
+_PARENT_REVISION = re.compile(r"(?m)^\s*down_revision\s*=\s*['\\"]([^'\\"]+)['\\"]")
 _CHANGESET_ID = re.compile(r"(?i)<changeSet\b[^>]*\bid\s*=\s*['\"]([^'\"]+)")
 _OPERATION_PATTERNS = (
     ("create_table", re.compile(
@@ -155,6 +156,7 @@ class MigrationIntelligenceAnalyzer(Analyzer):
         framework = _framework(record.path, filename, content)
         identifier = _migration_identifier(filename, content)
         rollback_present = bool(_ROLLBACK_MARKER.search(content))
+        parent_revision = _PARENT_REVISION.search(content)
         operations: list[tuple[str, int, bool]] = []
         for operation, pattern, destructive in _OPERATION_PATTERNS:
             for match in pattern.finditer(content):
@@ -170,6 +172,8 @@ class MigrationIntelligenceAnalyzer(Analyzer):
                 for operation, line, _ in operations[:100]
             ],
         ]
+        if parent_revision:
+            evidence.append(f"parent revision: {parent_revision.group(1)}")
         if rollback_present:
             evidence.append("rollback/down migration marker present")
         findings = [Finding(
@@ -179,7 +183,9 @@ class MigrationIntelligenceAnalyzer(Analyzer):
             f"{len(operations)} schema/data operations; "
             f"rollback marker: {'present' if rollback_present else 'not detected'}. "
             "Static markers do not prove rollback safety or migration execution state.",
-            confidence="CONFIRMED",
+            confidence=(
+                "INFERRED" if framework == "Generic migration convention" else "CONFIRMED"
+            ),
             evidence=evidence,
             analyzer=self.name,
         )]

@@ -82,3 +82,53 @@ def test_migration_analyzer_does_not_claim_execution_or_rollback_safety(tmp_path
     )
     assert "Prisma" in findings[0].detail
     assert "Static markers do not prove rollback safety" in findings[0].detail
+
+
+
+def test_django_and_typeorm_migrations_are_recognized(tmp_path: Path):
+    django = _scan(
+        tmp_path, "accounts/migrations/0003_remove_legacy.py",
+        "from django.db import migrations\n"
+        "class Migration(migrations.Migration):\n"
+        "    operations = [migrations.RemoveField(model_name='user', name='legacy')]\n",
+    )
+    typeorm = _scan(
+        tmp_path, "src/migrations/1710000000-DropOld.ts",
+        "export class DropOld implements MigrationInterface {\n"
+        "  async up(queryRunner: QueryRunner) { await queryRunner.dropTable('old'); }\n"
+        "  async down(queryRunner: QueryRunner) { await queryRunner.createTable(); }\n"
+        "}\n",
+    )
+    assert "Django" in django[0].detail
+    assert any("Potentially destructive" in item.title for item in django)
+    assert "TypeORM" in typeorm[0].detail
+    assert any("Potentially destructive" in item.title for item in typeorm)
+
+
+def test_knex_sequelize_and_ecto_migration_conventions_are_recognized(tmp_path: Path):
+    knex = _scan(
+        tmp_path, "db/migrations/001_drop_old.js",
+        "exports.up = async knex => knex.schema.dropTable('old');\n"
+        "exports.down = async knex => knex.schema.createTable('old');\n",
+    )
+    sequelize = _scan(
+        tmp_path, "migrations/002_drop_old.js",
+        "module.exports = { async up(queryInterface) { await queryInterface.dropTable('old'); }, "
+        "async down() {} };\n",
+    )
+    ecto = _scan(
+        tmp_path, "priv/repo/migrations/20261103120000_drop_old.exs",
+        "defmodule App.Repo.Migrations.DropOld do\n"
+        "  use Ecto.Migration\n  def change do\n    drop table(:old)\n  end\nend\n",
+    )
+    assert "Knex" in knex[0].detail
+    assert "Sequelize" in sequelize[0].detail
+    assert "Ecto" in ecto[0].detail
+
+
+def test_generic_migration_folder_is_not_overstated_as_confirmed(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "migrations/notes.py",
+        "# placeholder migration note\n",
+    )
+    assert findings[0].confidence == "INFERRED"
