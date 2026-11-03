@@ -13,9 +13,17 @@ These are per-analyzer safety limits, not a global scan-size policy. They are cu
 | Secret-pattern analysis | 64 MiB per file; 8 MiB chunks; 4 KiB overlap; at most 10,000 findings | Binary chunk streaming with cross-chunk overlap | UNKNOWN/partial on byte or finding limits |
 | Python AST inventory/security | 16 MiB per file | PEP 263-aware source reads with AST parsing | UNKNOWN on indexed oversize or parse failure |
 | Python import graph | 16 MiB per module | AST extraction over inventoried source | UNKNOWN for skipped or over-budget modules |
-| Python API endpoint extraction | 16 MiB per Python AST file | PEP 263-aware AST parsing | UNKNOWN on over-budget source |
+| Python API endpoint extraction | 16 MiB per Python AST file | PEP 263-aware limit + 1 byte read and AST parsing | UNKNOWN on oversize/growth/parser resource failure |
 | Non-Python API endpoint scanning | 32 MiB per file; 256 KiB per line | Bounded line streaming | UNKNOWN/partial when scan byte limit is reached |
-| Local vulnerability lockfiles | 128 MiB per lockfile | Format parser after size gate | UNKNOWN when the parser budget is exceeded |
+| API contract parsing | 16 MiB per file | Bounded one-buffer read for OpenAPI, AsyncAPI, OpenRPC, WSDL, RAML, GraphQL, Protobuf and Thrift | UNKNOWN on oversize/growth/parse failure |
+| Tree-sitter syntax parsing | 16 MiB per file | Bounded source read before parser invocation | UNKNOWN on oversize/growth/parser failure |
+| Build manifest analysis | 16 MiB per file | Bounded one-buffer read for build/CI manifests | UNKNOWN on oversize/growth/parse failure |
+| Markdown structure analysis | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
+| Coverage artifact parsing | 64 MiB per file | Bounded UTF-8 read before JSON/XML/LCOV parsing | UNKNOWN on oversize/growth/parse failure |
+| Generic lockfile inventory | 128 MiB per lockfile | Bounded one-buffer read before format parser | UNKNOWN on oversize/growth |
+| Local vulnerability lockfiles | 128 MiB per lockfile | Bounded one-buffer read before advisory matching | UNKNOWN when the parser budget is exceeded or the file grows |
+| Text/HTML/RST documents | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
+| PDF/DOCX documents | 16 MiB compressed input; PDF 5,000 pages; extracted text 16 MiB; DOCX 10,000 entries and 32 MiB total declared uncompressed data | Bounded bytes; DOCX ZIP metadata/ratio checks before python-docx | UNKNOWN on input, page, text, package entry or uncompressed-byte budget stop |
 | ZIP archive index | 200,000 entries; 64 MiB declared central-directory bytes | EOCD/ZIP64 preflight before ZipFile.infolist() | UNKNOWN without index materialization when bounds are exceeded or unavailable |
 | ZIP/TAR member content | 1 MiB per member; 32 MiB per archive | In-memory member streams only; no extraction | UNKNOWN/partial when member/sample limit is reached |
 | ZIP/TAR archive inspection | 8 seconds per archive | Cooperative checks during metadata iteration, member sampling and content-pattern matching | UNKNOWN/partial when the deadline is reached |
@@ -29,7 +37,7 @@ An analyzer may apply its own specialized budget regardless of --skip. Such a re
 ## Important limitations
 
 - Most byte limits are fixed constants and are not yet configurable by CLI or a policy file.
-- Python AST and import-graph limits use an indexed-size precheck; not every AST reader has a race-safe limit + 1 byte read yet.
+- Core Python AST inventory, Python security AST, import graph and Python endpoint readers now use race-safe limit + 1 byte reads. The other listed parser-based analyzers also use bounded reads; newly added analyzers must follow the same contract.
 - The archive wall-time limit is cooperative. It is checked between metadata/member operations and regex matches; it cannot preempt a blocked filesystem read or interrupt a single in-progress Python regular-expression call.
 - The archive implementation does not yet impose a shared nested-archive depth or total-uncompressed-size budget because recursive nested archive inspection is not implemented.
 - The vulnerability lockfile limit is a format-parser admission limit, not a streaming parser; files below the limit may still need significant memory.
