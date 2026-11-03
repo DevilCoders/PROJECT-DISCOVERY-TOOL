@@ -68,11 +68,37 @@ def _is_hidden(name: str, info: os.stat_result) -> bool:
     return bool(attributes & 0x2)
 
 
-def _signature_type(path: Path, relative_path: str) -> str | None:
-    """Classify common binary formats from a bounded signature sample."""
+def _read_signature_sample(path: Path, expected_info: os.stat_result | None = None) -> bytes:
+    """Read a bounded signature sample from the same regular file observed by the walker.
+
+    O_NOFOLLOW blocks symlink substitution where supported. The descriptor's fstat
+    identity is checked on every platform, including platforms without O_NOFOLLOW.
+    """
+    before = expected_info if expected_info is not None else path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(f"refusing signature read from non-regular entry: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
     try:
-        with path.open("rb") as stream:
-            head = stream.read(512)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(f"entry changed to a non-regular file: {path}")
+        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(opened, key) != getattr(before, key) for key in identity):
+            raise OSError(f"file identity changed during signature read: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            return stream.read(512)
+    finally:
+        os.close(descriptor)
+
+
+def _signature_type(
+    path: Path, relative_path: str, expected_info: os.stat_result | None = None,
+) -> str | None:
+    """Classify common binary formats from a bounded, no-follow signature sample."""
+    try:
+        head = _read_signature_sample(path, expected_info)
     except OSError:
         return None
     if not head:
@@ -441,7 +467,7 @@ def discover_inventory(
 
                     if stat.S_ISREG(info.st_mode):
                         size = info.st_size
-                        file_type = _file_type(Path(entry.path), relative)
+                        file_type = _file_type(Path(entry.path), relative, info)
                         language = detect_language(relative)
                         file_record = FileRecord(
                             relative,
