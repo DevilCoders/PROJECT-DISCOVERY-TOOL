@@ -103,6 +103,8 @@ The baseline is not production-ready:
 - [ ] Make progress phase-based: inventory, hashing, analyzer domains, archive inspection, correlation, reporting.
 - [x] Implement portable C byte counting and host capability reporting, used in scanner signature classification and streaming secret analysis.
 - [x] Implement Linux x86-64 SIMD Assembly byte counting with runtime SSE2/POPCNT detection and scalar C/Python fallbacks.
+- [x] Implement and integrate the C++17 native file-signature classifier with Python fallback.
+- [x] Extract the offline report client into a packaged JavaScript source asset bundled into standalone HTML.
 - [ ] Implement the Rust native walker/indexer/stream engine with bounded producer-consumer queues and resumable checkpoints.
 - [ ] Cross-compile/test native modules on Linux, Windows and macOS; fuzz FFI boundaries and test graceful fallback.
 - [ ] Benchmark 2GB, 10GB, 50GB and 100GB+ corpora with varied file counts/sizes, deep trees, large dependency directories, archives and symlink-heavy layouts.
