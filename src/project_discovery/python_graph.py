@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import FileRecord, Finding
+from .source_utils import read_python_source
 
 MAX_GRAPH_AST_FILE_BYTES = 16 * 1024 * 1024
 
@@ -140,7 +141,7 @@ def analyze_python_dependencies(
             continue
         try:
             tree = ast.parse(
-                (root / record.path).read_text(encoding="utf-8"),
+                read_python_source(root / record.path),
                 filename=record.path,
             )
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
