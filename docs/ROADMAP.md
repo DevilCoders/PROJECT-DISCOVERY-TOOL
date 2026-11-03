@@ -134,6 +134,8 @@ The baseline is not production-ready:
 - [x] Detect absolute paths, drive-prefixed paths, parent traversal, ZIP symlinks and TAR symlink/hardlink/device entries.
 - [x] Perform bounded in-memory content samples for ZIP/TAR members with redacted secret/PII indicators.
 - [ ] Make archive inspection states explicit: detected, index-read, metadata-complete, sample-read, sample-truncated, encrypted, unsupported, malformed, budget-stopped.
+- [x] Refuse ZIP index materialization when EOCD/ZIP64 preflight cannot establish bounded central-directory limits; return UNKNOWN instead.
+- [x] Enforce a per-archive wall-time budget during ZIP/TAR metadata traversal and bounded member sampling; time stops produce UNKNOWN findings.
 - [ ] Add configurable maximum archive bytes, entries, nested depth, total uncompressed bytes, per-member sample bytes, total sample bytes, compression ratio and wall time.
 - [ ] Validate ZIP data descriptors, ZIP64, encrypted members, duplicate/case-colliding paths, Unicode path normalization and truncated directories.
 - [ ] Add safe metadata readers for 7z, RAR, CAB, ISO, Zstandard, DEB/RPM and language package formats through optional offline dependencies where appropriate.
