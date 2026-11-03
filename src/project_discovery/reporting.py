@@ -23,33 +23,6 @@ def _script_json(value: Any) -> str:
     )
 
 
-def _report_data(result: ScanResult) -> dict[str, Any]:
-    return {
-        "findings": [item.to_dict() for item in result.findings],
-        "files": [
-            {
-                "path": item.path,
-                "size_bytes": item.size_bytes,
-                "extension": item.extension,
-                "language": item.language,
-                "file_type": item.file_type,
-                "size_bucket": item.size_bucket,
-                "is_hidden": item.is_hidden,
-                "permissions": item.permissions,
-                "content_skipped_reason": item.content_skipped_reason,
-                "error": item.error,
-            }
-            for item in result.files
-        ],
-        "directories": [item.to_dict() for item in result.directories],
-        "symlinks": [item.to_dict() for item in result.symlinks],
-        "special_entries": [item.to_dict() for item in result.special_entries],
-        "metrics": result.metrics,
-        "errors": result.errors,
-        "analyzers": result.analyzer_names,
-    }
-
-
 def _html_template(result: ScanResult) -> str:
     report_js = resource_files("project_discovery").joinpath("web/report.js").read_text(encoding="utf-8")
     root = html.escape(result.root)
