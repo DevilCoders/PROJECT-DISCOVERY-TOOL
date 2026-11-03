@@ -2,6 +2,7 @@
 from importlib.metadata import entry_points
 
 from .base import Analyzer
+from .configuration_analyzer import ConfigurationAnalyzer
 from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
 from .document_analyzer import DocumentAnalyzer
@@ -16,6 +17,7 @@ def load_analyzers() -> list[Analyzer]:
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
         DependencyManifestAnalyzer(),
+        ConfigurationAnalyzer(),
         SecretPatternAnalyzer(),
         TreeSitterAnalyzer(),
     ]

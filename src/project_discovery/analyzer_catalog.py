@@ -32,7 +32,7 @@ _DOMAINS = (
     AnalyzerDomain("authentication", "Authentication", "Identity providers, login flows, credential handling and session boundaries."),
     AnalyzerDomain("authorization", "Authorization", "Roles, permissions, access-control checks and policy consistency."),
     AnalyzerDomain("cryptography", "Cryptography", "Cryptographic primitives, key lifecycle, randomness and protocol usage."),
-    AnalyzerDomain("configuration", "Configuration Intelligence", "Environment variables, config formats, defaults, overrides and drift."),
+    AnalyzerDomain("configuration", "Configuration Intelligence", "Environment variables, config formats, defaults, overrides and drift.", "implemented"),
     AnalyzerDomain("api_rest", "REST API Intelligence", "Routes, handlers, schemas, middleware, versioning and endpoint relationships."),
     AnalyzerDomain("api_graphql", "GraphQL Intelligence", "Schemas, resolvers, directives, operations and federation boundaries."),
     AnalyzerDomain("api_rpc", "RPC and Service Contracts", "gRPC, Thrift, message contracts, generated stubs and compatibility."),
