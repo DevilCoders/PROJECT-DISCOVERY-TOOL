@@ -11,7 +11,7 @@ from ..models import FileRecord, Finding
 _BLOCK = re.compile(
     r"(?ms)^\s*(model|enum|datasource|generator)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)^\s*\}"
 )
-_FIELD = re.compile(r"^\s{2,}([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\[\])?(?:\?)?")
+_FIELD = re.compile(r"(?m)^\s{2,}([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\[\])?(?:\?)?")
 _PROVIDER = re.compile(r'(?m)^\s*provider\s*=\s*"([^"]+)"')
 
 
