@@ -19,6 +19,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
+from rich.text import Text
 from rich.panel import Panel
 
 from . import __version__
@@ -86,6 +87,55 @@ def _render_banner(console: Console) -> None:
     grid.add_row("REPORT", "JavaScript offline client // bundled HTML // paged findings")
     console.print(Panel(grid, title="[bold]ENGINE STATUS[/bold]", border_style="blue"))
     console.print("[dim]Inventory  >  Analyze  >  Correlate  >  Report[/dim]\n")
+
+def _print_security_findings(console: Console, findings: list[Finding], *, limit: int = 25) -> None:
+    """Print bounded, redacted security evidence with severity, impact and remediation."""
+    severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+    security_findings = sorted(
+        (
+            finding for finding in findings
+            if finding.category in {"security", "secrets", "privacy"}
+        ),
+        key=lambda finding: (
+            severity_rank.get(finding.severity, 5),
+            finding.title.casefold(),
+            finding.analyzer,
+        ),
+    )
+    if not security_findings:
+        return
+
+    console.print()
+    console.print("[bold red]SECURITY FINDINGS // REDACTED SOURCE EVIDENCE[/bold red]")
+    for finding in security_findings[:limit]:
+        severity_style = (
+            "bold red" if finding.severity in {"CRITICAL", "HIGH"}
+            else "bold yellow" if finding.severity == "MEDIUM"
+            else "bold cyan"
+        )
+        heading = Text(f"[{finding.severity}] ", style=severity_style)
+        heading.append(finding.title)
+        console.print(heading)
+        console.print(Text(f"  {finding.detail}", style="dim"))
+        for evidence in finding.code_evidence[:3]:
+            line = Text(f"  L{evidence.line_number:>5}  ", style="bold red")
+            line.append(evidence.code, style="bold red")
+            console.print(line)
+        if finding.impact:
+            impact = Text("  Attacker impact: ", style="bold yellow")
+            impact.append(finding.impact)
+            console.print(impact)
+        if finding.recommendation:
+            remediation = Text("  Remediation: ", style="bold green")
+            remediation.append(finding.recommendation)
+            console.print(remediation)
+        console.print()
+    omitted = len(security_findings) - limit
+    if omitted > 0:
+        console.print(
+            f"[dim]... {omitted:,} additional security findings are available in the reports.[/dim]"
+        )
+
 
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
@@ -379,6 +429,7 @@ def run_scan(
     )
     summary.add_row("VCS / hosting / delivery signals", str(metrics["vcs_provider_signal_count"]))
     console.print(summary)
+    _print_security_findings(console, findings)
     _status(
         console,
         "SUCCESS",
