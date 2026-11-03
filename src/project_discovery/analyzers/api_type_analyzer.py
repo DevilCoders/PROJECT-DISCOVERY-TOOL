@@ -20,7 +20,9 @@ _PATTERNS = {
     "Webhooks": re.compile(r"(?i)\bwebhooks?\b"),
 }
 _CONTRACT_EXTENSIONS = {".graphql", ".gql", ".proto", ".thrift", ".wsdl", ".raml", ".avdl"}
-_MAX_LINE_CHARS = 256 * 1024
+_MAX_LINE_BYTES = 256 * 1024
+_MAX_API_TYPE_FILE_BYTES = 32 * 1024 * 1024
+_MAX_API_TYPE_EVIDENCE_PER_STYLE = 20
 
 
 class APITypeAnalyzer(Analyzer):
@@ -48,38 +50,80 @@ class APITypeAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        line_hits: dict[str, set[int]] = {}
+        if record.size_bytes > _MAX_API_TYPE_FILE_BYTES:
+            return [Finding(
+                "api",
+                f"API type analysis resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the API-type analyzer's "
+                f"{_MAX_API_TYPE_FILE_BYTES:,}-byte scan budget.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"size: {record.size_bytes} bytes"],
+                analyzer=self.name,
+                severity="LOW",
+            )]
+
+        line_samples: dict[str, list[int]] = {}
+        line_counts: dict[str, int] = {}
+        line_number = 1
+        bytes_scanned = 0
+        budget_reached = False
         try:
-            with path.open("r", encoding="utf-8", errors="replace") as stream:
-                line_number = 1
-                while True:
-                    line = stream.readline(_MAX_LINE_CHARS)
-                    if not line:
+            with path.open("rb") as stream:
+                while bytes_scanned < _MAX_API_TYPE_FILE_BYTES:
+                    remaining = _MAX_API_TYPE_FILE_BYTES - bytes_scanned
+                    raw_line = stream.readline(min(_MAX_LINE_BYTES, remaining + 1))
+                    if not raw_line:
                         break
-                    current_line = line_number
+                    if len(raw_line) > remaining:
+                        budget_reached = True
+                        break
+                    bytes_scanned += len(raw_line)
+                    line = raw_line.decode("utf-8", errors="replace")
                     for api_type, pattern in _PATTERNS.items():
                         if pattern.search(line):
-                            line_hits.setdefault(api_type, set()).add(current_line)
+                            line_counts[api_type] = line_counts.get(api_type, 0) + 1
+                            samples = line_samples.setdefault(api_type, [])
+                            if len(samples) < _MAX_API_TYPE_EVIDENCE_PER_STYLE:
+                                samples.append(line_number)
                     if line.endswith(("\n", "\r")):
                         line_number += 1
+                if bytes_scanned >= _MAX_API_TYPE_FILE_BYTES and stream.read(1):
+                    budget_reached = True
         except OSError as exc:
             return [Finding(
                 "api", f"API classification unavailable: {record.path}",
                 f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
-        if not line_hits:
-            return []
-        names = sorted(line_hits)
-        evidence = [
-            f"{record.path}:{line} ({name})"
-            for name, lines in sorted(line_hits.items())
-            for line in sorted(lines)[:20]
-        ]
-        return [Finding(
-            "api",
-            f"API styles detected: {record.path}",
-            "Observed static API-style markers: " + ", ".join(names)
-            + ". A marker does not prove a deployed or reachable API implementation.",
-            confidence="INFERRED", evidence=evidence[:100], analyzer=self.name,
-        )]
+
+        findings: list[Finding] = []
+        if line_counts:
+            names = sorted(line_counts)
+            evidence = [
+                f"{record.path}:{line} ({name})"
+                for name in names
+                for line in line_samples.get(name, [])
+            ][:100]
+            findings.append(Finding(
+                "api",
+                f"API styles detected: {record.path}",
+                "Observed static API-style markers: "
+                + ", ".join(
+                    f"{name} ({line_counts[name]:,} line(s))" for name in names
+                )
+                + ". A marker does not prove a deployed or reachable API implementation.",
+                confidence="INFERRED", evidence=evidence, analyzer=self.name,
+            ))
+        if budget_reached:
+            findings.append(Finding(
+                "api",
+                f"API type scan budget reached: {record.path}",
+                f"Analysis stopped after {_MAX_API_TYPE_FILE_BYTES:,} bytes. "
+                "Findings collected before the limit are partial; remaining content "
+                "was not inspected.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"bytes_scanned: {bytes_scanned:,}"],
+                analyzer=self.name,
+                severity="LOW",
+            ))
+        return findings
