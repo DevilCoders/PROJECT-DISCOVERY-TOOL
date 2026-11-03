@@ -1,6 +1,7 @@
 """Source-reading helpers that honor language declarations and redact report excerpts."""
 from __future__ import annotations
 
+import io
 import re
 import tokenize
 from pathlib import Path
@@ -49,3 +50,21 @@ def read_python_source(path: Path) -> str:
     with path.open("rb") as raw:
         encoding, _ = tokenize.detect_encoding(raw.readline)
     return path.read_text(encoding=encoding)
+
+class SourceBudgetExceeded(ValueError):
+    """Raised when a source file exceeds a parser's bounded read budget."""
+
+
+def read_python_source_bounded(path: Path, max_bytes: int) -> str:
+    """Read at most max_bytes + 1 and decode Python source using its PEP 263 cookie."""
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    with path.open("rb") as stream:
+        raw_source = stream.read(max_bytes + 1)
+    if len(raw_source) > max_bytes:
+        raise SourceBudgetExceeded(
+            f"source grew beyond the {max_bytes:,}-byte parser budget while being read"
+        )
+    encoding, _ = tokenize.detect_encoding(io.BytesIO(raw_source).readline)
+    return raw_source.decode(encoding)
+
