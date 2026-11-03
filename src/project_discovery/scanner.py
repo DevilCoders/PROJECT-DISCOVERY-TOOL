@@ -178,11 +178,14 @@ def _symlink_scope(root: Path, link_path: Path, target: str) -> str:
         candidate = Path(target)
         if not candidate.is_absolute():
             candidate = link_path.parent / candidate
-        normalized_root = os.path.abspath(os.path.normpath(str(root)))
-        normalized_target = os.path.abspath(os.path.normpath(str(candidate)))
+        normalized_root = os.path.normcase(os.path.abspath(os.path.normpath(str(root))))
+        normalized_target = os.path.normcase(os.path.abspath(os.path.normpath(str(candidate))))
         common = os.path.commonpath((normalized_root, normalized_target))
-        return "internal" if os.path.normcase(common) == os.path.normcase(normalized_root) else "external"
-    except (OSError, ValueError):
+        return "internal" if common == normalized_root else "external"
+    except ValueError:
+        # Different Windows drives or filesystem roots are necessarily external.
+        return "external"
+    except OSError:
         return "unknown"
 
 
