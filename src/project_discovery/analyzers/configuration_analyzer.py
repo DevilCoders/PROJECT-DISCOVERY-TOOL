@@ -39,7 +39,7 @@ _RISK_PATTERNS = (
     ("root_user_allowed", re.compile(r"(?i)^\s*runAsNonRoot\s*:\s*false\b")),
     ("host_network_enabled", re.compile(r"(?i)^\s*hostNetwork\s*:\s*true\b")),
     ("root_container_user", re.compile(r"(?i)^\s*USER\s+root\b")),
-    ("nginx_client_verification_disabled", re.compile(r"(?i)^\s*ssl_verify_client\s+off\b")),
+    ("nginx_client_verification_disabled", re.compile(r"(?i)\bssl_verify_client\s+off\b")),
     ("wildcard_cors", re.compile(
         r"(?i)(?:allow[_-]?origins?|access-control-allow-origin)\s*[:=]\s*(?:\[\s*)?\*",
     )),
