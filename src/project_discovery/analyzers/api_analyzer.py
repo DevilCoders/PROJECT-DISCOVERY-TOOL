@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -140,7 +141,7 @@ class APIContractAnalyzer(Analyzer):
                 schemas = []
                 current_route = None
                 current_method = None
-                for line in content.splitlines():
+                for line in io.StringIO(content, newline=None):
                     route_match = _PATH_LINE.match(line)
                     if route_match:
                         current_route = route_match.group(1)
