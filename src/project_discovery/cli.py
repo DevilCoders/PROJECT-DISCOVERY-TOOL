@@ -93,6 +93,8 @@ def run_scan(
     vulnerability_db: Path | None = None, jobs: int = 0,
 ) -> int:
     console = Console(stderr=True)
+    if jobs < 0 or jobs > 64:
+        raise ValueError("--jobs must be 0 (automatic) or between 1 and 64")
     root = root.expanduser().absolute()
     root_info = root.lstat()
     if root_info.st_mode and root.is_symlink():
@@ -138,8 +140,6 @@ def run_scan(
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
     hardware_threads = max(1, int(native_capabilities().get("hardware_threads", os.cpu_count() or 1)))
-    if jobs < 0 or jobs > 64:
-        raise ValueError("--jobs must be 0 (automatic) or between 1 and 64")
     worker_count = jobs or max(1, min(8, hardware_threads * 2))
     max_pending = max(worker_count, worker_count * 2)
     analyzer_locks = {
