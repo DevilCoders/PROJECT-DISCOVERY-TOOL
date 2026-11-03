@@ -384,115 +384,122 @@ def discover_inventory(
         current, relative_dir, depth = pending.pop()
         directory_record = directories_by_path[relative_dir]
         try:
-            with os.scandir(current) as iterator:
-                entries = sorted(iterator, key=lambda entry: entry.name.casefold())
+            entries = os.scandir(current)
         except OSError as exc:
-            directory_record.error = f"{type(exc).__name__}: {exc}"
+            directory_record.error = `${type(exc).__name__}: ${exc}`
             stats["walk_errors"] += 1
             continue
+        try:
+            for entry in entries:
+                relative = entry.name if relative_dir == "." else f"{relative_dir}/{entry.name}"
+                stats["entry_count"] += 1
+                directory_record.direct_child_count += 1
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                    hidden = _is_hidden(entry.name, info)
+                    if hidden:
+                        stats["hidden_entry_count"] += 1
 
-        for entry in entries:
-            relative = entry.name if relative_dir == "." else f"{relative_dir}/{entry.name}"
-            stats["entry_count"] += 1
-            directory_record.direct_child_count += 1
-            try:
-                info = entry.stat(follow_symlinks=False)
-                hidden = _is_hidden(entry.name, info)
-                if hidden:
-                    stats["hidden_entry_count"] += 1
+                    if stat.S_ISLNK(info.st_mode):
+                        try:
+                            target = os.readlink(entry.path)
+                            scope = _symlink_scope(root, Path(entry.path), target)
+                        except OSError:
+                            target, scope = "", "unknown"
+                        symlinks.append(SymlinkRecord(
+                            relative, target, scope, target_state="unverified", is_hidden=hidden,
+                            permissions=stat.S_IMODE(info.st_mode),
+                        ))
+                        stats["symlink_count"] += 1
+                        stats[f"symlink_scope:{scope}"] += 1
+                        continue
 
-                if stat.S_ISLNK(info.st_mode):
-                    try:
-                        target = os.readlink(entry.path)
-                        scope = _symlink_scope(root, Path(entry.path), target)
-                    except OSError:
-                        target, scope = "", "unknown"
-                    symlinks.append(SymlinkRecord(
-                        relative, target, scope, target_state="unverified", is_hidden=hidden,
-                        permissions=stat.S_IMODE(info.st_mode),
-                    ))
-                    stats["symlink_count"] += 1
-                    stats[f"symlink_scope:{scope}"] += 1
-                    continue
-
-                if stat.S_ISDIR(info.st_mode):
-                    marker = entry.name.casefold() if entry.name.casefold() in _DEVELOPMENT_MARKERS else None
-                    exclusion = _exclusion_match(
-                        relative, entry.name, excluded_names, excluded_paths,
-                    )
-                    record = DirectoryRecord(
-                        relative,
-                        depth + 1,
-                        is_hidden=hidden,
-                        permissions=stat.S_IMODE(info.st_mode),
-                        development_marker=marker,
-                        pruned=exclusion is not None,
-                        prune_reason=exclusion,
-                    )
-                    directories_by_path[relative] = record
-                    if marker:
-                        stats["development_directory_count"] += 1
-                        stats[f"development_dir:{marker}"] += 1
-                    if exclusion:
-                        stats["pruned_directory_count"] += 1
-                        stats[f"pruned_dir:{entry.name.casefold()}"] += 1
-                    else:
-                        pending.append((Path(entry.path), relative, depth + 1))
-                    continue
-
-                if stat.S_ISREG(info.st_mode):
-                    size = info.st_size
-                    file_type = _file_type(Path(entry.path), relative)
-                    language = detect_language(relative)
-                    file_record = FileRecord(
-                        relative,
-                        size,
-                        Path(entry.name).suffix.lower(),
-                        language,
-                        file_type=file_type,
-                        size_bucket=_size_bucket(size),
-                        is_hidden=hidden,
-                        permissions=stat.S_IMODE(info.st_mode),
-                        mtime_ns=info.st_mtime_ns,
-                    )
-                    if size > max_file_bytes and skip_oversized:
-                        file_record.content_skipped_reason = (
-                            f"Explicit --skip: exceeds {max_file_bytes} bytes"
+                    if stat.S_ISDIR(info.st_mode):
+                        marker = entry.name.casefold() if entry.name.casefold() in _DEVELOPMENT_MARKERS else None
+                        exclusion = _exclusion_match(
+                            relative, entry.name, excluded_names, excluded_paths,
                         )
-                        stats["oversized_content_skipped"] += 1
-                    files.append(file_record)
-                    stats["total_bytes"] += size
-                    stats[f"file_type:{file_type}"] += 1
-                    stats[f"size_bucket:{file_record.size_bucket}"] += 1
-                    stats[f"language:{language}"] += 1
-                    continue
+                        record = DirectoryRecord(
+                            relative,
+                            depth + 1,
+                            is_hidden=hidden,
+                            permissions=stat.S_IMODE(info.st_mode),
+                            development_marker=marker,
+                            pruned=exclusion is not None,
+                            prune_reason=exclusion,
+                        )
+                        directories_by_path[relative] = record
+                        if marker:
+                            stats["development_directory_count"] += 1
+                            stats[f"development_dir:{marker}"] += 1
+                        if exclusion:
+                            stats["pruned_directory_count"] += 1
+                            stats[f"pruned_dir:{entry.name.casefold()}"] += 1
+                        else:
+                            pending.append((Path(entry.path), relative, depth + 1))
+                        continue
 
-                if stat.S_ISFIFO(info.st_mode):
-                    kind = "fifo"
-                elif stat.S_ISSOCK(info.st_mode):
-                    kind = "socket"
-                elif stat.S_ISBLK(info.st_mode):
-                    kind = "block_device"
-                elif stat.S_ISCHR(info.st_mode):
-                    kind = "character_device"
-                else:
-                    kind = "unknown_special"
-                special_entries.append(SpecialEntryRecord(
-                    relative,
-                    kind,
-                    is_hidden=hidden,
-                    permissions=stat.S_IMODE(info.st_mode),
-                    size_bytes=getattr(info, "st_size", 0),
-                ))
-                stats["special_entry_count"] += 1
-                stats[f"special_type:{kind}"] += 1
-            except OSError as exc:
-                stats["entry_errors"] += 1
-                files.append(FileRecord(
-                    relative, 0, Path(entry.name).suffix.lower(), "Unknown",
-                    error=f"{type(exc).__name__}: {exc}",
-                    is_hidden=entry.name.startswith("."),
-                ))
+                    if stat.S_ISREG(info.st_mode):
+                        size = info.st_size
+                        file_type = _file_type(Path(entry.path), relative)
+                        language = detect_language(relative)
+                        file_record = FileRecord(
+                            relative,
+                            size,
+                            Path(entry.name).suffix.lower(),
+                            language,
+                            file_type=file_type,
+                            size_bucket=_size_bucket(size),
+                            is_hidden=hidden,
+                            permissions=stat.S_IMODE(info.st_mode),
+                            mtime_ns=info.st_mtime_ns,
+                        )
+                        if size > max_file_bytes and skip_oversized:
+                            file_record.content_skipped_reason = (
+                                f"Explicit --skip: exceeds {max_file_bytes} bytes"
+                            )
+                            stats["oversized_content_skipped"] += 1
+                        files.append(file_record)
+                        stats["total_bytes"] += size
+                        stats[f"file_type:{file_type}"] += 1
+                        stats[f"size_bucket:{file_record.size_bucket}"] += 1
+                        stats[f"language:{language}"] += 1
+                        continue
+
+                    if stat.S_ISFIFO(info.st_mode):
+                        kind = "fifo"
+                    elif stat.S_ISSOCK(info.st_mode):
+                        kind = "socket"
+                    elif stat.S_ISBLK(info.st_mode):
+                        kind = "block_device"
+                    elif stat.S_ISCHR(info.st_mode):
+                        kind = "character_device"
+                    else:
+                        kind = "unknown_special"
+                    special_entries.append(SpecialEntryRecord(
+                        relative,
+                        kind,
+                        is_hidden=hidden,
+                        permissions=stat.S_IMODE(info.st_mode),
+                        size_bytes=getattr(info, "st_size", 0),
+                    ))
+                    stats["special_entry_count"] += 1
+                    stats[f"special_type:{kind}"] += 1
+                except OSError as exc:
+                    stats["entry_errors"] += 1
+                    files.append(FileRecord(
+                        relative, 0, Path(entry.name).suffix.lower(), "Unknown",
+                        error=f"{type(exc).__name__}: {exc}",
+                        is_hidden=entry.name.startswith("."),
+                    ))
+
+        except OSError as exc:
+            # A directory iterator can fail after yielding some entries. Keep the
+            # partial inventory, but make the incomplete directory explicit.
+            directory_record.error = f"${type(exc).__name__}: ${exc}"
+            stats["walk_errors"] += 1
+        finally:
+            entries.close()
 
     # Aggregate regular files into every inventoried ancestor. Pruned subtrees
     # intentionally do not acquire file totals because their content is unscanned.
