@@ -25,6 +25,8 @@
 - [x] Interactive standalone HTML report with search and filters
 - [x] Rich terminal progress and summary
 - [x] Metadata-aware cache validation, legacy migration and stale-entry pruning
+- [x] Initial static AI/ML framework, training/inference marker and artifact discovery
+- [ ] Dedicated ROS 1/ROS 2 package, node, topic, service, action and launch analysis
 - [ ] Rich terminal UI and CLI ergonomics
 - [ ] CI coverage gates
 

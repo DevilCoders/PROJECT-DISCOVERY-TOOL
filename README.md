@@ -15,6 +15,7 @@ PDT inventories and analyzes heterogeneous software repositories without importi
 - SQL DDL/schema inventory, Prisma ORM models/relations and inferred destructive migration indicators.
 - Test-suite discovery and static build-manifest inventory across common ecosystems.
 - Dependency declaration extraction for Python, Node.js, Rust, Go and Composer manifests.
+- Static AI/ML discovery for framework imports, training/inference/data-pipeline markers, selected model metadata and model/dataset artifact inventories. Binary model and dataset payloads are never deserialized.
 - Recognition catalog for 40+ languages and project file formats.
 - Optional offline-first Tree-sitter adapter covering 60+ language/format grammar mappings, declaration extraction and selected-language import-reference inventory when grammars are already provisioned locally.
 - Machine-readable analyzer domain catalog spanning 50+ domains, including security, APIs, databases, infrastructure, CI/CD, AI/ML, robotics, embedded, game engines, mobile and multi-project intelligence.
