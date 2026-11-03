@@ -60,7 +60,7 @@ _DOMAINS = (
     AnalyzerDomain("machine_learning", "Machine Learning Systems", "Framework imports, model/training/inference code markers and local model artifact inventory.", "partial"),
     AnalyzerDomain("datasets", "Dataset Intelligence", "Dataset container inventory and source-level input pipeline markers.", "partial"),
     AnalyzerDomain("model_artifacts", "Model Artifact Intelligence", "Checkpoint/model file inventory and selected model metadata extraction.", "partial"),
-    AnalyzerDomain("robotics_ros", "Robotics and ROS", "Packages, nodes, topics, services, actions, launch files and message interfaces."),
+    AnalyzerDomain("robotics_ros", "Robotics and ROS", "ROS package manifests, Python node APIs, C++ communication call sites, launch files and message/service/action interfaces.", "partial"),
     AnalyzerDomain("embedded", "Embedded Systems", "Cross-compilation, board support, RTOS, peripheral access and memory maps."),
     AnalyzerDomain("firmware", "Firmware and Binary Artifacts", "Firmware images, symbols, sections, boot chains and binary metadata."),
     AnalyzerDomain("hardware_description", "Hardware Description Languages", "Verilog, SystemVerilog, VHDL, modules and signal relationships."),
