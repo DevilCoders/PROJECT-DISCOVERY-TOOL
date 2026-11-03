@@ -1,4 +1,4 @@
-"""Optional native build: portable C on all platforms, Assembly on Linux x86-64."""
+"""Optional C, C++ and Rust native builds; Assembly acceleration on Linux x86-64."""
 from __future__ import annotations
 
 import platform
