@@ -7,7 +7,7 @@ PDT is not a Python-only scanner. Python is the control plane; native engines an
 | Layer | Primary language | Responsibility |
 |---|---|---|
 | Control plane | Python | CLI, plugin lifecycle, policy, orchestration, cache, findings and report schema |
-| Native low-level core | C | Bounded byte scanning, file-signature primitives, host capability reporting and stable extension boundary |
+| Native low-level core | C | Bounded byte counting, host capability reporting and stable extension boundary |
 | CPU acceleration | x86-64 Assembly + C dispatch | Linux x86-64 SIMD byte counting with runtime SSE2/POPCNT checks; scalar C fallback |
 | Filesystem traversal | Rust + PyO3 | Integrated no-follow directory iterator with native OS metadata and bounded depth state; persistent indexing remains planned |
 | File-signature classification | C++17 | Integrated native magic-byte classifier with Python fallback |
