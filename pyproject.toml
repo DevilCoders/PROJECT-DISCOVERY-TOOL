@@ -21,6 +21,7 @@ dev = [
     "build>=1.2",
     "twine>=5.0",
     "PyYAML>=6.0,<7",
+    "setuptools-rust>=1.10",
 ]
 polyglot = ["tree-sitter-language-pack>=1.23,<2"]
 infrastructure = ["PyYAML>=6.0,<7"]
