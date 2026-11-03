@@ -1,8 +1,11 @@
 """PDT command line."""
 import argparse
+import os
 import platform
 import sqlite3
-from collections import Counter
+import threading
+from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,7 +84,7 @@ def _render_banner(console: Console) -> None:
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
     *, skip_oversized: bool = False, ignores: set[str] | None = None,
-    vulnerability_db: Path | None = None,
+    vulnerability_db: Path | None = None, jobs: int = 0,
 ) -> int:
     console = Console(stderr=True)
     root = root.expanduser().absolute()
@@ -128,6 +131,42 @@ def run_scan(
     errors = list(analyzer_load.diagnostics)
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
+    hardware_threads = max(1, int(native_capabilities().get("hardware_threads", os.cpu_count() or 1)))
+    if jobs < 0 or jobs > 64:
+        raise ValueError("--jobs must be 0 (automatic) or between 1 and 64")
+    worker_count = jobs or max(1, min(8, hardware_threads * 2))
+    max_pending = max(worker_count, worker_count * 2)
+    analyzer_locks = {
+        id(analyzer): threading.Lock()
+        for analyzer in analyzers
+        if not getattr(analyzer, "concurrent_safe", True)
+    }
+
+    def analyze_one(record, path, digest_hint):
+        local_findings = []
+        local_errors = []
+        digest = digest_hint
+        if digest is None:
+            digest = sha256_file(path)
+        for analyzer in analyzers:
+            try:
+                lock = analyzer_locks.get(id(analyzer))
+                if lock is None:
+                    supported = analyzer.supports(record)
+                    if supported:
+                        local_findings.extend(analyzer.analyze(path, record))
+                        record.analyzed = True
+                else:
+                    with lock:
+                        supported = analyzer.supports(record)
+                        if supported:
+                            local_findings.extend(analyzer.analyze(path, record))
+                            record.analyzed = True
+            except Exception as exc:
+                local_errors.append(
+                    f"{record.path} [{analyzer.name}]: {type(exc).__name__}: {exc}"
+                )
+        return digest, local_findings, local_errors
 
     progress_columns = (
         SpinnerColumn(),
@@ -139,50 +178,71 @@ def run_scan(
     with ScanCache(cache_path) as cache:
         with Progress(*progress_columns, console=console) as progress:
             task = progress.add_task("Analyzing project files", total=len(records))
-            for record in records:
-                counts[record.language] += 1
+            pending = deque()
+
+            def collect_one():
+                future, record, file_stat, cache_miss = pending.popleft()
                 try:
-                    if record.error or record.content_skipped_reason:
-                        continue
-                    path = root / record.path
-                    file_stat = path.stat()
-                    cached = cache.get(str(root), record.path)
-                    if (
-                        cached
-                        and cached[0] == file_stat.st_size
-                        and cached[1] == file_stat.st_mtime_ns
-                        and cached[2] == file_stat.st_ctime_ns
-                        and cached[3] == file_stat.st_ino
-                    ):
-                        record.sha256 = cached[4]
-                    else:
-                        record.sha256 = sha256_file(path)
-                        cache.put(
-                            str(root),
-                            record.path,
-                            file_stat.st_size,
-                            file_stat.st_mtime_ns,
-                            file_stat.st_ctime_ns,
-                            file_stat.st_ino,
-                            record.sha256,
+                    digest, file_findings, file_errors = future.result()
+                    findings.extend(file_findings)
+                    errors.extend(file_errors)
+                    if file_errors:
+                        record.error = file_errors[0]
+                    if cache_miss and digest:
+                        current_stat = (root / record.path).stat()
+                        stable = (
+                            current_stat.st_size == file_stat.st_size
+                            and current_stat.st_mtime_ns == file_stat.st_mtime_ns
+                            and current_stat.st_ctime_ns == file_stat.st_ctime_ns
+                            and current_stat.st_ino == file_stat.st_ino
                         )
-                    for analyzer in analyzers:
-                        if analyzer.supports(record):
-                            try:
-                                findings.extend(analyzer.analyze(path, record))
-                                record.analyzed = True
-                            except Exception as exc:
-                                message = (
-                                    f"{record.path} [{analyzer.name}]: "
-                                    f"{type(exc).__name__}: {exc}"
-                                )
-                                errors.append(message)
-                                record.error = message
-                except OSError as exc:
-                    record.error = str(exc)
-                    errors.append(record.path + ": " + str(exc))
+                        if stable:
+                            cache.put(
+                                str(root), record.path, file_stat.st_size,
+                                file_stat.st_mtime_ns, file_stat.st_ctime_ns,
+                                file_stat.st_ino, digest,
+                            )
+                        else:
+                            message = f"{record.path}: file changed while scan was in progress"
+                            record.error = message
+                            errors.append(message)
+                except Exception as exc:
+                    message = f"{record.path}: {type(exc).__name__}: {exc}"
+                    record.error = message
+                    errors.append(message)
                 finally:
                     progress.advance(task)
+
+            with ThreadPoolExecutor(
+                max_workers=worker_count, thread_name_prefix="pdt-analyzer"
+            ) as executor:
+                for record in records:
+                    counts[record.language] += 1
+                    if record.error or record.content_skipped_reason:
+                        progress.advance(task)
+                        continue
+                    path = root / record.path
+                    try:
+                        file_stat = path.stat()
+                        cached = cache.get(str(root), record.path)
+                        cache_hit = bool(
+                            cached
+                            and cached[0] == file_stat.st_size
+                            and cached[1] == file_stat.st_mtime_ns
+                            and cached[2] == file_stat.st_ctime_ns
+                            and cached[3] == file_stat.st_ino
+                        )
+                        digest_hint = cached[4] if cache_hit else None
+                        future = executor.submit(analyze_one, record, path, digest_hint)
+                        pending.append((future, record, file_stat, not cache_hit))
+                        if len(pending) >= max_pending:
+                            collect_one()
+                    except OSError as exc:
+                        record.error = str(exc)
+                        errors.append(record.path + ": " + str(exc))
+                        progress.advance(task)
+                while pending:
+                    collect_one()
 
         if walk_stats.get("walk_errors", 0) == 0:
             cache.prune_missing(str(root), (record.path for record in records))
@@ -203,6 +263,12 @@ def run_scan(
         ).items())),
         "native_backend": native_capabilities(),
         "native_extension_available": native_available(),
+        "execution": {
+            "mode": "bounded-thread-pool",
+            "worker_count": worker_count,
+            "max_pending_tasks": max_pending,
+            "ordering": "deterministic-submission-order",
+        },
         "vulnerability_intelligence": vulnerability_db_status,
         "file_count": len(records),
         "directory_count": len(directories) - 1,
@@ -298,6 +364,8 @@ def run_scan(
     summary.add_row("Large files skipped by request", str(metrics["oversized_files"]))
     summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
     summary.add_row("Native backend", metrics["native_backend"]["backend"])
+    summary.add_row("GPU acceleration", metrics["native_backend"].get("gpu_status", "cpu-fallback"))
+    summary.add_row("Analysis workers", str(metrics["execution"]["worker_count"]))
     summary.add_row(
         "Local vulnerability advisories",
         str(vulnerability_db_status.get("advisory_count", 0))
@@ -331,6 +399,10 @@ def main() -> None:
     scan.add_argument("path", type=Path)
     scan.add_argument("--output", type=Path, default=None)
     scan.add_argument("--format", default="json,markdown,html")
+    scan.add_argument(
+        "--jobs", type=int, default=0,
+        help="Concurrent analysis workers; 0 auto-detects a bounded worker count (default: 0)",
+    )
     scan.add_argument(
         "--skip", action="store_true",
         help="Opt in to skipping content analysis for files above --max-file-mb",
@@ -442,7 +514,7 @@ def main() -> None:
             raise SystemExit(run_scan(
                 args.path, args.output, formats, args.max_file_mb,
                 skip_oversized=args.skip, ignores=set(args.exclude_dir),
-                vulnerability_db=args.vuln_db,
+                vulnerability_db=args.vuln_db, jobs=args.jobs,
             ))
 
         if not formats or formats - {"json", "markdown"}:
