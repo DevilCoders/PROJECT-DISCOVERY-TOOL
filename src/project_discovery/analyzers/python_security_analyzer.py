@@ -52,7 +52,7 @@ _IMPACTS = {
 
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
-from ..source_utils import read_python_source, redact_source_excerpt
+from ..source_utils import SourceBudgetExceeded, read_python_source_bounded, redact_source_excerpt
 
 
 class PythonSecurityAnalyzer(Analyzer):
@@ -82,18 +82,39 @@ class PythonSecurityAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            source = read_python_source(path)
-            tree = ast.parse(source, filename=record.path)
-            source_lines = source.splitlines()
-        except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+            source = read_python_source_bounded(path, MAX_AST_FILE_BYTES)
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "security",
+                f"Python security AST resource limit: {record.path}",
+                str(exc),
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            )]
+        except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
             return [Finding(
                 "security",
                 f"Python security analysis unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
             )]
+        try:
+            tree = ast.parse(source, filename=record.path)
+        except (SyntaxError, RecursionError, MemoryError) as exc:
+            return [Finding(
+                "security",
+                f"Python security parse resource limit: {record.path}",
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            )]
+        source_lines = source.splitlines()
 
         findings: list[Finding] = []
         seen: set[tuple[str, int]] = set()
