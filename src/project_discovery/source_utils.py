@@ -10,7 +10,7 @@ _SECRET_ASSIGNMENT = re.compile(
     r"""(?ix)(["']?[A-Za-z0-9_]*(?:password|passwd|passphrase|secret|token|api[_-]?key|client[_-]?secret|access[_-]?key|private[_-]?key|authorization|database[_-]?url|connection[_-]?string|credential|refresh[_-]?token|aws_secret_access_key)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
 )
 _IDENTITY_ASSIGNMENT = re.compile(
-    r"""(?ix)(["']?[A-Za-z0-9_]*(?:first_?name|given_?name|middle_?name|last_?name|family_?name|surname|user_?name|login_?name|email|e_mail|email_?address|phone|telephone|street_?address)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
+    r"""(?ix)(["']?[A-Za-z0-9_]*(?:first_?name|given_?name|middle_?name|last_?name|family_?name|surname|user_?name|login_?name|account_?name|email|e_mail|email_?address|phone|telephone|mobile|cell_?number|street_?address|postal_?address|home_?address|date_?of_?birth|birth_?date|dob|ssn|social_?security|passport_?number|national_?id)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
 )
 _CREDENTIAL_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/@\s]+:)[^@\s/]+(@)")
 _AUTHORIZATION_HEADER = re.compile(
