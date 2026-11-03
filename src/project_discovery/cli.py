@@ -421,6 +421,8 @@ def run_scan(
     summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
     summary.add_row("Native backend", metrics["native_backend"]["backend"])
     summary.add_row("GPU acceleration", metrics["native_backend"].get("gpu_status", "cpu-fallback"))
+    summary.add_row("GPU byte-count dispatches", str(metrics["native_backend"].get("gpu_dispatches", 0)))
+    summary.add_row("GPU CPU fallbacks", str(metrics["native_backend"].get("gpu_fallbacks", 0)))
     summary.add_row("Analysis workers", str(metrics["execution"]["worker_count"]))
     summary.add_row(
         "Local vulnerability advisories",
