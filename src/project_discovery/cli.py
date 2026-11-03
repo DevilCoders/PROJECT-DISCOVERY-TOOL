@@ -7,6 +7,7 @@ from pathlib import Path
 from . import __version__
 from .analyzers import load_analyzers
 from .cache import ScanCache
+from .language_catalog import language_catalog, recognized_language_count
 from .models import ScanResult
 from .python_graph import analyze_python_dependencies
 from .reporting import write_reports
@@ -36,7 +37,7 @@ def run_scan(root: Path, output: Path, formats: set[str], max_file_mb: int) -> i
         for index, record in enumerate(records, 1):
             counts[record.language] += 1
             if record.error:
-                continue  # Do not hash or parse oversized/unreadable inventory entries.
+                continue
             path = root / record.path
             try:
                 stat = path.stat()
@@ -45,14 +46,20 @@ def run_scan(root: Path, output: Path, formats: set[str], max_file_mb: int) -> i
                     record.sha256 = cached[2]
                 else:
                     record.sha256 = sha256_file(path)
-                    cache.put(str(root), record.path, stat.st_size, stat.st_mtime_ns, record.sha256)
+                    cache.put(
+                        str(root), record.path, stat.st_size, stat.st_mtime_ns,
+                        record.sha256,
+                    )
                 for analyzer in analyzers:
                     if analyzer.supports(record):
                         try:
                             findings.extend(analyzer.analyze(path, record))
                             record.analyzed = True
                         except Exception as exc:
-                            message = f"{record.path} [{analyzer.name}]: {type(exc).__name__}: {exc}"
+                            message = (
+                                f"{record.path} [{analyzer.name}]: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
                             errors.append(message)
                             record.error = message
             except OSError as exc:
@@ -69,6 +76,8 @@ def run_scan(root: Path, output: Path, formats: set[str], max_file_mb: int) -> i
         "walk_errors": walk_stats.get("walk_errors", 0),
         "oversized_files": walk_stats.get("oversized", 0),
         "languages": dict(sorted(counts.items())),
+        "language_catalog": language_catalog(),
+        "recognized_language_count": recognized_language_count(),
         "python_dependency_graph": python_graph,
     }
     result = ScanResult(
@@ -93,7 +102,9 @@ def main() -> None:
     scan.add_argument("--format", default="json,markdown,html")
     scan.add_argument("--max-file-mb", type=int, default=8)
     args = parser.parse_args()
-    formats = {item.strip().lower() for item in args.format.split(",") if item.strip()}
+    formats = {
+        item.strip().lower() for item in args.format.split(",") if item.strip()
+    }
     if not formats or formats - {"json", "markdown", "html"}:
         parser.error("--format accepts json, markdown, html")
     if args.max_file_mb < 1:

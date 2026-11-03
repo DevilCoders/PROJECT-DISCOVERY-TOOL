@@ -1,0 +1,148 @@
+"""Central language and file-format recognition catalog.
+
+Recognition is deliberately separate from parser support: identifying a file's
+language does not imply that PDT can fully parse or semantically analyze it.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+
+
+@dataclass(frozen=True, slots=True)
+class LanguageSpec:
+    name: str
+    extensions: tuple[str, ...] = ()
+    filenames: tuple[str, ...] = ()
+    family: str = "source"
+    parser_backend: str | None = None
+
+
+_SPECS = (
+    LanguageSpec("Python", (".py", ".pyi"), parser_backend="stdlib:ast"),
+    LanguageSpec("JavaScript", (".js", ".jsx", ".mjs", ".cjs"), parser_backend="optional:tree-sitter"),
+    LanguageSpec("TypeScript", (".ts", ".tsx", ".mts", ".cts"), parser_backend="optional:tree-sitter"),
+    LanguageSpec("Rust", (".rs",), parser_backend="optional:tree-sitter"),
+    LanguageSpec("Go", (".go",), parser_backend="optional:tree-sitter"),
+    LanguageSpec("C", (".c",), parser_backend="optional:tree-sitter"),
+    LanguageSpec("C++", (".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx", ".ipp")),
+    LanguageSpec("C/C++ Header", (".h", ".inc")),
+    LanguageSpec("Objective-C", (".m",)),
+    LanguageSpec("Objective-C++", (".mm",)),
+    LanguageSpec("Java", (".java",), parser_backend="optional:tree-sitter"),
+    LanguageSpec("Kotlin", (".kt", ".kts")),
+    LanguageSpec("Swift", (".swift",)),
+    LanguageSpec("C#", (".cs",)),
+    LanguageSpec("F#", (".fs", ".fsi", ".fsx")),
+    LanguageSpec("Visual Basic .NET", (".vb",)),
+    LanguageSpec("Dart", (".dart",)),
+    LanguageSpec("Ruby", (".rb", ".rake", ".gemspec")),
+    LanguageSpec("PHP", (".php", ".phtml")),
+    LanguageSpec("Perl", (".pl", ".pm", ".t")),
+    LanguageSpec("R", (".r", ".R")),
+    LanguageSpec("Julia", (".jl",)),
+    LanguageSpec("Lua", (".lua",)),
+    LanguageSpec("Shell", (".sh", ".bash", ".zsh", ".fish")),
+    LanguageSpec("PowerShell", (".ps1", ".psm1", ".psd1")),
+    LanguageSpec("Batch", (".bat", ".cmd")),
+    LanguageSpec("Elixir", (".ex", ".exs")),
+    LanguageSpec("Erlang", (".erl", ".hrl")),
+    LanguageSpec("Haskell", (".hs", ".lhs")),
+    LanguageSpec("OCaml", (".ml", ".mli")),
+    LanguageSpec("ReasonML", (".re", ".rei")),
+    LanguageSpec("Clojure", (".clj", ".cljs", ".cljc", ".edn")),
+    LanguageSpec("Scala", (".scala", ".sc")),
+    LanguageSpec("Groovy", (".groovy", ".gradle")),
+    LanguageSpec("C", (".h",), family="header"),
+    LanguageSpec("Fortran", (".f", ".for", ".f90", ".f95", ".f03", ".f08")),
+    LanguageSpec("COBOL", (".cob", ".cbl", ".cpy")),
+    LanguageSpec("Pascal", (".pas", ".pp")),
+    LanguageSpec("Ada", (".adb", ".ads")),
+    LanguageSpec("Zig", (".zig",)),
+    LanguageSpec("Nim", (".nim", ".nims")),
+    LanguageSpec("Crystal", (".cr",)),
+    LanguageSpec("D", (".d", ".di")),
+    LanguageSpec("Odin", (".odin",)),
+    LanguageSpec("V", (".v",)),
+    LanguageSpec("Verilog", (".v", ".vh")),
+    LanguageSpec("SystemVerilog", (".sv", ".svh")),
+    LanguageSpec("VHDL", (".vhd", ".vhdl")),
+    LanguageSpec("Solidity", (".sol",)),
+    LanguageSpec("Move", (".move",)),
+    LanguageSpec("SQL", (".sql",)),
+    LanguageSpec("PL/SQL", (".pls", ".pks", ".pkb")),
+    LanguageSpec("HTML", (".html", ".htm"), family="markup"),
+    LanguageSpec("CSS", (".css",), family="stylesheet"),
+    LanguageSpec("SCSS", (".scss",), family="stylesheet"),
+    LanguageSpec("Sass", (".sass",), family="stylesheet"),
+    LanguageSpec("Less", (".less",), family="stylesheet"),
+    LanguageSpec("XML", (".xml", ".xsd", ".xsl", ".xslt"), family="markup"),
+    LanguageSpec("XAML", (".xaml",), family="markup"),
+    LanguageSpec("Markdown", (".md", ".markdown"), family="documentation"),
+    LanguageSpec("reStructuredText", (".rst",), family="documentation"),
+    LanguageSpec("AsciiDoc", (".adoc", ".asciidoc"), family="documentation"),
+    LanguageSpec("LaTeX", (".tex", ".sty", ".cls"), family="documentation"),
+    LanguageSpec("JSON", (".json", ".jsonc", ".json5"), family="data"),
+    LanguageSpec("YAML", (".yaml", ".yml"), family="data"),
+    LanguageSpec("TOML", (".toml",), family="data"),
+    LanguageSpec("INI", (".ini", ".cfg"), family="configuration"),
+    LanguageSpec("Protocol Buffers", (".proto",), family="schema"),
+    LanguageSpec("GraphQL", (".graphql", ".gql"), family="schema"),
+    LanguageSpec("Thrift", (".thrift",), family="schema"),
+    LanguageSpec("Avro IDL", (".avdl",), family="schema"),
+    LanguageSpec("HCL", (".hcl", ".tf", ".tfvars"), family="configuration"),
+    LanguageSpec("Nix", (".nix",), family="configuration"),
+    LanguageSpec("Dockerfile", filenames=("Dockerfile", "Containerfile"), family="configuration"),
+    LanguageSpec("Makefile", filenames=("Makefile", "GNUmakefile"), family="build"),
+    LanguageSpec("CMake", (".cmake",), filenames=("CMakeLists.txt",), family="build"),
+    LanguageSpec("Meson", (".build",), filenames=("meson.build",), family="build"),
+    LanguageSpec("Assembly", (".s", ".S", ".asm"), family="low_level"),
+    LanguageSpec("CUDA", (".cu", ".cuh"), family="gpu"),
+    LanguageSpec("OpenCL", (".cl",), family="gpu"),
+    LanguageSpec("GLSL", (".glsl", ".vert", ".frag", ".geom", ".tesc", ".tese"), family="shader"),
+    LanguageSpec("HLSL", (".hlsl", ".fx", ".fxh"), family="shader"),
+    LanguageSpec("WGSL", (".wgsl",), family="shader"),
+    LanguageSpec("Metal Shading Language", (".metal",), family="shader"),
+    LanguageSpec("Jupyter Notebook", (".ipynb",), family="notebook"),
+    LanguageSpec("PDF", (".pdf",), family="document"),
+    LanguageSpec("Word Document", (".docx",), family="document"),
+    LanguageSpec("Text", (".txt",), family="documentation"),
+)
+
+_BY_EXTENSION: dict[str, LanguageSpec] = {}
+_BY_FILENAME: dict[str, LanguageSpec] = {}
+for spec in _SPECS:
+    for extension in spec.extensions:
+        # Prefer the first unambiguous primary mapping for shared extensions.
+        _BY_EXTENSION.setdefault(extension.lower(), spec)
+    for filename in spec.filenames:
+        _BY_FILENAME.setdefault(filename.lower(), spec)
+
+
+def detect_language(path: str) -> str:
+    """Return a best-effort language/format label for a project-relative path."""
+    name = PurePosixPath(path).name
+    by_name = _BY_FILENAME.get(name.lower())
+    if by_name:
+        return by_name.name
+    return _BY_EXTENSION.get(PurePosixPath(name).suffix.lower(), LanguageSpec("Other")).name
+
+
+def language_catalog() -> list[dict[str, str | None]]:
+    """Return the recognition catalog, including parser capability declarations."""
+    return [
+        {
+            "name": spec.name,
+            "family": spec.family,
+            "parser_backend": spec.parser_backend,
+            "recognition": "CONFIRMED",
+            "analysis_status": (
+                "implemented" if spec.parser_backend == "stdlib:ast" else "inventory_only"
+            ),
+        }
+        for spec in _SPECS
+    ]
+
+
+def recognized_language_count() -> int:
+    return len({spec.name for spec in _SPECS})
