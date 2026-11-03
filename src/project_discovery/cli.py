@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
+from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
 from .cache import ScanCache
 from .language_catalog import language_catalog, recognized_language_count
@@ -78,6 +79,12 @@ def run_scan(root: Path, output: Path, formats: set[str], max_file_mb: int) -> i
         "languages": dict(sorted(counts.items())),
         "language_catalog": language_catalog(),
         "recognized_language_count": recognized_language_count(),
+        "analyzer_domain_catalog": analyzer_domain_catalog(),
+        "analyzer_domain_count": analyzer_domain_count(),
+        "implemented_analyzer_domains": [
+            item["id"] for item in analyzer_domain_catalog()
+            if item["status"] == "implemented"
+        ],
         "python_dependency_graph": python_graph,
     }
     result = ScanResult(
