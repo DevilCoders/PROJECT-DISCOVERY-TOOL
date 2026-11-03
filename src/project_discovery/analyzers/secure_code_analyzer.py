@@ -145,6 +145,15 @@ _PATTERNS = (
 )
 _PYTHON_UNSAFE_LOADERS = {"UnsafeLoader", "Loader", "FullLoader"}
 _MAX_SECURE_CODE_FILE_BYTES = 16 * 1024 * 1024
+_MAX_RULE_LOCATIONS = 100
+_MAX_CODE_EXCERPTS_PER_FINDING = 20
+
+
+def _record_rule_line(matches: dict[str, set[int]], rule: str, line_number: int) -> None:
+    locations = matches.setdefault(rule, set())
+    if line_number not in locations and len(locations) < _MAX_RULE_LOCATIONS:
+        locations.add(line_number)
+
 
 _IMPACTS = {
     "dynamic_code_execution": (
@@ -275,7 +284,7 @@ def _python_rules(tree: ast.AST) -> dict[str, set[int]]:
             if _dynamic_sql_argument(node.args[0]):
                 rule = "dynamic_sql_query"
         if rule:
-            matches.setdefault(rule, set()).add(node.lineno)
+            _record_rule_line(matches, rule, node.lineno)
 
         if name in {"requests.get", "requests.post", "requests.put", "requests.delete",
                     "httpx.get", "httpx.post", "httpx.put", "httpx.delete"}:
@@ -283,7 +292,7 @@ def _python_rules(tree: ast.AST) -> dict[str, set[int]]:
                 keyword.arg == "verify" and isinstance(keyword.value, ast.Constant)
                 and keyword.value.value is False for keyword in node.keywords
             ):
-                matches.setdefault("tls_verification_disabled", set()).add(node.lineno)
+                _record_rule_line(matches, "tls_verification_disabled", node.lineno)
     return matches
 
 
@@ -338,7 +347,6 @@ class SecureCodePatternAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
 
-        source_lines = source.splitlines()
         matches: dict[str, set[int]] = {}
         if record.extension in {".py", ".pyi"}:
             try:
@@ -353,11 +361,25 @@ class SecureCodePatternAnalyzer(Analyzer):
                     analyzer=self.name,
                 )]
         else:
-            for rule, pattern, _, _ in _PATTERNS:
-                matches[rule] = {
-                    number for number, line in enumerate(source.splitlines(), 1)
-                    if pattern.search(line)
-                }
+            # Keep line iteration streaming. splitlines() can allocate millions of
+            # strings for a newline-heavy 16 MiB source file.
+            for line_number, line in enumerate(io.StringIO(source, newline=None), 1):
+                for rule, pattern, _, _ in _PATTERNS:
+                    if pattern.search(line):
+                        _record_rule_line(matches, rule, line_number)
+
+        requested_lines = {
+            line_number
+            for locations in matches.values()
+            for line_number in sorted(locations)[:_MAX_CODE_EXCERPTS_PER_FINDING]
+        }
+        source_evidence: dict[int, str] = {}
+        if requested_lines:
+            for line_number, line in enumerate(io.StringIO(source, newline=None), 1):
+                if line_number in requested_lines:
+                    source_evidence[line_number] = redact_source_excerpt(line)
+                    if len(source_evidence) >= len(requested_lines):
+                        break
 
         metadata = {rule: (title, detail) for rule, _, title, detail in _PATTERNS}
         metadata.update({
@@ -381,7 +403,7 @@ class SecureCodePatternAnalyzer(Analyzer):
             if not lines:
                 continue
             title, detail = metadata[rule]
-            selected_lines = sorted(lines)[:100]
+            selected_lines = sorted(lines)[:_MAX_RULE_LOCATIONS]
             findings.append(Finding(
                 "security",
                 f"{title}: {record.path}",
@@ -401,10 +423,10 @@ class SecureCodePatternAnalyzer(Analyzer):
                 code_evidence=[
                     CodeEvidence(
                         line_number=line,
-                        code=redact_source_excerpt(source_lines[line - 1]),
+                        code=source_evidence[line],
                     )
-                    for line in selected_lines[:20]
-                    if 0 < line <= len(source_lines)
+                    for line in selected_lines[:_MAX_CODE_EXCERPTS_PER_FINDING]
+                    if line in source_evidence
                 ],
                 impact=_IMPACTS.get(
                     rule,
