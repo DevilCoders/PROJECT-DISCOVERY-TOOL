@@ -6,6 +6,7 @@ from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
 from .document_analyzer import DocumentAnalyzer
 from .python_analyzer import PythonAnalyzer
+from .security_analyzer import SecretPatternAnalyzer
 from .tree_sitter_analyzer import TreeSitterAnalyzer
 
 
@@ -15,6 +16,7 @@ def load_analyzers() -> list[Analyzer]:
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
         DependencyManifestAnalyzer(),
+        SecretPatternAnalyzer(),
         TreeSitterAnalyzer(),
     ]
     for point in entry_points(group="pdt.analyzers"):
