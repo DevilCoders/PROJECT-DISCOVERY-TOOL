@@ -122,3 +122,15 @@ def test_missing_yaml_dependency_is_unknown(tmp_path: Path, monkeypatch):
     findings = analyzer.analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "infrastructure extra" in findings[0].detail
+
+
+def test_ansible_playbook_list_is_inventoried(tmp_path: Path):
+    path = tmp_path / "site.yml"
+    path.write_text(
+        "- hosts: all\n  tasks:\n    - name: install package\n      package:\n        name: nginx\n",
+        encoding="utf-8",
+    )
+    findings = DeploymentIntelligenceAnalyzer().analyze(
+        path, _record(path, "ansible/playbooks/site.yml")
+    )
+    assert any(item.title.startswith("Ansible playbook:") for item in findings)

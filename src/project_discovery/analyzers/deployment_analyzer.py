@@ -272,7 +272,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 evidence=[record.path],
                 analyzer=self.name,
             ))
-        if root.get("on") == "pull_request_target":
+        if root.get("on", root.get(True)) == "pull_request_target":
             findings.append(Finding(
                 "security",
                 f"Privileged pull_request_target workflow: {record.path}",
@@ -300,6 +300,15 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             return [error]
         findings = []
         for index, document in enumerate(documents or []):
+            if isinstance(document, list):
+                if name_is_ansible(record.path, {"plays": document}):
+                    findings.append(Finding(
+                        "infrastructure", f"Ansible playbook: {record.path}",
+                        f"Detected {len(document)} top-level play item(s). Tasks and module "
+                        "arguments are not executed or evaluated.",
+                        confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
+                    ))
+                continue
             root = _mapping(document)
             if not root:
                 continue
