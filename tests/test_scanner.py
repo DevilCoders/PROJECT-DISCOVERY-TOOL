@@ -248,6 +248,8 @@ def test_inventory_order_has_exact_path_tiebreak_for_casefold_collisions(
             (tmp_path / name).write_text("pass\n", encoding="utf-8")
         except OSError:
             pytest.skip("Filesystem cannot represent the casefold-collision fixture")
+    if (tmp_path / "A.py").samefile(tmp_path / "a.py"):
+        pytest.skip("Filesystem is case-insensitive for the ASCII collision fixture")
     files, _, _, _, _ = scanner.discover_inventory(tmp_path)
     paths = [item.path for item in files]
     expected = sorted(paths, key=lambda value: (value.casefold(), value))
