@@ -13,6 +13,7 @@ from ..source_utils import redact_source_excerpt
 
 
 _MAX_IDENTITY_SOURCE_BYTES = 16 * 1024 * 1024
+_MAX_IDENTITY_EVIDENCE_LINES = 100
 _SOURCE_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
     ".java", ".kt", ".kts", ".cs", ".fs", ".php", ".rb", ".go", ".rs",
@@ -107,7 +108,7 @@ def _python_markers(source: str, relative: str) -> tuple[dict[str, set[int]], di
                 if framework is None:
                     framework = _FRAMEWORKS.get(module.split(".", 1)[0])
                 if framework:
-                    frameworks.setdefault(framework, set()).add(node.lineno)
+                    _add_location(frameworks, framework, node.lineno)
         elif isinstance(node, ast.ImportFrom) and node.module:
             module = node.module
             framework = _FRAMEWORKS.get(module)
@@ -130,7 +131,7 @@ def _python_markers(source: str, relative: str) -> tuple[dict[str, set[int]], di
                     "authorization" if lowered in {"login_required", "requires_auth"}
                     else "authentication"
                 )
-                markers.setdefault(category, set()).add(node.lineno)
+                _add_location(markers, category, node.lineno)
     return frameworks, markers
 
 
@@ -179,10 +180,10 @@ class IdentityIntelligenceAnalyzer(Analyzer):
                 redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
                 confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
             )]
-        source_lines = source.splitlines()
         frameworks: dict[str, set[int]] = {}
         markers: dict[str, set[int]] = {}
-        if record.extension in {".py", ".pyi"}:
+        is_python = record.extension in {".py", ".pyi"}
+        if is_python:
             try:
                 frameworks, markers = _python_markers(source, record.path)
             except (RecursionError, MemoryError) as exc:
@@ -193,22 +194,18 @@ class IdentityIntelligenceAnalyzer(Analyzer):
                     confidence="UNKNOWN", evidence=[record.path],
                     analyzer=self.name, severity="LOW",
                 )]
-        else:
-            lines = source_lines
-            for framework, package in _FRAMEWORKS.items():
-                locations = {
-                    number for number, line in enumerate(lines, 1)
-                    if package.lower() in line.lower() or framework.lower() in line.lower()
-                }
-                if locations:
-                    frameworks[package] = locations
-        for category, pattern, _, _ in _PATTERNS:
-            locations = {
-                number for number, line in enumerate(source_lines, 1)
-                if pattern.search(line)
-            }
-            if locations:
-                markers.setdefault(category, set()).update(locations)
+
+        # Iterate without materializing source.splitlines(); retain only bounded
+        # representative locations for each marker/framework family.
+        for line_number, line in enumerate(io.StringIO(source, newline=None), 1):
+            lowered = line.lower()
+            if not is_python:
+                for framework, package in _FRAMEWORKS.items():
+                    if package.lower() in lowered or framework.lower() in lowered:
+                        _add_location(frameworks, package, line_number)
+            for category, pattern, _, _ in _PATTERNS:
+                if pattern.search(line):
+                    _add_location(markers, category, line_number)
 
         findings = []
         if frameworks:
