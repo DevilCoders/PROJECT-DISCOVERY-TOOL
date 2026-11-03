@@ -2,9 +2,10 @@
 from importlib.metadata import entry_points
 
 from .base import Analyzer
-from .python_analyzer import PythonAnalyzer
-from .docs_analyzer import MarkdownAnalyzer
 from .dependency_manifest_analyzer import DependencyManifestAnalyzer
+from .docs_analyzer import MarkdownAnalyzer
+from .python_analyzer import PythonAnalyzer
+from .tree_sitter_analyzer import TreeSitterAnalyzer
 
 
 def load_analyzers() -> list[Analyzer]:
@@ -12,6 +13,7 @@ def load_analyzers() -> list[Analyzer]:
         PythonAnalyzer(),
         MarkdownAnalyzer(),
         DependencyManifestAnalyzer(),
+        TreeSitterAnalyzer(),
     ]
     for point in entry_points(group="pdt.analyzers"):
         try:
