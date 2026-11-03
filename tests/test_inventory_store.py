@@ -80,3 +80,35 @@ def test_inventory_store_rejects_use_after_close(tmp_path: Path):
     store.close()
     with pytest.raises(RuntimeError, match="closed"):
         store.append("file", {"path": "a"})
+
+
+
+def test_inventory_store_rejects_symlink_database_path(tmp_path: Path):
+    target = tmp_path / "real.sqlite3"
+    link = tmp_path / "linked.sqlite3"
+    with InventoryStore(target) as store:
+        store.append("file", {"path": "safe.txt"})
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        InventoryStore(link)
+
+
+def test_inventory_store_closes_early_stream_cursor(tmp_path: Path):
+    with InventoryStore(tmp_path / "inventory.sqlite3", batch_size=1) as store:
+        store.extend("file", ({"path": f"{index:04}.txt"} for index in range(5)))
+        records = store.iter_records("file", fetch_size=1)
+        assert next(records)["path"] == "0000.txt"
+        records.close()
+        assert [item["path"] for item in store.iter_records("file")] == [
+            "0000.txt", "0001.txt", "0002.txt", "0003.txt", "0004.txt",
+        ]
+
+
+def test_inventory_store_metadata_rejects_use_after_close(tmp_path: Path):
+    store = InventoryStore(tmp_path / "inventory.sqlite3")
+    store.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        store.get_metadata("root")
