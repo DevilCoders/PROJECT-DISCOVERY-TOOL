@@ -7,12 +7,11 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..language_catalog import source_extensions, source_language_names
 
 
-_SOURCE_EXTENSIONS = {
-    ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
-    ".java", ".kt", ".kts", ".cs", ".go", ".rs", ".rb", ".php",
-}
+_SOURCE_EXTENSIONS = source_extensions()
+
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
 _ROUTE_PATTERNS = (
     re.compile(
@@ -41,6 +40,18 @@ _ROUTE_PATTERNS = (
     ),
     re.compile(
         r"""#\s*\[\s*(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]""",
+        re.I,
+    ),
+    re.compile(
+        r"""(?:app|group|router)\s*\.\s*Map(Get|Post|Put|Patch|Delete)\s*\(\s*['"]([^'"]+)['"]""",
+        re.I,
+    ),
+    re.compile(
+        r"""\b(?:http\.)?HandleFunc\s*\(\s*(['"])([^'"]+)\1""",
+        re.I,
+    ),
+    re.compile(
+        r"""\bCROW_ROUTE\s*\([^,]+,\s*(['"])([^'"]+)\1""",
         re.I,
     ),
 )
@@ -103,10 +114,7 @@ class APIEndpointAnalyzer(Analyzer):
 
     name = "api-endpoints"
     domains = ("api_rest", "networking")
-    languages = (
-        "Python", "JavaScript", "TypeScript", "Java", "Kotlin", "C#",
-        "Go", "Rust", "Ruby", "PHP",
-    )
+    languages = source_language_names()
 
     def supports(self, record: FileRecord) -> bool:
         return record.error is None and record.extension in _SOURCE_EXTENSIONS
@@ -133,6 +141,10 @@ class APIEndpointAnalyzer(Analyzer):
                         elif pattern.pattern.startswith(r"""\[\s*Http"""):
                             method = groups[0].upper()
                             route = groups[1] or ""
+                        elif pattern.pattern.startswith(r"""(?:app|group|router)"""):
+                            method, route = groups[0].upper(), groups[1]
+                        elif pattern.pattern.startswith(r"""\b(?:http\.)?HandleFunc""") or pattern.pattern.startswith(r"""\bCROW_ROUTE"""):
+                            method, route = "ANY", groups[1]
                         elif len(groups) >= 2:
                             method, route = groups[0].upper().removesuffix("MAPPING"), groups[1]
                         else:

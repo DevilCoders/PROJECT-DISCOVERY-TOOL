@@ -10,12 +10,11 @@ from pathlib import Path, PurePosixPath
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..language_catalog import source_extensions
 
 
-_MIGRATION_EXTENSIONS = {
-    ".sql", ".py", ".rb", ".js", ".cjs", ".mjs", ".ts", ".cts", ".mts",
-    ".cs", ".php", ".ex", ".exs", ".java", ".kt", ".xml", ".yaml", ".yml", ".json",
-}
+_MIGRATION_EXTENSIONS = source_extensions() | {".xml", ".yaml", ".yml", ".json"}
+
 _MIGRATION_DIRS = {
     "migration", "migrations", "migrate", "versions", "changelog",
     "changelogs", "changeset", "changesets", "flyway", "liquibase",
@@ -26,7 +25,7 @@ _PARENT_REVISION = re.compile(r"""(?m)^\s*down_revision\s*=\s*['"]([^'"]+)['"]""
 _CHANGESET_ID = re.compile(r"(?i)<changeSet\b[^>]*\bid\s*=\s*['\"]([^'\"]+)")
 _OPERATION_PATTERNS = (
     ("create_table", re.compile(
-        r"(?i)(?:\bCREATE\s+(?:TEMPORARY\s+)?TABLE\b|\b(?:op\.)?create_table\s*\(|"
+        r"(?i)(?:\bCREATE\s+(?:TEMPORARY\s+)?TABLE\b|\b(?:op\.)?create_table\s*\(|\b(?:pgTable|mysqlTable|sqliteTable)\s*\(|"
         r"\bSchema::create\s*\(|\bcreateTable\s*\(|\bCreateTable\s*\(|"
         r"<\s*createTable\b|\bmigrations\.CreateModel\b)"
     ), False),
@@ -77,6 +76,20 @@ def _framework(path: str, filename: str, content: str) -> str:
     parts = _migration_context(path)
     if _FLYWAY_NAME.match(filename):
         return "Flyway"
+    if "-- +goose" in content.lower() or "github.com/pressly/goose" in content:
+        return "Goose"
+    if "-- atlas:" in content.lower() or "atlas.hcl" in parts:
+        return "Atlas"
+    if "-- migrate:up" in content.lower() or "-- migrate:down" in content.lower():
+        return "Dbmate"
+    if "drizzle-orm" in content or "drizzle-kit" in content:
+        return "Drizzle ORM"
+    if "diesel::" in content or "diesel" in parts:
+        return "Diesel"
+    if "sea_orm_migration" in content or "MigratorTrait" in content:
+        return "SeaORM"
+    if "sqlx::migrate" in content or "sqlx::migrate!" in content:
+        return "SQLx"
     if "liquibase" in parts or "changelog" in parts or filename.startswith("changelog"):
         return "Liquibase"
     if "prisma" in parts:

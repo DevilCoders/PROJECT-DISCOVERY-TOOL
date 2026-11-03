@@ -7,12 +7,11 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..language_catalog import source_extensions, source_language_names
 
 
-_SOURCE_EXTENSIONS = {
-    ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
-    ".java", ".kt", ".kts", ".cs", ".go", ".rs", ".rb", ".php",
-}
+_SOURCE_EXTENSIONS = source_extensions()
+
 _TECHNOLOGIES = {
     "pymongo": ("MongoDB", "pymongo"),
     "motor": ("MongoDB", "motor"),
@@ -151,7 +150,7 @@ class NoSQLIntelligenceAnalyzer(Analyzer):
 
     name = "nosql-intelligence"
     domains = ("databases_nosql", "messaging")
-    languages = ("Python", "JavaScript", "TypeScript", "Java", "Kotlin", "C#", "Go", "Rust", "Ruby", "PHP")
+    languages = source_language_names()
 
     def supports(self, record: FileRecord) -> bool:
         return record.error is None and record.extension in _SOURCE_EXTENSIONS

@@ -55,3 +55,28 @@ def test_go_and_ruby_route_patterns(tmp_path: Path):
 
 def test_non_route_source_produces_no_api_finding(tmp_path: Path):
     assert _scan(tmp_path, "math.py", "math.py", "def add(a, b):\n    return a + b\n") == []
+
+
+def test_dotnet_minimal_api_and_cpp_crow_routes_are_scanned(tmp_path: Path):
+    dotnet = _scan(
+        tmp_path, "MinimalApi.cs", "src/MinimalApi.cs",
+        'app.MapGet("/health", () => "ok");\n'
+        'app.MapPost("/users", createUser);\n',
+    )
+    crow = _scan(
+        tmp_path, "routes.cpp", "server/routes.cpp",
+        'CROW_ROUTE(app, "/api/items");\n',
+    )
+    assert any("GET /health" in item for item in dotnet[0].evidence)
+    assert any("POST /users" in item for item in dotnet[0].evidence)
+    assert any("ANY /api/items" in item for item in crow[0].evidence)
+
+
+def test_api_endpoint_analyzer_accepts_the_full_source_language_catalog():
+    from project_discovery.language_catalog import source_extensions, source_language_names
+
+    analyzer = APIEndpointAnalyzer()
+    assert analyzer.languages == source_language_names()
+    for extension in source_extensions():
+        record = FileRecord("sample" + extension, 1, extension, "Source")
+        assert analyzer.supports(record), extension

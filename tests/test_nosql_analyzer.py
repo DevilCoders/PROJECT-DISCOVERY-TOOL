@@ -85,3 +85,13 @@ def test_javascript_vector_database_clients_are_detected(tmp_path: Path):
     )
     assert any("Qdrant datastore references" in item.title for item in findings)
     assert any("Chroma datastore references" in item.title for item in findings)
+
+
+def test_no_sql_analyzer_accepts_the_full_source_language_catalog():
+    from project_discovery.language_catalog import source_extensions, source_language_names
+
+    analyzer = NoSQLIntelligenceAnalyzer()
+    assert analyzer.languages == source_language_names()
+    for extension in source_extensions():
+        record = FileRecord("sample" + extension, 1, extension, "Source")
+        assert analyzer.supports(record), extension

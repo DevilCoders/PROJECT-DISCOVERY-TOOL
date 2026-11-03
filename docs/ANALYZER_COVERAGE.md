@@ -34,3 +34,10 @@ The localization analyzer inventories Gettext PO/POT, ARB, nested JSON, XLIFF, A
 ## Expanded non-relational and vector datastore inventory
 
 The NoSQL analyzer now recognizes additional vector/search and multi-model datastore client ecosystems, including Chroma, Qdrant, Pinecone, Weaviate, Milvus, FAISS, LanceDB, Vespa, ArangoDB and SurrealDB. Python AST analysis also propagates imported client classes through simple constructor assignments so selected operations on local client variables can be associated with the imported datastore. These are static client/API references, not live connection or schema claims.
+
+
+## Expanded source-language matrix for API, database and migration analyzers
+
+The source-level API endpoint analyzer and NoSQL/vector datastore analyzer now use the central source-language extension catalog instead of a hard-coded short list. Their static pattern checks therefore run across every source family recognized by PDT, while language-specific semantic extraction remains explicitly bounded by implemented rules.
+
+Migration discovery likewise accepts migration scripts written in any recognized source language and adds explicit framework identification for Goose, Atlas, Dbmate, Drizzle ORM, Diesel, SeaORM and SQLx. A recognized migration file is not evidence that it has been applied to a database.
