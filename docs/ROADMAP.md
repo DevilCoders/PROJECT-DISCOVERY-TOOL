@@ -316,6 +316,8 @@ The baseline is not production-ready:
 
 ## Phase 13 — Production release
 
+- [ ] CI triggers on pushes to `master`, `main` and `feat/**`, and pull requests targeting `master` or `main`; matrix jobs have explicit timeouts and pip dependency caching.
+
 - [ ] Full supported OS and Python CI matrix, plus native build matrix where Rust/C modules exist.
 - [ ] Analyzer conformance and regression coverage for all claimed capabilities.
 - [ ] Reproducible source/wheel builds, clean install, package metadata, dependency/license inventory and CLI smoke tests.
