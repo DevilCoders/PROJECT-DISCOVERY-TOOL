@@ -454,12 +454,16 @@ static size_t pdt_count_byte_scalar(const unsigned char *data, size_t length,
 static int pdt_use_assembly(void) {
 #if PDT_ASM_COMPILED && (defined(__x86_64__) || defined(_M_X64))
     static int enabled = -1;
-    if (enabled < 0) {
+    int value = __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
+    if (value < 0) {
+        int detected;
         __builtin_cpu_init();
-        enabled = __builtin_cpu_supports("sse2") &&
-                  __builtin_cpu_supports("popcnt");
+        detected = __builtin_cpu_supports("sse2") &&
+                   __builtin_cpu_supports("popcnt");
+        __atomic_store_n(&enabled, detected, __ATOMIC_RELEASE);
+        value = detected;
     }
-    return enabled;
+    return value;
 #else
     return 0;
 #endif
