@@ -293,3 +293,46 @@ def test_signature_reader_uses_bounded_descriptor_read(tmp_path: Path):
     assert sample == b"\x7fELF" + b"x" * 508
     assert len(sample) == 512
 
+def test_sha256_file_uses_verified_no_follow_descriptor(tmp_path: Path):
+    import hashlib
+    import pytest
+    from project_discovery.scanner import sha256_file
+
+    target = tmp_path / "payload.bin"
+    payload = b"static evidence" * 1000
+    target.write_bytes(payload)
+    observed = target.stat()
+    assert sha256_file(target, chunk_size=97, expected_info=observed) == hashlib.sha256(
+        payload
+    ).hexdigest()
+
+    link = tmp_path / "payload-link.bin"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+    with pytest.raises(OSError, match="non-regular"):
+        sha256_file(link)
+
+
+def test_sha256_file_rejects_changed_identity_before_read(tmp_path: Path):
+    import pytest
+    from project_discovery.scanner import sha256_file
+
+    path = tmp_path / "mutable.bin"
+    path.write_bytes(b"original")
+    observed = path.stat()
+    path.write_bytes(b"replacement content")
+    with pytest.raises(OSError, match="identity changed"):
+        sha256_file(path, expected_info=observed)
+
+
+def test_sha256_file_rejects_invalid_chunk_size(tmp_path: Path):
+    import pytest
+    from project_discovery.scanner import sha256_file
+
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"payload")
+    with pytest.raises(ValueError, match="chunk_size"):
+        sha256_file(path, chunk_size=0)
+
