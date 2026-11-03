@@ -161,3 +161,65 @@ def language_catalog() -> list[dict[str, str | None]]:
 
 def recognized_language_count() -> int:
     return len({spec.name for spec in _SPECS})
+
+
+# Shared language-family selectors. Recognition does not imply semantic parser support.
+_SOURCE_FAMILIES = frozenset({"source", "schema", "low_level", "gpu", "shader"})
+_TEXT_FAMILIES = frozenset({
+    "source", "schema", "markup", "stylesheet", "documentation", "data",
+    "configuration", "build", "low_level", "gpu", "shader", "notebook",
+})
+_EXTRA_TEXT_FILENAMES = frozenset({
+    ".env", ".npmrc", ".yarnrc", ".editorconfig", ".gitignore", ".gitattributes",
+    ".dockerignore", ".npmignore", ".browserslistrc", ".prettierrc", ".eslintrc",
+})
+_EXTRA_TEXT_EXTENSIONS = frozenset({".pem", ".key", ".env", ".properties"})
+
+
+def _spec_for_path(path: str) -> LanguageSpec | None:
+    normalized = path.replace("\\", "/")
+    name = PurePosixPath(normalized).name
+    return _BY_FILENAME.get(name.lower()) or _BY_EXTENSION.get(
+        PurePosixPath(name).suffix.lower()
+    )
+
+
+def source_extensions() -> set[str]:
+    """Extensions belonging to recognized source, schema, low-level and compute languages."""
+    return {
+        extension.lower()
+        for spec in _SPECS if spec.family in _SOURCE_FAMILIES
+        for extension in spec.extensions
+    }
+
+
+def source_language_names() -> tuple[str, ...]:
+    """Unique recognized source-language names, excluding documentation and binary formats."""
+    return tuple(sorted({
+        spec.name for spec in _SPECS if spec.family in _SOURCE_FAMILIES
+    }))
+
+
+def is_source_path(path: str) -> bool:
+    """Whether a path maps to a recognized source-like language family."""
+    spec = _spec_for_path(path)
+    return spec is not None and spec.family in _SOURCE_FAMILIES
+
+
+def is_textual_path(path: str) -> bool:
+    """Whether a recognized path is suitable for bounded UTF-8 text scanning."""
+    normalized = path.replace("\\", "/")
+    name = PurePosixPath(normalized).name.lower()
+    if name in _EXTRA_TEXT_FILENAMES or name.startswith(".env."):
+        return True
+    if PurePosixPath(name).suffix.lower() in _EXTRA_TEXT_EXTENSIONS:
+        return True
+    spec = _spec_for_path(normalized)
+    return spec is not None and spec.family in _TEXT_FAMILIES
+
+
+def textual_language_names() -> tuple[str, ...]:
+    """Unique recognized textual language and format names."""
+    return tuple(sorted({
+        spec.name for spec in _SPECS if spec.family in _TEXT_FAMILIES
+    }))

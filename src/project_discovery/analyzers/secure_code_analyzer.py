@@ -11,14 +11,9 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..language_catalog import is_source_path, source_language_names
 
 
-_SOURCE_EXTENSIONS = {
-    ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
-    ".java", ".kt", ".kts", ".cs", ".fs", ".php", ".phtml", ".rb",
-    ".go", ".rs", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh",
-    ".swift", ".sh", ".bash", ".zsh", ".ps1", ".pl", ".pm",
-}
 _PATTERNS = (
     (
         "dynamic_code_execution",
@@ -144,14 +139,10 @@ class SecureCodePatternAnalyzer(Analyzer):
 
     name = "secure-code-patterns"
     domains = ("secure_code", "cryptography", "serialization")
-    languages = (
-        "Python", "JavaScript", "TypeScript", "Java", "Kotlin", "C#", "F#",
-        "PHP", "Ruby", "Go", "Rust", "C", "C++", "Swift", "Shell",
-        "PowerShell", "Perl",
-    )
+    languages = source_language_names()
 
     def supports(self, record: FileRecord) -> bool:
-        return record.error is None and record.extension in _SOURCE_EXTENSIONS
+        return record.error is None and is_source_path(record.path)
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:

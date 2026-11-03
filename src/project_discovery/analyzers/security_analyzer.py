@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..language_catalog import is_textual_path, textual_language_names
 
 
 _PATTERNS = (
@@ -26,14 +27,6 @@ _PLACEHOLDERS = {
     "your_api_key", "placeholder", "dummy", "redacted", "null", "none",
     "password", "secret", "xxx", "xxxx", "***",
 }
-_SOURCE_EXTENSIONS = {
-    ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".rs",
-    ".go", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".java", ".kt",
-    ".swift", ".cs", ".rb", ".php", ".sh", ".bash", ".ps1", ".pem", ".key",
-    ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".xml", ".sql", ".env",
-    ".properties", ".gradle", ".tf", ".hcl",
-}
-
 
 def _is_placeholder(value: str) -> bool:
     normalized = value.strip().strip("\"'").lower()
@@ -52,13 +45,14 @@ class SecretPatternAnalyzer(Analyzer):
 
     name = "secret-patterns"
     domains = ("secrets",)
+    languages = textual_language_names()
 
     def supports(self, record: FileRecord) -> bool:
         name = Path(record.path).name.lower()
         is_env_file = name == ".env" or name.startswith(".env.")
         return (
             record.error is None
-            and (record.extension in _SOURCE_EXTENSIONS or is_env_file)
+            and (is_textual_path(record.path) or is_env_file)
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
