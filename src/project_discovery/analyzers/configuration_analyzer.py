@@ -34,7 +34,7 @@ _RISK_PATTERNS = (
     ("root_user_allowed", re.compile(r"(?i)^\s*runAsNonRoot\s*:\s*false\b")),
     ("host_network_enabled", re.compile(r"(?i)^\s*hostNetwork\s*:\s*true\b")),
     ("wildcard_cors", re.compile(
-        r"(?i)(?:allow[_-]?origins?|access-control-allow-origin)\s*[:=]\s*(?:\[\s*)?["']?\*["']?"
+        r"(?i)(?:allow[_-]?origins?|access-control-allow-origin)\s*[:=]\s*(?:\[\s*)?\*",
     )),
 )
 _SECRET_KEY = re.compile(r"(?i)(?:password|passwd|secret|token|api[_-]?key|private[_-]?key)")
