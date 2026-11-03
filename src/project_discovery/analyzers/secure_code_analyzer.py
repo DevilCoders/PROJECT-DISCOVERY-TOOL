@@ -362,7 +362,9 @@ class SecureCodePatternAnalyzer(Analyzer):
                     "CRITICAL" if rule == "unsafe_deserialization" else
                     "HIGH" if rule in {
                         "dynamic_code_execution", "shell_command_execution",
-                        "tls_verification_disabled", "unsafe_c_memory_api", "dynamic_sql_query"
+                        "tls_verification_disabled", "unsafe_c_memory_api", "dynamic_sql_query",
+                        "ssrf_user_controlled_url", "path_traversal_user_controlled_path",
+                        "jwt_verification_disabled", "unsafe_xml_external_entities",
                     } else "MEDIUM"
                 ),
                 code_evidence=[
