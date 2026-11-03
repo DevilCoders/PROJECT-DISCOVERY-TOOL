@@ -162,3 +162,14 @@ def test_generic_build_manifests_and_mix_dependencies(tmp_path: Path):
     )
     assert "recognized build ecosystem manifest: setup.py" in setup[0].detail
     assert "Elixir task: phoenix" in mix[0].evidence
+
+def test_build_manifest_reports_oversized_and_growing_source_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.build_analyzer as module
+
+    path = tmp_path / "Makefile"
+    path.write_text("all: build\nbuild: test\n", encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_BUILD_MANIFEST_BYTES", 8)
+    record = FileRecord(path.name, 1, "", "Build")
+    findings = BuildManifestAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
