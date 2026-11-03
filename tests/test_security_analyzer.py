@@ -143,3 +143,16 @@ def test_source_excerpt_redacts_secrets_identity_and_credential_urls():
     ):
         assert value not in excerpt
     assert excerpt.count("[REDACTED]") >= 3
+
+
+def test_code_evidence_model_redacts_values_from_custom_analyzers():
+    from project_discovery.models import CodeEvidence
+
+    secret = "custom-secret-value-987"
+    evidence = CodeEvidence(
+        line_number=22,
+        code=f'password = "{secret}"; email = "dev@example.com"',
+    )
+    assert secret not in evidence.code
+    assert "dev@example.com" not in evidence.code
+    assert "[REDACTED]" in evidence.code
