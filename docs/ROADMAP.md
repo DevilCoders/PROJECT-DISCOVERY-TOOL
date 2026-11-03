@@ -247,15 +247,18 @@ The baseline is not production-ready:
 - [ ] Add archive summary/member risk records, network endpoint records, API endpoint records, OS/platform indicators, credential/PII classifications and analyzer coverage.
 - [ ] Add per-file analyzer status: not applicable, completed, partial, unsupported, budget-stopped, excluded, error.
 - [ ] Add evidence spans/source locations, redaction state, confidence and severity.
-- [ ] Stream large JSON/NDJSON datasets without duplicating large in-memory structures.
+- [x] Stream JSON and HTML serialization record-by-record without building duplicate result dictionaries or one giant HTML string.
+- [ ] Add NDJSON/chunked external report data backed by a persistent inventory store.
 
 ### HTML report
 - [x] Standalone offline dark UI baseline with responsive navigation and summary panels.
 - [x] Search, category/severity/confidence filters and paginated finding display.
 - [x] Per-finding disclosure plus open-all/close-all controls.
+- [x] Use cursor-based bounded page rendering for file inventory and findings without allocating full filtered-match arrays.
 - [ ] Add dedicated sections for subdirectories, hidden entries, development dependency trees, symlinks, file type/signature, size categories, network/IP/port/URL/subdomain, API routes/types, OS, archive/member content, secrets/PII and analysis coverage.
 - [ ] Add hierarchical directory explorer and archive member browser without flattening everything into one list.
-- [ ] Add progressive/lazy loading from external local report data or chunked embedded data; keep 100k+ finding DOM bounded.
+- [x] Keep the rendered DOM bounded with cursor-based pagination for large file/finding lists.
+- [ ] Add progressive loading from external local report data or chunked embedded data so the browser does not need the full report payload at startup.
 - [ ] Make all large tables sortable, searchable and paginated with stable row keys.
 - [ ] Add severity heatmaps, category summaries, per-domain completion and unknown/skipped/error accounting.
 - [ ] Security-test HTML/JS data embedding, escaping, content security policy and offline isolation.
