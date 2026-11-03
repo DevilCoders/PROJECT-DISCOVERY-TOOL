@@ -47,6 +47,7 @@ class SQLSchemaAnalyzer(Analyzer):
     """Inventory common SQL DDL objects and flag potentially destructive migrations."""
 
     name = "sql-schema"
+    domains = ("databases_sql", "migrations",)
 
     def supports(self, record: FileRecord) -> bool:
         return record.extension == ".sql" and record.error is None

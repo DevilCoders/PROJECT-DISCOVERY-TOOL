@@ -19,6 +19,7 @@ class PrismaSchemaAnalyzer(Analyzer):
     """Extract Prisma models, enums, datasource providers and model relations."""
 
     name = "prisma-schema"
+    domains = ("orm", "databases_sql",)
 
     def supports(self, record: FileRecord) -> bool:
         return record.extension == ".prisma" and record.error is None

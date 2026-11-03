@@ -38,6 +38,7 @@ class TestDiscoveryAnalyzer(Analyzer):
     """Find test files and statically recognizable test declarations."""
 
     name = "test-discovery"
+    domains = ("tests",)
 
     def supports(self, record: FileRecord) -> bool:
         return record.error is None and any(

@@ -61,6 +61,7 @@ class APIContractAnalyzer(Analyzer):
     """Inventory API schemas and operations without making network requests."""
 
     name = "api-contracts"
+    domains = ("api_rest", "api_graphql", "api_rpc",)
 
     def supports(self, record: FileRecord) -> bool:
         name = Path(record.path).name.lower()

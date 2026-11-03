@@ -32,6 +32,7 @@ class BuildManifestAnalyzer(Analyzer):
     """Inventory build targets, scripts and CI workflow files."""
 
     name = "build-manifests"
+    domains = ("build_systems",)
 
     def supports(self, record: FileRecord) -> bool:
         name = Path(record.path).name.lower()
