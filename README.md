@@ -211,3 +211,11 @@ The current C/Assembly backend is real and used on scan paths, but it is not yet
 ## Release policy
 
 The current PR remains unmerged. Production readiness requires all mandatory roadmap gates, a green CI run on the final PR head, representative 2GB/10GB/50GB/100GB+ benchmarks, bounded-memory behavior, adversarial archive and symlink tests, broad language/analyzer conformance, verified redaction, offline/read-only guarantees, usable large HTML reports, reproducible packages and security review. Only the repository owner decides when to merge into `master`.
+
+## Production engineering priorities (2026-11-04)
+
+The next implementation cycle prioritizes correctness and scale over adding catalog labels. The required order is: (1) remove silent inventory pruning and introduce bounded streaming inventory; (2) implement the Rust traversal/index engine and stable native boundary; (3) complete archive metadata/content inspection under explicit decompression, nesting, ratio, time and byte budgets; (4) expand cross-language security/configuration/API/database/test/build evidence; (5) complete redacted identity/credential, network, OS, file-type and dependency-tree reporting; (6) make the offline HTML report lazy and bounded for very large result sets; (7) validate the full system with adversarial fixtures, polyglot corpora and 2GB–100GB+ benchmarks.
+
+PDT's language goal is 40+ language families, with capability states reported per analyzer. Python remains orchestration only. Native C and x86-64 Assembly are implemented; Rust must become an integrated, tested execution path for traversal/indexing. C++ is used only where an actual native dependency or performance boundary justifies it. JavaScript/TypeScript own the offline report interaction layer. No language is considered implemented because it appears in documentation or a catalog.
+
+The default scan inventories and analyzes oversized files. Only the explicit `--skip` option enables the global threshold-based content skip; skipped files remain in inventory and carry a visible reason. Analyzer-specific hard safety budgets are reported as UNKNOWN/partial and must never be represented as a clean result.
