@@ -15,6 +15,11 @@ class Finding:
     evidence: list[str] = field(default_factory=list)
     analyzer: str = "core"
     severity: Severity = "INFO"
+
+    def __post_init__(self) -> None:
+        if self.severity == "INFO" and self.category in {"security", "supply_chain", "migration"}:
+            self.severity = "MEDIUM"
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
