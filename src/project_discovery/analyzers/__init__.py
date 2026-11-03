@@ -1,6 +1,7 @@
 """Built-in and third-party analyzer discovery."""
 from importlib.metadata import entry_points
 
+from .api_analyzer import APIContractAnalyzer
 from .base import Analyzer
 from .configuration_analyzer import ConfigurationAnalyzer
 from .dependency_manifest_analyzer import DependencyManifestAnalyzer
@@ -18,6 +19,7 @@ def load_analyzers() -> list[Analyzer]:
         DocumentAnalyzer(),
         DependencyManifestAnalyzer(),
         ConfigurationAnalyzer(),
+        APIContractAnalyzer(),
         SecretPatternAnalyzer(),
         TreeSitterAnalyzer(),
     ]
