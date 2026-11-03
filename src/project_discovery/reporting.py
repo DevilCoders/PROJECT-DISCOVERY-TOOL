@@ -207,7 +207,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
    </section>
    <section class="section" id="symlinks">
     <div class="section-head"><h2>Symbolic links</h2><span class="kicker">04 / NO-FOLLOW INVENTORY</span></div>
-    <div class="table-wrap"><table><thead><tr><th>Link path</th><th>Target</th><th>Scope</th><th>Hidden</th></tr></thead><tbody id="symlink-rows"></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>Link path</th><th>Target</th><th>Lexical scope</th><th>Verification</th><th>Permissions</th><th>Hidden</th></tr></thead><tbody id="symlink-rows"></tbody></table></div>
     <div id="no-symlinks" class="empty hidden">No symbolic links were detected.</div>
    </section>
    <section class="section" id="special">
