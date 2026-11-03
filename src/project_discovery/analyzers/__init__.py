@@ -16,6 +16,7 @@ from .migration_analyzer import MigrationIntelligenceAnalyzer
 from .mobile_analyzer import MobileIntelligenceAnalyzer
 from .messaging_analyzer import MessagingIntelligenceAnalyzer
 from .nosql_analyzer import NoSQLIntelligenceAnalyzer
+from .observability_analyzer import ObservabilityAnalyzer
 from .document_analyzer import DocumentAnalyzer
 from .deployment_analyzer import DeploymentIntelligenceAnalyzer
 from .lockfile_analyzer import LockfileAnalyzer
@@ -63,6 +64,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         AIMLIntelligenceAnalyzer(),
         MobileIntelligenceAnalyzer(),
         NoSQLIntelligenceAnalyzer(),
+        ObservabilityAnalyzer(),
         MessagingIntelligenceAnalyzer(),
         ROSIntelligenceAnalyzer(),
         TreeSitterAnalyzer(),

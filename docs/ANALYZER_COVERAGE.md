@@ -9,3 +9,8 @@ Catalog status is explicit:
 - `planned`: a domain is part of the coverage contract but is not yet implemented.
 
 A domain being catalogued is not evidence that its analyzer is complete. The roadmap is expanded as actual parsers, analyzers, tests, and evidence models are delivered.
+
+
+## Implemented logging and observability slice
+
+The built-in observability analyzer inventories static logging, metrics, tracing, health-check and telemetry configuration markers across recognized source languages. It records file and line evidence only and does not expose configuration values. Static presence is not proof of runtime initialization, active exporters, deployed collectors or operational telemetry.
