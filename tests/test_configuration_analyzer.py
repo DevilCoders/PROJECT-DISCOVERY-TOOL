@@ -159,3 +159,33 @@ def test_oversized_configuration_is_unknown_without_content_read(tmp_path: Path,
     assert len(findings) == 1
     assert findings[0].confidence == "UNKNOWN"
     assert "resource limit" in findings[0].title.lower()
+
+def test_configuration_budget_detects_growth_after_inventory(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import configuration_analyzer
+
+    path = tmp_path / "growing.yaml"
+    path.write_text("debug: true\\n" * 20, encoding="utf-8")
+    monkeypatch.setattr(configuration_analyzer, "_MAX_CONFIG_FILE_BYTES", 8)
+    record = FileRecord(path.name, 1, ".yaml", "Configuration")
+    findings = ConfigurationAnalyzer().analyze(path, record)
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
+
+
+def test_configuration_parser_exception_diagnostics_are_redacted(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import configuration_analyzer
+
+    secret = "exception-secret-value-432"
+    path = tmp_path / "invalid.json"
+    path.write_text("{}", encoding="utf-8")
+    record = FileRecord(path.name, path.stat().st_size, ".json", "Configuration")
+
+    def fail_with_sensitive_context(content, record):
+        raise ValueError(f"parser context API_TOKEN={secret}")
+
+    monkeypatch.setattr(configuration_analyzer, "_parse_config", fail_with_sensitive_context)
+    findings = ConfigurationAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert secret not in repr([item.to_dict() for item in findings])
+    assert "[REDACTED]" in findings[0].detail
