@@ -193,6 +193,17 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
     def _zip(self, path: Path, record: FileRecord) -> list[Finding]:
         index_hint = _zip_index_hint(path)
+        if index_hint is None:
+            return [Finding(
+                "archive",
+                f"ZIP central-directory bounds unavailable: {record.path}",
+                "The archive index could not be safely bounded from its ZIP/ZIP64 trailer. "
+                "The central directory was not materialized and no members were inspected.",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="MEDIUM",
+            )]
         if index_hint is not None:
             entry_count, index_bytes = index_hint
             if entry_count > _MAX_ARCHIVE_ENTRIES or index_bytes > _MAX_ARCHIVE_INDEX_BYTES:
