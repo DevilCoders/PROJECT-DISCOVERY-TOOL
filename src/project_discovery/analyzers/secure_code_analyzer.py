@@ -22,7 +22,7 @@ _SOURCE_EXTENSIONS = {
 _PATTERNS = (
     (
         "dynamic_code_execution",
-        re.compile(r"\b(?:eval|exec)\s*\(", re.I),
+        re.compile(r"""\b(?:eval|exec)\s*(?:\(|["'\x60$])""", re.I),
         "Dynamic code execution primitive",
         "Review whether the input can be influenced by untrusted data.",
     ),
