@@ -10,6 +10,9 @@ PDT inventories and analyzes heterogeneous software repositories without importi
 - SQLite fingerprint cache for incremental content hashing.
 - Python AST analysis and evidence-backed internal Python import graph with cycle detection.
 - Structural documentation analysis for Markdown, HTML, reStructuredText and text formats; optional PDF and DOCX extraction.
+- Conservative secret-pattern detection with strict value redaction, plus configuration key inventory and risky-setting indicators.
+- Static API contract inventory for OpenAPI/Swagger, GraphQL, Protocol Buffers and Thrift.
+- SQL DDL/schema inventory and inferred destructive migration indicators.
 - Dependency declaration extraction for Python, Node.js, Rust, Go and Composer manifests.
 - Recognition catalog for 40+ languages and project file formats.
 - Optional offline-first Tree-sitter adapter covering 60+ language/format grammar mappings when grammars are already provisioned locally.

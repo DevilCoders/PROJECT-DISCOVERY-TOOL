@@ -13,11 +13,18 @@
 - [x] Dependency manifest inventory (Python, Node, Rust, Go, Composer)
 - [x] Polyglot recognition catalog covering 40+ languages and project formats
 - [x] Explicit 50+ domain analyzer coverage catalog
+- [x] Local secret-pattern scanner with redacted values
+- [x] Configuration key inventory and initial risky-setting checks
+- [x] OpenAPI, GraphQL, Protocol Buffers and Thrift contract inventory
+- [x] SQL DDL inventory and destructive migration pattern checks
+- [x] Interactive standalone HTML report with search and filters
+- [x] Rich terminal progress and summary
+- [x] Metadata-aware cache validation, legacy migration and stale-entry pruning
 - [ ] Rich terminal UI and CLI ergonomics
 - [ ] CI coverage gates
 
 ## Production-readiness work
-1. Complete parser adapter contracts, parser availability reporting and version compatibility.
+1. Expand parser-specific symbol, import/export, type and call-graph extraction across the 60+ grammar mapping.
 2. Implement language adapters in prioritized packs while keeping optional dependencies isolated.
 3. Expand domain analyzers across security, configuration, APIs, databases, tests, build/deployment, supply chain, ML/AI, robotics, embedded and other project-specific domains.
 4. Add cache invalidation, ignore-rule, output safety, malformed-input and large-repository regression suites.
