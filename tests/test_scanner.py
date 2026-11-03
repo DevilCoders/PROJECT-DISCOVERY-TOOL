@@ -336,3 +336,48 @@ def test_sha256_file_rejects_invalid_chunk_size(tmp_path: Path):
     with pytest.raises(ValueError, match="chunk_size"):
         sha256_file(path, chunk_size=0)
 
+
+
+
+def test_sha256_file_uses_verified_no_follow_descriptor(tmp_path: Path):
+    import hashlib
+    import pytest
+    from project_discovery.scanner import sha256_file
+
+    source = tmp_path / "source.bin"
+    payload = b"bounded hashing fixture" * 4096
+    source.write_bytes(payload)
+    observed = source.stat()
+    assert sha256_file(source, chunk_size=127, expected_info=observed) == hashlib.sha256(
+        payload
+    ).hexdigest()
+
+    link = tmp_path / "source-link.bin"
+    try:
+        link.symlink_to(source)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+    with pytest.raises(OSError, match="non-regular"):
+        sha256_file(link)
+
+
+def test_sha256_file_rejects_changed_file_identity(tmp_path: Path):
+    import pytest
+    from project_discovery.scanner import sha256_file
+
+    source = tmp_path / "changing.bin"
+    source.write_bytes(b"before")
+    observed = source.stat()
+    source.write_bytes(b"after with a different length")
+    with pytest.raises(OSError, match="identity changed"):
+        sha256_file(source, expected_info=observed)
+
+
+def test_sha256_file_rejects_invalid_chunk_size(tmp_path: Path):
+    import pytest
+    from project_discovery.scanner import sha256_file
+
+    source = tmp_path / "small.bin"
+    source.write_bytes(b"x")
+    with pytest.raises(ValueError, match="chunk_size"):
+        sha256_file(source, chunk_size=0)
