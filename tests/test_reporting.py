@@ -167,5 +167,5 @@ def test_json_and_html_report_writers_do_not_materialize_scanresult_dict(tmp_pat
     paths = write_reports(result, tmp_path, {"json", "html"})
     assert {path.suffix for path in paths} == {".json", ".html"}
     payload = json.loads((tmp_path / "discovery-report.json").read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.2"
+    assert payload["schema_version"] == "1.3"
     assert "const REPORT =" in (tmp_path / "discovery-report.html").read_text(encoding="utf-8")
