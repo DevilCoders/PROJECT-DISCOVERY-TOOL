@@ -170,6 +170,8 @@ def test_html_report_uses_bounded_page_rendering_without_full_match_copies(tmp_p
     assert "const files=REPORT.files;" in content
     assert "fileScanIndex" in content
     assert "findingScanIndex" in content
+    assert "vulnFindingCount" in content and "vulnFindings.length<200" in content
+    assert "vcsFindingCount" in content and "vcsFindings.length<100" in content
     assert "REPORT.files.slice().sort" not in content
     assert "findings.filter" not in content
 
