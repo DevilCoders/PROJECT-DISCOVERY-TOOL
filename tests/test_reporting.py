@@ -141,8 +141,8 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "GPU device: Test GPU" in content
     assert "GPU byte-count dispatches: 3" in content
     assert "GPU CPU fallbacks: 1" in content
-    assert content.startswith("# Project Discovery Report\\n")
-    assert content.endswith("\\n")
+    assert content.startswith("# Project Discovery Report\n")
+    assert content.endswith("\n")
     assert "\\\\n" not in content
 
 
