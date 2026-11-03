@@ -50,3 +50,10 @@ def test_scans_env_files_without_extension(tmp_path: Path):
 def test_oversized_files_are_not_supported():
     record = FileRecord("settings.py", 100, ".py", "Python", error="oversized")
     assert SecretPatternAnalyzer().supports(record) is False
+
+
+def test_aws_secret_access_key_value_is_redacted(tmp_path: Path):
+    value = "super-secret-aws-access-key-value"
+    findings = _scan(tmp_path, "deployment.env", "AWS_SECRET_ACCESS_KEY=" + value + "\n")
+    assert findings
+    assert value not in repr([item.to_dict() for item in findings])

@@ -17,7 +17,7 @@ _PATTERNS = (
     (
         "credential_assignment",
         re.compile(
-            r"""(?ix)\b(?:api[_-]?key|client[_-]?secret|service[_-]?token|access[_-]?token|auth[_-]?token|password|passwd|secret[_-]?key|secret|token)\b\s*[:=]\s*["']?([^\s"'#,;]{6,})"""
+            r"""(?ix)\b(?:api[_-]?key|client[_-]?secret|service[_-]?token|access[_-]?(?:token|key)|auth[_-]?token|refresh[_-]?token|password|passwd|secret[_-]?(?:access[_-]?)?key|secret|token|encryption[_-]?key|signing[_-]?key)\b\s*[:=]\s*["']?([^\s"'#,;]{6,})"""
         ),
     ),
 )
@@ -29,7 +29,7 @@ _PLACEHOLDERS = {
 _SOURCE_EXTENSIONS = {
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".rs",
     ".go", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".java", ".kt",
-    ".swift", ".cs", ".rb", ".php", ".sh", ".bash", ".ps1", ".yaml",
+    ".swift", ".cs", ".rb", ".php", ".sh", ".bash", ".ps1", ".pem", ".key", ".yaml",
     ".yml", ".json", ".toml", ".ini", ".cfg", ".xml", ".sql", ".env",
     ".properties", ".gradle", ".tf", ".hcl",
 }
