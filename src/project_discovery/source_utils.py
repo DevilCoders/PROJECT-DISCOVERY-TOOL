@@ -19,7 +19,7 @@ _TOKEN = re.compile(
     r"glpat-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|"
     r"AIza[0-9A-Za-z_-]{30,}|xox[baprs]-[A-Za-z0-9-]{16,}|"
     r"sk_(?:live|test)_[A-Za-z0-9]{12,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|"
-    r"hf_[A-Za-z0-9]{24,}|npm_[A-Za-z0-9]{24,}|pypi-[A-Za-z0-9_-]{30,})\b"
+    r"sk-(?:ant-|proj-|svcacct-)?[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{24,}|npm_[A-Za-z0-9]{24,}|pypi-[A-Za-z0-9_-]{30,})\b"
 )
 _PRIVATE_KEY_BODY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*", re.I)
 
