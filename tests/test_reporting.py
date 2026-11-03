@@ -141,6 +141,22 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "GPU device: Test GPU" in content
     assert "GPU byte-count dispatches: 3" in content
     assert "GPU CPU fallbacks: 1" in content
+    assert content.startswith("# Project Discovery Report\\n")
+    assert content.endswith("\\n")
+    assert "\\\\n" not in content
+
+
+def test_markdown_writer_streams_without_compatibility_string_builder(tmp_path: Path, monkeypatch):
+    import project_discovery.reporting as reporting
+
+    def forbidden(_result):
+        raise AssertionError("write_reports must stream Markdown instead of building one string")
+
+    monkeypatch.setattr(reporting, "_markdown_report", forbidden)
+    path = write_reports(_result(), tmp_path, {"markdown"})[0]
+    content = path.read_text(encoding="utf-8")
+    assert "## Findings" in content
+    assert content.endswith("\\n")
 
 
 def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
