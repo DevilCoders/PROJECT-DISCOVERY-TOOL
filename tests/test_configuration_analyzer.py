@@ -56,3 +56,53 @@ def test_env_inventory_reports_names_not_values(tmp_path: Path):
 def test_malformed_json_is_unknown(tmp_path: Path):
     findings = _scan(tmp_path, "broken.json", "{")
     assert findings[0].confidence == "UNKNOWN"
+
+
+
+def test_xml_and_plist_configuration_inventory_omits_values(tmp_path: Path):
+    xml = _scan(
+        tmp_path, "web.config",
+        '<configuration><appSettings><add key="ApiToken" value="do-not-leak"/>'
+        '</appSettings><system.web><compilation debug="true"/></system.web></configuration>',
+    )
+    serialized = repr([item.to_dict() for item in xml])
+    assert "configuration.appSettings.add@key" in serialized
+    assert "do-not-leak" not in serialized
+
+
+def test_extended_application_and_platform_configuration_names(tmp_path: Path):
+    analyzer = ConfigurationAnalyzer()
+    for filename in (
+        "appsettings.Development.json", "application.properties",
+        "bootstrap.yaml", "sshd_config", "service.service",
+        "launch.plist", "default.nix", ".envrc",
+    ):
+        record = FileRecord(filename, 10, Path(filename).suffix.lower(), "Configuration")
+        assert analyzer.supports(record), filename
+
+
+def test_nginx_and_dockerfile_risky_directives_are_reported(tmp_path: Path):
+    nginx = _scan(
+        tmp_path, "nginx.conf",
+        "server {\\n  listen 443 ssl;\\n  ssl_verify_client off;\\n}\\n",
+    )
+    docker = _scan(
+        tmp_path, "Dockerfile",
+        "FROM alpine:3\\nUSER root\\nENV DEBUG=true\\n",
+    )
+    risk_titles = [item.title for item in nginx + docker if item.category == "security"]
+    assert any("nginx_client_verification_disabled" in title for title in risk_titles)
+    assert any("root_container_user" in title for title in risk_titles)
+
+
+def test_yaml_and_nix_config_keys_are_inventoried(tmp_path: Path):
+    yaml = _scan(
+        tmp_path, "application.yml",
+        "server:\\n  port: 8080\\n  ssl:\\n    enabled: true\\n",
+    )
+    nix = _scan(
+        tmp_path, "default.nix",
+        "{ services.nginx.enable = true; environment.systemPackages = []; }\\n",
+    )
+    assert yaml
+    assert nix
