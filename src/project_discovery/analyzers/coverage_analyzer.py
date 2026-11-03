@@ -1,6 +1,7 @@
 """Static coverage artifact reader for common language ecosystems."""
 from __future__ import annotations
 
+import io
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -155,7 +156,7 @@ def _xml_summary(root: ET.Element) -> dict[str, tuple[int, int]] | None:
 
 def _lcov_summary(source: str) -> dict[str, tuple[int, int]] | None:
     totals = {"lines": [0, 0], "branches": [0, 0]}
-    for line in source.splitlines():
+    for line in io.StringIO(source, newline=None):
         for prefix, key, index in (
             ("LF:", "lines", 1), ("LH:", "lines", 0),
             ("BRF:", "branches", 1), ("BRH:", "branches", 0),
