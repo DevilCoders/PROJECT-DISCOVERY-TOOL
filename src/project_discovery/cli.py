@@ -222,7 +222,7 @@ def run_scan(
         try:
             _verified_regular_file_stat(path, expected_stat)
             if digest is None:
-                digest = sha256_file(path)
+                digest = sha256_file(path, expected_info=expected_stat)
         except OSError as exc:
             return None, [], [f"{record.path}: {type(exc).__name__}: {exc}"]
         for analyzer in analyzers:
