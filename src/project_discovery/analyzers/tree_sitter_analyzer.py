@@ -96,6 +96,21 @@ def _walk_tree(root_node):
     return node_count, max_depth, errors, top_level
 
 
+def parser_capabilities() -> dict[str, str]:
+    """Report local parser availability without downloading grammars."""
+    try:
+        pack = importlib.import_module("tree_sitter_language_pack")
+    except ImportError:
+        return {name: "optional_dependency_missing" for name in GRAMMARS}
+    result = {}
+    for name, grammar in GRAMMARS.items():
+        try:
+            result[name] = "available" if pack.has_parser(grammar) else "grammar_not_provisioned"
+        except Exception:
+            result[name] = "parser_check_error"
+    return result
+
+
 class TreeSitterAnalyzer(Analyzer):
     """Provide generic syntax-tree metrics for any locally provisioned grammar."""
 
@@ -137,7 +152,7 @@ class TreeSitterAnalyzer(Analyzer):
                 raise RuntimeError("Tree-sitter parser returned no syntax tree")
             root = tree.root_node
             node_count, max_depth, errors, top_level = _walk_tree(root)
-        except (OSError, UnicodeDecodeError, Exception) as exc:
+        except Exception as exc:
             return [Finding(
                 "code",
                 f"Tree-sitter analysis error: {record.language}",

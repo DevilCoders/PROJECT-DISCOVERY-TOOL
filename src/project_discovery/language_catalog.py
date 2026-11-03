@@ -125,23 +125,37 @@ def detect_language(path: str) -> str:
     by_name = _BY_FILENAME.get(name.lower())
     if by_name:
         return by_name.name
-    return _BY_EXTENSION.get(PurePosixPath(name).suffix.lower(), LanguageSpec("Other")).name
+    extension = PurePosixPath(name).suffix.lower()
+    if extension == ".m":
+        return "Objective-C / MATLAB (ambiguous)"
+    if extension == ".v":
+        return "V / Verilog (ambiguous)"
+    return _BY_EXTENSION.get(extension, LanguageSpec("Other")).name
 
 
 def language_catalog() -> list[dict[str, str | None]]:
-    """Return the recognition catalog, including parser capability declarations."""
-    return [
-        {
+    """Return recognition and parser integration metadata."""
+    from .analyzers.tree_sitter_analyzer import GRAMMARS
+
+    result = []
+    for spec in _SPECS:
+        backend = (
+            "stdlib:ast" if spec.name == "Python"
+            else "optional:tree-sitter-language-pack" if spec.name in GRAMMARS
+            else spec.parser_backend
+        )
+        result.append({
             "name": spec.name,
             "family": spec.family,
-            "parser_backend": spec.parser_backend,
+            "parser_backend": backend,
             "recognition": "CONFIRMED",
             "analysis_status": (
-                "implemented" if spec.parser_backend == "stdlib:ast" else "inventory_only"
+                "implemented" if spec.name == "Python"
+                else "optional_parser" if spec.name in GRAMMARS
+                else "inventory_only"
             ),
-        }
-        for spec in _SPECS
-    ]
+        })
+    return result
 
 
 def recognized_language_count() -> int:

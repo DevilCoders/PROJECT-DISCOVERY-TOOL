@@ -7,6 +7,7 @@ from pathlib import Path
 from . import __version__
 from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
+from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
 from .language_catalog import language_catalog, recognized_language_count
 from .models import ScanResult
@@ -79,6 +80,7 @@ def run_scan(root: Path, output: Path, formats: set[str], max_file_mb: int) -> i
         "languages": dict(sorted(counts.items())),
         "language_catalog": language_catalog(),
         "recognized_language_count": recognized_language_count(),
+        "local_parser_capabilities": parser_capabilities(),
         "analyzer_domain_catalog": analyzer_domain_catalog(),
         "analyzer_domain_count": analyzer_domain_count(),
         "implemented_analyzer_domains": [
