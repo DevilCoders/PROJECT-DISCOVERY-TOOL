@@ -101,3 +101,12 @@ def test_polyglot_endpoint_stream_budget_returns_unknown(tmp_path: Path, monkeyp
     record = FileRecord("routes.ts", path.stat().st_size, ".ts", "TypeScript")
     findings = APIEndpointAnalyzer().analyze(path, record)
     assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
+
+def test_python_api_ast_detects_source_growth_after_inventory(tmp_path: Path, monkeypatch):
+    path = tmp_path / "growing_routes.py"
+    path.write_text("@app.get('/health')\\ndef health(): pass\\n", encoding="utf-8")
+    monkeypatch.setattr(api_source_analyzer, "MAX_PYTHON_ENDPOINT_AST_BYTES", 8)
+    record = FileRecord(path.name, 1, ".py", "Python")
+    findings = APIEndpointAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
