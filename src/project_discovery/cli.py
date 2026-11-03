@@ -67,7 +67,7 @@ def run_scan(
                     path = root / record.path
                     stat = path.stat()
                     cached = cache.get(str(root), record.path)
-                    if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
+                    if (cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns\n                        and cached[2] == stat.st_ctime_ns and cached[3] == stat.st_ino):
                         record.sha256 = cached[2]
                     else:
                         record.sha256 = sha256_file(path)
@@ -94,7 +94,7 @@ def run_scan(
                 finally:
                     progress.advance(task)
 
-    python_graph, graph_findings = analyze_python_dependencies(root, records)
+    if walk_stats.get("walk_errors", 0) == 0:\n        with ScanCache(output / ".pdt-cache" / "fingerprints.sqlite3") as cache:\n            cache.prune_missing(str(root), (record.path for record in records))\n\n    python_graph, graph_findings = analyze_python_dependencies(root, records)
     findings.extend(graph_findings)
     domain_catalog = analyzer_domain_catalog()
     metrics = {
