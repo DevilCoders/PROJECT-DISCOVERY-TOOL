@@ -94,7 +94,8 @@ _RISK_IMPACTS = {
         "Use an explicit origin allowlist and review credentialed CORS behavior."
     ),
 }
-\n_NIX_ASSIGNMENT = re.compile(r"(?m)\b([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
+
+_NIX_ASSIGNMENT = re.compile(r"(?m)\b([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
 
 
 def _flatten(data: Any, prefix: str = "") -> list[str]:
@@ -222,7 +223,8 @@ class ConfigurationAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            keys, risks = _parse_config(path, record)\n            source_lines = path.read_text(encoding="utf-8").splitlines()
+            keys, risks = _parse_config(path, record)
+            source_lines = path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, configparser.Error, ET.ParseError, ValueError) as exc:
             return [Finding(
                 "configuration",
