@@ -177,17 +177,25 @@ class DependencyManifestAnalyzer(Analyzer):
                             fields.get("version") or "managed/unspecified",
                             f"pom.xml dependency ({fields.get('scope', 'compile')})")
                 elif tag in {"packagereference", "packageversion"}:
-                    dep_name = element.attrib.get("include") or element.attrib.get("update")
-                    version = element.attrib.get("version")
+                    attributes = {
+                        key.rsplit("}", 1)[-1].lower(): value
+                        for key, value in element.attrib.items()
+                    }
+                    dep_name = attributes.get("include") or attributes.get("update")
+                    version = attributes.get("version")
                     for child in element:
                         if child.tag.rsplit("}", 1)[-1].lower() == "version":
                             version = (child.text or "").strip()
                     if dep_name:
                         add(dep_name, version or "central/unspecified", tag)
                 elif tag == "package" and name == "packages.config":
-                    dep_name = element.attrib.get("id")
+                    attributes = {
+                        key.rsplit("}", 1)[-1].lower(): value
+                        for key, value in element.attrib.items()
+                    }
+                    dep_name = attributes.get("id")
                     if dep_name:
-                        add(dep_name, element.attrib.get("version", "unspecified"), "packages.config")
+                        add(dep_name, attributes.get("version", "unspecified"), "packages.config")
                 elif tag in {"depend", "build_depend", "buildtool_depend", "exec_depend", "test_depend"} and name == "package.xml":
                     if element.text and element.text.strip():
                         add(element.text.strip(), "unspecified", f"ROS {tag}")
