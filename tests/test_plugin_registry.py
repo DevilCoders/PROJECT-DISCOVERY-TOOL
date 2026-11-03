@@ -9,6 +9,8 @@ def test_builtin_registry_returns_unique_stable_names():
     assert len(names) == len(set(names))
     assert "python-ast" in names
     assert "secret-patterns" in names
+    assert "ai-ml-intelligence" in names
+    assert "ros-intelligence" in names
     assert result.diagnostics == []
 
 

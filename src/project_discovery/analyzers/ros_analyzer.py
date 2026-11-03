@@ -29,7 +29,7 @@ _CPP_APIS = {
     "advertiseService": "service_server", "serviceClient": "service_client",
 }
 _INTERFACE_EXTENSIONS = {".msg", ".srv", ".action"}
-_ROS_PATHS = {"launch", "msg", "srv", "action", "config", "urdf", "description"}
+_ROS_PATHS = {"src", "scripts", "nodes", "launch", "msg", "srv", "action", "config", "urdf", "description"}
 
 
 def _literal_string(node: ast.AST) -> str | None:
@@ -59,7 +59,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
             or (record.extension == ".py" and (
                 bool(parts & _ROS_PATHS) or name.endswith(("_node.py", "_ros.py"))
             ))
-            or record.extension in {".cpp", ".cc", ".cxx", ".hpp", ".hh"}
+            or record.extension in {".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h"}
             or name == "cmakelists.txt" and bool(parts & {"src", "ros"})
         )
 
@@ -86,7 +86,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
             )]
         if record.extension == ".py":
             return self._python(source, record)
-        if record.extension in {".cpp", ".cc", ".cxx", ".hpp", ".hh"}:
+        if record.extension in {".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h"}:
             return self._cpp(source, record)
         if name == "cmakelists.txt":
             matches = re.findall(
