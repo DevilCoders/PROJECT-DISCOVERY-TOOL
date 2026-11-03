@@ -1,183 +1,87 @@
-"""Offline-first generic syntax analysis through optional Tree-sitter grammars.
-
-The analyzer never downloads grammars. It checks has_parser() before constructing
-a parser; users must provision grammar libraries separately before scanning.
-"""
-from __future__ import annotations
-
-import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
-from .base import Analyzer
-from ..models import FileRecord, Finding
-
-
-GRAMMARS = {
-    "JavaScript": "javascript",
-    "TypeScript": "typescript",
-    "Rust": "rust",
-    "Go": "go",
-    "C": "c",
-    "C++": "cpp",
-    "Java": "java",
-    "Kotlin": "kotlin",
-    "Swift": "swift",
-    "C#": "c_sharp",
-    "F#": "fsharp",
-    "Dart": "dart",
-    "Ruby": "ruby",
-    "PHP": "php",
-    "Perl": "perl",
-    "R": "r",
-    "Julia": "julia",
-    "Lua": "lua",
-    "Shell": "bash",
-    "PowerShell": "powershell",
-    "Elixir": "elixir",
-    "Erlang": "erlang",
-    "Haskell": "haskell",
-    "OCaml": "ocaml",
-    "Clojure": "clojure",
-    "Scala": "scala",
-    "Groovy": "groovy",
-    "Fortran": "fortran",
-    "COBOL": "cobol",
-    "Pascal": "pascal",
-    "Ada": "ada",
-    "Zig": "zig",
-    "Nim": "nim",
-    "Crystal": "crystal",
-    "D": "d",
-    "Odin": "odin",
-    "Verilog": "verilog",
-    "SystemVerilog": "systemverilog",
-    "VHDL": "vhdl",
-    "Solidity": "solidity",
-    "SQL": "sql",
-    "HTML": "html",
-    "CSS": "css",
-    "SCSS": "scss",
-    "XML": "xml",
-    "JSON": "json",
-    "YAML": "yaml",
-    "TOML": "toml",
-    "Dockerfile": "dockerfile",
-    "Makefile": "make",
-    "CMake": "cmake",
-    "Assembly": "asm",
-    "CUDA": "cuda",
-    "GLSL": "glsl",
-    "HLSL": "hlsl",
-    "WGSL": "wgsl",
-    "Markdown": "markdown",
-    "Protocol Buffers": "proto",
-    "GraphQL": "graphql",
-    "Nix": "nix",
-    "HCL": "hcl",
-}
+from project_discovery.analyzers.tree_sitter_analyzer import (
+    GRAMMARS,
+    TreeSitterAnalyzer,
+)
+from project_discovery.models import FileRecord
 
 
-def _walk_tree(root_node):
-    """Iteratively summarize a syntax tree without recursion-depth risk."""
-    stack = [(root_node, 0)]
-    node_count = 0
-    max_depth = 0
-    errors: list[tuple[str, int, int, bool]] = []
-    top_level = [child.type for child in root_node.children]
-    while stack:
-        node, depth = stack.pop()
-        node_count += 1
-        max_depth = max(max_depth, depth)
-        if node.is_error or node.is_missing:
-            point = node.start_point
-            errors.append((node.type, point.row + 1, point.column + 1, node.is_missing))
-        for child in reversed(node.children):
-            stack.append((child, depth + 1))
-    return node_count, max_depth, errors, top_level
+def _record(language: str) -> FileRecord:
+    return FileRecord("sample.src", 12, ".src", language)
 
 
-class TreeSitterAnalyzer(Analyzer):
-    """Provide generic syntax-tree metrics for any locally provisioned grammar."""
+def test_polyglot_adapter_maps_more_than_forty_languages():
+    assert len(GRAMMARS) >= 40
+    assert GRAMMARS["Rust"] == "rust"
+    assert GRAMMARS["TypeScript"] == "typescript"
+    assert GRAMMARS["C++"] == "cpp"
+    assert GRAMMARS["CUDA"] == "cuda"
 
-    name = "tree-sitter-polyglot"
 
-    def supports(self, record: FileRecord) -> bool:
-        return record.error is None and record.language in GRAMMARS
+def test_analyzer_reports_missing_optional_dependency(tmp_path: Path, monkeypatch):
+    import builtins
+    import project_discovery.analyzers.tree_sitter_analyzer as module
 
-    def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        grammar = GRAMMARS[record.language]
-        try:
-            pack = importlib.import_module("tree_sitter_language_pack")
-        except ImportError:
-            return [Finding(
-                "code",
-                f"Optional parser unavailable: {record.language}",
-                "Install PDT's optional polyglot parser extra and provision this grammar "
-                "before scanning. PDT does not download parsers during analysis.",
-                confidence="UNKNOWN",
-                evidence=[record.path],
-                analyzer=self.name,
-            )]
+    module._CAPABILITY_CACHE.clear()
+    path = tmp_path / "sample.rs"
+    path.write_text("fn main() {}", encoding="utf-8")
+    record = _record("Rust")
+    record.path = "sample.rs"
+    analyzer = TreeSitterAnalyzer()
+    original_import = builtins.__import__
 
-        try:
-            if not pack.has_parser(grammar):
-                return [Finding(
-                    "code",
-                    f"Grammar not provisioned offline: {record.language}",
-                    f"Tree-sitter recognizes grammar '{grammar}', but it is not available "
-                    "in the local parser cache. No network download was attempted.",
-                    confidence="UNKNOWN",
-                    evidence=[record.path],
-                    analyzer=self.name,
-                )]
-            parser = pack.get_parser(grammar)
-            source = path.read_text(encoding="utf-8")
-            tree = parser.parse(source)
-            if tree is None:
-                raise RuntimeError("Tree-sitter parser returned no syntax tree")
-            root = tree.root_node
-            node_count, max_depth, errors, top_level = _walk_tree(root)
-        except (OSError, UnicodeDecodeError, Exception) as exc:
-            return [Finding(
-                "code",
-                f"Tree-sitter analysis error: {record.language}",
-                f"{type(exc).__name__}: {exc}",
-                confidence="UNKNOWN",
-                evidence=[record.path],
-                analyzer=self.name,
-            )]
+    def blocked(name, *args, **kwargs):
+        if name == "tree_sitter_language_pack":
+            raise ImportError("not installed")
+        return original_import(name, *args, **kwargs)
 
-        findings = [Finding(
-            "code_structure",
-            f"Syntax tree: {record.path}",
-            f"Grammar: {grammar}; root node: {root.type}; nodes: {node_count}; "
-            f"maximum depth: {max_depth}; top-level node kinds: "
-            f"{', '.join(top_level[:30]) or 'none'}.",
-            confidence="CONFIRMED",
-            evidence=[record.path],
-            analyzer=self.name,
-        )]
-        if errors:
-            preview = errors[:50]
-            evidence = [
-                f"{record.path}:{line}:{column} ({'missing' if missing else 'error'} {kind})"
-                for kind, line, column, missing in preview
-            ]
-            findings.append(Finding(
-                "code",
-                f"Parser diagnostics: {record.path}",
-                f"Tree-sitter emitted {len(errors)} error or missing nodes. This is parser "
-                "evidence, not by itself a compiler or runtime failure diagnosis.",
-                confidence="CONFIRMED",
-                evidence=evidence,
-                analyzer=self.name,
-            ))
-        return findings
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    assert analyzer.supports(record) is False
+    findings = analyzer.analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "does not download" in findings[0].detail
 
+
+def test_analyzer_reports_unprovisioned_grammar_without_network(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.tree_sitter_analyzer as module
+
+    module._CAPABILITY_CACHE.clear()
+    path = tmp_path / "sample.rs"
+    path.write_text("fn main() {}", encoding="utf-8")
+    record = _record("Rust")
+    pack = SimpleNamespace(has_parser=lambda _: False)
+    monkeypatch.setattr(module.importlib, "import_module", lambda _: pack)
+    assert module.TreeSitterAnalyzer().supports(record) is False
+    findings = module.TreeSitterAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "No network download" in findings[0].detail
+
+
+def test_iterative_tree_walker_summarizes_nested_nodes():
+    from project_discovery.analyzers.tree_sitter_analyzer import _walk_tree
+
+    point = SimpleNamespace(row=0, column=0)
+    leaf = SimpleNamespace(
+        type="identifier", children=[], is_error=False, is_missing=False,
+        start_point=point,
+    )
+    root = SimpleNamespace(
+        type="module", children=[leaf], is_error=False, is_missing=False,
+        start_point=point,
+    )
+    node_count, max_depth, errors, top_level = _walk_tree(root)
+    assert node_count == 2
+    assert max_depth == 1
+    assert errors == []
+    assert top_level == ["identifier"]
 
 
 def test_parser_capability_check_does_not_download(monkeypatch):
     import project_discovery.analyzers.tree_sitter_analyzer as module
+
+    module._CAPABILITY_CACHE.clear()
 
     class OfflinePack:
         @staticmethod
@@ -185,5 +89,5 @@ def test_parser_capability_check_does_not_download(monkeypatch):
             return False
 
     monkeypatch.setattr(module.importlib, "import_module", lambda _: OfflinePack)
-    capabilities = module.parser_capabilities()
+    capabilities = module.parser_capabilities({"Rust"})
     assert capabilities["Rust"] == "grammar_not_provisioned"

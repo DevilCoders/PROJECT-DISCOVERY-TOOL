@@ -20,8 +20,13 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def run_scan(root: Path, output: Path, formats: set[str], max_file_mb: int) -> int:
+def run_scan(
+    root: Path, output: Path | None, formats: set[str], max_file_mb: int
+) -> int:
     root = root.expanduser().resolve(strict=True)
+    if output is None:
+        project_name = root.name or "root"
+        output = root.parent / f"{project_name}-pdt-report"
     output = output.expanduser().resolve()
     if not root.is_dir():
         raise NotADirectoryError(root)
@@ -80,7 +85,7 @@ def run_scan(root: Path, output: Path, formats: set[str], max_file_mb: int) -> i
         "languages": dict(sorted(counts.items())),
         "language_catalog": language_catalog(),
         "recognized_language_count": recognized_language_count(),
-        "local_parser_capabilities": parser_capabilities(),
+        "local_parser_capabilities": parser_capabilities(set(counts)),
         "analyzer_domain_catalog": analyzer_domain_catalog(),
         "analyzer_domain_count": analyzer_domain_count(),
         "implemented_analyzer_domains": [
@@ -107,7 +112,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     scan = sub.add_parser("scan", help="Analyze a project without modifying it")
     scan.add_argument("path", type=Path)
-    scan.add_argument("--output", type=Path, default=Path("./pdt-report"))
+    scan.add_argument("--output", type=Path, default=None)
     scan.add_argument("--format", default="json,markdown,html")
     scan.add_argument("--max-file-mb", type=int, default=8)
     args = parser.parse_args()

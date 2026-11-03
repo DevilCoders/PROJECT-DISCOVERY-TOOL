@@ -12,6 +12,9 @@ from .base import Analyzer
 from ..models import FileRecord, Finding
 
 
+_CAPABILITY_CACHE: dict[str, str] = {}
+
+
 GRAMMARS = {
     "JavaScript": "javascript",
     "TypeScript": "typescript",
@@ -96,19 +99,27 @@ def _walk_tree(root_node):
     return node_count, max_depth, errors, top_level
 
 
-def parser_capabilities() -> dict[str, str]:
+def parser_capabilities(languages: set[str] | None = None) -> dict[str, str]:
     """Report local parser availability without downloading grammars."""
-    try:
-        pack = importlib.import_module("tree_sitter_language_pack")
-    except ImportError:
-        return {name: "optional_dependency_missing" for name in GRAMMARS}
-    result = {}
-    for name, grammar in GRAMMARS.items():
+    requested = set(GRAMMARS) if languages is None else set(languages) & set(GRAMMARS)
+    pending = requested - set(_CAPABILITY_CACHE)
+    if pending:
         try:
-            result[name] = "available" if pack.has_parser(grammar) else "grammar_not_provisioned"
-        except Exception:
-            result[name] = "parser_check_error"
-    return result
+            pack = importlib.import_module("tree_sitter_language_pack")
+        except ImportError:
+            _CAPABILITY_CACHE.update({
+                name: "optional_dependency_missing" for name in pending
+            })
+        else:
+            for name in sorted(pending):
+                try:
+                    _CAPABILITY_CACHE[name] = (
+                        "available" if pack.has_parser(GRAMMARS[name])
+                        else "grammar_not_provisioned"
+                    )
+                except Exception:
+                    _CAPABILITY_CACHE[name] = "parser_check_error"
+    return {name: _CAPABILITY_CACHE[name] for name in sorted(requested)}
 
 
 class TreeSitterAnalyzer(Analyzer):
@@ -117,7 +128,11 @@ class TreeSitterAnalyzer(Analyzer):
     name = "tree-sitter-polyglot"
 
     def supports(self, record: FileRecord) -> bool:
-        return record.error is None and record.language in GRAMMARS
+        return (
+            record.error is None
+            and record.language in GRAMMARS
+            and parser_capabilities({record.language}).get(record.language) == "available"
+        )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         grammar = GRAMMARS[record.language]
