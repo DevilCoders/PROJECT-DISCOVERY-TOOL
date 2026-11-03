@@ -1,5 +1,6 @@
 """Static Python AST analysis. Target modules are never imported or executed."""
 import ast
+import io
 from pathlib import Path
 
 MAX_AST_FILE_BYTES = 16 * 1024 * 1024
@@ -67,7 +68,7 @@ class PythonAnalyzer(Analyzer):
         findings = [Finding(
             "code",
             f"Python module: {record.path}",
-            f"{len(source.splitlines())} lines; {len(classes)} classes; "
+            f"{sum(1 for _ in io.StringIO(source, newline=None))} lines; {len(classes)} classes; "
             f"{len(functions)} functions; {len(imports)} imports.",
             evidence=[record.path],
             analyzer=self.name,
