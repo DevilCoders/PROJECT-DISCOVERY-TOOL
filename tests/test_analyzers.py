@@ -39,3 +39,14 @@ def test_python_analyzer_detects_growth_after_inventory(tmp_path: Path, monkeypa
     findings = PythonAnalyzer().analyze(source, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "grew beyond" in findings[0].detail
+
+def test_markdown_analyzer_reports_source_growth_as_unknown(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import docs_analyzer
+
+    source = tmp_path / "large.md"
+    source.write_text("# " + "x" * 40, encoding="utf-8")
+    monkeypatch.setattr(docs_analyzer, "_MAX_MARKDOWN_BYTES", 8)
+    record = FileRecord(source.name, 1, ".md", "Markdown")
+    findings = MarkdownAnalyzer().analyze(source, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
