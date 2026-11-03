@@ -14,5 +14,5 @@ def test_analyzer_coverage_catalog_is_broad_and_explicit():
         "imports",
         "documentation",
         "dependency_manifests",
-    } <= available
+    } <= implemented
     assert any(item["status"] == "planned" for item in catalog)

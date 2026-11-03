@@ -34,7 +34,10 @@ class _SafeDeploymentLoader:
             return None
 
         Loader.add_multi_constructor("!", unknown_tag)
-        return list(yaml.load_all(text, Loader=Loader))
+        try:
+            return list(yaml.load_all(text, Loader=Loader))
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Invalid YAML: {exc}") from exc
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -135,7 +138,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         bases = instructions.get("FROM", [])
         stages = [value.split()[-1] for _, value in bases]
         ports = [value for _, value in instructions.get("EXPOSE", [])]
-        users = [value for _, value in instructions.get("USER", [])]
+        users = instructions.get("USER", [])
         evidence = [
             f"{record.path}:{line} ({key})"
             for key, values in instructions.items() for line, _ in values
