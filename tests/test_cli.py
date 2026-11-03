@@ -1,6 +1,6 @@
 from pathlib import Path
 import pytest
-from project_discovery.cli import run_scan
+from project_discovery.cli import run_scan, _verified_regular_file_stat
 
 
 def test_report_output_inside_target_is_rejected(tmp_path: Path):
@@ -248,3 +248,34 @@ def test_cli_prints_redacted_source_impact_and_remediation():
     assert "Attacker impact:" in rendered
     assert "Remediation:" in rendered
     assert "\x1b[" in rendered
+
+
+
+def test_analysis_guard_rejects_symlink_substitution(tmp_path: Path):
+    target = tmp_path / "outside.txt"
+    target.write_text("must not be analyzed", encoding="utf-8")
+    link = tmp_path / "project-file.txt"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+    with pytest.raises(OSError, match="non-regular or symlink"):
+        _verified_regular_file_stat(link)
+
+
+def test_analysis_guard_detects_file_identity_change(tmp_path: Path):
+    original = tmp_path / "original.py"
+    replacement = tmp_path / "replacement.py"
+    original.write_text("print('original')", encoding="utf-8")
+    replacement.write_text("print('replacement with different size')", encoding="utf-8")
+    expected = original.lstat()
+    with pytest.raises(OSError, match="identity changed"):
+        _verified_regular_file_stat(replacement, expected)
+
+
+def test_analysis_guard_accepts_unchanged_regular_file(tmp_path: Path):
+    source = tmp_path / "stable.py"
+    source.write_text("print('stable')", encoding="utf-8")
+    expected = source.lstat()
+    current = _verified_regular_file_stat(source, expected)
+    assert current.st_ino == expected.st_ino
