@@ -1,9 +1,10 @@
-"""Static API contract discovery for OpenAPI, GraphQL, Protocol Buffers and Thrift."""
+"""Static API contract discovery across REST, event, RPC, SOAP and collection formats."""
 from __future__ import annotations
 
 import importlib
 import json
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,9 @@ from ..models import FileRecord, Finding
 
 
 _OPENAPI_NAMES = {"openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.yml", "swagger.json"}
+_ASYNCAPI_NAMES = {"asyncapi.yaml", "asyncapi.yml", "asyncapi.json"}
+_OPENRPC_NAMES = {"openrpc.yaml", "openrpc.yml", "openrpc.json"}
+_WSDL_NAMES = {"service.wsdl", "services.wsdl", "definitions.wsdl"}
 _GRAPHQL_DEFINITION = re.compile(
     r"(?m)^\s*(type|interface|input|enum|scalar|union|schema|directive)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
@@ -61,13 +65,16 @@ class APIContractAnalyzer(Analyzer):
     """Inventory API schemas and operations without making network requests."""
 
     name = "api-contracts"
-    domains = ("api_rest", "api_graphql", "api_rpc",)
+    domains = ("api_rest", "api_graphql", "api_rpc", "api_event", "api_soap", "api_collections")
 
     def supports(self, record: FileRecord) -> bool:
         name = Path(record.path).name.lower()
         return record.error is None and (
-            name in _OPENAPI_NAMES
-            or record.extension in {".graphql", ".gql", ".proto", ".thrift"}
+            name in (_OPENAPI_NAMES | _ASYNCAPI_NAMES | _OPENRPC_NAMES | _WSDL_NAMES)
+            or name.endswith(".postman_collection.json")
+            or record.extension in {
+                ".graphql", ".gql", ".proto", ".thrift", ".wsdl", ".raml",
+            }
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
@@ -76,12 +83,22 @@ class APIContractAnalyzer(Analyzer):
             name = Path(record.path).name.lower()
             if name in _OPENAPI_NAMES:
                 return self._openapi(path, record, content)
+            if name in _ASYNCAPI_NAMES:
+                return self._asyncapi(record, content)
+            if name in _OPENRPC_NAMES:
+                return self._openrpc(record, content)
+            if name.endswith(".postman_collection.json"):
+                return self._postman(record, content)
+            if record.extension == ".wsdl" or name in _WSDL_NAMES:
+                return self._wsdl(record, content)
+            if record.extension == ".raml":
+                return self._raml(record, content)
             if record.extension in {".graphql", ".gql"}:
                 return self._graphql(record, content)
             if record.extension == ".proto":
                 return self._declarations(record, content, _PROTO_DECLARATION, "Protocol Buffers")
             return self._declarations(record, content, _THRIFT_DECLARATION, "Thrift")
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ET.ParseError, ValueError) as exc:
             return [Finding(
                 "api",
                 f"API contract parse error: {record.path}",
@@ -130,6 +147,180 @@ class APIContractAnalyzer(Analyzer):
             "This is a static contract inventory; it does not verify a running service.",
             confidence="CONFIRMED",
             evidence=[f"{method} {route}" for method, route in routes[:100]] or [record.path],
+            analyzer=self.name,
+        )]
+
+    def _structured_document(self, record: FileRecord, content: str) -> Any:
+        if record.extension == ".json":
+            return json.loads(content)
+        try:
+            yaml = importlib.import_module("yaml")
+        except ImportError:
+            return None
+        return yaml.safe_load(content)
+
+    def _asyncapi(self, record: FileRecord, content: str) -> list[Finding]:
+        data = self._structured_document(record, content)
+        if not isinstance(data, dict):
+            return [Finding(
+                "api",
+                f"AsyncAPI contract unavailable: {record.path}",
+                "A structured YAML parser is required for this AsyncAPI document; "
+                "install the optional infrastructure extra. No network access was attempted.",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+            )]
+        channels = data.get("channels", {})
+        channels = channels if isinstance(channels, dict) else {}
+        operations = data.get("operations", {})
+        operations = operations if isinstance(operations, dict) else {}
+        operation_evidence: list[str] = []
+        for channel_name, channel in channels.items():
+            if isinstance(channel, dict):
+                for action in ("publish", "subscribe"):
+                    if action in channel:
+                        operation_evidence.append(f"{action}: {channel_name}")
+        for operation_name, operation in operations.items():
+            if isinstance(operation, dict):
+                action = operation.get("action", "operation")
+                channel_ref = operation.get("channel", {})
+                address = channel_ref.get("$ref", "") if isinstance(channel_ref, dict) else ""
+                operation_evidence.append(
+                    f"{action}: {operation_name}" + (f" -> {address}" if address else "")
+                )
+        components = data.get("components", {})
+        messages = components.get("messages", {}) if isinstance(components, dict) else {}
+        messages = messages if isinstance(messages, dict) else {}
+        evidence = (
+            [f"channel: {name}" for name in list(channels)[:60]]
+            + operation_evidence[:100]
+            + [f"message: {name}" for name in list(messages)[:60]]
+        )
+        return [Finding(
+            "api",
+            f"AsyncAPI contract: {record.path}",
+            f"Detected {len(channels)} channels, {len(operation_evidence)} publish/subscribe "
+            f"operations and {len(messages)} component messages. Static contract inventory "
+            "does not verify broker connectivity or runtime delivery.",
+            confidence="CONFIRMED",
+            evidence=evidence or [record.path],
+            analyzer=self.name,
+        )]
+
+    def _openrpc(self, record: FileRecord, content: str) -> list[Finding]:
+        data = self._structured_document(record, content)
+        if not isinstance(data, dict):
+            return [Finding(
+                "api",
+                f"OpenRPC contract unavailable: {record.path}",
+                "A structured YAML parser is required for this OpenRPC document.",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+            )]
+        methods = data.get("methods", [])
+        methods = methods if isinstance(methods, list) else []
+        components = data.get("components", {})
+        schemas = components.get("schemas", {}) if isinstance(components, dict) else {}
+        schemas = schemas if isinstance(schemas, dict) else {}
+        names = [
+            str(item.get("name")) for item in methods
+            if isinstance(item, dict) and item.get("name")
+        ]
+        evidence = (
+            [f"method: {name}" for name in names[:100]]
+            + [f"schema: {name}" for name in list(schemas)[:60]]
+        )
+        return [Finding(
+            "api",
+            f"OpenRPC contract: {record.path}",
+            f"Detected {len(names)} JSON-RPC methods and {len(schemas)} component schemas.",
+            confidence="CONFIRMED",
+            evidence=evidence or [record.path],
+            analyzer=self.name,
+        )]
+
+    def _postman(self, record: FileRecord, content: str) -> list[Finding]:
+        data = json.loads(content)
+        requests: list[str] = []
+
+        def walk(items: Any, prefix: str = "") -> None:
+            if not isinstance(items, list):
+                return
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "unnamed"))
+                current = f"{prefix}/{name}" if prefix else name
+                request = item.get("request")
+                if isinstance(request, dict):
+                    method = str(request.get("method", "UNKNOWN")).upper()
+                    requests.append(f"{method} {current}")
+                walk(item.get("item"), current)
+
+        walk(data.get("item", []))
+        return [Finding(
+            "api",
+            f"Postman collection: {record.path}",
+            f"Detected {len(requests)} request definitions. URLs and parameter values are "
+            "intentionally omitted from evidence to avoid leaking collection secrets.",
+            confidence="CONFIRMED",
+            evidence=requests[:100] or [record.path],
+            analyzer=self.name,
+        )]
+
+    def _wsdl(self, record: FileRecord, content: str) -> list[Finding]:
+        root = ET.fromstring(content)
+        services: list[str] = []
+        port_types: list[str] = []
+        operations: set[str] = set()
+        bindings: list[str] = []
+        for element in root.iter():
+            tag = element.tag.rsplit("}", 1)[-1]
+            name = element.attrib.get("name")
+            if not name:
+                continue
+            if tag == "service":
+                services.append(name)
+            elif tag in {"portType", "interface"}:
+                port_types.append(name)
+            elif tag == "operation":
+                operations.add(name)
+            elif tag == "binding":
+                bindings.append(name)
+        evidence = (
+            [f"service: {name}" for name in services[:40]]
+            + [f"portType: {name}" for name in port_types[:40]]
+            + [f"operation: {name}" for name in sorted(operations)[:100]]
+            + [f"binding: {name}" for name in bindings[:40]]
+        )
+        return [Finding(
+            "api",
+            f"WSDL contract: {record.path}",
+            f"Detected {len(services)} services, {len(port_types)} port types/interfaces, "
+            f"{len(operations)} unique operations and {len(bindings)} bindings.",
+            confidence="CONFIRMED",
+            evidence=evidence or [record.path],
+            analyzer=self.name,
+        )]
+
+    def _raml(self, record: FileRecord, content: str) -> list[Finding]:
+        routes = re.findall(r"(?m)^(/[^\\s:]+)\\s*:\\s*$", content)
+        methods = re.findall(
+            r"(?im)^\\s{2,}(get|post|put|patch|delete|options|head)\\s*:\\s*$",
+            content,
+        )
+        evidence = (
+            [f"resource: {route}" for route in routes[:80]]
+            + [f"method: {method.upper()}" for method in methods[:100]]
+        )
+        return [Finding(
+            "api",
+            f"RAML contract: {record.path}",
+            f"Detected {len(routes)} resource paths and {len(methods)} HTTP method declarations.",
+            confidence="CONFIRMED",
+            evidence=evidence or [record.path],
             analyzer=self.name,
         )]
 

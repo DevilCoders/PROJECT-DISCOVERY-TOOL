@@ -11,7 +11,7 @@ PDT inventories and analyzes heterogeneous software repositories without importi
 - Python AST analysis and evidence-backed internal Python import graph with cycle detection.
 - Structural documentation analysis for Markdown, HTML, reStructuredText and text formats; optional PDF and DOCX extraction.
 - Conservative secret-pattern detection with strict value redaction, Python AST security heuristics, severity-rated findings, plus configuration key inventory and risky-setting indicators.
-- Static API contract inventory for OpenAPI/Swagger, GraphQL, Protocol Buffers and Thrift.
+- Static API contract inventory for OpenAPI/Swagger, AsyncAPI, OpenRPC, GraphQL, Protocol Buffers, Thrift, WSDL, RAML and nested Postman collections (request URLs and values are excluded from collection evidence).
 - SQL DDL/schema inventory, Prisma ORM models/relations and inferred destructive migration indicators.
 - Test-suite candidate discovery across the central polyglot source catalog; build/CI manifest inventory across Bazel, Buck, SCons, Ant, Ninja, QMake, SwiftPM, .NET, Autotools, Jenkins, GitHub Actions, GitLab, Azure Pipelines and other ecosystems.
 - Dependency declaration extraction for Python, Node.js, Rust, Go and Composer manifests.

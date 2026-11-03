@@ -67,3 +67,60 @@ def test_yaml_openapi_fallback_does_not_require_pyyaml(tmp_path: Path, monkeypat
     findings = module.APIContractAnalyzer().analyze(path, record)
     assert "1 HTTP operations" in findings[0].detail
     assert "GET /health (health)" in findings[0].evidence
+
+
+
+def test_asyncapi_channels_operations_and_messages_are_discovered(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "asyncapi.json",
+        '{"asyncapi":"3.0.0","channels":{"userEvents":{"address":"users"}},'
+        '"operations":{"receiveUser":{"action":"receive","channel":{"$ref":"#/channels/userEvents"}}},'
+        '"components":{"messages":{"UserCreated":{}}}}',
+    )
+    assert "1 channels" in findings[0].detail
+    assert "1 publish/subscribe operations" in findings[0].detail
+    assert "1 component messages" in findings[0].detail
+    assert "channel: userEvents" in findings[0].evidence
+    assert "receive: receiveUser -> #/channels/userEvents" in findings[0].evidence
+
+
+def test_openrpc_methods_and_schemas_are_discovered(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "openrpc.json",
+        '{"openrpc":"1.2.6","methods":[{"name":"system.ping"},{"name":"user.get"}],'
+        '"components":{"schemas":{"User":{},"Error":{}}}}',
+    )
+    assert "2 JSON-RPC methods" in findings[0].detail
+    assert "2 component schemas" in findings[0].detail
+    assert "method: system.ping" in findings[0].evidence
+
+
+def test_postman_nested_collection_requests_are_discovered_without_urls(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "backend.postman_collection.json",
+        '{"info":{"name":"Backend"},"item":[{"name":"Users","item":['
+        '{"name":"List users","request":{"method":"GET","url":"https://example.test/users?token=secret"}},'
+        '{"name":"Create user","request":{"method":"POST","url":"https://example.test/users"}}]}]}',
+    )
+    assert "2 request definitions" in findings[0].detail
+    serialized = repr([item.to_dict() for item in findings])
+    assert "List users" in serialized
+    assert "token=secret" not in serialized
+
+
+def test_wsdl_services_operations_and_raml_resources_are_discovered(tmp_path: Path):
+    wsdl = _scan(
+        tmp_path, "service.wsdl",
+        '<definitions xmlns="urn:wsdl"><portType name="UserPort">'
+        '<operation name="GetUser"/></portType><binding name="UserBinding"/>'
+        '<service name="UserService"/></definitions>',
+    )
+    raml = _scan(
+        tmp_path, "api.raml",
+        "#%RAML 1.0\n/users:\n  get:\n  post:\n/users/{id}:\n  delete:\n",
+    )
+    assert "1 services" in wsdl[0].detail
+    assert "1 unique operations" in wsdl[0].detail
+    assert "service: UserService" in wsdl[0].evidence
+    assert "2 resource paths" in raml[0].detail
+    assert "3 HTTP method declarations" in raml[0].detail
