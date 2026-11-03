@@ -125,7 +125,8 @@ for(const item of sortedDirectories){
 const symlinkRows=$("symlink-rows");
 for(const item of REPORT.symlinks){
  const tr=document.createElement("tr");
- for(const pair of [[item.path,"path"],[item.target,"path"],[item.target_scope,""],[item.is_hidden?"yes":"no",""]]){
+ const mode=item.permissions===null||item.permissions===undefined?"unknown":Number(item.permissions).toString(8);
+ for(const pair of [[item.path,"path"],[item.target,"path"],[item.target_scope,""],[item.target_state||"unverified",""],[mode,"mono"],[item.is_hidden?"yes":"no",""]]){
   const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
  }
  symlinkRows.append(tr);
