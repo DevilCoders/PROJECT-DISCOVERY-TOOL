@@ -142,3 +142,18 @@ def test_polyglot_security_rule_catalog_is_deterministic():
         "open_redirect_user_controlled",
         "unsafe_xml_external_entities",
     } <= set(names)
+
+
+def test_finding_includes_redacted_line_impact_and_remediation(tmp_path: Path):
+    findings = _scan(
+        tmp_path,
+        "unsafe.py",
+        "eval(user_input)  # email='developer@example.com'\n",
+    )
+    finding = next(item for item in findings if "Dynamic code execution" in item.title)
+    assert finding.severity == "HIGH"
+    assert finding.code_evidence[0].line_number == 1
+    assert "eval(user_input)" in finding.code_evidence[0].code
+    assert "developer@example.com" not in finding.code_evidence[0].code
+    assert "arbitrary code" in finding.impact
+    assert finding.recommendation
