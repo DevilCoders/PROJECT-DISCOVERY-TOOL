@@ -68,3 +68,20 @@ def test_non_source_files_are_not_supported():
 def test_syntax_error_is_unknown_not_crash(tmp_path: Path):
     findings = _scan(tmp_path, "broken.py", "def broken(:\n")
     assert findings[0].confidence == "UNKNOWN"
+
+
+
+def test_secure_code_rules_cover_the_full_recognized_source_catalog(tmp_path: Path):
+    from project_discovery.language_catalog import source_language_names
+
+    analyzer = SecureCodePatternAnalyzer()
+    assert len(source_language_names()) >= 40
+    for filename in (
+        "agent.jl", "service.ex", "contract.sol", "kernel.cu",
+        "shader.wgsl", "module.vhd", "controller.nim", "firmware.cob",
+    ):
+        record = FileRecord(filename, 10, Path(filename).suffix.lower(), "Other")
+        assert analyzer.supports(record), filename
+
+    findings = _scan(tmp_path, "agent.jl", "result = eval(user_input)\n")
+    assert any("Dynamic code execution" in item.title for item in findings)

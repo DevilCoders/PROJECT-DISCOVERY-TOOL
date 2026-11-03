@@ -65,3 +65,27 @@ def test_secret_findings_have_actionable_severity(tmp_path: Path):
         "-----BEGIN PRIVATE KEY-----\n",
     )
     assert findings[0].severity == "CRITICAL"
+
+
+
+def test_secret_scanner_covers_polyglot_source_and_text_formats(tmp_path: Path):
+    analyzer = SecretPatternAnalyzer()
+    for filename in (
+        "agent.jl", "service.ex", "contract.sol", "kernel.cu",
+        "shader.wgsl", "module.vhd", "controller.nim", "guide.md",
+        "schema.graphql", "infra.tf", "deployment.env",
+    ):
+        record = FileRecord(filename, 10, Path(filename).suffix.lower(), "Other")
+        assert analyzer.supports(record), filename
+
+    findings = _scan(
+        tmp_path, "agent.jl",
+        'API_TOKEN = "real-token-value-987654"\n',
+    )
+    assert findings
+    assert "real-token-value-987654" not in repr([item.to_dict() for item in findings])
+
+
+def test_binary_office_documents_are_not_scanned_as_utf8_text():
+    record = FileRecord("manual.docx", 1024, ".docx", "Word Document")
+    assert SecretPatternAnalyzer().supports(record) is False

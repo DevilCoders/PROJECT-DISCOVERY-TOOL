@@ -70,3 +70,26 @@ def test_non_test_source_is_not_supported(tmp_path: Path):
     path = tmp_path / "main.py"
     path.write_text("print('hello')", encoding="utf-8")
     assert TestDiscoveryAnalyzer().supports(_record(path, "src/main.py")) is False
+
+
+
+def test_test_discovery_uses_catalog_for_uncommon_polyglot_languages(tmp_path: Path):
+    analyzer = TestDiscoveryAnalyzer()
+    for relative in (
+        "tests/test_scheduler.odin",
+        "tests/integration/firmware_test.cob",
+        "tests/gpu/test_kernel.cu",
+        "specs/test_contract.move",
+    ):
+        path = tmp_path / Path(relative).name
+        path.write_text("", encoding="utf-8")
+        record = FileRecord(relative, 0, path.suffix.lower(), "Other")
+        assert analyzer.supports(record), relative
+
+
+def test_root_test_filename_convention_is_language_agnostic(tmp_path: Path):
+    analyzer = TestDiscoveryAnalyzer()
+    path = tmp_path / "test_runtime.odin"
+    path.write_text('proc testRuntime() = discard\n', encoding="utf-8")
+    record = FileRecord(path.name, path.stat().st_size, path.suffix.lower(), "Odin")
+    assert analyzer.supports(record)
