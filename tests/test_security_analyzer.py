@@ -27,6 +27,9 @@ def test_detects_secret_patterns_and_redacts_values(tmp_path: Path):
     assert token not in serialized and password not in serialized
     assert all(finding.confidence == "INFERRED" for finding in findings)
     assert all("redacted" in finding.detail.lower() for finding in findings)
+    assert all(finding.code_evidence for finding in findings)
+    assert all(finding.impact and finding.recommendation for finding in findings)
+    assert all(token not in repr(finding.code_evidence) for finding in findings for token in (password,))
 
 
 def test_ignores_placeholders_and_environment_references(tmp_path: Path):
@@ -122,3 +125,20 @@ def test_native_byte_counter_matches_reference_count():
 
     sample = b"line1\nline2\n" * 1000
     assert count_byte(sample, 10) == sample.count(b"\n")
+
+
+def test_source_excerpt_redacts_secrets_identity_and_credential_urls():
+    from project_discovery.source_utils import redact_source_excerpt
+
+    sensitive = (
+        'first_name = "Alice"; email = "alice@example.com"; '
+        'password = "super-secret-value"; token = "ghp_' + "A" * 36 + '"; '
+        'DATABASE_URL = "postgres://admin:db-password@db.internal/app"'
+    )
+    excerpt = redact_source_excerpt(sensitive)
+    for value in (
+        "Alice", "alice@example.com", "super-secret-value",
+        "ghp_" + "A" * 36, "db-password",
+    ):
+        assert value not in excerpt
+    assert excerpt.count("[REDACTED]") >= 3
