@@ -9,6 +9,18 @@ Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 
 @dataclass(slots=True)
+class CodeEvidence:
+    """One redacted source line associated with a finding."""
+
+    line_number: int
+    code: str
+    vulnerable: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class Finding:
     category: str
     title: str
@@ -17,6 +29,9 @@ class Finding:
     evidence: list[str] = field(default_factory=list)
     analyzer: str = "core"
     severity: Severity = "INFO"
+    code_evidence: list[CodeEvidence] = field(default_factory=list)
+    impact: str | None = None
+    recommendation: str | None = None
 
     def __post_init__(self) -> None:
         if self.severity == "INFO" and self.category in {
@@ -107,7 +122,7 @@ class ScanResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "1.2",
+            "schema_version": "1.3",
             "root": self.root,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
