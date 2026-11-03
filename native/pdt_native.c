@@ -371,10 +371,12 @@ static int pdt_opencl_count_byte(
         pdt_opencl.context, pdt_opencl.device, 0, &status
     );
     if (status != PDT_CL_SUCCESS || queue == NULL) {
+        if (status == PDT_CL_SUCCESS) status = -1;
         goto cleanup;
     }
     kernel = pdt_opencl.create_kernel(pdt_opencl.program, "pdt_count_byte", &status);
     if (status != PDT_CL_SUCCESS || kernel == NULL) {
+        if (status == PDT_CL_SUCCESS) status = -1;
         goto cleanup;
     }
     input_buffer = pdt_opencl.create_buffer(
@@ -383,12 +385,14 @@ static int pdt_opencl_count_byte(
         length, (void *)data, &status
     );
     if (status != PDT_CL_SUCCESS || input_buffer == NULL) {
+        if (status == PDT_CL_SUCCESS) status = -1;
         goto cleanup;
     }
     partial_buffer = pdt_opencl.create_buffer(
         pdt_opencl.context, PDT_CL_MEM_WRITE_ONLY, partial_bytes, NULL, &status
     );
     if (status != PDT_CL_SUCCESS || partial_buffer == NULL) {
+        if (status == PDT_CL_SUCCESS) status = -1;
         goto cleanup;
     }
 
@@ -509,8 +513,8 @@ static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if ((size_t)view.len >= PDT_GPU_MIN_BYTES && pdt_opencl_initialize()) {
-        if (pdt_opencl_count_byte(
+    if ((size_t)view.len >= PDT_GPU_MIN_BYTES) {
+        if (pdt_opencl_initialize() && pdt_opencl_count_byte(
                 (const unsigned char *)view.buf, (size_t)view.len,
                 (unsigned char)needle, &gpu_count
             )) {
