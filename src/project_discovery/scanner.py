@@ -386,7 +386,7 @@ def discover_inventory(
         try:
             entries = os.scandir(current)
         except OSError as exc:
-            directory_record.error = `${type(exc).__name__}: ${exc}`
+            directory_record.error = f"{type(exc).__name__}: {exc}"
             stats["walk_errors"] += 1
             continue
         try:
@@ -496,7 +496,7 @@ def discover_inventory(
         except OSError as exc:
             # A directory iterator can fail after yielding some entries. Keep the
             # partial inventory, but make the incomplete directory explicit.
-            directory_record.error = f"${type(exc).__name__}: ${exc}"
+            directory_record.error = f"{type(exc).__name__}: {exc}"
             stats["walk_errors"] += 1
         finally:
             entries.close()
