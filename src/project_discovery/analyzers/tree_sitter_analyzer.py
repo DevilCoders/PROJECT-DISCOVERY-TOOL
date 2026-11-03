@@ -6,6 +6,7 @@ a parser; users must provision grammar libraries separately before scanning.
 from __future__ import annotations
 
 import importlib
+import re
 from pathlib import Path
 
 from .base import Analyzer
