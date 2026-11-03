@@ -171,7 +171,7 @@ def _lcov_summary(source: str) -> dict[str, tuple[int, int]] | None:
 def _go_profile_summary(source: str) -> dict[str, tuple[int, int]] | None:
     total = covered = 0
     pattern = re.compile(r"^\S+:\d+\.\d+,\d+\.\d+\s+(\d+)\s+(\d+)\s*$")
-    for line in source.splitlines():
+    for line in io.StringIO(source, newline=None):
         match = pattern.match(line.strip())
         if match:
             statements, count = map(int, match.groups())
