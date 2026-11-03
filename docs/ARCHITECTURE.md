@@ -9,9 +9,9 @@ PDT is not a Python-only scanner. Python is the control plane; native engines an
 | Control plane | Python | CLI, plugin lifecycle, policy, orchestration, cache, findings and report schema |
 | Native low-level core | C | Bounded byte scanning, file-signature primitives, host capability reporting and stable extension boundary |
 | CPU acceleration | x86-64 Assembly + C dispatch | Linux x86-64 SIMD byte counting with runtime SSE2/POPCNT checks; scalar C fallback |
-| High-throughput traversal | Rust (required next subsystem) | Bounded concurrent walker, inventory streaming, resumable checkpoints and archive/index pipeline |
-| Complex SDK integration | C++ | Optional native adapters needing mature C++ libraries/SDKs |
-| Report application | JavaScript/TypeScript + HTML/CSS | Offline interactive views, filtering, pagination, directory and architecture graphs |
+| Filesystem traversal | Rust + PyO3 | Integrated no-follow directory iterator with native OS metadata and bounded depth state; persistent indexing remains planned |
+| File-signature classification | C++17 | Integrated native magic-byte classifier with Python fallback |
+| Report application | JavaScript + HTML/CSS | Separate packaged offline client bundled into the standalone report; filtering, pagination and disclosure controls |
 | Domain packs | Polyglot | Language, build, API, database, security, tests, ML/robotics/mobile/game/VCS analyzers |
 
 Each language component must serve a production execution path. Merely listing a language in the roadmap or catalog is not implementation.
@@ -32,8 +32,10 @@ Each language component must serve a production execution path. Merely listing a
 - The current C extension accepts explicit contiguous Python buffers and returns bounded scalar results; it reports the selected backend and hardware concurrency.
 - x86-64 Assembly uses the System V ABI and is compiled only on Linux x86-64. C dispatch checks SSE2 and POPCNT before calling it.
 - Other CPUs/platforms use portable C. If the extension cannot be built, the Python fallback remains available.
-- The current native byte counter is used by scanner/security code; it is not yet a native filesystem walker.
-- Rust traversal/indexing, bounded streaming inventory and 100GB+ benchmarks remain mandatory release work.
+- The C byte counter and Linux x86-64 Assembly backend are used by scanner/security code.
+- The C++17 signature classifier is used by scanner file-type detection, with the Python catalog as fallback.
+- The Rust PyO3 iterator is used by scanner traversal when built; it does not follow symlinks and retains only the active directory iterator stack.
+- Persistent inventory/index storage, bounded analyzer queues, resumable checkpoints and 100GB+ benchmarks remain mandatory release work.
 - Every native component needs ownership/error contracts, sanitizers/fuzz coverage, cross-platform compile tests, deterministic fallback behavior and repeatable benchmarks.
 
 ## VCS, hosting and delivery discovery
