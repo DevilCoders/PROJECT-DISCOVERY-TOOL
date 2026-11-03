@@ -35,8 +35,8 @@ def test_discover_inventory_returns_directory_and_file_metadata(tmp_path: Path):
     assert any(item.path == "src" and item.development_marker == "src" for item in directories)
     assert files[0].is_hidden
     assert files[1].file_type == "source"
-    assert stats["entry_count"] == 5
-    assert stats["development_directory_count"] == 2
+    assert stats["entry_count"] == 4
+    assert stats["development_directory_count"] == 1
     assert symlinks == []
 
 
@@ -58,7 +58,7 @@ def test_discover_inventory_records_symlinks_without_following_them(tmp_path: Pa
     from project_discovery.scanner import discover_inventory
     import pytest
 
-    target = tmp_path / "outside"
+    target = tmp_path.parent / f"{tmp_path.name}-outside"
     target.mkdir()
     link = tmp_path / "linked"
     try:

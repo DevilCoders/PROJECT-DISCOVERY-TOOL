@@ -2,7 +2,7 @@
 import hashlib
 import os
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .language_catalog import detect_language
 from .models import DirectoryRecord, FileRecord, SymlinkRecord
