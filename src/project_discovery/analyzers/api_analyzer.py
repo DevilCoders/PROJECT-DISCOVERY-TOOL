@@ -10,6 +10,7 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import SourceBudgetExceeded, read_text_bounded
 
 
 _OPENAPI_NAMES = {"openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.yml", "swagger.json"}
@@ -61,6 +62,9 @@ def _flatten_openapi(data: Any) -> tuple[list[tuple[str, str]], list[str]]:
     return paths, schemas
 
 
+_MAX_API_CONTRACT_BYTES = 16 * 1024 * 1024
+
+
 class APIContractAnalyzer(Analyzer):
     """Inventory API schemas and operations without making network requests."""
 
@@ -78,8 +82,16 @@ class APIContractAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > _MAX_API_CONTRACT_BYTES:
+            return [Finding(
+                "api", f"API contract resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the API contract parser's "
+                f"{_MAX_API_CONTRACT_BYTES:,}-byte content budget.",
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
         try:
-            content = path.read_text(encoding="utf-8")
+            content = read_text_bounded(path, _MAX_API_CONTRACT_BYTES)
             name = Path(record.path).name.lower()
             if name in _OPENAPI_NAMES:
                 return self._openapi(path, record, content)
@@ -98,6 +110,12 @@ class APIContractAnalyzer(Analyzer):
             if record.extension == ".proto":
                 return self._declarations(record, content, _PROTO_DECLARATION, "Protocol Buffers")
             return self._declarations(record, content, _THRIFT_DECLARATION, "Thrift")
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "api", f"API contract resource limit: {record.path}", str(exc),
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ET.ParseError, ValueError) as exc:
             return [Finding(
                 "api",
