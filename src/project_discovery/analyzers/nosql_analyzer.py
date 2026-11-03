@@ -60,7 +60,7 @@ _IMPORT_PATTERNS = {
     "CouchDB": re.compile(r"(?:import\s+couchdb|require\s*\(\s*['\"]nano['\"])", re.I),
     "InfluxDB": re.compile(r"(?:influxdb_client|influxdb-client)", re.I),
     "ClickHouse": re.compile(r"(?:clickhouse_connect|clickhouse_driver|clickhouse-jdbc)", re.I),
-    "Chroma": re.compile(r"(?:from\\s+chromadb|import\\s+chromadb|require\\s*\\(\\s*['"]chromadb['"])", re.I),
+    "Chroma": re.compile(r"""(?:from\\s+chromadb|import\\s+chromadb|(?:require|from)\\s*\\(?\\s*['"]chromadb['"])""", re.I),
     "Qdrant": re.compile(r"(?:from\\s+qdrant_client|import\\s+qdrant_client|@qdrant/js-client-rest|github.com/qdrant/go-client)", re.I),
     "Pinecone": re.compile(r"(?:from\\s+pinecone|import\\s+pinecone|@pinecone-database/pinecone)", re.I),
     "Weaviate": re.compile(r"(?:from\\s+weaviate|import\\s+weaviate|weaviate-client|io.weaviate)", re.I),
