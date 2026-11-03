@@ -6,9 +6,53 @@ from pathlib import Path
 
 MAX_AST_FILE_BYTES = 16 * 1024 * 1024
 
+_IMPACTS = {
+    "dynamic_code_execution": (
+        "If attacker-controlled input reaches eval() or exec(), an attacker may run arbitrary "
+        "Python code with the privileges of the application process."
+    ),
+    "os_system_shell": (
+        "If untrusted data influences the command string, an attacker may execute operating-"
+        "system commands as the application account and access its files, secrets or services."
+    ),
+    "subprocess_shell_true": (
+        "If attacker-controlled data reaches a shell=True command, an attacker may inject "
+        "additional shell commands and execute them with the application's privileges."
+    ),
+    "unsafe_pickle_deserialization": (
+        "If untrusted pickle data is loaded, deserialization can invoke attacker-controlled "
+        "callables and result in arbitrary code execution in the application process."
+    ),
+    "unsafe_yaml_load": (
+        "With an unsafe loader and attacker-controlled YAML, deserialization may construct "
+        "dangerous Python objects or execute code, depending on the PyYAML version and loader."
+    ),
+    "tls_certificate_verification_disabled": (
+        "A network attacker may impersonate the remote peer and intercept or modify traffic, "
+        "including credentials, session tokens and application data."
+    ),
+    "tls_verification_disabled": (
+        "A network attacker may impersonate the remote peer and intercept or modify traffic, "
+        "including credentials, session tokens and application data."
+    ),
+    "insecure_temporary_file": (
+        "A local attacker may exploit a predictable temporary path or race to read or replace "
+        "files accessible to the application, depending on directory permissions."
+    ),
+    "weak_cryptographic_hash": (
+        "If the hash protects signatures, integrity or password storage, collision or "
+        "offline-guessing attacks may undermine that protection; risk depends on its purpose."
+    ),
+    "possible_sql_injection": (
+        "If attacker-controlled data is interpolated into the SQL statement, an attacker may "
+        "alter query logic to read, modify or delete records or bypass authorization."
+    ),
+}
+
+
 from .base import Analyzer
-from ..models import FileRecord, Finding
-from ..source_utils import read_python_source
+from ..models import CodeEvidence, FileRecord, Finding
+from ..source_utils import read_python_source, redact_source_excerpt
 
 
 class PythonSecurityAnalyzer(Analyzer):
@@ -38,7 +82,7 @@ class PythonSecurityAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            tree = ast.parse(read_python_source(path), filename=record.path)
+            source = read_python_source(path)\n            tree = ast.parse(source, filename=record.path)
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             return [Finding(
                 "security",
@@ -57,14 +101,29 @@ class PythonSecurityAnalyzer(Analyzer):
             if key in seen:
                 return
             seen.add(key)
+            line_number = getattr(node, "lineno", 0)
+            excerpt = (
+                redact_source_excerpt(source_lines[line_number - 1])
+                if 0 < line_number <= len(source_lines) else ""
+            )
             findings.append(Finding(
                 "security",
                 f"Potential Python security issue: {rule}",
                 detail,
                 confidence="INFERRED",
-                evidence=[f"{record.path}:{getattr(node, 'lineno', 0)}"],
+                evidence=[f"{record.path}:{line_number}"],
                 analyzer=self.name,
                 severity=severity,
+                code_evidence=(
+                    [CodeEvidence(line_number=line_number, code=excerpt)]
+                    if excerpt else []
+                ),
+                impact=_IMPACTS.get(
+                    rule,
+                    "If this operation is reachable with attacker-controlled data, it may "
+                    "affect confidentiality, integrity or availability. Confirm the data flow."
+                ),
+                recommendation=detail,
             ))
 
         for node in ast.walk(tree):
