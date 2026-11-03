@@ -28,12 +28,16 @@ _TOKEN = re.compile(
     r"hf_[A-Za-z0-9]{24,}|npm_[A-Za-z0-9]{24,}|pypi-[A-Za-z0-9_-]{30,})\b"
 )
 _PRIVATE_KEY_BODY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*", re.I)
+# PEM payload lines are base64-only; redact them conservatively even when a finding
+# excerpt contains the body line but not the BEGIN marker.
+_PRIVATE_KEY_MATERIAL_LINE = re.compile(r"(?m)^([ \\t]*)[A-Za-z0-9+/]{32,}={0,2}([ \\t]*)$")
 
 
 def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     """Return a bounded source line with credentials and direct identifiers removed."""
     value = source_line.rstrip("\r\n")
     value = _PRIVATE_KEY_BODY.sub("[REDACTED PRIVATE KEY MATERIAL]", value)
+    value = _PRIVATE_KEY_MATERIAL_LINE.sub(r"\\1[REDACTED PRIVATE KEY MATERIAL]\\2", value)
     value = _AUTHORIZATION_HEADER.sub("Authorization: [REDACTED]", value)
     value = _SECRET_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _IDENTITY_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
