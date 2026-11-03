@@ -45,3 +45,19 @@ def test_binary_document_formats_are_not_selected_for_text_scanning():
     assert not is_textual_path("docs/specification.docx")
     assert not is_textual_path("Unreal/Content/Map.umap")
     assert is_textual_path("Unreal/Config/Game.uproject")
+
+
+def test_component_and_localization_formats_are_recognized_as_text():
+    from project_discovery.language_catalog import is_source_path, is_textual_path
+
+    assert detect_language("web/App.vue") == "Vue"
+    assert detect_language("web/Widget.svelte") == "Svelte"
+    assert detect_language("web/Page.astro") == "Astro"
+    assert is_source_path("web/App.vue")
+    assert is_source_path("web/Widget.svelte")
+    assert is_source_path("web/Page.astro")
+    for path in (
+        "locale/fr/app.po", "lib/l10n/app_en.arb",
+        "Resources/en.lproj/Localizable.strings", "locales/en/app.ftl",
+    ):
+        assert is_textual_path(path), path

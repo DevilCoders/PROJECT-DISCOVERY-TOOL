@@ -208,3 +208,20 @@ def test_grammar_mapping_covers_sixty_plus_languages_and_matches_recognition_cat
     recognized = {item["name"] for item in language_catalog()}
     assert len(GRAMMARS) >= 60
     assert set(GRAMMARS) <= recognized
+
+
+def test_generic_import_inventory_covers_use_statement_nodes():
+    from types import SimpleNamespace
+    from project_discovery.analyzers.tree_sitter_analyzer import _extract_imports
+
+    point = SimpleNamespace(row=4, column=0)
+    statement = SimpleNamespace(
+        type="use_statement", text=b"use Ada.Text_IO;", children=[], start_point=point,
+    )
+    root = SimpleNamespace(type="source_file", children=[statement])
+
+    imports = _extract_imports(root, "grammar_without_explicit_import_map")
+
+    assert imports == [{
+        "target": "Ada.Text_IO", "line": 5, "node_type": "use_statement",
+    }]

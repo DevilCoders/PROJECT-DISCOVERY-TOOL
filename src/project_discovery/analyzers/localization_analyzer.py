@@ -188,7 +188,10 @@ class LocalizationAnalyzer(Analyzer):
                         if (match := re.match(r"^\s*([A-Za-z0-9_.-]+)\s*:", line))
                     ]
                 else:
-                    keys, untranslated = _json_keys(yaml.safe_load(source))
+                    try:
+                        keys, untranslated = _json_keys(yaml.safe_load(source))
+                    except yaml.YAMLError as exc:
+                        raise ValueError(f"YAML localization parse error: {exc}") from exc
                 format_name = "YAML translation catalog"
             else:
                 return []

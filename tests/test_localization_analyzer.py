@@ -84,3 +84,30 @@ def test_malformed_catalog_is_unknown(tmp_path: Path):
     findings = _scan(tmp_path, "locales/en.json", "{broken")
     assert findings[0].confidence == "UNKNOWN"
     assert "parse error" in findings[0].title.lower()
+
+
+def test_yaml_catalog_and_invalid_yaml_are_handled(tmp_path: Path):
+    valid = _scan(
+        tmp_path, "locales/es/common.yaml",
+        "navigation:\n  home: Inicio\n  empty: ''\n",
+    )
+    invalid = _scan(tmp_path, "locales/it/broken.yaml", "items: [unterminated\n")
+    assert "2 key(s)" in valid[0].detail
+    assert "1 explicitly empty" in valid[0].detail
+    assert invalid[0].confidence == "UNKNOWN"
+    assert "parse error" in invalid[0].title.lower()
+
+
+def test_resx_and_properties_catalogs_are_supported(tmp_path: Path):
+    resx = _scan(
+        tmp_path, "Resources/App.fr.resx",
+        '<root><data name="Welcome"><value>Bonjour</value></data>'
+        '<data name="Missing"><value></value></data></root>',
+    )
+    properties = _scan(
+        tmp_path, "locales/fr/messages.properties",
+        "welcome=Bonjour\nmissing=\n",
+    )
+    assert "2 key(s)" in resx[0].detail
+    assert "1 explicitly empty" in resx[0].detail
+    assert "2 key(s)" in properties[0].detail

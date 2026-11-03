@@ -191,7 +191,8 @@ def _extract_imports(root_node, grammar: str) -> list[dict[str, str | int]]:
         generic_import_node = (
             "import" in node_type
             or "include" in node_type
-            or node_type in {"use_declaration", "using_directive"}
+            or node_type.startswith("use_")
+            or node_type == "using_directive"
         )
         if node.type in node_types or generic_import_node:
             raw = node.text
