@@ -13,6 +13,7 @@ from .docs_analyzer import MarkdownAnalyzer
 from .ml_analyzer import AIMLIntelligenceAnalyzer
 from .document_analyzer import DocumentAnalyzer
 from .lockfile_analyzer import LockfileAnalyzer
+from .license_analyzer import LicenseAnalyzer
 from .prisma_analyzer import PrismaSchemaAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .ros_analyzer import ROSIntelligenceAnalyzer
@@ -36,6 +37,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         DocumentAnalyzer(),
         DependencyManifestAnalyzer(),
         LockfileAnalyzer(),
+        LicenseAnalyzer(),
         ConfigurationAnalyzer(),
         APIContractAnalyzer(),
         SQLSchemaAnalyzer(),
