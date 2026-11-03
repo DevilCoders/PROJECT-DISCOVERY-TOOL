@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import read_python_source
+from ..source_utils import redact_source_excerpt
 
 
 _MAX_IDENTITY_SOURCE_BYTES = 16 * 1024 * 1024
@@ -174,18 +174,27 @@ class IdentityIntelligenceAnalyzer(Analyzer):
             else:
                 source = raw_source.decode("utf-8")
         except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
-            from ..source_utils import redact_source_excerpt
             return [Finding(
                 "identity", f"Identity analysis unavailable: {record.path}",
                 redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
                 confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
             )]
+        source_lines = source.splitlines()
         frameworks: dict[str, set[int]] = {}
         markers: dict[str, set[int]] = {}
         if record.extension in {".py", ".pyi"}:
-            frameworks, markers = _python_markers(source, record.path)
+            try:
+                frameworks, markers = _python_markers(source, record.path)
+            except (RecursionError, MemoryError) as exc:
+                return [Finding(
+                    "identity", f"Identity AST resource limit: {record.path}",
+                    f"{type(exc).__name__}: Python identity parsing could not complete within "
+                    "available interpreter resources.",
+                    confidence="UNKNOWN", evidence=[record.path],
+                    analyzer=self.name, severity="LOW",
+                )]
         else:
-            lines = source.splitlines()
+            lines = source_lines
             for framework, package in _FRAMEWORKS.items():
                 locations = {
                     number for number, line in enumerate(lines, 1)
@@ -195,7 +204,7 @@ class IdentityIntelligenceAnalyzer(Analyzer):
                     frameworks[package] = locations
         for category, pattern, _, _ in _PATTERNS:
             locations = {
-                number for number, line in enumerate(source.splitlines(), 1)
+                number for number, line in enumerate(source_lines, 1)
                 if pattern.search(line)
             }
             if locations:
