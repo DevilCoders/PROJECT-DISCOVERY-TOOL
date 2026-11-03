@@ -11,9 +11,11 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import SourceBudgetExceeded, read_text_bounded
 
 
 _CAPABILITY_CACHE: dict[str, str] = {}
+_MAX_TREE_SITTER_FILE_BYTES = 16 * 1024 * 1024
 
 
 GRAMMARS = {
@@ -273,6 +275,17 @@ class TreeSitterAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > _MAX_TREE_SITTER_FILE_BYTES:
+            return [Finding(
+                "code",
+                f"Tree-sitter resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the Tree-sitter parser's "
+                f"{_MAX_TREE_SITTER_FILE_BYTES:,}-byte content budget.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"size: {record.size_bytes} bytes"],
+                analyzer=self.name,
+                severity="LOW",
+            )]
         grammar = GRAMMARS[record.language]
         try:
             pack = importlib.import_module("tree_sitter_language_pack")
@@ -299,7 +312,7 @@ class TreeSitterAnalyzer(Analyzer):
                     analyzer=self.name,
                 )]
             parser = pack.get_parser(grammar)
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(path, _MAX_TREE_SITTER_FILE_BYTES)
             tree = parser.parse(source)
             if tree is None:
                 raise RuntimeError("Tree-sitter parser returned no syntax tree")
@@ -307,6 +320,16 @@ class TreeSitterAnalyzer(Analyzer):
             node_count, max_depth, errors, top_level = _walk_tree(root)
             declarations = _extract_declarations(root, grammar)
             imports = _extract_imports(root, grammar)
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "code",
+                f"Tree-sitter resource limit: {record.path}",
+                str(exc),
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            )]
         except Exception as exc:
             return [Finding(
                 "code",
