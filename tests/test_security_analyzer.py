@@ -169,3 +169,11 @@ def test_model_boundary_redacts_prefixed_secret_and_identity_keys():
     for value in (token, "Alice", email):
         assert value not in evidence.code
     assert "[REDACTED]" in evidence.code
+
+
+def test_authorization_bearer_value_is_redacted_without_leaving_token_tail():
+    from project_discovery.source_utils import redact_source_excerpt
+
+    token = "bearer-secret-value-0123456789"
+    excerpt = redact_source_excerpt(f"Authorization: Bearer {token}")
+    assert token not in excerpt
