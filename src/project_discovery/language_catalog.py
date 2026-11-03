@@ -108,6 +108,22 @@ _SPECS = (
     LanguageSpec("PDF", (".pdf",), family="document"),
     LanguageSpec("Word Document", (".docx",), family="document"),
     LanguageSpec("Text", (".txt",), family="documentation"),
+    LanguageSpec("GDScript", (".gd",), family="game_source"),
+    LanguageSpec("Godot Scene", (".tscn",), family="game_source"),
+    LanguageSpec("Godot Resource", (".tres",), family="game_source"),
+    LanguageSpec("Godot Shader", (".gdshader",), family="shader"),
+    LanguageSpec("Unity Scene", (".unity",), family="game_source"),
+    LanguageSpec("Unity Prefab", (".prefab",), family="game_source"),
+    LanguageSpec("Unity Asset YAML", (".asset",), family="game_source"),
+    LanguageSpec("Unreal Project", (".uproject", ".uplugin"), family="configuration"),
+    LanguageSpec("Unreal Binary Asset", (".uasset", ".umap"), family="binary_asset"),
+    LanguageSpec("GameMaker Language", (".gml",), family="game_source"),
+    LanguageSpec("GameMaker Project", (".yyp", ".yy"), family="game_source"),
+    LanguageSpec("Defold Script", (".script",), family="game_source"),
+    LanguageSpec("Defold Collection", (".collection",), family="game_source"),
+    LanguageSpec("Ren'Py", (".rpy",), family="game_source"),
+    LanguageSpec("Roblox XML Model", (".rbxlx", ".rbxmx"), family="game_source"),
+    LanguageSpec("LÖVE Configuration", filenames=("conf.lua",), family="build"),
 )
 
 _BY_EXTENSION: dict[str, LanguageSpec] = {}
@@ -164,10 +180,10 @@ def recognized_language_count() -> int:
 
 
 # Shared language-family selectors. Recognition does not imply semantic parser support.
-_SOURCE_FAMILIES = frozenset({"source", "schema", "low_level", "gpu", "shader"})
+_SOURCE_FAMILIES = frozenset({"source", "schema", "low_level", "gpu", "shader", "game_source"})
 _TEXT_FAMILIES = frozenset({
     "source", "schema", "markup", "stylesheet", "documentation", "data",
-    "configuration", "build", "low_level", "gpu", "shader", "notebook",
+    "configuration", "build", "low_level", "gpu", "shader", "notebook", "game_source",
 })
 _EXTRA_TEXT_FILENAMES = frozenset({
     ".env", ".npmrc", ".yarnrc", ".editorconfig", ".gitignore", ".gitattributes",

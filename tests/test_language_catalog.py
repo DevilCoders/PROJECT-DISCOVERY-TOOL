@@ -4,6 +4,9 @@ from project_discovery.language_catalog import detect_language, language_catalog
 def test_ambiguous_extensions_are_not_misclassified():
     assert detect_language("legacy/module.m") == "Objective-C / MATLAB (ambiguous)"
     assert detect_language("rtl/top.v") == "V / Verilog (ambiguous)"
+    assert detect_language("game/player.gd") == "GDScript"
+    assert detect_language("game/Scenes/Main.tscn") == "Godot Scene"
+    assert detect_language("Unreal/Content/Map.umap") == "Unreal Binary Asset"
 
 
 def test_catalog_reports_optional_parser_backend():
@@ -40,3 +43,5 @@ def test_binary_document_formats_are_not_selected_for_text_scanning():
     assert is_textual_path("config/settings.yaml")
     assert not is_textual_path("docs/manual.pdf")
     assert not is_textual_path("docs/specification.docx")
+    assert not is_textual_path("Unreal/Content/Map.umap")
+    assert is_textual_path("Unreal/Config/Game.uproject")

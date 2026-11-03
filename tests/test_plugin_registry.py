@@ -18,6 +18,7 @@ def test_builtin_registry_returns_unique_stable_names():
     assert "api-endpoints" in names
     assert "identity-intelligence" in names
     assert "mobile-intelligence" in names
+    assert "game-engine-intelligence" in names
     assert result.diagnostics == []
 
 
