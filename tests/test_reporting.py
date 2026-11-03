@@ -143,7 +143,7 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "GPU CPU fallbacks: 1" in content
     assert content.startswith("# Project Discovery Report\n")
     assert content.endswith("\n")
-    assert "\\\\n" not in content
+    assert "\\n" not in content
 
 
 def test_markdown_writer_streams_without_compatibility_string_builder(tmp_path: Path, monkeypatch):
@@ -156,7 +156,7 @@ def test_markdown_writer_streams_without_compatibility_string_builder(tmp_path: 
     path = write_reports(_result(), tmp_path, {"markdown"})[0]
     content = path.read_text(encoding="utf-8")
     assert "## Findings" in content
-    assert content.endswith("\\n")
+    assert content.endswith("\n")
 
 
 def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
