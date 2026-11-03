@@ -27,6 +27,7 @@
 - [x] Metadata-aware cache validation, legacy migration and stale-entry pruning
 - [x] Initial static AI/ML framework, training/inference marker and artifact discovery
 - [x] Initial ROS package, node API, launch and interface inventory
+- [x] Initial Docker, Compose, Kubernetes, Helm, Terraform, CloudFormation and CI/CD manifest inventory
 - [ ] Dedicated ROS 1/ROS 2 package, node, topic, service, action and launch analysis
 - [ ] Rich terminal UI and CLI ergonomics
 - [ ] CI coverage gates

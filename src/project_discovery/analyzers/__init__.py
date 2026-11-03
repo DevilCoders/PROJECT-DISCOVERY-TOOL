@@ -12,11 +12,11 @@ from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
 from .ml_analyzer import AIMLIntelligenceAnalyzer
 from .document_analyzer import DocumentAnalyzer
+from .deployment_analyzer import DeploymentIntelligenceAnalyzer
 from .lockfile_analyzer import LockfileAnalyzer
 from .license_analyzer import LicenseAnalyzer
 from .prisma_analyzer import PrismaSchemaAnalyzer
 from .python_analyzer import PythonAnalyzer
-from .python_security_analyzer import PythonSecurityAnalyzer
 from .ros_analyzer import ROSIntelligenceAnalyzer
 from .security_analyzer import SecretPatternAnalyzer
 from .sql_analyzer import SQLSchemaAnalyzer
@@ -34,9 +34,9 @@ def load_analyzers() -> AnalyzerLoadResult:
     """Load built-ins and validated third-party plugins without hiding failures."""
     analyzers: list[Analyzer] = [
         PythonAnalyzer(),
-        PythonSecurityAnalyzer(),
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
+        DeploymentIntelligenceAnalyzer(),
         DependencyManifestAnalyzer(),
         LockfileAnalyzer(),
         LicenseAnalyzer(),

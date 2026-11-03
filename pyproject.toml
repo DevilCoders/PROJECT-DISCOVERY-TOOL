@@ -20,13 +20,16 @@ dev = [
     "ruff>=0.5",
     "build>=1.2",
     "twine>=5.0",
+    "PyYAML>=6.0,<7",
 ]
 polyglot = ["tree-sitter-language-pack>=1.23,<2"]
+infrastructure = ["PyYAML>=6.0,<7"]
 documents = ["pypdf>=5,<7", "python-docx>=1.1,<2"]
 all = [
     "tree-sitter-language-pack>=1.23,<2",
     "pypdf>=5,<7",
     "python-docx>=1.1,<2",
+    "PyYAML>=6.0,<7",
 ]
 
 [tool.setuptools.packages.find]
