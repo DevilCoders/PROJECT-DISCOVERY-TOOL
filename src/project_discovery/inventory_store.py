@@ -6,6 +6,7 @@ metadata records only; target file contents are never copied into the inventory 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
@@ -25,12 +26,20 @@ class InventoryStore:
     def __init__(self, path: Path, *, batch_size: int = 512) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
-        self.path = Path(path)
+        self.path = Path(path).expanduser().absolute()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Do not let SQLite silently follow a pre-planted database symlink.
+        if self.path.is_symlink():
+            raise ValueError("inventory database path must not be a symlink")
         self.batch_size = batch_size
         self._pending: list[tuple[str, str, str]] = []
         self._closed = False
-        self.db = sqlite3.connect(self.path)
+        self.db = sqlite3.connect(self.path, timeout=30.0)
+        if os.name == "posix":
+            # Inventory databases contain local project paths and metadata.
+            # Keep the database private to the current account by default.
+            os.chmod(self.path, 0o600)
+        self.db.execute("PRAGMA busy_timeout=30000")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute("PRAGMA temp_store=MEMORY")
@@ -137,12 +146,17 @@ class InventoryStore:
             "SELECT payload FROM inventory_records WHERE kind=? ORDER BY path COLLATE BINARY",
             (kind,),
         )
-        while True:
-            rows = cursor.fetchmany(fetch_size)
-            if not rows:
-                break
-            for (payload,) in rows:
-                yield json.loads(payload)
+        try:
+            while True:
+                rows = cursor.fetchmany(fetch_size)
+                if not rows:
+                    break
+                for (payload,) in rows:
+                    yield json.loads(payload)
+        finally:
+            # Callers commonly stop after a page; release the SQLite read
+            # cursor immediately instead of waiting for generator collection.
+            cursor.close()
 
     def set_metadata(self, key: str, value: Any) -> None:
         if self._closed:
@@ -158,6 +172,8 @@ class InventoryStore:
             )
 
     def get_metadata(self, key: str, default: Any = None) -> Any:
+        if self._closed:
+            raise RuntimeError("inventory store is closed")
         row = self.db.execute(
             "SELECT value FROM inventory_metadata WHERE key=?", (key,)
         ).fetchone()
