@@ -19,7 +19,7 @@ _GRAPHQL_OPERATION = re.compile(
     r"(?m)^\s*(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 _PROTO_DECLARATION = re.compile(
-    r"(?m)^\s*(service|rpc|message|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?m)\b(service|rpc|message|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 _THRIFT_DECLARATION = re.compile(
     r"(?m)^\s*(service|struct|exception|enum|typedef)\s+([A-Za-z_][A-Za-z0-9_]*)"
