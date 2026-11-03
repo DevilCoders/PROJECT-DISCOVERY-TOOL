@@ -3,6 +3,7 @@ from importlib.metadata import entry_points
 
 from .api_analyzer import APIContractAnalyzer
 from .base import Analyzer
+from .build_analyzer import BuildManifestAnalyzer
 from .configuration_analyzer import ConfigurationAnalyzer
 from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
@@ -10,6 +11,7 @@ from .document_analyzer import DocumentAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .security_analyzer import SecretPatternAnalyzer
 from .sql_analyzer import SQLSchemaAnalyzer
+from .test_analyzer import TestDiscoveryAnalyzer
 from .tree_sitter_analyzer import TreeSitterAnalyzer
 
 
@@ -22,6 +24,8 @@ def load_analyzers() -> list[Analyzer]:
         ConfigurationAnalyzer(),
         APIContractAnalyzer(),
         SQLSchemaAnalyzer(),
+        TestDiscoveryAnalyzer(),
+        BuildManifestAnalyzer(),
         SecretPatternAnalyzer(),
         TreeSitterAnalyzer(),
     ]
