@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from .language_catalog import detect_language, is_source_path, is_textual_path
 from .native_backend import count_byte as native_count_byte
 from .native_backend import detect_signature as native_detect_signature
+from .native_backend import create_walker as native_create_walker
 from .models import (
     DirectoryRecord,
     FileRecord,
@@ -226,6 +227,100 @@ def discover_files(
     return files, stats
 
 
+
+def _discover_with_rust(
+    root: Path,
+    excluded_names: set[str],
+    excluded_paths: set[str],
+    max_file_bytes: int,
+    skip_oversized: bool,
+    directories_by_path: dict[str, DirectoryRecord],
+    files: list[FileRecord],
+    symlinks: list[SymlinkRecord],
+    special_entries: list[SpecialEntryRecord],
+    stats: Counter[str],
+) -> bool:
+    """Consume the optional Rust directory iterator; return False if unavailable."""
+    walker = native_create_walker(root, excluded_names, excluded_paths)
+    if walker is None:
+        return False
+    for relative, kind, size, mode, mtime_ns, hidden, target, error, depth in walker:
+        stats["entry_count"] += 1
+        parent = PurePosixPath(relative).parent.as_posix() or "."
+        parent_record = directories_by_path.get(parent)
+        if parent_record is not None:
+            parent_record.direct_child_count += 1
+        if hidden:
+            stats["hidden_entry_count"] += 1
+        if kind == "directory_error":
+            record = directories_by_path.get(relative)
+            if record is not None:
+                record.error = error or "Directory read failed"
+            stats["walk_errors"] += 1
+            continue
+        if kind == "entry_error":
+            stats["entry_errors"] += 1
+            files.append(FileRecord(
+                relative, 0, Path(relative).suffix.lower(), "Unknown",
+                error=error or "Entry metadata unavailable", is_hidden=hidden,
+            ))
+            continue
+        if kind == "symlink":
+            scope = _symlink_scope(root, root / relative, target)
+            symlinks.append(SymlinkRecord(
+                relative, target, scope, target_state="unverified",
+                is_hidden=hidden, permissions=mode,
+            ))
+            stats["symlink_count"] += 1
+            stats[f"symlink_scope:{scope}"] += 1
+            continue
+        if kind == "directory":
+            name = PurePosixPath(relative).name
+            marker = name.casefold() if name.casefold() in _DEVELOPMENT_MARKERS else None
+            exclusion = _exclusion_match(relative, name, excluded_names, excluded_paths)
+            record = DirectoryRecord(
+                relative, depth, is_hidden=hidden, permissions=mode,
+                development_marker=marker, pruned=exclusion is not None,
+                prune_reason=exclusion, error=error,
+            )
+            directories_by_path[relative] = record
+            if marker:
+                stats["development_directory_count"] += 1
+                stats[f"development_dir:{marker}"] += 1
+            if exclusion:
+                stats["pruned_directory_count"] += 1
+                stats[f"pruned_dir:{name.casefold()}"] += 1
+            if error:
+                stats["walk_errors"] += 1
+            continue
+        if kind == "file":
+            path = root / relative
+            file_type = _file_type(path, relative)
+            language = detect_language(relative)
+            record = FileRecord(
+                relative, size, Path(relative).suffix.lower(), language,
+                file_type=file_type, size_bucket=_size_bucket(size),
+                is_hidden=hidden, permissions=mode, mtime_ns=mtime_ns,
+            )
+            if size > max_file_bytes and skip_oversized:
+                record.content_skipped_reason = (
+                    f"Explicit --skip: exceeds {max_file_bytes} bytes"
+                )
+                stats["oversized_content_skipped"] += 1
+            files.append(record)
+            stats["total_bytes"] += size
+            stats[f"file_type:{file_type}"] += 1
+            stats[f"size_bucket:{record.size_bucket}"] += 1
+            stats[f"language:{language}"] += 1
+            continue
+        special_entries.append(SpecialEntryRecord(
+            relative, kind, is_hidden=hidden, permissions=mode, size_bytes=size,
+        ))
+        stats["special_entry_count"] += 1
+        stats[f"special_type:{kind}"] += 1
+    return True
+
+
 def discover_inventory(
     root: Path,
     *,
@@ -266,7 +361,11 @@ def discover_inventory(
     special_entries: list[SpecialEntryRecord] = []
     pending: list[tuple[Path, str, int]] = [(root, ".", 0)]
 
-    while pending:
+    used_rust = _discover_with_rust(
+        root, excluded_names, excluded_paths, max_file_bytes, skip_oversized,
+        directories_by_path, files, symlinks, special_entries, stats,
+    )
+    while pending if not used_rust else False:
         current, relative_dir, depth = pending.pop()
         directory_record = directories_by_path[relative_dir]
         try:
