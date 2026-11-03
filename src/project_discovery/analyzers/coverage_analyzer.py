@@ -9,6 +9,10 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import SourceBudgetExceeded, read_text_bounded
+
+
+_MAX_COVERAGE_ARTIFACT_BYTES = 64 * 1024 * 1024
 
 
 _COVERAGE_NAMES = {
@@ -190,8 +194,16 @@ class CoverageArtifactAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > _MAX_COVERAGE_ARTIFACT_BYTES:
+            return [Finding(
+                "coverage", f"Coverage artifact resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the coverage parser's "
+                f"{_MAX_COVERAGE_ARTIFACT_BYTES:,}-byte content budget.",
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(path, _MAX_COVERAGE_ARTIFACT_BYTES)
             name = Path(record.path).name.lower()
             if name in {"lcov.info", "coverage.lcov"} or path.suffix.lower() == ".lcov":
                 summary, format_name = _lcov_summary(source), "LCOV"
@@ -203,6 +215,12 @@ class CoverageArtifactAnalyzer(Analyzer):
             else:
                 summary = _xml_summary(ET.fromstring(source))
                 format_name = "XML coverage report"
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "coverage", f"Coverage artifact resource limit: {record.path}", str(exc),
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ET.ParseError, ValueError) as exc:
             return [Finding(
                 "coverage", f"Coverage report parse error: {record.path}",
