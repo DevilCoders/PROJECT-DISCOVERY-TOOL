@@ -106,3 +106,22 @@ def test_yaml_and_nix_config_keys_are_inventoried(tmp_path: Path):
     )
     assert yaml
     assert nix
+
+
+def test_configuration_security_findings_include_redacted_code_and_impact(tmp_path: Path):
+    findings = _scan(
+        tmp_path,
+        "compose.yaml",
+        "services:\n"
+        "  app:\n"
+        "    privileged: true\n"
+        "    environment:\n"
+        "      API_TOKEN: super-secret-value-should-not-leak\n",
+    )
+    risky = next(item for item in findings if item.category == "security")
+    assert risky.code_evidence
+    assert risky.code_evidence[0].line_number == 3
+    assert "privileged: true" in risky.code_evidence[0].code
+    assert "privileges" in risky.impact or "host" in risky.impact
+    assert risky.recommendation
+    assert "super-secret-value-should-not-leak" not in repr([x.to_dict() for x in findings])
