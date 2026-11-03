@@ -9,7 +9,10 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import SourceBudgetExceeded, read_text_bounded
 
+
+_MAX_LOCKFILE_INVENTORY_BYTES = 128 * 1024 * 1024
 
 _LOCK_NAMES = {
     "package-lock.json", "composer.lock", "cargo.lock", "poetry.lock",
@@ -74,8 +77,17 @@ class LockfileAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         name = Path(record.path).name.lower()
+        if record.size_bytes > _MAX_LOCKFILE_INVENTORY_BYTES:
+            return [Finding(
+                "dependency",
+                f"Lockfile inventory resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the lockfile inventory "
+                f"{_MAX_LOCKFILE_INVENTORY_BYTES:,}-byte content budget.",
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
         try:
-            content = path.read_text(encoding="utf-8")
+            content = read_text_bounded(path, _MAX_LOCKFILE_INVENTORY_BYTES)
             if name in {"package-lock.json", "composer.lock", "pipfile.lock"}:
                 packages = _json_packages(json.loads(content), name)
             elif name in {"cargo.lock", "poetry.lock"}:
@@ -112,6 +124,12 @@ class LockfileAnalyzer(Analyzer):
                 packages = _MIX_PACKAGE.findall(content)
             else:
                 packages = []
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "dependency", f"Lockfile inventory resource limit: {record.path}",
+                str(exc), confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
             return [Finding(
                 "dependency",
