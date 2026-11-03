@@ -1,8 +1,7 @@
 """Static Python module and import graph extraction.
 
-This module parses source with :mod:`ast`; it never imports or executes target code.
-Only imports that resolve unambiguously to an inventoried project module become
-confirmed graph edges. Unresolved imports are retained as UNKNOWN evidence.
+Target source is parsed with :mod:`ast`; it is never imported or executed.
+Only imports resolved to inventoried modules become confirmed graph edges.
 """
 from __future__ import annotations
 
@@ -30,44 +29,49 @@ def _module_name(relative_path: str) -> str | None:
 def _strongly_connected_components(
     nodes: list[str], adjacency: dict[str, set[str]]
 ) -> list[list[str]]:
-    """Return deterministic Tarjan SCCs, including only cyclic components."""
-    index = 0
-    indices: dict[str, int] = {}
-    lowlinks: dict[str, int] = {}
-    stack: list[str] = []
-    on_stack: set[str] = set()
+    """Return cyclic SCCs using iterative Kosaraju traversal."""
+    visited: set[str] = set()
+    finished: list[str] = []
+    for start in sorted(nodes):
+        if start in visited:
+            continue
+        stack: list[tuple[str, bool]] = [(start, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                finished.append(node)
+                continue
+            if node in visited:
+                continue
+            visited.add(node)
+            stack.append((node, True))
+            for neighbor in sorted(adjacency.get(node, set()), reverse=True):
+                if neighbor not in visited:
+                    stack.append((neighbor, False))
+
+    reverse: dict[str, set[str]] = {node: set() for node in nodes}
+    for source, targets in adjacency.items():
+        for target in targets:
+            reverse.setdefault(target, set()).add(source)
+
+    assigned: set[str] = set()
     components: list[list[str]] = []
-
-    def visit(node: str) -> None:
-        nonlocal index
-        indices[node] = index
-        lowlinks[node] = index
-        index += 1
-        stack.append(node)
-        on_stack.add(node)
-
-        for neighbor in sorted(adjacency.get(node, set())):
-            if neighbor not in indices:
-                visit(neighbor)
-                lowlinks[node] = min(lowlinks[node], lowlinks[neighbor])
-            elif neighbor in on_stack:
-                lowlinks[node] = min(lowlinks[node], indices[neighbor])
-
-        if lowlinks[node] == indices[node]:
-            component: list[str] = []
-            while True:
-                member = stack.pop()
-                on_stack.remove(member)
-                component.append(member)
-                if member == node:
-                    break
-            component.sort()
-            if len(component) > 1 or node in adjacency.get(node, set()):
-                components.append(component)
-
-    for node in sorted(nodes):
-        if node not in indices:
-            visit(node)
+    for start in reversed(finished):
+        if start in assigned:
+            continue
+        component: list[str] = []
+        stack = [start]
+        assigned.add(start)
+        while stack:
+            node = stack.pop()
+            component.append(node)
+            for neighbor in sorted(reverse.get(node, set()), reverse=True):
+                if neighbor not in assigned:
+                    assigned.add(neighbor)
+                    stack.append(neighbor)
+        component.sort()
+        if len(component) > 1 or start in adjacency.get(start, set()):
+            components.append(component)
     return sorted(components)
 
 
@@ -91,17 +95,31 @@ def analyze_python_dependencies(
     duplicate_modules = {
         name: sorted(paths) for name, paths in module_paths.items() if len(paths) > 1
     }
+    known_modules = set(unique_modules) | set(duplicate_modules)
     edges: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
     adjacency: dict[str, set[str]] = {name: set() for name in unique_modules}
     findings: list[Finding] = []
 
+    def record_unresolved(
+        source: str, path: str, line: int, target: str, reason: str
+    ) -> None:
+        item: dict[str, Any] = {
+            "source": source, "path": path, "line": line, "import": target,
+            "reason": reason, "confidence": "UNKNOWN",
+        }
+        if target in duplicate_modules:
+            item["candidates"] = duplicate_modules[target]
+        unresolved.append(item)
+
     for record, source_module in sorted(eligible, key=lambda item: item[0].path):
         if source_module not in unique_modules:
             continue
-        source_path = root / record.path
         try:
-            tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=record.path)
+            tree = ast.parse(
+                (root / record.path).read_text(encoding="utf-8"),
+                filename=record.path,
+            )
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             unresolved.append({
                 "source": source_module,
@@ -116,80 +134,80 @@ def analyze_python_dependencies(
         is_package = Path(record.path).stem == "__init__"
         package = source_module if is_package else source_module.rpartition(".")[0]
         for node in ast.walk(tree):
-            targets: list[str] = []
-            import_text = ""
+            imports: list[tuple[str, str]] = []
             if isinstance(node, ast.Import):
-                for alias in node.names:
-                    import_text = alias.name
-                    targets.append(alias.name)
+                imports.extend((alias.name, alias.name) for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 import_text = "." * node.level + (node.module or "")
                 if node.level:
                     if not package:
-                        unresolved.append({
-                            "source": source_module, "path": record.path,
-                            "line": node.lineno, "import": import_text,
-                            "reason": "relative_import_without_package_context",
-                            "confidence": "UNKNOWN",
-                        })
+                        record_unresolved(
+                            source_module, record.path, node.lineno, import_text,
+                            "relative_import_without_package_context",
+                        )
                         continue
                     try:
                         base = resolve_name(import_text, package)
                     except ImportError:
-                        unresolved.append({
-                            "source": source_module, "path": record.path,
-                            "line": node.lineno, "import": import_text,
-                            "reason": "relative_import_resolution_failed",
-                            "confidence": "UNKNOWN",
-                        })
+                        record_unresolved(
+                            source_module, record.path, node.lineno, import_text,
+                            "relative_import_resolution_failed",
+                        )
                         continue
                 else:
                     base = node.module or ""
-                if base:
-                    targets.append(base)
-                # "from package import child" may refer to a real local submodule.
-                for alias in node.names:
-                    if alias.name != "*":
-                        targets.append(f"{base}.{alias.name}" if base else alias.name)
 
-            for target in sorted(set(targets)):
-                if target in unique_modules:
-                    target_module = target
-                elif target in duplicate_modules:
-                    unresolved.append({
-                        "source": source_module, "path": record.path,
-                        "line": node.lineno, "import": target,
-                        "reason": "ambiguous_duplicate_module",
-                        "candidates": duplicate_modules[target],
-                        "confidence": "UNKNOWN",
-                    })
+                candidates: list[str] = []
+                if base and base in known_modules and base != source_module:
+                    candidates.append(base)
+                child_modules = [
+                    f"{base}.{alias.name}" for alias in node.names
+                    if alias.name != "*" and f"{base}.{alias.name}" in known_modules
+                ] if base else [
+                    alias.name for alias in node.names if alias.name in known_modules
+                ]
+                candidates.extend(child_modules)
+                if not candidates and base in known_modules and base != source_module:
+                    candidates.append(base)
+                if not candidates:
+                    record_unresolved(
+                        source_module, record.path, node.lineno, base or import_text,
+                        "not_resolved_to_inventoried_module",
+                    )
                     continue
-                else:
-                    unresolved.append({
-                        "source": source_module, "path": record.path,
-                        "line": node.lineno, "import": target or import_text,
-                        "reason": "not_resolved_to_inventoried_module",
-                        "confidence": "UNKNOWN",
-                    })
+                imports.extend((target, import_text) for target in sorted(set(candidates)))
+
+            for target, import_text in imports:
+                if target in duplicate_modules:
+                    record_unresolved(
+                        source_module, record.path, node.lineno, target,
+                        "ambiguous_duplicate_module",
+                    )
+                    continue
+                if target not in unique_modules:
+                    record_unresolved(
+                        source_module, record.path, node.lineno, target,
+                        "not_resolved_to_inventoried_module",
+                    )
                     continue
                 edge = {
                     "source": source_module,
-                    "target": target_module,
+                    "target": target,
                     "source_path": record.path,
-                    "target_path": unique_modules[target_module],
+                    "target_path": unique_modules[target],
                     "line": node.lineno,
                     "import": import_text,
                     "confidence": "CONFIRMED",
                 }
                 if edge not in edges:
                     edges.append(edge)
-                    adjacency[source_module].add(target_module)
+                    adjacency[source_module].add(target)
                     findings.append(Finding(
                         "dependency",
-                        f"Internal Python dependency: {source_module} -> {target_module}",
+                        f"Internal Python dependency: {source_module} -> {target}",
                         f"Static import resolves to an inventoried module at line {node.lineno}.",
                         confidence="CONFIRMED",
-                        evidence=[f"{record.path}:{node.lineno}", unique_modules[target_module]],
+                        evidence=[f"{record.path}:{node.lineno}", unique_modules[target]],
                         analyzer="python-module-graph",
                     ))
 
