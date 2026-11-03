@@ -166,6 +166,21 @@ def _file_type(path: Path, relative_path: str) -> str:
     return "binary/unclassified"
 
 
+
+def _symlink_scope(root: Path, link_path: Path, target: str) -> str:
+    """Classify a symlink target lexically without resolving or stat-following it."""
+    try:
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = link_path.parent / candidate
+        normalized_root = os.path.abspath(os.path.normpath(str(root)))
+        normalized_target = os.path.abspath(os.path.normpath(str(candidate)))
+        common = os.path.commonpath((normalized_root, normalized_target))
+        return "internal" if os.path.normcase(common) == os.path.normcase(normalized_root) else "external"
+    except (OSError, ValueError):
+        return "unknown"
+
+
 def _normalise_exclusions(ignores: set[str] | None) -> tuple[set[str], set[str]]:
     names: set[str] = set()
     paths: set[str] = set()
@@ -271,17 +286,11 @@ def discover_inventory(
                 if stat.S_ISLNK(info.st_mode):
                     try:
                         target = os.readlink(entry.path)
-                        resolved = (Path(entry.path).parent / target).resolve(strict=False)
-                        if not resolved.exists():
-                            scope = "broken"
-                        elif resolved == root or root in resolved.parents:
-                            scope = "internal"
-                        else:
-                            scope = "external"
-                    except (OSError, RuntimeError):
+                        scope = _symlink_scope(root, Path(entry.path), target)
+                    except OSError:
                         target, scope = "", "unknown"
                     symlinks.append(SymlinkRecord(
-                        relative, target, scope, is_hidden=hidden,
+                        relative, target, scope, target_state="unverified", is_hidden=hidden,
                         permissions=stat.S_IMODE(info.st_mode),
                     ))
                     stats["symlink_count"] += 1
