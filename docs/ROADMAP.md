@@ -326,6 +326,7 @@ The baseline is not production-ready:
 - [ ] Full supported OS and Python CI matrix, plus native build matrix where Rust/C modules exist.
 - [ ] Analyzer conformance and regression coverage for all claimed capabilities.
 - [ ] Reproducible source/wheel builds, clean install, package metadata, dependency/license inventory and CLI smoke tests.
+- [ ] Complete descriptor-pinned file reads to close remaining path-based TOCTOU windows; current pre/post `lstat` identity guards reject symlink/non-regular substitutions and detect observed file changes but do not make analyzer path opens race-free.
 - [ ] Security review of filesystem races, symlink handling, parsers, archive streams, plugin execution, cache databases, output paths and HTML serialization.
 - [ ] Verified read-only, offline and privacy guarantees.
 - [ ] Verified secret/PII redaction across every output surface.
