@@ -1,0 +1,168 @@
+use pyo3::prelude::*;
+use std::collections::HashSet;
+use std::fs::{self, ReadDir};
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+#[pyclass]
+struct Walker {
+    root: PathBuf,
+    stack: Vec<(PathBuf, ReadDir, usize)>,
+    excluded_names: HashSet<String>,
+    excluded_paths: HashSet<String>,
+}
+
+fn relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn mode_bits(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn hidden_entry(name: &str, metadata: &fs::Metadata) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return metadata.file_attributes() & 0x2 != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
+fn modified_ns(metadata: &fs::Metadata) -> u64 {
+    metadata.modified().ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+#[pymethods]
+impl Walker {
+    #[new]
+    fn new(root: String, excluded_names: Vec<String>, excluded_paths: Vec<String>) -> PyResult<Self> {
+        let root = PathBuf::from(root);
+        let initial = fs::read_dir(&root)
+            .map_err(|error| pyo3::exceptions::PyOSError::new_err(error.to_string()))?;
+        Ok(Self {
+            root,
+            stack: vec![(PathBuf::new(), initial, 0)],
+            excluded_names: excluded_names.into_iter().map(|value| value.to_lowercase()).collect(),
+            excluded_paths: excluded_paths.into_iter().map(|value| value.to_lowercase()).collect(),
+        })
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> PyResult<Option<(String, String, u64, u32, u64, bool, String, Option<String>, usize)>> {
+        loop {
+            let (parent, next_entry, parent_depth) = match self.stack.last_mut() {
+                Some((path, entries, depth)) => (path.clone(), entries.next(), *depth),
+                None => return Ok(None),
+            };
+
+            let entry = match next_entry {
+                Some(Ok(entry)) => entry,
+                Some(Err(error)) => {
+                    self.stack.pop();
+                    let rel = if parent.as_os_str().is_empty() {
+                        ".".to_string()
+                    } else {
+                        relative_path(&self.root, &parent)
+                    };
+                    return Ok(Some((rel, "directory_error".to_string(), 0, 0, 0, false,
+                                    String::new(), Some(error.to_string()), parent_depth)));
+                }
+                None => {
+                    self.stack.pop();
+                    continue;
+                }
+            };
+
+            let path = entry.path();
+            let rel = relative_path(&self.root, &path);
+            let depth = parent_depth + 1;
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Ok(Some((rel, "entry_error".to_string(), 0, 0, 0, false,
+                                    String::new(), Some(error.to_string()), depth)));
+                }
+            };
+
+            let file_type = metadata.file_type();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let hidden = hidden_entry(&name, &metadata);
+            let size = metadata.len();
+            let mode = mode_bits(&metadata);
+            let mtime = modified_ns(&metadata);
+            let mut target = String::new();
+            let mut error = None;
+            let kind = if file_type.is_symlink() {
+                match fs::read_link(&path) {
+                    Ok(value) => target = value.to_string_lossy().into_owned(),
+                    Err(value) => error = Some(value.to_string()),
+                }
+                "symlink"
+            } else if file_type.is_dir() {
+                let name_key = name.to_lowercase();
+                let path_key = rel.to_lowercase();
+                if !self.excluded_names.contains(&name_key) &&
+                   !self.excluded_paths.contains(&path_key) {
+                    match fs::read_dir(&path) {
+                        Ok(children) => self.stack.push((path.clone(), children, depth)),
+                        Err(value) => error = Some(value.to_string()),
+                    }
+                }
+                "directory"
+            } else if file_type.is_file() {
+                "file"
+            } else {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileTypeExt;
+                    if file_type.is_fifo() { "fifo" }
+                    else if file_type.is_socket() { "socket" }
+                    else if file_type.is_block_device() { "block_device" }
+                    else if file_type.is_char_device() { "character_device" }
+                    else { "unknown_special" }
+                }
+                #[cfg(not(unix))]
+                {
+                    "unknown_special"
+                }
+            };
+
+            return Ok(Some((rel, kind.to_string(), size, mode, mtime, hidden,
+                            target, error, depth)));
+        }
+    }
+}
+
+#[pymodule]
+fn _walker(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Walker>()?;
+    Ok(())
+}
