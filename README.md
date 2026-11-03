@@ -199,7 +199,7 @@ Documentation does not prove implementation. A declared package does not prove i
 PDT is intentionally polyglot. Python is the control plane, not the only implementation language:
 
 - **Python:** CLI/control plane, analyzer orchestration, plugin SDK, capability registry, local cache coordination and shared report schema.
-- **C:** implemented portable native core for bounded byte scanning and hardware capability reporting. The scanner uses it for magic-byte classification; the streaming secret analyzer uses it for native newline counting.
+- **C:** implemented portable native core for bounded byte counting and hardware capability reporting. The streaming secret analyzer uses it for native newline counting.
 - **x86-64 Assembly:** implemented Linux x86-64 SIMD backend using SSE2 compare/movemask and POPCNT, selected only after runtime CPU-feature checks. Other CPUs/platforms use C fallback.
 - **Rust:** an optional PyO3 no-follow filesystem iterator is now integrated into scanner traversal. It uses native directory iterators and bounded active-directory state; persistent indexing and bounded analyzer queues remain outstanding.
 - **C++:** an optional C++17 signature classifier is compiled as a native extension and used by scanner file-type detection, with a Python fallback.
