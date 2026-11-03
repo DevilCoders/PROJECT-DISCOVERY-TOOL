@@ -102,6 +102,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .evidence{padding:12px;border:1px solid #20334b;border-radius:9px;background:#07101d}
 .evidence ul{margin:7px 0 0;padding-left:20px}.evidence li{margin:4px 0}
 .evidence code{color:#9bdcf1;font:11px ui-monospace,monospace;overflow-wrap:anywhere}
+.vulnerable-code{margin:12px 0;border:1px solid #713044;border-radius:10px;background:#180d16;overflow:hidden}
+.vulnerable-code>strong{display:block;padding:9px 12px;background:#351321;color:#fda4af;font:800 10px ui-monospace,monospace;letter-spacing:.12em}
+.vulnerable-line{display:flex;gap:12px;padding:8px 12px;border-top:1px solid #492034;border-left:4px solid #fb7185;background:#24101b}
+.vulnerable-line .line-number{flex:none;color:#fb7185;font:700 11px ui-monospace,monospace}
+.vulnerable-line code{color:#fecdd3;font:12px/1.5 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.impact-block,.recommendation-block{margin:10px 0;padding:11px 13px;border:1px solid var(--line);border-radius:9px;background:#0a1422}
+.impact-block strong{color:#fda4af}.recommendation-block strong{color:var(--green)}
+.impact-block p,.recommendation-block p{margin:5px 0 0}
 .empty{padding:28px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:12px}
 .table-wrap{max-width:100%;overflow:auto;border:1px solid var(--line);border-radius:10px}
 table{width:100%;border-collapse:collapse;min-width:640px;font-size:11px}
@@ -294,7 +302,7 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
 
 
 def _write_json_report(stream: TextIO, result: ScanResult) -> None:
-    stream.write('{"schema_version":"1.2","root":')
+    stream.write('{"schema_version":"1.3","root":')
     _write_json_value(stream, result.root)
     stream.write(',"started_at":')
     _write_json_value(stream, result.started_at)
@@ -427,9 +435,17 @@ def _markdown_report(result: ScanResult) -> str:
             "",
             item.detail,
             "",
+            *([f"**Potential attacker impact:** {item.impact}", ""] if item.impact else []),
+            *([f"**Recommended remediation:** {item.recommendation}", ""] if item.recommendation else []),
             "Evidence:",
         ])
         lines.extend(f"- {value}" for value in item.evidence)
+        if item.code_evidence:
+            lines.extend(["", "**Vulnerable source lines (redacted):**", ""])
+            lines.extend(
+                f"- 🔴 Line {code.line_number}: `{code.code}`"
+                for code in item.code_evidence
+            )
         lines.append("")
     lines.extend(["## Diagnostics", ""])
     if result.errors:
