@@ -278,6 +278,7 @@ The baseline is not production-ready:
 - [ ] Add hierarchical directory explorer and archive member browser without flattening everything into one list.
 - [x] Keep the rendered DOM bounded with cursor-based pagination for large file/finding lists.
 - [x] Keep symlink and special-filesystem-entry tables bounded with independent 100-row pagination controls.
+- [x] Bound local-advisory and VCS/provider detail-card copies while retaining complete category counts.
 - [ ] Add progressive loading from external local report data or chunked embedded data so the browser does not need the full report payload at startup.
 - [ ] Make all large tables sortable, searchable and paginated with stable row keys.
 - [ ] Add severity heatmaps, category summaries, per-domain completion and unknown/skipped/error accounting.
