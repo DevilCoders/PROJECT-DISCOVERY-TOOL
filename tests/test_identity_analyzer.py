@@ -50,3 +50,14 @@ def test_unrelated_source_has_no_identity_findings(tmp_path: Path):
 def test_non_source_files_are_not_supported():
     record = FileRecord("settings.yaml", 10, ".yaml", "YAML")
     assert IdentityIntelligenceAnalyzer().supports(record) is False
+
+def test_identity_analyzer_reports_oversized_source_as_unknown(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import identity_analyzer
+
+    path = tmp_path / "large_auth.py"
+    path.write_text("from jwt import decode\\n", encoding="utf-8")
+    monkeypatch.setattr(identity_analyzer, "_MAX_IDENTITY_SOURCE_BYTES", 1)
+    record = FileRecord("large_auth.py", path.stat().st_size, ".py", "Python")
+    findings = IdentityIntelligenceAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "resource limit" in findings[0].title.lower()
