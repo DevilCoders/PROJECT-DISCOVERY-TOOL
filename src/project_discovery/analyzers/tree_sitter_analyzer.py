@@ -149,6 +149,65 @@ def _extract_declarations(root_node, grammar: str) -> list[dict[str, str | int]]
     return declarations
 
 
+
+IMPORT_NODE_TYPES = {
+    "javascript": {"import_statement", "export_statement"},
+    "typescript": {"import_statement", "export_statement"},
+    "tsx": {"import_statement", "export_statement"},
+    "go": {"import_declaration", "import_spec"},
+    "rust": {"use_declaration"},
+    "c": {"preproc_include"},
+    "cpp": {"preproc_include"},
+    "java": {"import_declaration"},
+    "kotlin": {"import_header"},
+    "swift": {"import_declaration"},
+    "c_sharp": {"using_directive"},
+    "ruby": {"call"},
+    "php": {"namespace_use_declaration"},
+    "dart": {"import_or_export"},
+    "scala": {"import_declaration"},
+    "haskell": {"import_declaration"},
+    "elixir": {"call"},
+}
+_IMPORT_TARGET_PATTERNS = (
+    re.compile(r"""(?i)\bfrom\s+["']?([\w./:@-]+)"""),
+    re.compile(r"""(?i)\bimport\s+(?:static\s+)?["']?([\w./:@-]+)"""),
+    re.compile(r"""(?i)\b(?:require|include)\s*\(?\s*["']([\w./:@-]+)"""),
+    re.compile(r"""(?i)#\s*include\s*[<"]([^>"]+)"""),
+    re.compile(r"""(?i)\buse\s+([A-Za-z_][\w:.]*)"""),
+    re.compile(r"""(?i)\busing\s+([A-Za-z_][\w.]*)"""),
+)
+
+
+def _extract_imports(root_node, grammar: str) -> list[dict[str, str | int]]:
+    """Extract import targets as references; does not claim internal resolution."""
+    node_types = IMPORT_NODE_TYPES.get(grammar, set())
+    imports: list[dict[str, str | int]] = []
+    stack = [root_node]
+    while stack:
+        node = stack.pop()
+        if node.type in node_types:
+            raw = node.text
+            text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            for pattern in _IMPORT_TARGET_PATTERNS:
+                match = pattern.search(text)
+                if match:
+                    imports.append({
+                        "target": match.group(1),
+                        "line": node.start_point.row + 1,
+                        "node_type": node.type,
+                    })
+                    break
+        stack.extend(reversed(node.children))
+    unique = {
+        (item["target"], item["line"], item["node_type"]): item for item in imports
+    }
+    return sorted(
+        unique.values(),
+        key=lambda item: (item["line"], item["target"], item["node_type"]),
+    )
+
+
 def _walk_tree(root_node):
     """Iteratively summarize a syntax tree without recursion-depth risk."""
     stack = [(root_node, 0)]
@@ -237,6 +296,7 @@ class TreeSitterAnalyzer(Analyzer):
             root = tree.root_node
             node_count, max_depth, errors, top_level = _walk_tree(root)
             declarations = _extract_declarations(root, grammar)
+            imports = _extract_imports(root, grammar)
         except Exception as exc:
             return [Finding(
                 "code",
@@ -258,6 +318,21 @@ class TreeSitterAnalyzer(Analyzer):
             analyzer=self.name,
         )]
 
+
+        if imports:
+            evidence = [
+                "{}:{} imports {}".format(record.path, item["line"], item["target"])
+                for item in imports[:100]
+            ]
+            findings.append(Finding(
+                "dependency",
+                f"Static import inventory: {record.path}",
+                f"Extracted {len(imports)} import references. Internal/external target "
+                "resolution is not yet established for this language adapter.",
+                confidence="CONFIRMED",
+                evidence=evidence,
+                analyzer=self.name,
+            ))
         if declarations:
             symbol_preview = [
                 "{} {}".format(item["kind"], item["name"])

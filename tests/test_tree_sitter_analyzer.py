@@ -139,3 +139,32 @@ def test_generic_declaration_fallback_covers_unmapped_grammar():
     symbols = _extract_declarations(root, "unmapped_language")
     assert symbols[0]["name"] == "Widget"
     assert symbols[0]["kind"] == "class_declaration"
+
+
+def test_generic_import_inventory_keeps_resolution_unconfirmed():
+    from types import SimpleNamespace
+    from project_discovery.analyzers.tree_sitter_analyzer import _extract_imports
+
+    point = SimpleNamespace(row=2, column=0)
+    leaf = SimpleNamespace(type="string", text=b'"react"', children=[])
+    statement = SimpleNamespace(
+        type="import_statement",
+        text=b'import React from "react";',
+        children=[leaf],
+        start_point=point,
+    )
+    root = SimpleNamespace(type="program", children=[statement])
+    imports = _extract_imports(root, "javascript")
+    assert imports == [{
+        "target": "react",
+        "line": 3,
+        "node_type": "import_statement",
+    }]
+
+
+def test_import_inventory_skips_unmapped_language():
+    from types import SimpleNamespace
+    from project_discovery.analyzers.tree_sitter_analyzer import _extract_imports
+
+    root = SimpleNamespace(type="program", children=[])
+    assert _extract_imports(root, "unknown") == []
