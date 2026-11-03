@@ -137,3 +137,26 @@ def test_zip_index_is_not_materialized_when_preflight_bounds_are_unknown(tmp_pat
     assert len(findings) == 1
     assert findings[0].confidence == "UNKNOWN"
     assert "bounds unavailable" in findings[0].title
+
+def test_zip_archive_wall_time_budget_returns_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.archive_analyzer as archive_module
+
+    path = tmp_path / "timed.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("one.txt", "content")
+    monkeypatch.setattr(archive_module, "_MAX_ARCHIVE_WALL_SECONDS", 0.0)
+    findings = ArchiveIntelligenceAnalyzer()._zip(path, _record(path, "timed.zip"))
+    assert any(item.confidence == "UNKNOWN" and "wall-time budget" in item.title for item in findings)
+
+
+def test_tar_archive_wall_time_budget_returns_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.archive_analyzer as archive_module
+
+    path = tmp_path / "timed.tar"
+    with tarfile.open(path, "w") as archive:
+        member = tarfile.TarInfo("one.txt")
+        member.size = 7
+        archive.addfile(member, io.BytesIO(b"content"))
+    monkeypatch.setattr(archive_module, "_MAX_ARCHIVE_WALL_SECONDS", 0.0)
+    findings = ArchiveIntelligenceAnalyzer()._tar(path, _record(path, "timed.tar"))
+    assert any(item.confidence == "UNKNOWN" and "wall-time budget" in item.title for item in findings)
