@@ -149,14 +149,14 @@ class NetworkIndicatorAnalyzer(Analyzer):
                         break
                     if (
                         len(raw_line) == _MAX_NETWORK_LINE_BYTES
-                        and not raw_line.endswith(b"\\n")
+                        and not raw_line.endswith(b"\n")
                     ):
                         next_byte = stream.read(1)
                         if next_byte:
-                            bytes_scanned += 1
-                            if next_byte == b"\\n":
+                            if next_byte == b"\n":
                                 raw_line += next_byte
                             else:
+                                bytes_scanned += 1
                                 budget_reason = (
                                     f"physical line exceeded the {_MAX_NETWORK_LINE_BYTES:,}-byte line budget"
                                 )
