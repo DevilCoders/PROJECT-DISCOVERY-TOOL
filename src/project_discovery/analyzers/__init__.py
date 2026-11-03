@@ -4,6 +4,7 @@ from importlib.metadata import entry_points
 from .base import Analyzer
 from .dependency_manifest_analyzer import DependencyManifestAnalyzer
 from .docs_analyzer import MarkdownAnalyzer
+from .document_analyzer import DocumentAnalyzer
 from .python_analyzer import PythonAnalyzer
 from .tree_sitter_analyzer import TreeSitterAnalyzer
 
@@ -12,6 +13,7 @@ def load_analyzers() -> list[Analyzer]:
     result: list[Analyzer] = [
         PythonAnalyzer(),
         MarkdownAnalyzer(),
+        DocumentAnalyzer(),
         DependencyManifestAnalyzer(),
         TreeSitterAnalyzer(),
     ]

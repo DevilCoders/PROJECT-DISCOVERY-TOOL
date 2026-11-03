@@ -9,7 +9,7 @@ PDT inventories and analyzes heterogeneous software repositories without importi
 - Deterministic filesystem inventory; skips symlinks and common generated/vendor directories.
 - SQLite fingerprint cache for incremental content hashing.
 - Python AST analysis and evidence-backed internal Python import graph with cycle detection.
-- Markdown structure analysis.
+- Structural documentation analysis for Markdown, HTML, reStructuredText and text formats; optional PDF and DOCX extraction.
 - Dependency declaration extraction for Python, Node.js, Rust, Go and Composer manifests.
 - Recognition catalog for 40+ languages and project file formats.
 - Optional offline-first Tree-sitter adapter covering 60+ language/format grammar mappings when grammars are already provisioned locally.
@@ -33,10 +33,10 @@ python -m pip install -e ".[dev]"
 pytest
 ```
 
-Optional polyglot parser integration:
+Optional parser and document integrations:
 
 ```bash
-python -m pip install -e ".[polyglot]"
+python -m pip install -e ".[polyglot,documents]"
 ```
 
 PDT never downloads grammars during a scan. The Tree-sitter adapter checks local parser availability first. Provision any required grammar libraries separately under your own operational policy; unavailable grammars are reported as capability gaps and skipped.
