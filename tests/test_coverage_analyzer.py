@@ -81,3 +81,14 @@ def test_coverage_summary_json_and_malformed_input(tmp_path: Path):
     assert summary[0].confidence == "CONFIRMED"
     assert "does not verify the test run" in summary[0].detail
     assert broken[0].confidence == "UNKNOWN"
+
+def test_coverage_artifact_reports_oversized_and_growing_source_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.coverage_analyzer as module
+
+    path = tmp_path / "coverage.out"
+    path.write_text("mode: atomic\nfile.go:1.1,2.2 2 1\n", encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_COVERAGE_ARTIFACT_BYTES", 8)
+    record = FileRecord(path.name, 1, ".out", "Coverage")
+    findings = CoverageArtifactAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
