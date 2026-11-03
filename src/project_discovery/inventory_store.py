@@ -187,6 +187,41 @@ class InventoryStore:
             self.db.execute("DELETE FROM inventory_records")
             self.db.execute("DELETE FROM inventory_metadata")
 
+    def checkpoint(self, metadata: Mapping[str, Any]) -> None:
+        """Flush inventory rows, then atomically persist a resumable scan checkpoint.
+
+        The caller supplies stable progress fields (for example scan_id,
+        phase, last_committed_path and completed). A checkpoint never claims
+        completion unless the caller explicitly sets completed=True.
+        """
+        if self._closed:
+            raise RuntimeError("inventory store is closed")
+        if not metadata:
+            raise ValueError("checkpoint metadata must not be empty")
+        if any(not isinstance(key, str) or not key for key in metadata):
+            raise ValueError("checkpoint metadata keys must be non-empty strings")
+        encoded = [
+            (
+                key,
+                json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            )
+            for key, value in metadata.items()
+        ]
+        self.flush()
+        with self.db:
+            self.db.executemany(
+                """INSERT INTO inventory_metadata(key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                encoded,
+            )
+
+    def integrity_check(self) -> str:
+        """Return SQLite quick_check status; 'ok' indicates a structurally sound store."""
+        if self._closed:
+            raise RuntimeError("inventory store is closed")
+        row = self.db.execute("PRAGMA quick_check").fetchone()
+        return str(row[0]) if row else "no result"
+
     def close(self) -> None:
         if self._closed:
             return
