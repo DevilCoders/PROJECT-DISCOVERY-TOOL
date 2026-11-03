@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from project_discovery.models import (
-    DirectoryRecord, FileRecord, Finding, ScanResult, SpecialEntryRecord, SymlinkRecord,
+    CodeEvidence, DirectoryRecord, FileRecord, Finding, ScanResult, SpecialEntryRecord, SymlinkRecord,
 )
 from project_discovery.reporting import write_reports
 
@@ -26,6 +26,9 @@ def _result() -> ScanResult:
                 "security", "<script>alert('x')</script>",
                 "Potential secret <value> redacted.", confidence="INFERRED",
                 evidence=["config.py:12"], analyzer="secret-patterns", severity="HIGH",
+                code_evidence=[CodeEvidence(12, "query = build_query(user_input) + [REDACTED]")],
+                impact="If untrusted input reaches this query, an attacker may read or alter database records.",
+                recommendation="Use parameterized SQL and validate input.",
             ),
             Finding(
                 "network", "IPv4 address indicators: config.yaml",
@@ -89,6 +92,11 @@ def test_html_report_has_interactive_paged_inventory_and_findings(tmp_path: Path
     assert "GHSA-unit-test-1234" in content
     assert "Git remote provider: GitHub" in content
     assert "node_dependencies" in content
+    assert "VULNERABLE SOURCE LINES // REDACTED" in content
+    assert "vulnerable-line" in content
+    assert "POTENTIAL ATTACKER IMPACT" in content
+    assert "RECOMMENDED REMEDIATION" in content
+    assert "build_query(user_input)" in content
 
 
 def test_html_json_embedding_escapes_script_terminators(tmp_path: Path):
@@ -114,15 +122,23 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "Git remote provider: GitHub" in content
     assert "current" in content
     assert "node_dependencies" in content
+    assert "Potential attacker impact" in content
+    assert "Recommended remediation" in content
+    assert "🔴 Line 12" in content
 
 
 def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
     path = write_reports(_result(), tmp_path, {"json"})[0]
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.2"
+    assert payload["schema_version"] == "1.3"
     assert payload["directories"][1]["path"] == "src"
     assert payload["symlinks"][0]["target_scope"] == "internal"
     assert payload["special_entries"][0]["entry_type"] == "fifo"
+    security_finding = payload["findings"][0]
+    assert security_finding["code_evidence"][0]["line_number"] == 12
+    assert "[REDACTED]" in security_finding["code_evidence"][0]["code"]
+    assert "untrusted input" in security_finding["impact"]
+    assert "parameterized SQL" in security_finding["recommendation"]
 
 def test_html_report_exposes_symlink_scope_verification_and_permissions(tmp_path: Path):
     path = write_reports(_result(), tmp_path, {"html"})[0]
