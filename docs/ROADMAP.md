@@ -94,6 +94,17 @@ The baseline is not production-ready:
 
 ## Phase 2 — High-throughput engine for 2GB–100GB+
 
+### C-native asynchronous and GPU execution (new release gate)
+- [ ] Add bounded asynchronous file-analysis scheduling with configurable worker count, back-pressure and deterministic result ordering; keep SQLite cache operations on the coordinator thread.
+- [ ] Add `pdt scan --jobs N` and `--jobs 0` auto-sizing; expose selected worker count and queue limits in scan metrics and every report format.
+- [ ] Extend the C extension with runtime OpenCL loader/device discovery without requiring GPU SDK headers or a GPU at build time.
+- [ ] Implement a bounded C/OpenCL byte-count/reduction kernel for large buffers; dispatch to an available GPU only above a measured threshold and only for supported kernels.
+- [ ] Fall back to portable C/SIMD/Python on missing OpenCL loader, no GPU device, device memory limits, kernel/build/dispatch failure, unsupported platforms or small workloads. GPU absence must never fail a scan.
+- [ ] Report GPU vendor/device/compute units/memory, acceleration eligibility, actual dispatch counts and fallback reason without exposing device-specific private data.
+- [ ] Add fake/no-device, GPU-present, kernel-failure, threshold, concurrent-call, large-buffer and CPU-equivalence tests; benchmark GPU versus CPU before selecting default thresholds.
+- [ ] Do not claim all analyzers execute on GPU: analyzer semantics remain CPU-side unless a specific C/OpenCL kernel is implemented and validated.
+
+
 - [ ] Replace the all-in-memory `files/directories/symlinks/pending` model with a streaming inventory iterator and bounded producer/consumer queues.
 - [ ] Persist inventory rows incrementally to a local SQLite or append-only spool store; stream report assembly from it.
 - [ ] Implement bounded concurrency, work stealing only if justified, back-pressure, cancellation and resumable checkpoints.
@@ -275,6 +286,15 @@ The baseline is not production-ready:
 - [ ] Add CLI commands for capability catalog, analyzer diagnostics, archive policy, budgets and report inspection.
 - [ ] Test TTY, no-TTY, narrow terminals, Windows console, ANSI-disabled terminals and large CI logs.
 
+## Security finding evidence and developer remediation (new release gate)
+
+- [ ] Extend the finding schema with redacted source-line evidence, exact line numbers, attacker-impact explanation and actionable remediation guidance.
+- [ ] Add rule-specific impact descriptions for credential exposure, command/code injection, unsafe deserialization, SQL injection, SSRF, path traversal, weak cryptography, TLS/JWT misconfiguration, unsafe C APIs and other supported security rules.
+- [ ] Render vulnerable source lines in red in the HTML report using safe text nodes (never inject source as HTML); show file path, line number, severity, confidence, impact and remediation together.
+- [ ] Bring JSON and Markdown outputs to schema parity; Markdown must visibly mark the vulnerable line and include impact/remediation even though terminal Markdown cannot guarantee red text.
+- [ ] Redact passwords, tokens, private keys, credential URL values, email addresses and other sensitive literals from all source excerpts; test report escaping against HTML/script payloads.
+- [ ] Keep severity evidence-driven: explain realistic consequences conditionally and never describe a heuristic marker as confirmed exploitability or runtime exposure.
+
 ## Phase 12 — Large-project and adversarial verification
 
 - [ ] Build synthetic and representative corpora at 2GB, 10GB, 50GB and 100GB+.
@@ -325,7 +345,9 @@ The next implementation block follows this dependency order. Documentation is up
 4. **Analyzer completeness:** expand security, configuration, API style/route/contracts, database/ORM/migrations, test/build/CI, OS/platform, network and identity/credential analyzers across the 40+ language-family catalog. Separate lexical evidence from parser-backed semantics.
 5. **Report schema and UX:** expose every inventory/analyzer state in JSON; provide grouped domain dashboards and lazy/chunked HTML rendering, stable pagination, global search, keyboard-accessible disclosures and open/close-all without unbounded DOM creation.
 6. **Terminal experience:** retain the ASCII banner and command-center presentation; group progress by phase/domain, keep TTY clearing conditional, and add quiet/no-color/JSON-lines/verbosity modes with stable exit codes.
-7. **Verification and release:** adversarial filesystem/archive fixtures, redaction tests, cross-platform native builds, parser conformance, packaging checks, 2GB/10GB/50GB/100GB+ performance and peak-RSS benchmarks, and green CI on the final PR head.
+7. **Native execution acceleration:** implement C/OpenCL runtime GPU detection and a measured large-buffer kernel, bounded asynchronous file workers, deterministic output, CPU fallback and capability/dispatch reporting. GPU use is limited to supported kernels; GPU absence must be transparent and harmless.
+8. **Security evidence and reporting:** attach safely redacted vulnerable source lines, precise line numbers, severity, attacker-impact context and remediation to findings; synchronize JSON, Markdown and HTML output and test XSS/secret redaction.
+9. **Verification and release:** adversarial filesystem/archive fixtures, redaction tests, GPU/CPU parity and fallback tests, concurrent-scan/cache tests, cross-platform native builds, parser conformance, packaging checks, 2GB/10GB/50GB/100GB+ performance and peak-RSS benchmarks, and green CI on the final PR head.
 
 ### Polyglot implementation acceptance
 
