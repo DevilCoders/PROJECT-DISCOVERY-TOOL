@@ -475,6 +475,20 @@ static size_t pdt_count_byte_cpu(const unsigned char *data, size_t length,
     return pdt_count_byte_scalar(data, length, needle);
 }
 
+static size_t pdt_count_byte_cpu_buffer(PyObject *object,
+                                       const unsigned char *data,
+                                       size_t length,
+                                       unsigned char needle) {
+    size_t count;
+    if (PyBytes_Check(object)) {
+        Py_BEGIN_ALLOW_THREADS
+        count = pdt_count_byte_cpu(data, length, needle);
+        Py_END_ALLOW_THREADS
+        return count;
+    }
+    return pdt_count_byte_cpu(data, length, needle);
+}
+
 static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
     PyObject *object;
     Py_buffer view;
@@ -505,14 +519,14 @@ static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
             ++pdt_gpu_dispatches;
         } else {
             ++pdt_gpu_fallbacks;
-            count = pdt_count_byte_cpu(
-                (const unsigned char *)view.buf, (size_t)view.len,
+            count = pdt_count_byte_cpu_buffer(
+                object, (const unsigned char *)view.buf, (size_t)view.len,
                 (unsigned char)needle
             );
         }
     } else {
-        count = pdt_count_byte_cpu(
-            (const unsigned char *)view.buf, (size_t)view.len,
+        count = pdt_count_byte_cpu_buffer(
+            object, (const unsigned char *)view.buf, (size_t)view.len,
             (unsigned char)needle
         );
     }
