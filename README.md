@@ -30,7 +30,7 @@ PDT does not assume that a project is Python-based, that one language is its cor
 - No telemetry, hosted inference, DNS lookup, network probe, automatic grammar download, target dependency installation or archive extraction.
 - Cache and report output are placed outside the analyzed tree by default.
 - Symlinks are inventoried as links and are never followed during filesystem traversal.
-- ZIP/TAR members can be inspected through bounded in-memory streams; archive entries are never extracted to disk. Formats without a supported index reader are reported as detected but not deeply inspected.
+- ZIP/TAR members can be inspected through bounded in-memory streams; archive entries are never extracted to disk. ZIP central-directory count/size is checked before materializing the member index; ZIP/TAR traversal and member sampling have an 8-second cooperative wall-time budget, plus a 32 MiB total and 1 MiB per-member content-sample budget. Unknown or exceeded bounds produce `UNKNOWN`/partial findings. Formats without a supported index reader are reported as detected but not deeply inspected.
 - Secret and PII evidence must be redacted. Reports may retain category, file/member path, line, confidence and a keyed local fingerprint; they must not contain complete passwords, tokens, private keys, email addresses or personal-data values.
 - Static references are not runtime facts. A URL, hostname, port, API route, dependency, package manifest or ROS topic found in source is not proof that it is deployed, reachable, installed or active.
 
@@ -80,7 +80,7 @@ The current branch contains first-pass implementations of:
 - Static API-type classification, API contracts and initial source route extraction.
 - SQL, NoSQL, Prisma ORM and migration indicators.
 - Test discovery, build manifests, CI/CD, container and deployment manifests.
-- ZIP/TAR member metadata and bounded content samples without extraction; other recognized archive formats may be detection-only.
+- ZIP/TAR member metadata and bounded in-memory content samples without extraction, preflight index limits, and cooperative per-archive wall-time limits; archive-member secret/PII findings carry redacted line evidence, impact and remediation. Other recognized archive formats may be detection-only.
 - IPv4/IPv6/CIDR/port, URI/URL, hostname/subdomain and protocol indicators; host OS metadata and target-platform markers.
 - Initial AI/ML, ROS 1/2, mobile, game-engine, frontend, accessibility, localization, observability, coverage, VCS/hosting and multi-project analysis.
 - Local-only OSV advisory database import and lockfile-based vulnerability matching when an operator supplies `--vuln-db`.
@@ -167,7 +167,7 @@ This is deliberately capability-scoped: PDT does not claim that every analyzer r
 
 ## Security findings: code, impact and remediation
 
-Security findings now carry exact source line numbers, redacted vulnerable-line excerpts, severity, confidence, conditional attacker-impact explanations and recommended remediation. The HTML report displays the source excerpts in red and uses safe DOM text nodes; JSON and Markdown expose the same finding fields, and Markdown marks vulnerable lines with a red indicator. The HTML/JSON payload schema and JSON report schema are versioned as 1.3.
+Security findings now carry exact source line numbers, redacted vulnerable-line excerpts, severity, confidence, conditional attacker-impact explanations and recommended remediation. This includes secure-code patterns, Python AST security, secret/PII/configuration indicators, and credential/email patterns found inside ZIP/TAR members. The interactive CLI prints the highest-severity source lines in red; the HTML report displays source excerpts in red using safe DOM text nodes; JSON and Markdown expose the same finding fields, and Markdown marks vulnerable lines with a red indicator. The HTML/JSON payload schema and JSON report schema are versioned as 1.3.
 
 Redaction is applied by the source excerpt helper and again at the `CodeEvidence` model boundary, including for third-party analyzers. It covers common password/token/key assignments, bearer/basic authorization values, credential URLs, provider token formats, JWT-shaped values, email addresses and common identity-field assignments. No heuristic finding is proof of exploitability or runtime exposure: impact text is conditional on reachability and attacker-controlled data, and severity must be reviewed against actual data flow and deployment context.
 
