@@ -1,6 +1,7 @@
 """Local JSON, Markdown and offline interactive HTML report generation."""
 from __future__ import annotations
 
+import heapq
 import html
 import io
 import json
@@ -503,7 +504,8 @@ def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[P
         written.append(path)
     if "markdown" in formats:
         path = output / "discovery-report.md"
-        path.write_text(_markdown_report(result), encoding="utf-8")
+        with path.open("w", encoding="utf-8", newline="\n") as stream:
+            _write_markdown_report(stream, result)
         written.append(path)
     if "html" in formats:
         path = output / "discovery-report.html"
