@@ -10,7 +10,8 @@ import re
 from pathlib import Path
 
 from .base import Analyzer
-from ..models import FileRecord, Finding
+from ..models import CodeEvidence, FileRecord, Finding
+from ..source_utils import redact_source_excerpt
 from ..language_catalog import is_source_path, source_language_names
 
 
@@ -142,6 +143,74 @@ _PATTERNS = (
 )
 _PYTHON_UNSAFE_LOADERS = {"UnsafeLoader", "Loader", "FullLoader"}
 
+_IMPACTS = {
+    "dynamic_code_execution": (
+        "If attacker-controlled input reaches this operation, an attacker may execute "
+        "arbitrary code in the application process context, access its data and secrets, "
+        "modify files, or pivot to resources available to that process."
+    ),
+    "shell_command_execution": (
+        "If untrusted data influences the command or its arguments, an attacker may execute "
+        "operating-system commands with the application's privileges, potentially exposing "
+        "secrets, altering data or taking control of the service account."
+    ),
+    "unsafe_deserialization": (
+        "If untrusted serialized data reaches an unsafe deserializer, an attacker may "
+        "trigger code execution, unsafe object construction or resource exhaustion; the "
+        "exact impact depends on the runtime and serializer."
+    ),
+    "tls_verification_disabled": (
+        "A network attacker may impersonate the remote peer and intercept or alter traffic, "
+        "including credentials, session tokens and application data."
+    ),
+    "unsafe_c_memory_api": (
+        "An input that exceeds expected buffer bounds may corrupt memory or crash the process. "
+        "Depending on platform and exploitability, memory corruption can sometimes enable code execution."
+    ),
+    "dynamic_sql_query": (
+        "If attacker-controlled data is concatenated into the query, an attacker may alter SQL "
+        "logic to read, modify or delete database records, bypass authorization or access other users' data."
+    ),
+    "ssrf_user_controlled_url": (
+        "If the destination is attacker-controlled or insufficiently constrained, an attacker "
+        "may make the server contact internal services, cloud metadata endpoints or systems "
+        "not directly reachable from the attacker's network."
+    ),
+    "path_traversal_user_controlled_path": (
+        "If path input is not constrained to an allowed directory, an attacker may read "
+        "sensitive files or overwrite files writable by the application, potentially exposing "
+        "credentials or changing application behavior."
+    ),
+    "weak_hash": (
+        "If this hash protects signatures, integrity or password storage, collision or "
+        "offline-guessing attacks may undermine that protection. Actual risk depends on purpose and key/salt use."
+    ),
+    "jwt_verification_disabled": (
+        "If signature or algorithm verification is bypassed, an attacker may forge or alter "
+        "tokens and impersonate users or services, potentially bypassing authentication and authorization."
+    ),
+    "insecure_random_for_secret": (
+        "Predictable session identifiers, reset tokens or API secrets may be guessed or "
+        "reproduced, allowing account/session takeover or unauthorized API access."
+    ),
+    "open_redirect_user_controlled": (
+        "An attacker may direct users to a malicious destination using a trusted application "
+        "URL, enabling phishing or, in some OAuth flows, leakage of authorization material."
+    ),
+    "insecure_file_permissions": (
+        "Users or processes outside the intended trust boundary may read or modify files, "
+        "including configuration, credentials or executable content, depending on effective permissions."
+    ),
+    "unsafe_xml_external_entities": (
+        "If external entities are processed, an attacker may cause local file disclosure, "
+        "server-side requests to internal services or resource exhaustion."
+    ),
+    "insecure_temporary_file": (
+        "A predictable or non-atomically reserved temporary path may permit a local race, "
+        "file overwrite or disclosure under the application's filesystem permissions."
+    ),
+}
+
 
 def _dotted(node: ast.AST) -> str:
     if isinstance(node, ast.Name):
@@ -238,6 +307,7 @@ class SecureCodePatternAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
 
+        source_lines = source.splitlines()
         matches: dict[str, set[int]] = {}
         if record.extension in {".py", ".pyi"}:
             try:
@@ -280,12 +350,13 @@ class SecureCodePatternAnalyzer(Analyzer):
             if not lines:
                 continue
             title, detail = metadata[rule]
+            selected_lines = sorted(lines)[:100]
             findings.append(Finding(
                 "security",
                 f"{title}: {record.path}",
                 detail,
                 confidence="INFERRED",
-                evidence=[f"{record.path}:{line}" for line in sorted(lines)[:100]],
+                evidence=[f"{record.path}:{line}" for line in selected_lines],
                 analyzer=self.name,
                 severity=(
                     "CRITICAL" if rule == "unsafe_deserialization" else
@@ -294,5 +365,20 @@ class SecureCodePatternAnalyzer(Analyzer):
                         "tls_verification_disabled", "unsafe_c_memory_api", "dynamic_sql_query"
                     } else "MEDIUM"
                 ),
+                code_evidence=[
+                    CodeEvidence(
+                        line_number=line,
+                        code=redact_source_excerpt(source_lines[line - 1]),
+                    )
+                    for line in selected_lines[:20]
+                    if 0 < line <= len(source_lines)
+                ],
+                impact=_IMPACTS.get(
+                    rule,
+                    "If the risky behavior is reachable with attacker-controlled data, it may "
+                    "weaken confidentiality, integrity or availability. Confirm data flow and "
+                    "runtime configuration before asserting exploitability."
+                ),
+                recommendation=detail,
             ))
         return findings
