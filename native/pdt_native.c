@@ -253,18 +253,25 @@ static int pdt_opencl_initialize(void) {
                 pdt_cl_uint units = 0;
                 pdt_cl_ulong memory = 0;
                 pdt_cl_ulong max_allocation = 0;
-                (void)pdt_opencl.get_device_info(
+                pdt_cl_int units_status = pdt_opencl.get_device_info(
                     devices[d], PDT_CL_DEVICE_MAX_COMPUTE_UNITS,
                     sizeof(units), &units, NULL
                 );
-                (void)pdt_opencl.get_device_info(
+                pdt_cl_int memory_status = pdt_opencl.get_device_info(
                     devices[d], PDT_CL_DEVICE_GLOBAL_MEM_SIZE,
                     sizeof(memory), &memory, NULL
                 );
-                (void)pdt_opencl.get_device_info(
+                pdt_cl_int allocation_status = pdt_opencl.get_device_info(
                     devices[d], PDT_CL_DEVICE_MAX_MEM_ALLOC_SIZE,
                     sizeof(max_allocation), &max_allocation, NULL
                 );
+                /* Unknown device limits are not treated as unlimited memory. */
+                if (units_status != PDT_CL_SUCCESS ||
+                    memory_status != PDT_CL_SUCCESS ||
+                    allocation_status != PDT_CL_SUCCESS ||
+                    units == 0 || memory == 0 || max_allocation == 0) {
+                    continue;
+                }
                 if (selected == NULL || units > selected_units ||
                     (units == selected_units && memory > selected_memory)) {
                     selected = devices[d];
