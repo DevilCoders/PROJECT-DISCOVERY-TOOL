@@ -5,6 +5,7 @@ import re
 import stat
 import struct
 import tarfile
+import time
 import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
@@ -53,6 +54,7 @@ def _zip_index_hint(path: Path) -> tuple[int, int] | None:
 
 _MAX_MEMBER_SCAN_BYTES = 1024 * 1024
 _MAX_ARCHIVE_SCAN_BYTES = 32 * 1024 * 1024
+_MAX_ARCHIVE_WALL_SECONDS = 8.0
 _MEMBER_SCAN_CHUNK = 64 * 1024
 _CONTENT_RULES = (
     (
@@ -85,19 +87,30 @@ _CONTENT_RULES = (
 )
 
 
-def _read_member_sample(stream, budget_remaining: int) -> tuple[bytes, int, bool]:
-    """Read a bounded in-memory sample from a member stream; never write it to disk."""
+def _read_member_sample(
+    stream,
+    budget_remaining: int,
+    deadline: float | None = None,
+) -> tuple[bytes, int, bool]:
+    """Read a bounded in-memory sample; stop on byte or wall-time budget."""
     limit = min(_MAX_MEMBER_SCAN_BYTES, max(0, budget_remaining))
     if limit <= 0:
         return b"", 0, True
     sample = bytearray()
+    timed_out = False
     while len(sample) <= limit:
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
+            break
         chunk = stream.read(min(_MEMBER_SCAN_CHUNK, limit + 1 - len(sample)))
         if not chunk:
             break
         sample.extend(chunk)
-    truncated = len(sample) > limit
-    if truncated:
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
+            break
+    truncated = timed_out or len(sample) > limit
+    if len(sample) > limit:
         del sample[limit:]
     return bytes(sample), len(sample), truncated
 
@@ -223,6 +236,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     analyzer=self.name,
                     severity="MEDIUM",
                 )]
+        deadline = time.monotonic() + _MAX_ARCHIVE_WALL_SECONDS
+        time_budget_reached = False
         counts: Counter[str] = Counter()
         unsafe_paths: list[str] = []
         symlinks: list[str] = []
@@ -242,6 +257,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     ).items() if count > 1
                 ]
                 for info in infos[:_MAX_ARCHIVE_ENTRIES]:
+                    if time.monotonic() >= deadline:
+                        time_budget_reached = True
+                        break
                     mode = (info.external_attr >> 16) & 0xFFFF
                     encrypted_member = bool(info.flag_bits & 0x1)
                     if info.is_dir():
@@ -273,9 +291,11 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     try:
                         with archive.open(info, "r") as member_stream:
                             sample, consumed, truncated = _read_member_sample(
-                                member_stream, remaining
+                                member_stream, remaining, deadline
                             )
                         content_bytes += consumed
+                        if time.monotonic() >= deadline:
+                            time_budget_reached = True
                         if truncated or info.file_size > consumed:
                             content_truncated += 1
                         if kind == "symlink":
@@ -291,6 +311,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                         zipfile.BadZipFile, EOFError,
                     ):
                         content_truncated += 1
+                    if time_budget_reached:
+                        break
 
         except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError) as exc:
             return [Finding(
@@ -348,9 +370,23 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 analyzer=self.name,
                 severity="LOW",
             ))
+        if time_budget_reached:
+            findings.append(Finding(
+                "archive",
+                f"ZIP wall-time budget reached: {record.path}",
+                f"Archive inspection stopped after the {_MAX_ARCHIVE_WALL_SECONDS:g}-second "
+                "wall-time budget. Findings already collected are partial; remaining entries "
+                "were not inspected.",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            ))
         return findings
 
     def _tar(self, path: Path, record: FileRecord) -> list[Finding]:
+        deadline = time.monotonic() + _MAX_ARCHIVE_WALL_SECONDS
+        time_budget_reached = False
         counts: Counter[str] = Counter()
         unsafe_paths: list[str] = []
         symlinks: list[str] = []
@@ -364,6 +400,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         try:
             with tarfile.open(path, mode="r|*") as archive:
                 for member in archive:
+                    if time.monotonic() >= deadline:
+                        time_budget_reached = True
+                        break
                     total += 1
                     if total > _MAX_ARCHIVE_ENTRIES:
                         break
@@ -400,16 +439,18 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             member_stream = archive.extractfile(member)
                             if member_stream is not None:
                                 sample, consumed, truncated = _read_member_sample(
-                                    member_stream, remaining
+                                    member_stream, remaining, deadline
                                 )
                                 content_bytes += consumed
                                 member_incomplete = truncated or member.size > consumed
+                                if time.monotonic() >= deadline:
+                                    time_budget_reached = True
                                 if member_incomplete:
                                     content_truncated += 1
                                 content_findings.extend(
                                     _member_content_findings(record.path, member.name, sample)
                                 )
-                                if member_incomplete:
+                                if member_incomplete or time_budget_reached:
                                     break
                         except (OSError, tarfile.TarError, EOFError):
                             content_truncated += 1
@@ -482,6 +523,18 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 f"Content inspection was limited to {_MAX_ARCHIVE_SCAN_BYTES:,} total "
                 f"in-memory bytes and {_MAX_MEMBER_SCAN_BYTES:,} bytes per member. "
                 f"{content_truncated} member(s) were not fully inspected.",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            ))
+        if time_budget_reached:
+            findings.append(Finding(
+                "archive",
+                f"TAR wall-time budget reached: {record.path}",
+                f"Archive inspection stopped after the {_MAX_ARCHIVE_WALL_SECONDS:g}-second "
+                "wall-time budget. Findings already collected are partial; remaining entries "
+                "were not inspected.",
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
