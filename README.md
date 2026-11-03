@@ -59,6 +59,12 @@ pdt scan /path/to/project --output /path/to/reports --format json,markdown,html
 
 The output directory must be outside the analyzed project. PDT does not modify target files.
 
+Compare independent scan reports without merging project identities:
+
+```bash
+pdt compare project-a-report/discovery-report.json project-b-report/discovery-report.json --output comparison-report
+```
+
 ## Confidence model
 
 - **CONFIRMED** — directly supported by source or configuration evidence.
