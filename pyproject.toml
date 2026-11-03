@@ -42,3 +42,5 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+[tool.setuptools.package-data]
+project_discovery = ["web/*.js"]
