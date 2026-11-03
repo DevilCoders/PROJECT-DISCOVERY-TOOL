@@ -1,5 +1,6 @@
 """Static Python AST analysis. Target modules are never imported or executed."""
 import ast
+import tokenize
 from pathlib import Path
 
 MAX_AST_FILE_BYTES = 16 * 1024 * 1024
@@ -29,7 +30,8 @@ class PythonAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            source = path.read_text(encoding="utf-8")
+            with tokenize.open(path) as stream:
+                source = stream.read()
             tree = ast.parse(source, filename=record.path)
         except (OSError, UnicodeDecodeError, SyntaxError) as exc:
             return [Finding("code","Python source parse error",str(exc),evidence=[record.path],analyzer=self.name)]
