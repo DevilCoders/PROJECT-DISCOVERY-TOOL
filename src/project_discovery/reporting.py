@@ -345,11 +345,15 @@ def _html_report(result: ScanResult) -> str:
     return buffer.getvalue()
 
 
-def _markdown_report(result: ScanResult) -> str:
+def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
+    """Write Markdown incrementally without duplicating the complete report in RAM."""
+    def line(value: str = "") -> None:
+        stream.write(value + "\\n")
+
     metrics = result.metrics
     native = metrics.get("native_backend", {})
     execution = metrics.get("execution", {})
-    lines = [
+    for value in (
         "# Project Discovery Report",
         "",
         f"- Root: {result.root}",
@@ -373,97 +377,120 @@ def _markdown_report(result: ScanResult) -> str:
         "",
         "## File Type Distribution",
         "",
-    ]
+    ):
+        line(value)
     for name, count in sorted(metrics.get("file_types", {}).items()):
-        lines.append(f"- {name}: {count:,}")
-    lines.extend(["", "## File Size Distribution", ""])
+        line(f"- {name}: {count:,}")
+    line()
+    line("## File Size Distribution")
+    line()
     for name, count in sorted(metrics.get("size_buckets", {}).items()):
-        lines.append(f"- {name}: {count:,}")
-    lines.extend(["", "## Development Dependency and Cache Directories", ""])
+        line(f"- {name}: {count:,}")
+    line()
+    line("## Development Dependency and Cache Directories")
+    line()
     for name, count in sorted(metrics.get("development_directories", {}).items()):
-        lines.append(f"- {name}: {count:,}")
-    lines.extend(["", "## Largest Directories", ""])
-    largest = sorted(
+        line(f"- {name}: {count:,}")
+    line()
+    line("## Largest Directories")
+    line()
+    largest = heapq.nlargest(
+        100,
         (item for item in result.directories if item.path != "."),
-        key=lambda item: item.total_bytes,
-        reverse=True,
-    )[:100]
+        key=lambda item: (item.total_bytes, item.path.casefold(), item.path),
+    )
     for item in largest:
         marker = f" [{item.development_marker}]" if item.development_marker else ""
         pruned = " [pruned]" if item.pruned else ""
-        lines.append(
+        line(
             f"- {item.path} — {item.total_bytes:,} bytes, "
             f"{item.file_count:,} files, depth {item.depth}{marker}{pruned}"
         )
-    lines.extend(["", "## Symbolic Links", ""])
+    line()
+    line("## Symbolic Links")
+    line()
     if not result.symlinks:
-        lines.append("No symbolic links were detected.")
+        line("No symbolic links were detected.")
     else:
         for item in result.symlinks:
-            lines.append(
+            line(
                 f"- {item.path} -> {item.target} "
                 f"(scope: {item.target_scope}, hidden: {item.is_hidden})"
             )
-    lines.extend(["", "## Special Filesystem Entries", ""])
+    line()
+    line("## Special Filesystem Entries")
+    line()
     if not result.special_entries:
-        lines.append("No special filesystem entries were detected.")
+        line("No special filesystem entries were detected.")
     else:
         for item in result.special_entries:
             mode = "unknown" if item.permissions is None else oct(item.permissions)
-            lines.append(
+            line(
                 f"- {item.path} — {item.entry_type}, permissions {mode}, "
                 f"hidden: {item.is_hidden}, size: {item.size_bytes:,} bytes"
             )
-    vulnerability_findings = [
-        item for item in result.findings if item.category == "vulnerabilities"
-    ]
     vuln_meta = metrics.get("vulnerability_intelligence", {})
-    lines.extend(["", "## Local Vulnerability Intelligence", ""])
+    vulnerability_count = sum(
+        1 for item in result.findings if item.category == "vulnerabilities"
+    )
+    line()
+    line("## Local Vulnerability Intelligence")
+    line()
     if not vuln_meta.get("enabled"):
-        lines.append(
-            "No local advisory database was configured. This is not a vulnerability-free result."
-        )
+        line("No local advisory database was configured. This is not a vulnerability-free result.")
     else:
-        lines.append(
-            f"- Local advisories available: {vuln_meta.get('advisory_count', 0):,}"
-        )
-        lines.append(
-            f"- Local advisory snapshot imported: {vuln_meta.get('last_imported_at', 'unknown')}"
-        )
-        lines.append(f"- Matched findings: {len(vulnerability_findings):,}")
-    for item in vulnerability_findings:
-        lines.extend([
-            f"- [{item.severity}][{item.confidence}] {item.title}",
-            f"  - {item.detail}",
-            f"  - Evidence: " + "; ".join(item.evidence),
-        ])
-    lines.extend(["", "## Findings", ""])
-    if not result.findings:
-        lines.append("No findings were produced.")
+        line(f"- Local advisories available: {vuln_meta.get('advisory_count', 0):,}")
+        line(f"- Local advisory snapshot imported: {vuln_meta.get('last_imported_at', 'unknown')}")
+        line(f"- Matched findings: {vulnerability_count:,}")
     for item in result.findings:
-        lines.extend([
-            f"### [{item.severity}][{item.confidence}] {item.title}",
-            "",
-            item.detail,
-            "",
-            *([f"**Potential attacker impact:** {item.impact}", ""] if item.impact else []),
-            *([f"**Recommended remediation:** {item.recommendation}", ""] if item.recommendation else []),
-            "Evidence:",
-        ])
-        lines.extend(f"- {value}" for value in item.evidence)
+        if item.category != "vulnerabilities":
+            continue
+        line(f"- [{item.severity}][{item.confidence}] {item.title}")
+        line(f"  - {item.detail}")
+        line("  - Evidence: " + "; ".join(item.evidence))
+    line()
+    line("## Findings")
+    line()
+    if not result.findings:
+        line("No findings were produced.")
+    for item in result.findings:
+        line(f"### [{item.severity}][{item.confidence}] {item.title}")
+        line()
+        line(item.detail)
+        line()
+        if item.impact:
+            line(f"**Potential attacker impact:** {item.impact}")
+            line()
+        if item.recommendation:
+            line(f"**Recommended remediation:** {item.recommendation}")
+            line()
+        line("Evidence:")
+        for value in item.evidence:
+            line(f"- {value}")
         if item.code_evidence:
-            lines.extend(["", "**Vulnerable source lines (redacted):**", ""])
-            lines.extend(
-                f"- 🔴 Line {code.line_number}: `{code.code.replace(chr(92), chr(92) * 2).replace(chr(96), chr(92) + chr(96))}`"
-                for code in item.code_evidence
-            )
-        lines.append("")
-    lines.extend(["## Diagnostics", ""])
+            line()
+            line("**Vulnerable source lines (redacted):**")
+            line()
+            for code in item.code_evidence:
+                escaped = code.code.replace(chr(92), chr(92) * 2).replace(
+                    chr(96), chr(92) + chr(96)
+                )
+                line(f"- 🔴 Line {code.line_number}: `{escaped}`")
+        line()
+    line("## Diagnostics")
+    line()
     if result.errors:
-        lines.extend(f"- {error}" for error in result.errors)
+        for error in result.errors:
+            line(f"- {error}")
     else:
-        lines.append("No scanner/analyzer errors recorded.")
-    return "\n".join(lines).rstrip() + "\n"
+        line("No scanner/analyzer errors recorded.")
+
+
+def _markdown_report(result: ScanResult) -> str:
+    """Compatibility helper for callers/tests that explicitly need a string."""
+    buffer = io.StringIO()
+    _write_markdown_report(buffer, result)
+    return buffer.getvalue().rstrip() + "\\n"
 
 
 def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[Path]:
