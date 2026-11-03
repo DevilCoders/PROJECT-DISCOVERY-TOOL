@@ -225,3 +225,16 @@ def test_generic_import_inventory_covers_use_statement_nodes():
     assert imports == [{
         "target": "Ada.Text_IO", "line": 5, "node_type": "use_statement",
     }]
+
+def test_tree_sitter_reports_oversized_and_growing_source_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.tree_sitter_analyzer as module
+
+    path = tmp_path / "large.rs"
+    path.write_text('fn main() { println!("large"); }', encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_TREE_SITTER_FILE_BYTES", 8)
+    record = _record("Rust")
+    record.path = path.name
+    record.size_bytes = 1
+    findings = TreeSitterAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
