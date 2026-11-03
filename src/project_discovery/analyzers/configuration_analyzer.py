@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from .base import Analyzer
-from ..models import CodeEvidence, FileRecord, Finding\nfrom ..source_utils import redact_source_excerpt
+from ..models import CodeEvidence, FileRecord, Finding
+from ..source_utils import redact_source_excerpt
 
 
 _CONFIG_FILENAMES = {
