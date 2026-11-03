@@ -213,3 +213,38 @@ def test_scan_rejects_unbounded_or_negative_job_counts(tmp_path: Path):
         run_scan(project, tmp_path / "bad-jobs-report", {"json"}, 1, jobs=65)
     with pytest.raises(ValueError, match="--jobs"):
         run_scan(project, tmp_path / "bad-jobs-report-2", {"json"}, 1, jobs=-1)
+
+
+def test_cli_prints_redacted_source_impact_and_remediation():
+    from io import StringIO
+
+    from rich.console import Console
+    from project_discovery.cli import _print_security_findings
+    from project_discovery.models import CodeEvidence, Finding
+
+    output = StringIO()
+    console = Console(
+        file=output, force_terminal=True, color_system="truecolor", width=160
+    )
+    finding = Finding(
+        "security",
+        "Shell command execution API: src/service.py",
+        "Process execution receives untrusted input.",
+        confidence="INFERRED",
+        analyzer="secure-code-patterns",
+        severity="HIGH",
+        code_evidence=[
+            CodeEvidence(41, 'os.system(command)  # password = "do-not-display-this"')
+        ],
+        impact="An attacker may execute operating-system commands with application privileges.",
+        recommendation="Use an argument array and avoid shell interpretation.",
+    )
+    _print_security_findings(console, [finding])
+    rendered = output.getvalue()
+    assert "Shell command execution API" in rendered
+    assert "L   41" in rendered
+    assert "os.system(command)" in rendered
+    assert "do-not-display-this" not in rendered
+    assert "Attacker impact:" in rendered
+    assert "Remediation:" in rendered
+    assert "\x1b[" in rendered
