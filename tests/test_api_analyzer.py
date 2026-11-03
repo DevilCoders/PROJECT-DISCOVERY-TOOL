@@ -124,3 +124,14 @@ def test_wsdl_services_operations_and_raml_resources_are_discovered(tmp_path: Pa
     assert "service: UserService" in wsdl[0].evidence
     assert "2 resource paths" in raml[0].detail
     assert "3 HTTP method declarations" in raml[0].detail
+
+def test_api_contract_reports_oversized_and_growing_source_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.api_analyzer as module
+
+    path = tmp_path / "openapi.json"
+    path.write_text('{"openapi":"3.1.0","paths":{}}', encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_API_CONTRACT_BYTES", 8)
+    record = FileRecord(path.name, 1, ".json", "API")
+    findings = APIContractAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
