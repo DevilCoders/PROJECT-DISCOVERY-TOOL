@@ -6,7 +6,8 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..language_catalog import is_textual_path
-from ..models import FileRecord, Finding
+from ..models import CodeEvidence, FileRecord, Finding
+from ..source_utils import redact_source_excerpt
 
 
 _EMAIL = re.compile(
@@ -35,7 +36,7 @@ class DataExposureAnalyzer(Analyzer):
 
     name = "data-exposure-indicators"
     domains = ("privacy", "secrets")
-    languages = ("Polyglot text/source/configuration")
+    languages = ("Polyglot text/source/configuration",)
 
     def supports(self, record: FileRecord) -> bool:
         return (
@@ -48,6 +49,9 @@ class DataExposureAnalyzer(Analyzer):
         field_lines: dict[str, set[int]] = {}
         email_lines: set[int] = set()
         secret_field_lines: set[int] = set()
+        field_excerpts: dict[tuple[str, int], str] = {}
+        email_excerpts: dict[int, str] = {}
+        secret_excerpts: dict[int, str] = {}
         try:
             with path.open("r", encoding="utf-8", errors="replace") as stream:
                 line_number = 1
@@ -56,13 +60,17 @@ class DataExposureAnalyzer(Analyzer):
                     if not line:
                         break
                     current_line = line_number
+                    excerpt = redact_source_excerpt(line)
                     for field_name, pattern in _PII_FIELDS.items():
                         if pattern.search(line):
                             field_lines.setdefault(field_name, set()).add(current_line)
+                            field_excerpts[(field_name, current_line)] = excerpt
                     if _EMAIL.search(line):
                         email_lines.add(current_line)
+                        email_excerpts[current_line] = excerpt
                     if _SECRET_FIELDS.search(line):
                         secret_field_lines.add(current_line)
+                        secret_excerpts[current_line] = excerpt
                     if line.endswith(("\n", "\r")):
                         line_number += 1
         except OSError as exc:
@@ -88,6 +96,21 @@ class DataExposureAnalyzer(Analyzer):
                 "are intentionally excluded from findings.",
                 confidence="INFERRED", evidence=evidence[:100], analyzer=self.name,
                 severity="MEDIUM",
+                code_evidence=[
+                    CodeEvidence(line_number=line, code=field_excerpts[(name, line)])
+                    for name, lines in sorted(field_lines.items())
+                    for line in sorted(lines)[:20]
+                    if (name, line) in field_excerpts
+                ][:20],
+                impact=(
+                    "If these fields contain real user data, exposing the source or sample "
+                    "records may reveal personal identifiers and increase privacy, phishing "
+                    "or account-correlation risk. Field names alone do not prove data exposure."
+                ),
+                recommendation=(
+                    "Keep real user records and personal identifiers out of source control; "
+                    "use synthetic fixtures, data minimization and access-controlled storage."
+                ),
             ))
         if email_lines:
             findings.append(Finding(
@@ -96,9 +119,24 @@ class DataExposureAnalyzer(Analyzer):
                 f"Detected email-address-shaped value(s) on {len(email_lines)} line(s). "
                 "Address values are not stored or printed.",
                 confidence="INFERRED",
-                evidence=[f"{record.path}:{line} (email value redacted)" for line in sorted(email_lines)[:100]],
+                evidence=[
+                    f"{record.path}:{line} (email value redacted)"
+                    for line in sorted(email_lines)[:100]
+                ],
                 analyzer=self.name,
                 severity="MEDIUM",
+                code_evidence=[
+                    CodeEvidence(line_number=line, code=email_excerpts[line])
+                    for line in sorted(email_lines)[:20] if line in email_excerpts
+                ],
+                impact=(
+                    "If these are real addresses in a repository or public artifact, they may "
+                    "expose contact identities for unsolicited contact, phishing or correlation."
+                ),
+                recommendation=(
+                    "Replace real addresses in fixtures and examples with reserved example "
+                    "addresses; remove exposed personal data from tracked files and history."
+                ),
             ))
         if secret_field_lines:
             findings.append(Finding(
@@ -113,5 +151,19 @@ class DataExposureAnalyzer(Analyzer):
                 ],
                 analyzer=self.name,
                 severity="LOW",
+                code_evidence=[
+                    CodeEvidence(line_number=line, code=secret_excerpts[line])
+                    for line in sorted(secret_field_lines)[:20] if line in secret_excerpts
+                ],
+                impact=(
+                    "A credential-related key name alone is not a secret. If a live value is "
+                    "present on the line or supplied through adjacent configuration, exposure "
+                    "could enable unauthorized API, cloud or database access."
+                ),
+                recommendation=(
+                    "Check whether the setting is assigned a real value. Keep live credentials "
+                    "in an approved secret manager or protected runtime injection path and rotate "
+                    "any credential already committed."
+                ),
             ))
         return findings
