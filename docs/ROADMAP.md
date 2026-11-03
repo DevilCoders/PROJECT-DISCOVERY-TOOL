@@ -94,6 +94,11 @@ The baseline is not production-ready:
 
 ## Phase 2 — High-throughput engine for 2GB–100GB+
 
+### Per-analyzer resource governance
+
+- [ ] Centralize per-analyzer limits into a policy object and add configured/consumed byte, time and stop-reason telemetry for all report formats.
+
+
 ### C-native asynchronous and GPU execution (new release gate)
 - [x] Add bounded asynchronous file-analysis scheduling with configurable worker count, back-pressure and deterministic result ordering; keep SQLite cache operations on the coordinator thread.
 - [x] Add `pdt scan --jobs N` and `--jobs 0` auto-sizing; expose selected worker count and queue limits in scan metrics and every report format.
