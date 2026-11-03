@@ -28,3 +28,14 @@ def test_python_analyzer_honors_pep263_source_encoding_cookie(tmp_path: Path):
     findings = PythonAnalyzer().analyze(source, record)
     assert any(item.title == "Python module: latin_source.py" for item in findings)
     assert not any("parse error" in item.title.lower() for item in findings)
+
+def test_python_analyzer_detects_growth_after_inventory(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import python_analyzer
+
+    source = tmp_path / "growing.py"
+    source.write_text("import os\\n", encoding="utf-8")
+    monkeypatch.setattr(python_analyzer, "MAX_AST_FILE_BYTES", 8)
+    record = FileRecord("growing.py", 1, ".py", "Python")
+    findings = PythonAnalyzer().analyze(source, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
