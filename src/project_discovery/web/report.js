@@ -219,6 +219,31 @@ function makeFinding(item){
  summary.append(conf,sev,title);
  const body=document.createElement("div");body.className="finding-body";
  const description=document.createElement("p");description.textContent=item.detail||"";
+ if(item.impact){
+  const impact=document.createElement("div");impact.className="impact-block";
+  const impactLabel=document.createElement("strong");impactLabel.textContent="POTENTIAL ATTACKER IMPACT";
+  const impactText=document.createElement("p");impactText.textContent=item.impact;
+  impact.append(impactLabel,impactText);body.append(impact);
+ }
+ if(item.recommendation){
+  const recommendation=document.createElement("div");recommendation.className="recommendation-block";
+  const recommendationLabel=document.createElement("strong");recommendationLabel.textContent="RECOMMENDED REMEDIATION";
+  const recommendationText=document.createElement("p");recommendationText.textContent=item.recommendation;
+  recommendation.append(recommendationLabel,recommendationText);body.append(recommendation);
+ }
+ if(Array.isArray(item.code_evidence)&&item.code_evidence.length){
+  const codeEvidence=document.createElement("div");codeEvidence.className="vulnerable-code";
+  const codeLabel=document.createElement("strong");codeLabel.textContent="VULNERABLE SOURCE LINES // REDACTED";
+  codeEvidence.append(codeLabel);
+  for(const sourceLine of item.code_evidence.slice(0,20)){
+   const line=document.createElement("div");line.className="vulnerable-line";
+   const number=document.createElement("span");number.className="line-number";
+   number.textContent="L"+String(sourceLine.line_number);
+   const code=document.createElement("code");code.textContent=String(sourceLine.code||"");
+   line.append(number,code);codeEvidence.append(line);
+  }
+  body.append(codeEvidence);
+ }
  const evidence=document.createElement("div");evidence.className="evidence";
  const label=document.createElement("strong");label.textContent="Evidence";evidence.append(label);
  const ul=document.createElement("ul");
