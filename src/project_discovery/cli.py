@@ -84,7 +84,11 @@ def run_scan(
     vulnerability_db: Path | None = None,
 ) -> int:
     console = Console(stderr=True)
-    root = root.expanduser().resolve(strict=True)
+    root = root.expanduser().absolute()
+    root_info = root.lstat()
+    if root_info.st_mode and root.is_symlink():
+        raise ValueError("The scan root itself is a symlink; pass its real directory path explicitly.")
+    root = root.resolve(strict=True)
     if output is None:
         project_name = root.name or "root"
         output = root.parent / f"{project_name}-pdt-report"
