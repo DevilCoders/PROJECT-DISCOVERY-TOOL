@@ -185,3 +185,31 @@ def test_vuln_db_cli_import_and_status_are_local(tmp_path: Path, monkeypatch):
     with pytest.raises(SystemExit) as status:
         main()
     assert status.value.code == 0
+
+
+def test_scan_uses_bounded_worker_count_and_reports_it(tmp_path: Path):
+    import json
+
+    project = tmp_path / "concurrent-project"
+    project.mkdir()
+    for index in range(12):
+        (project / f"module_{index}.py").write_text(
+            f"def value_{index}(): return {index}\n", encoding="utf-8"
+        )
+    output = tmp_path / "concurrent-report"
+    assert run_scan(project, output, {"json"}, 1, jobs=2) == 0
+    payload = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    execution = payload["metrics"]["execution"]
+    assert execution["mode"] == "bounded-thread-pool"
+    assert execution["worker_count"] == 2
+    assert execution["max_pending_tasks"] == 4
+    assert execution["ordering"] == "deterministic-submission-order"
+
+
+def test_scan_rejects_unbounded_or_negative_job_counts(tmp_path: Path):
+    project = tmp_path / "bad-jobs"
+    project.mkdir()
+    with pytest.raises(ValueError, match="--jobs"):
+        run_scan(project, tmp_path / "bad-jobs-report", {"json"}, 1, jobs=65)
+    with pytest.raises(ValueError, match="--jobs"):
+        run_scan(project, tmp_path / "bad-jobs-report-2", {"json"}, 1, jobs=-1)
