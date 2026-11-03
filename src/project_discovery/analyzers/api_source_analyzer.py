@@ -8,7 +8,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..language_catalog import source_extensions, source_language_names
-from ..source_utils import read_python_source
+from ..source_utils import SourceBudgetExceeded, read_python_source_bounded
 
 
 _SOURCE_EXTENSIONS = source_extensions()
@@ -70,10 +70,7 @@ def _literal(node: ast.AST) -> str | None:
 
 
 def _python_routes(source: str, relative: str) -> list[tuple[str, str, int]]:
-    try:
-        tree = ast.parse(source, filename=relative)
-    except SyntaxError:
-        return []
+    tree = ast.parse(source, filename=relative)
     routes: list[tuple[str, str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -139,13 +136,19 @@ class APIEndpointAnalyzer(Analyzer):
                     severity="LOW",
                 )]
             try:
-                source = read_python_source(path)
+                source = read_python_source_bounded(path, MAX_PYTHON_ENDPOINT_AST_BYTES)
                 routes = _python_routes(source, record.path)
-            except (OSError, UnicodeDecodeError) as exc:
+            except SourceBudgetExceeded as exc:
+                return [Finding(
+                    "api", f"Python endpoint AST resource limit: {record.path}",
+                    str(exc), confidence="UNKNOWN", evidence=[record.path],
+                    analyzer=self.name, severity="LOW",
+                )]
+            except (OSError, UnicodeDecodeError, SyntaxError, LookupError, RecursionError, MemoryError) as exc:
                 return [Finding(
                     "api", f"API endpoint scan unavailable: {record.path}",
                     f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
-                    evidence=[record.path], analyzer=self.name,
+                    evidence=[record.path], analyzer=self.name, severity="LOW",
                 )]
         else:
             bytes_scanned = 0
