@@ -123,7 +123,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     try:
                         parsed = ipaddress.ip_address(candidate)
                         if parsed.version == 6:
-                            addresses["IPv6"].add((str(parsed), number))
+                            addresses["IPv6"].add((parsed.compressed, number))
                     except ValueError:
                         pass
             for match in _PORT_KEY.finditer(line):
