@@ -44,3 +44,40 @@ def test_pdf_optional_dependency_is_reported_as_unknown(tmp_path: Path, monkeypa
     findings = module.DocumentAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "pypdf" in findings[0].detail
+
+def test_text_document_growth_after_inventory_returns_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.document_analyzer as module
+
+    path = tmp_path / "large.txt"
+    path.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_TEXT_DOCUMENT_BYTES", 8)
+    record = FileRecord(path.name, 1, ".txt", "Document")
+    findings = DocumentAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
+
+
+def test_pdf_binary_input_growth_after_inventory_returns_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.document_analyzer as module
+
+    path = tmp_path / "large.pdf"
+    path.write_bytes(b"%PDF-" + b"x" * 100)
+    monkeypatch.setattr(module, "_MAX_BINARY_DOCUMENT_BYTES", 8)
+    record = FileRecord(path.name, 1, ".pdf", "PDF")
+    findings = DocumentAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "grew beyond" in findings[0].detail
+
+
+def test_docx_uncompressed_package_budget_returns_unknown(tmp_path: Path, monkeypatch):
+    import zipfile
+    import project_discovery.analyzers.document_analyzer as module
+
+    path = tmp_path / "expanded.docx"
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", b"x" * 1024)
+    monkeypatch.setattr(module, "_MAX_DOCX_UNCOMPRESSED_BYTES", 64)
+    record = FileRecord(path.name, path.stat().st_size, ".docx", "DOCX")
+    findings = DocumentAnalyzer().analyze(path, record)
+    assert findings[0].confidence == "UNKNOWN"
+    assert "uncompressed bytes" in findings[0].detail
