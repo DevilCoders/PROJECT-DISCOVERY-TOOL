@@ -43,6 +43,6 @@ def test_native_capability_report_is_machine_readable():
 
 def test_cpp_signature_classifier_is_compiled_and_recognizes_binary_formats():
     assert native_backend.signature_backend_available()
-    assert native_backend.detect_signature(b"\\x7fELF" + b"0" * 32) == "executable/elf"
-    assert native_backend.detect_signature(b"PK\\x03\\x04" + b"0" * 32) == "archive/zip"
+    assert native_backend.detect_signature(b"\x7fELF" + b"0" * 32) == "executable/elf"
+    assert native_backend.detect_signature(b"PK\x03\x04" + b"0" * 32) == "archive/zip"
     assert native_backend.detect_signature(b"not a recognized signature") is None
