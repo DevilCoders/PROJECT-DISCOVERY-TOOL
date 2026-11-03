@@ -84,3 +84,22 @@ def test_lockfile_analyzer_detects_growth_after_inventory(tmp_path: Path, monkey
     findings = LockfileAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "grew beyond" in findings[0].detail
+
+
+def test_lockfile_inventory_reports_package_entry_cap_as_unknown(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import lockfile_analyzer
+
+    monkeypatch.setattr(lockfile_analyzer, "_MAX_LOCKFILE_PACKAGE_ENTRIES", 1)
+    findings = _scan(
+        tmp_path,
+        "package-lock.json",
+        json.dumps({
+            "packages": {
+                "node_modules/alpha": {"version": "1.0.0"},
+                "node_modules/beta": {"version": "2.0.0"},
+            }
+        }),
+    )
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "package entry budget" in findings[0].detail
