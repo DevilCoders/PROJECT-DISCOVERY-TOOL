@@ -46,3 +46,43 @@ def test_data_exposure_findings_include_redacted_source_and_impact(tmp_path: Pat
     rendered = repr([item.to_dict() for item in findings])
     for secret in ("Alice", "alice@example.com", "secret-value-should-not-leak"):
         assert secret not in rendered
+
+def test_data_exposure_large_file_returns_unknown(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import data_exposure_analyzer
+
+    path = tmp_path / "large-users.json"
+    path.write_text('{"email":"user@example.test"}', encoding="utf-8")
+    monkeypatch.setattr(data_exposure_analyzer, "_MAX_DATA_EXPOSURE_FILE_BYTES", 8)
+    record = FileRecord(path.name, 100, ".json", "JSON", file_type="text")
+    findings = DataExposureAnalyzer().analyze(path, record)
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "resource limit" in findings[0].title.lower()
+
+
+def test_data_exposure_detects_growth_and_reports_partial_budget(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers import data_exposure_analyzer
+
+    path = tmp_path / "growing-users.json"
+    path.write_text('{"email":"user@example.test"}\\n' * 4, encoding="utf-8")
+    monkeypatch.setattr(data_exposure_analyzer, "_MAX_DATA_EXPOSURE_FILE_BYTES", 32)
+    record = FileRecord(path.name, 1, ".json", "JSON", file_type="text")
+    findings = DataExposureAnalyzer().analyze(path, record)
+    assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
+
+
+def test_data_exposure_retains_only_bounded_evidence_samples(tmp_path: Path):
+    path = tmp_path / "many-users.jsonl"
+    path.write_text(
+        "".join('{"email":"user%d@example.test"}\\n' % index for index in range(300)),
+        encoding="utf-8",
+    )
+    record = FileRecord(
+        path.name, path.stat().st_size, ".jsonl", "JSONL", file_type="text"
+    )
+    findings = DataExposureAnalyzer().analyze(path, record)
+    email = next(item for item in findings if "Email-shaped value" in item.title)
+    assert len(email.evidence) <= 100
+    assert len(email.code_evidence) <= 20
+    serialized = repr([item.to_dict() for item in findings])
+    assert "user299@example.test" not in serialized
