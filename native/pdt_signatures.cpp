@@ -18,7 +18,7 @@ PyObject* classify(std::string_view data) {
         starts_with(data, "PK\x07\x08")) return emit("archive/zip");
     if (starts_with(data, "\x1f\x8b")) return emit("archive/gzip");
     if (starts_with(data, "BZh")) return emit("archive/bzip2");
-    if (starts_with(data, "\xfd" "7zXZ\x00")) return emit("archive/xz");
+    if (starts_with(data, std::string_view("\xfd" "7zXZ\x00", 6))) return emit("archive/xz");
     if (starts_with(data, "\x28\xb5\x2f\xfd")) return emit("archive/zstandard");
     if (starts_with(data, "7z\xbc\xaf\x27\x1c")) return emit("archive/7z");
     if (starts_with(data, "Rar!\x1a\x07")) return emit("archive/rar");
