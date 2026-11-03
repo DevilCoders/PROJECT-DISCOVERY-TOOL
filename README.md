@@ -159,8 +159,6 @@ The terminal is an analysis console, not an append-only file dump. On an interac
 
 ## Asynchronous execution and GPU acceleration
 
-## Asynchronous execution and GPU acceleration
-
 The scan pipeline now schedules file analysis through a bounded worker pool and exposes `pdt scan --jobs N`; `--jobs 0` selects a bounded automatic worker count based on detected hardware concurrency. Pending tasks are capped at twice the worker count, results are collected in deterministic submission order, and SQLite fingerprint-cache access stays on the coordinator thread. Stateful third-party analyzers can declare `concurrent_safe = False` to serialize their own calls.
 
 The C extension dynamically discovers OpenCL at runtime; PDT does not require OpenCL headers, an SDK or a GPU to install/build. For buffers of at least 8 MiB, the supported byte-count operation may dispatch to a detected GPU using a bounded reduction kernel. The large-file secret scanner uses this native byte counter. Small buffers, unsupported devices, allocation failures and kernel/dispatch errors fall back to C/SIMD; when the C extension is unavailable, the Python fallback remains functional. The runtime reports device capabilities, dispatches and fallback counts.
