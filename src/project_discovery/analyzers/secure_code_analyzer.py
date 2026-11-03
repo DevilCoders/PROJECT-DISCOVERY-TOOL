@@ -144,7 +144,11 @@ class SecureCodePatternAnalyzer(Analyzer):
 
     name = "secure-code-patterns"
     domains = ("secure_code", "cryptography", "serialization")
-    languages = tuple(sorted(_SOURCE_EXTENSIONS))
+    languages = (
+        "Python", "JavaScript", "TypeScript", "Java", "Kotlin", "C#", "F#",
+        "PHP", "Ruby", "Go", "Rust", "C", "C++", "Swift", "Shell",
+        "PowerShell", "Perl",
+    )
 
     def supports(self, record: FileRecord) -> bool:
         return record.error is None and record.extension in _SOURCE_EXTENSIONS
@@ -211,5 +215,12 @@ class SecureCodePatternAnalyzer(Analyzer):
                 confidence="INFERRED",
                 evidence=[f"{record.path}:{line}" for line in sorted(lines)[:100]],
                 analyzer=self.name,
+                severity=(
+                    "CRITICAL" if rule == "unsafe_deserialization" else
+                    "HIGH" if rule in {
+                        "dynamic_code_execution", "shell_command_execution",
+                        "tls_verification_disabled", "unsafe_c_memory_api", "dynamic_sql_query"
+                    } else "MEDIUM"
+                ),
             ))
         return findings

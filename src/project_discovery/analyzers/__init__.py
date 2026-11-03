@@ -20,6 +20,7 @@ from .python_analyzer import PythonAnalyzer
 from .ros_analyzer import ROSIntelligenceAnalyzer
 from .security_analyzer import SecretPatternAnalyzer
 from .secure_code_analyzer import SecureCodePatternAnalyzer
+from .secure_code_analyzer import SecureCodePatternAnalyzer
 from .sql_analyzer import SQLSchemaAnalyzer
 from .test_analyzer import TestDiscoveryAnalyzer
 from .tree_sitter_analyzer import TreeSitterAnalyzer
@@ -48,6 +49,7 @@ def load_analyzers() -> AnalyzerLoadResult:
         TestDiscoveryAnalyzer(),
         BuildManifestAnalyzer(),
         SecretPatternAnalyzer(),
+        SecureCodePatternAnalyzer(),
         SecureCodePatternAnalyzer(),
         AIMLIntelligenceAnalyzer(),
         ROSIntelligenceAnalyzer(),
