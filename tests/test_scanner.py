@@ -193,3 +193,28 @@ def test_python_inventory_fallback_remains_available_without_rust(tmp_path: Path
     assert [record.path for record in records] == ["main.py"]
     assert len(directories) == 1
     assert stats["entry_count"] == 1
+
+def test_scandir_fallback_streams_fanout_but_keeps_deterministic_inventory_order(
+    tmp_path: Path, monkeypatch,
+):
+    import project_discovery.scanner as scanner
+
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *args, **kwargs: None)
+    for name in ("zeta.py", "alpha.py", "mu.py", "Beta.py"):
+        (tmp_path / name).write_text("pass\n", encoding="utf-8")
+    for name in ("z-dir", "a-dir", "m-dir"):
+        (tmp_path / name).mkdir()
+
+    files, directories, _, _, _ = scanner.discover_inventory(tmp_path)
+    assert [item.path for item in files] == sorted(
+        (item.path for item in files), key=str.casefold,
+    )
+    assert [item.path for item in directories] == [
+        item.path for item in sorted(
+            directories, key=lambda item: (item.depth, item.path.casefold()),
+        )
+    ]
+    assert {item.path for item in files} == {
+        "zeta.py", "alpha.py", "mu.py", "Beta.py",
+    }
+
