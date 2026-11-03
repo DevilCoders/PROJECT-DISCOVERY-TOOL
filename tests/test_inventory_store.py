@@ -123,3 +123,43 @@ def test_inventory_store_database_is_private_by_default(tmp_path: Path):
     with InventoryStore(path):
         mode = stat.S_IMODE(path.stat().st_mode)
         assert mode == 0o600
+
+
+
+def test_inventory_store_checkpoint_flushes_rows_before_progress_metadata(tmp_path: Path):
+    path = tmp_path / "checkpoint.sqlite3"
+    with InventoryStore(path, batch_size=100) as store:
+        store.append("file", {"path": "src/main.py", "size_bytes": 10})
+        assert len(store._pending) == 1
+        store.checkpoint({
+            "scan_id": "scan-42",
+            "phase": "inventory",
+            "last_committed_path": "src/main.py",
+            "completed": False,
+        })
+        assert store._pending == []
+        assert store.count("file") == 1
+        assert store.get_metadata("scan_id") == "scan-42"
+        assert store.get_metadata("completed") is False
+
+    with InventoryStore(path) as reopened:
+        assert reopened.get_metadata("phase") == "inventory"
+        assert reopened.get_metadata("last_committed_path") == "src/main.py"
+        assert reopened.integrity_check() == "ok"
+
+
+def test_inventory_store_checkpoint_validates_metadata(tmp_path: Path):
+    with InventoryStore(tmp_path / "checkpoint.sqlite3") as store:
+        with pytest.raises(ValueError, match="must not be empty"):
+            store.checkpoint({})
+        with pytest.raises(ValueError, match="non-empty strings"):
+            store.checkpoint({"": "invalid"})
+        with pytest.raises(ValueError, match="non-empty strings"):
+            store.checkpoint({"phase": "inventory", 1: "invalid"})
+
+
+def test_inventory_store_integrity_check_rejects_closed_store(tmp_path: Path):
+    store = InventoryStore(tmp_path / "closed.sqlite3")
+    store.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        store.integrity_check()
