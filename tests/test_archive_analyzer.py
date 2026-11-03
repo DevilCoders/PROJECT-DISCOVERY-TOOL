@@ -63,3 +63,40 @@ def test_archive_with_unsupported_metadata_format_is_identified(tmp_path: Path):
     )
     assert findings[0].confidence == "CONFIRMED"
     assert "no extraction" in findings[0].detail
+
+
+
+def test_zip_member_content_is_scanned_in_memory_with_redaction(tmp_path: Path):
+    path = tmp_path / "secrets.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            ".env",
+            "PASSWORD=super-secret-value\nEMAIL=person@example.test\n",
+        )
+    before = path.read_bytes()
+    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "secrets.zip"))
+    assert any("Credential-Like Assignment inside archive member" in item.title for item in findings)
+    assert any("Email-Shaped Value inside archive member" in item.title for item in findings)
+    serialized = repr([item.to_dict() for item in findings])
+    assert "super-secret-value" not in serialized
+    assert "person@example.test" not in serialized
+    assert "secrets.zip::.env" in serialized
+    assert path.read_bytes() == before
+    assert not (tmp_path / ".env").exists()
+
+
+def test_tar_member_content_is_scanned_without_extracting(tmp_path: Path):
+    path = tmp_path / "credentials.tar"
+    payload = b"API_KEY=AKIAABCDEFGHIJKLMNOP\n"
+    with tarfile.open(path, "w") as archive:
+        member = tarfile.TarInfo("config/.env")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    before = path.read_bytes()
+    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "credentials.tar"))
+    assert any("Cloud Access-Key Identifier inside archive member" in item.title for item in findings)
+    serialized = repr([item.to_dict() for item in findings])
+    assert "AKIAABCDEFGHIJKLMNOP" not in serialized
+    assert "credentials.tar::config/.env" in serialized
+    assert path.read_bytes() == before
+    assert not (tmp_path / "config").exists()

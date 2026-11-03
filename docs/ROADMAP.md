@@ -48,13 +48,13 @@ These are initial implementations of varying depth. Production readiness is not 
 
 ## Phase 3 — Archives and artifact intelligence
 
-- [ ] Detect archives through both extension and signatures: ZIP, JAR/WAR/EAR, APK/AAB, IPA, TAR, TAR.GZ, TGZ, TAR.BZ2, TAR.XZ, GZIP, BZIP2, XZ, 7z, RAR, CAB, ISO, Zstandard and other common containers.
-- [ ] Inspect archive central directories or metadata indexes without extracting members to disk.
-- [ ] Record archive member paths, types, uncompressed/compressed sizes, compression ratio, CRC metadata, timestamps, permissions, ownership metadata and encryption indicators where formats expose them.
-- [ ] Detect symlink and hardlink entries, absolute paths, drive-prefixed paths, parent traversal, duplicate names, special devices/FIFOs and suspicious path normalization.
+- [x] Detect archive/container candidates through extensions and selected signatures: ZIP/JAR/WAR/EAR/APK/AAB/IPA, TAR/TAR.GZ/TGZ, GZIP/BZIP2/XZ, 7z, RAR, CAB, ISO, Zstandard, DEB/RPM and common package archives. Extend signatures for all supported subformats.
+- [x] Inspect ZIP central directories and TAR metadata without extracting members to disk; other archive formats are currently detection-only.
+- [x] Record ZIP/TAR member paths and types, compression metadata where available, timestamps, permissions/modes, link types, duplicate names, and encryption indicators; expand owner/CRC/index fields.
+- [x] Detect ZIP/TAR symlink/hardlink entries, absolute/drive-prefixed/parent-traversal paths, duplicate ZIP names and TAR special devices/FIFOs; expand path normalization and collision analysis.
 - [ ] Add configurable archive entry-count, metadata-size, nesting-depth, parsing-time and compression-ratio limits to resist archive bombs.
-- [ ] Distinguish metadata-only support from format-specific content inspection. Never claim to have inspected compressed member payloads unless a bounded in-memory streaming path actually did so.
-- [ ] Add fixtures for malformed, encrypted, nested, huge, truncated, malicious-path and symlink archives.
+- [x] Add bounded in-memory inspection of ZIP/TAR member samples for credential/PII markers without writing members to disk. Metadata-only and content-sampled states are distinguished. Expand content scanners, per-format support, and scan coverage accounting.
+- [ ] Expand fixtures for malformed, encrypted, nested, huge, truncated, malicious-path, high-ratio and symlink archives. Initial ZIP/TAR content and path-risk fixtures exist.
 
 ## Phase 4 — Network, API and OS intelligence
 

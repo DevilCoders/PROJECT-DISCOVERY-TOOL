@@ -29,7 +29,7 @@ POLYGLOT INTELLIGENCE  //  LOCAL-FIRST  //  READ-ONLY
 - No automatic grammar downloads, dependency installation, archive extraction, or cloud/API calls.
 - Scan cache and generated reports are stored outside the analyzed project by default.
 - Symlinks are recorded as links and never traversed.
-- Archive members are inspected through archive metadata/index structures; entries are never extracted to disk.
+- Archive members are inspected through ZIP/TAR metadata and bounded in-memory streaming samples; entries are never extracted to disk or followed as links.
 - Secret-like values and personal data are redacted in findings. Reports should retain evidence locations and classifications, not raw passwords, tokens, private keys, or full PII values.
 - Static observations are separated from runtime facts. A URL, port, dependency, endpoint, or ROS topic found in source is not proof that it is reachable or active.
 
@@ -78,7 +78,7 @@ The following capabilities have initial implementations in the current branch; t
 - Secret-pattern and secure-code heuristics, PII/identity field-name and redacted email indicators, and authentication/access-control markers.
 - REST/OpenAPI, GraphQL, RPC, event, SOAP/WSDL, API collection, selected source endpoint discovery, and static API-style classification.
 - SQL, NoSQL, Prisma ORM, and cross-framework migration inventory.
-- Test/build/CI/CD, container, deployment, and infrastructure manifest discovery; ZIP/TAR metadata-only archive inspection; IPv4/IPv6/CIDR/port/URL/URI/domain/protocol indicators; and host/target OS metadata.
+- Test/build/CI/CD, container, deployment, and infrastructure manifest discovery; ZIP/TAR metadata plus bounded member-content indicators without extraction; IPv4/IPv6/CIDR/port/URL/URI/domain/protocol indicators; and host/target OS metadata.
 - Initial ML/AI, ROS 1/ROS 2, mobile, game-engine, frontend, accessibility, and multi-project intelligence.
 
 See [Analyzer Coverage](docs/ANALYZER_COVERAGE.md), [Architecture](docs/ARCHITECTURE.md), and [Roadmap](docs/ROADMAP.md) for capability status and work remaining.

@@ -5,8 +5,9 @@ PDT is designed for polyglot repositories and heterogeneous project ecosystems. 
 The machine-readable coverage catalog currently enumerates more than 50 domains spanning source structure, language semantics, dependency and supply-chain intelligence, security, APIs, databases, infrastructure, CI/CD, runtime architecture, ML/AI, datasets, robotics/ROS, embedded firmware, hardware description, GPU compute, graphics, game engines, mobile, accessibility, localization, and cross-project analysis.
 
 Catalog status is explicit:
-- `implemented`: a built-in analyzer currently emits findings for this domain.
-- `planned`: a domain is part of the coverage contract but is not yet implemented.
+- `implemented`: the built-in analyzer currently provides the stated scope.
+- `partial`: an initial analyzer exists but substantial planned coverage remains.
+- `planned`: a domain is part of the coverage contract but has no substantive built-in analyzer yet.
 
 A domain being catalogued is not evidence that its analyzer is complete. The roadmap is expanded as actual parsers, analyzers, tests, and evidence models are delivered.
 
@@ -67,3 +68,8 @@ Privacy intelligence inventories PII field-name categories and email-shaped valu
 
 
 Additional dependency manifests include Erlang rebar configuration, PlatformIO embedded firmware library declarations, Lua rockspec dependencies and Ruby gemspec runtime/development dependencies.
+
+
+## Bounded archive member content inspection
+
+The ZIP/TAR archive analyzer reads archive metadata without writing members to disk. For regular members, it reads bounded samples through in-memory streams with a per-member cap and a total per-archive byte budget. Initial sample rules identify credential-like assignments, private-key markers, cloud access-key identifiers and email-shaped values. Findings retain only archive/member paths, line numbers and redacted indicator types; matched values are discarded. TAR streaming stops when an oversized member or scan budget is reached rather than decompressing the remainder solely to reach later entries. ZIP can continue metadata inventory independently of member sample limits. This is partial static content inspection, not a complete malware scanner or DLP engine. Unsupported 7z/RAR/CAB/ISO formats are detection-only in the current implementation.
