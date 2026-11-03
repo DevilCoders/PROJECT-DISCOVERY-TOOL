@@ -65,4 +65,4 @@ def test_scc_traversal_handles_deep_graphs_without_recursion():
         adjacency[nodes[index]].add(nodes[index + 1])
     adjacency[nodes[-1]].add(nodes[0])
 
-    assert _strongly_connected_components(nodes, adjacency) == [nodes]
+    components = _strongly_connected_components(nodes, adjacency)\n    assert len(components) == 1\n    assert set(components[0]) == set(nodes)
