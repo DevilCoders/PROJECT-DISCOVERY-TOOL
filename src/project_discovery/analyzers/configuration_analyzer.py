@@ -31,7 +31,7 @@ _ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\
 _RISK_PATTERNS = (
     ("debug_enabled", re.compile(r"(?i)^\s*(?:debug|debug_mode)\s*[:=]\s*(?:true|1|yes|on)\b")),
     ("tls_verification_disabled", re.compile(
-        r"(?i)^\s*(?:verify|ssl_verify|tls_verify|rejectUnauthorized|insecure_skip_verify)\s*[:=]\s*(?:false|0|no|off|true)\b"
+        r"(?i)^\s*(?:(?:verify|ssl_?verify|tls_?verify|rejectUnauthorized)\s*[:=]\s*(?:false|0|no|off)|(?:insecure_skip_verify|insecureSkipVerify)\s*[:=]\s*(?:true|1|yes|on))\b"
     )),
     ("privileged_container", re.compile(r"(?i)^\s*privileged\s*:\s*true\b")),
     ("privilege_escalation_enabled", re.compile(
@@ -46,6 +46,7 @@ _RISK_PATTERNS = (
     )),
 )
 _SECRET_KEY = re.compile(r"(?i)(?:password|passwd|secret|token|api[_-]?key|private[_-]?key)")
+_MAX_CONFIG_FILE_BYTES = 16 * 1024 * 1024
 
 _RISK_IMPACTS = {
     "debug_enabled": (
@@ -136,9 +137,8 @@ def _directive_keys(content: str) -> list[str]:
     ]
 
 
-def _parse_config(path: Path, record: FileRecord) -> tuple[list[str], list[tuple[int, str]]]:
+def _parse_config(content: str, record: FileRecord) -> tuple[list[str], list[tuple[int, str]]]:
     name = Path(record.path).name.lower()
-    content = path.read_text(encoding="utf-8")
     risks: list[tuple[int, str]] = []
     for line_number, line in enumerate(content.splitlines(), 1):
         for risk_name, pattern in _RISK_PATTERNS:
@@ -222,9 +222,34 @@ class ConfigurationAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > _MAX_CONFIG_FILE_BYTES:
+            return [Finding(
+                "configuration",
+                f"Configuration analysis resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the configuration analyzer's "
+                f"{_MAX_CONFIG_FILE_BYTES:,}-byte content budget. This is not a clean result.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"size: {record.size_bytes} bytes"],
+                analyzer=self.name,
+                severity="LOW",
+            )]
         try:
-            keys, risks = _parse_config(path, record)
-            source_lines = path.read_text(encoding="utf-8").splitlines()
+            with path.open("rb") as stream:
+                raw_content = stream.read(_MAX_CONFIG_FILE_BYTES + 1)
+            if len(raw_content) > _MAX_CONFIG_FILE_BYTES:
+                return [Finding(
+                    "configuration",
+                    f"Configuration analysis resource limit: {record.path}",
+                    f"Content grew beyond the {_MAX_CONFIG_FILE_BYTES:,}-byte configuration "
+                    "budget while reading. This is not a clean result.",
+                    confidence="UNKNOWN",
+                    evidence=[record.path, f"read_limit: {_MAX_CONFIG_FILE_BYTES} bytes"],
+                    analyzer=self.name,
+                    severity="LOW",
+                )]
+            content = raw_content.decode("utf-8")
+            keys, risks = _parse_config(content, record)
+            source_lines = content.splitlines()
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, configparser.Error, ET.ParseError, ValueError) as exc:
             return [Finding(
                 "configuration",
