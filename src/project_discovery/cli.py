@@ -4,6 +4,10 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rich.console import Console
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.table import Table
+
 from . import __version__
 from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
@@ -20,9 +24,14 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _status(console: Console, label: str, message: str, style: str) -> None:
+    console.print(f"[bold {style}][ {label} ][/bold {style}] {message}")
+
+
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int
 ) -> int:
+    console = Console(stderr=True)
     root = root.expanduser().resolve(strict=True)
     if output is None:
         project_name = root.name or "root"
@@ -33,50 +42,61 @@ def run_scan(
     if output == root or root in output.parents:
         raise ValueError("Report output must be outside the analyzed project directory.")
 
-    print("[ INFO ] Read-only discovery: " + str(root))
+    _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
     started = now()
     records, walk_stats = discover_files(root, max_file_bytes=max_file_mb * 1024 * 1024)
     analyzers = load_analyzers()
     findings, errors = [], []
     counts = Counter()
 
+    progress_columns = (
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+    )
     with ScanCache(output / ".pdt-cache" / "fingerprints.sqlite3") as cache:
-        for index, record in enumerate(records, 1):
-            counts[record.language] += 1
-            if record.error:
-                continue
-            path = root / record.path
-            try:
-                stat = path.stat()
-                cached = cache.get(str(root), record.path)
-                if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
-                    record.sha256 = cached[2]
-                else:
-                    record.sha256 = sha256_file(path)
-                    cache.put(
-                        str(root), record.path, stat.st_size, stat.st_mtime_ns,
-                        record.sha256,
-                    )
-                for analyzer in analyzers:
-                    if analyzer.supports(record):
-                        try:
-                            findings.extend(analyzer.analyze(path, record))
-                            record.analyzed = True
-                        except Exception as exc:
-                            message = (
-                                f"{record.path} [{analyzer.name}]: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                            errors.append(message)
-                            record.error = message
-            except OSError as exc:
-                record.error = str(exc)
-                errors.append(record.path + ": " + str(exc))
-            if index % 250 == 0 or index == len(records):
-                print(f"[ PROGRESS ] {index}/{len(records)} files")
+        with Progress(*progress_columns, console=console) as progress:
+            task = progress.add_task("Analyzing project files", total=len(records))
+            for record in records:
+                counts[record.language] += 1
+                try:
+                    if record.error:
+                        continue
+                    path = root / record.path
+                    stat = path.stat()
+                    cached = cache.get(str(root), record.path)
+                    if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime_ns:
+                        record.sha256 = cached[2]
+                    else:
+                        record.sha256 = sha256_file(path)
+                        cache.put(
+                            str(root), record.path, stat.st_size, stat.st_mtime_ns,
+                            record.sha256,
+                        )
+                    for analyzer in analyzers:
+                        if analyzer.supports(record):
+                            try:
+                                new_findings = analyzer.analyze(path, record)
+                                findings.extend(new_findings)
+                                record.analyzed = True
+                            except Exception as exc:
+                                message = (
+                                    f"{record.path} [{analyzer.name}]: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                                errors.append(message)
+                                record.error = message
+                except OSError as exc:
+                    record.error = str(exc)
+                    errors.append(record.path + ": " + str(exc))
+                finally:
+                    progress.advance(task)
 
     python_graph, graph_findings = analyze_python_dependencies(root, records)
     findings.extend(graph_findings)
+    domain_catalog = analyzer_domain_catalog()
     metrics = {
         "file_count": len(records),
         "total_bytes": walk_stats.get("total_bytes", 0),
@@ -86,11 +106,10 @@ def run_scan(
         "language_catalog": language_catalog(),
         "recognized_language_count": recognized_language_count(),
         "local_parser_capabilities": parser_capabilities(set(counts)),
-        "analyzer_domain_catalog": analyzer_domain_catalog(),
+        "analyzer_domain_catalog": domain_catalog,
         "analyzer_domain_count": analyzer_domain_count(),
         "implemented_analyzer_domains": [
-            item["id"] for item in analyzer_domain_catalog()
-            if item["status"] == "implemented"
+            item["id"] for item in domain_catalog if item["status"] == "implemented"
         ],
         "python_dependency_graph": python_graph,
     }
@@ -98,9 +117,28 @@ def run_scan(
         str(root), started, now(), records, findings, metrics, errors,
         [analyzer.name for analyzer in analyzers] + ["python-module-graph"],
     )
-    for report in write_reports(result, output, formats):
-        print("[ SUCCESS ] Report: " + str(report))
-    print(f"[ SUCCESS ] Scan complete: {len(records)} files; {len(findings)} findings")
+    reports = write_reports(result, output, formats)
+    for report in reports:
+        _status(console, "SUCCESS", "Report: " + str(report), "green")
+
+    summary = Table(title="PROJECT DISCOVERY SUMMARY", show_header=True, header_style="bold cyan")
+    summary.add_column("Metric")
+    summary.add_column("Value", justify="right")
+    summary.add_row("Files inventoried", str(len(records)))
+    summary.add_row("Total size", f"{metrics['total_bytes']:,} bytes")
+    summary.add_row("Languages / formats detected", str(len(counts)))
+    summary.add_row("Findings", str(len(findings)))
+    summary.add_row("Scan errors", str(len(errors) + metrics["walk_errors"]))
+    summary.add_row("Oversized files skipped", str(metrics["oversized_files"]))
+    summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
+    console.print(summary)
+    _status(
+        console, "SUCCESS",
+        f"Scan complete: {len(records)} files; {len(findings)} findings; reports in {output}",
+        "green",
+    )
+    if errors:
+        _status(console, "WARNING", f"{len(errors)} file/analyzer errors recorded in JSON report.", "yellow")
     return 0
 
 

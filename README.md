@@ -14,7 +14,7 @@ PDT inventories and analyzes heterogeneous software repositories without importi
 - Recognition catalog for 40+ languages and project file formats.
 - Optional offline-first Tree-sitter adapter covering 60+ language/format grammar mappings when grammars are already provisioned locally.
 - Machine-readable analyzer domain catalog spanning 50+ domains, including security, APIs, databases, infrastructure, CI/CD, AI/ML, robotics, embedded, game engines, mobile and multi-project intelligence.
-- JSON, Markdown and standalone dark HTML reports.
+- Rich terminal progress and summary output, plus JSON, Markdown and standalone dark HTML reports.
 
 The language and domain catalogs are coverage maps, not claims that every language-specific semantic analyzer or every domain analyzer is complete. Current implementation status is included in scan metrics.
 
