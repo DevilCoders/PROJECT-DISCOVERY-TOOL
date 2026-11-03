@@ -158,7 +158,7 @@ def _xml_keys(content: str) -> list[str]:
 
 
 def _directive_keys(content: str) -> list[str]:
-    pattern = re.compile(r"(?m)^\\s*([A-Za-z_][A-Za-z0-9_.-]*)\\s+(?![=:])([^;#]+?);?\\s*$")
+    pattern = re.compile(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s+(?![=:])([^;#]+?);?\s*$")
     keys: list[str] = []
     for line in io.StringIO(content, newline=None):
         if line.lstrip().startswith(("#", ";", "//")):
@@ -193,7 +193,7 @@ def _parse_config(
         keys = _flatten(json.loads(content))
     elif record.extension in {".json5", ".jsonc"}:
         keys = _collect_keys(
-            match.group(1) for match in re.finditer(r"""["']([^"']+)["']\\s*:""", content)
+            match.group(1) for match in re.finditer(r"""["']([^"']+)["']\s*:""", content)
         )
     elif record.extension == ".toml":
         keys = _flatten(tomllib.loads(content))
@@ -227,7 +227,7 @@ def _parse_config(
             match.group(1).upper()
             for line in io.StringIO(content, newline=None)
             if (match := re.match(
-                r"(?i)^\\s*(FROM|ARG|ENV|USER|WORKDIR|EXPOSE|ENTRYPOINT|CMD|HEALTHCHECK|SHELL)\\b",
+                r"(?i)^\s*(FROM|ARG|ENV|USER|WORKDIR|EXPOSE|ENTRYPOINT|CMD|HEALTHCHECK|SHELL)\b",
                 line,
             ))
         )
