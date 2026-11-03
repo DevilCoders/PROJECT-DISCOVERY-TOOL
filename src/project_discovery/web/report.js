@@ -111,10 +111,18 @@ $("raw-metrics").textContent=JSON.stringify(metrics,null,2);
 $("raw-errors").textContent=JSON.stringify(REPORT.errors||[],null,2);
 $("raw-analyzers").textContent=JSON.stringify(REPORT.analyzers||[],null,2);
 
-const directoryRows=$("directory-rows");
-const sortedDirectories=REPORT.directories.filter(function(item){return item.path!==".";})
- .sort(function(a,b){return b.total_bytes-a.total_bytes;}).slice(0,250);
-for(const item of sortedDirectories){
+const directoryRows=$("directory-rows"),topDirectories=[];
+for(const item of REPORT.directories){
+ if(item.path===".")continue;
+ let low=0,high=topDirectories.length;
+ while(low<high){
+  const middle=(low+high)>>1;
+  if(Number(topDirectories[middle].total_bytes)>=Number(item.total_bytes))low=middle+1;
+  else high=middle;
+ }
+ if(low<250){topDirectories.splice(low,0,item);if(topDirectories.length>250)topDirectories.pop();}
+}
+for(const item of topDirectories){
  const tr=document.createElement("tr");
  const marker=[item.development_marker,item.pruned?"pruned":null,item.is_hidden?"hidden":null].filter(Boolean).join(" / ")||"—";
  for(const pair of [[item.path,"path"],[item.depth,""],[number(item.file_count),""],[formatBytes(item.total_bytes),""],[marker,""]]){
