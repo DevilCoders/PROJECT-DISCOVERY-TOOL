@@ -75,6 +75,7 @@ class DataExposureAnalyzer(Analyzer):
         secret_excerpts: dict[int, str] = {}
         bytes_scanned = 0
         budget_reached = False
+        line_budget_reached = False
         try:
             with path.open("rb") as stream:
                 line_number = 1
@@ -86,6 +87,18 @@ class DataExposureAnalyzer(Analyzer):
                     if len(raw_line) > remaining:
                         budget_reached = True
                         break
+                    if (
+                        len(raw_line) == _MAX_LINE_BYTES
+                        and not raw_line.endswith((b"\\n", b"\\r"))
+                    ):
+                        next_byte = stream.read(1)
+                        if next_byte:
+                            bytes_scanned += 1
+                            if next_byte in (b"\\n", b"\\r"):
+                                raw_line += next_byte
+                            else:
+                                line_budget_reached = True
+                                break
                     bytes_scanned += len(raw_line)
                     line = raw_line.decode("utf-8", errors="replace")
                     current_line = line_number
@@ -222,6 +235,17 @@ class DataExposureAnalyzer(Analyzer):
                     "in an approved secret manager or protected runtime injection path and rotate "
                     "any credential already committed."
                 ),
+            ))
+        if line_budget_reached:
+            findings.append(Finding(
+                "privacy",
+                f"Data exposure line-length budget reached: {record.path}",
+                f"Analysis stopped because a physical line exceeded the {_MAX_LINE_BYTES:,}-byte "
+                "line budget. The remainder of that line and following content were not inspected.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"bytes_scanned: {bytes_scanned:,}"],
+                analyzer=self.name,
+                severity="LOW",
             ))
         if budget_reached:
             findings.append(Finding(
