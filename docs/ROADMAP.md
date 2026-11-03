@@ -277,6 +277,7 @@ The baseline is not production-ready:
 - [ ] Add dedicated sections for subdirectories, hidden entries, development dependency trees, symlinks, file type/signature, size categories, network/IP/port/URL/subdomain, API routes/types, OS, archive/member content, secrets/PII and analysis coverage.
 - [ ] Add hierarchical directory explorer and archive member browser without flattening everything into one list.
 - [x] Keep the rendered DOM bounded with cursor-based pagination for large file/finding lists.
+- [x] Keep symlink and special-filesystem-entry tables bounded with independent 100-row pagination controls.
 - [ ] Add progressive loading from external local report data or chunked embedded data so the browser does not need the full report payload at startup.
 - [ ] Make all large tables sortable, searchable and paginated with stable row keys.
 - [ ] Add severity heatmaps, category summaries, per-domain completion and unknown/skipped/error accounting.
