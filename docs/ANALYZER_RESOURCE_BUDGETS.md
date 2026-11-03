@@ -20,9 +20,10 @@ These are per-analyzer safety limits, not a global scan-size policy. They are cu
 | Build manifest analysis | 16 MiB per file | Bounded one-buffer read for build/CI manifests | UNKNOWN on oversize/growth/parse failure |
 | Markdown structure analysis | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
 | Coverage artifact parsing | 64 MiB per file | Bounded UTF-8 read before JSON/XML/LCOV parsing | UNKNOWN on oversize/growth/parse failure |
-| Generic lockfile inventory | 128 MiB per lockfile | Bounded one-buffer read before format parser | UNKNOWN on oversize/growth |
-| Local vulnerability lockfiles | 128 MiB per lockfile | Bounded one-buffer read before advisory matching | UNKNOWN when the parser budget is exceeded or the file grows |
+| Generic lockfile inventory | 128 MiB per lockfile; 250,000 retained package/version entries | Bounded one-buffer read; JSON/TOML objects parsed in memory; text formats iterated from bounded in-memory content | UNKNOWN on byte or entry-count limit |
+| Local vulnerability lockfiles | 128 MiB per lockfile; 250,000 retained package/version entries | Bounded one-buffer read; JSON/TOML objects parsed in memory; text formats iterated from bounded in-memory content | UNKNOWN on byte or entry-count limit |
 | Text/HTML/RST documents | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
+| Markdown | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
 | PDF/DOCX documents | 16 MiB compressed input; PDF 5,000 pages; extracted text 16 MiB; DOCX 10,000 entries and 32 MiB total declared uncompressed data | Bounded bytes; DOCX ZIP metadata/ratio checks before python-docx | UNKNOWN on input, page, text, package entry or uncompressed-byte budget stop |
 | ZIP archive index | 200,000 entries; 64 MiB declared central-directory bytes | EOCD/ZIP64 preflight before ZipFile.infolist() | UNKNOWN without index materialization when bounds are exceeded or unavailable |
 | ZIP/TAR member content | 1 MiB per member; 32 MiB per archive | In-memory member streams only; no extraction | UNKNOWN/partial when member/sample limit is reached |
@@ -37,6 +38,7 @@ An analyzer may apply its own specialized budget regardless of --skip. Such a re
 ## Important limitations
 
 - Most byte limits are fixed constants and are not yet configurable by CLI or a policy file.
+- Lockfile text formats iterate lines from a bounded in-memory content buffer; JSON/TOML lockfiles are parsed as bounded in-memory objects. The 250,000 entry cap limits retained package results, not the initial JSON/TOML parser object graph.
 - Core Python AST inventory, Python security AST, import graph and Python endpoint readers now use race-safe limit + 1 byte reads. The other listed parser-based analyzers also use bounded reads; newly added analyzers must follow the same contract.
 - The archive wall-time limit is cooperative. It is checked between metadata/member operations and regex matches; it cannot preempt a blocked filesystem read or interrupt a single in-progress Python regular-expression call.
 - The archive implementation does not yet impose a shared nested-archive depth or total-uncompressed-size budget because recursive nested archive inspection is not implemented.
