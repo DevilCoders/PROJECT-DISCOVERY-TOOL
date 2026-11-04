@@ -169,7 +169,7 @@ def analyze_python_dependencies(
     known_modules = set(unique_modules) | set(duplicate_modules)
     edges: list[dict[str, Any]] = []
     edge_keys: set[tuple[str, str, str, int, str]] = set()
-    omitted_edge_count = 0
+    omitted_edge_candidate_count = 0
     unresolved: list[dict[str, Any]] = []
     omitted_unresolved_count = 0
     adjacency: dict[str, set[str]] = {name: set() for name in unique_modules}
@@ -340,7 +340,7 @@ def analyze_python_dependencies(
                 )
                 if edge_key not in edge_keys:
                     if len(edges) >= MAX_GRAPH_EDGES:
-                        omitted_edge_count += 1
+                        omitted_edge_candidate_count += 1
                         continue
                     edge_keys.add(edge_key)
                     edges.append(edge)
@@ -378,7 +378,7 @@ def analyze_python_dependencies(
             analyzer="python-module-graph",
         ))
 
-    if omitted_module_record_count or omitted_edge_count or omitted_unresolved_count or omitted_skipped_module_count:
+    if omitted_module_record_count or omitted_edge_candidate_count or omitted_unresolved_count or omitted_skipped_module_count:
         emit(Finding(
             "architecture",
             "Python dependency graph reached a resource limit",
@@ -388,7 +388,7 @@ def analyze_python_dependencies(
             confidence="UNKNOWN",
             evidence=[
                 f"omitted_modules: {omitted_module_record_count}",
-                f"omitted_edges: {omitted_edge_count}",
+                f"omitted_edges: {omitted_edge_candidate_count}",
                 f"omitted_unresolved_imports: {omitted_unresolved_count}",
                 f"omitted_skipped_modules: {omitted_skipped_module_count}",
             ],
@@ -419,12 +419,12 @@ def analyze_python_dependencies(
             "cycle_count": len(cycles),
             "module_limit_reached": omitted_module_record_count > 0,
             "omitted_module_record_count": omitted_module_record_count,
-            "edge_limit_reached": omitted_edge_count > 0,
-            "omitted_edge_count": omitted_edge_count,
+            "edge_limit_reached": omitted_edge_candidate_count > 0,
+            "omitted_edge_candidate_count": omitted_edge_candidate_count,
             "unresolved_limit_reached": omitted_unresolved_count > 0,
             "omitted_unresolved_import_count": omitted_unresolved_count,
             "graph_complete": not any((
-                omitted_module_record_count, omitted_edge_count,
+                omitted_module_record_count, omitted_edge_candidate_count,
                 omitted_unresolved_count, omitted_skipped_module_count,
             )) and not skipped_modules and not any(
                 item["reason"] == "source_budget_exceeded"
