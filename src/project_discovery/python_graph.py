@@ -195,8 +195,6 @@ def analyze_python_dependencies(
     for source_module, record in sorted(eligible.items(), key=lambda item: item[1].path):
         if source_module not in unique_modules:
             continue
-        if source_module not in unique_modules:
-            continue
         try:
             source_text = read_python_source_bounded(
                 root / record.path, MAX_GRAPH_AST_FILE_BYTES,
