@@ -444,6 +444,7 @@ def test_inventory_checkpoint_is_partial_when_directory_traversal_fails(tmp_path
     root.mkdir()
     blocked = root / "blocked"
     blocked.mkdir()
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *args, **kwargs: None)
     real_scandir = scanner.os.scandir
 
     def controlled_scandir(path):
