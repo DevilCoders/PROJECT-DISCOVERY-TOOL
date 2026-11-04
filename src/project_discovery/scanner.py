@@ -90,15 +90,25 @@ def _is_hidden(name: str, info: os.stat_result) -> bool:
     return bool(attributes & 0x2)
 
 
-def _read_signature_sample(path: Path, expected_info: os.stat_result | None = None) -> bytes:
-    """Read a bounded signature sample from the same regular file observed by the walker.
-
-    O_NOFOLLOW blocks symlink substitution where supported. The descriptor's fstat
-    identity is checked on every platform, including platforms without O_NOFOLLOW.
-    """
-    before = expected_info if expected_info is not None else path.lstat()
+def _read_signature_sample(
+    path: Path,
+    expected_info: os.stat_result | tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+) -> bytes:
+    """Read 512 bytes from a verified descriptor matching walker metadata."""
+    before = path.lstat() if expected_info is None or isinstance(expected_info, tuple) else expected_info
     if not stat.S_ISREG(before.st_mode):
         raise OSError(f"refusing signature read from non-regular entry: {path}")
+    identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    expected_values = (
+        expected_info if isinstance(expected_info, tuple)
+        else tuple(getattr(before, key) for key in identity)
+    )
+    observed_values = tuple(getattr(before, key, None) for key in identity)
+    if any(
+        expected is not None and expected != observed
+        for expected, observed in zip(expected_values, observed_values)
+    ):
+        raise OSError(f"file identity changed before signature read: {path}")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -106,8 +116,11 @@ def _read_signature_sample(path: Path, expected_info: os.stat_result | None = No
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             raise OSError(f"entry changed to a non-regular file: {path}")
-        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if any(getattr(opened, key) != getattr(before, key) for key in identity):
+        opened_values = tuple(getattr(opened, key, None) for key in identity)
+        if opened_values != observed_values or any(
+            expected is not None and expected != actual
+            for expected, actual in zip(expected_values, opened_values)
+        ):
             raise OSError(f"file identity changed during signature read: {path}")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             return stream.read(512)
@@ -116,7 +129,9 @@ def _read_signature_sample(path: Path, expected_info: os.stat_result | None = No
 
 
 def _signature_type(
-    path: Path, relative_path: str, expected_info: os.stat_result | None = None,
+    path: Path,
+    relative_path: str,
+    expected_info: os.stat_result | tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
 ) -> str | None:
     """Classify common binary formats from a bounded, no-follow signature sample."""
     try:
@@ -209,7 +224,9 @@ def _signature_type(
 
 
 def _file_type(
-    path: Path, relative_path: str, expected_info: os.stat_result | None = None,
+    path: Path,
+    relative_path: str,
+    expected_info: os.stat_result | tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
 ) -> str:
     signature = _signature_type(path, relative_path, expected_info)
     if signature:
@@ -362,7 +379,10 @@ def _discover_with_rust(
             continue
         if kind == "file":
             path = root / relative
-            file_type = _file_type(path, relative)
+            file_identity = (
+                device_id, inode_id, size, mtime_ns, ctime_ns,
+            ) if device_id is not None and inode_id is not None else None
+            file_type = _file_type(path, relative, file_identity)
             language = detect_language(relative)
             record = FileRecord(
                 relative, size, Path(relative).suffix.lower(), language,
