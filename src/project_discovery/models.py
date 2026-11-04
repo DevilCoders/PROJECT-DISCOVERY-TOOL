@@ -164,7 +164,7 @@ class ScanResult:
     files: Sequence[FileRecord] = field(default_factory=list)
     findings: Sequence[Finding] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
-    errors: list[str] = field(default_factory=list)
+    errors: Sequence[str] = field(default_factory=list)
     analyzer_names: list[str] = field(default_factory=list)
     directories: Sequence[DirectoryRecord] = field(default_factory=list)
     symlinks: Sequence[SymlinkRecord] = field(default_factory=list)
@@ -182,6 +182,6 @@ class ScanResult:
             "special_entries": [item.to_dict() for item in self.special_entries],
             "findings": [item.to_dict() for item in self.findings],
             "metrics": self.metrics,
-            "errors": self.errors,
+            "errors": list(self.errors),
             "analyzers": self.analyzer_names,
         }
