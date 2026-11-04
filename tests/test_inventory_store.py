@@ -359,3 +359,25 @@ def test_inventory_store_persists_and_deduplicates_typed_findings(tmp_path: Path
         }
         assert lazy[0].to_dict() == lazy[0].to_dict()
 
+
+
+
+def test_inventory_store_streams_ordered_diagnostics_without_deduplication(tmp_path: Path):
+    from project_discovery.inventory_store import StoredDiagnosticRecords
+
+    database = tmp_path / "diagnostics.sqlite3"
+    with InventoryStore(database, batch_size=2) as store:
+        assert store.extend_diagnostics(["first diagnostic", "repeat", "repeat"]) == 3
+
+    lazy = StoredDiagnosticRecords(database, fetch_size=1)
+    assert len(lazy) == 3
+    assert list(lazy) == ["first diagnostic", "repeat", "repeat"]
+    assert lazy[1] == "repeat"
+    assert lazy[3:] == []
+
+    # The insertion sequence continues after reopening the store.
+    with InventoryStore(database) as store:
+        store.append_diagnostic("after reopen")
+    assert list(lazy) == [
+        "first diagnostic", "repeat", "repeat", "after reopen",
+    ]
