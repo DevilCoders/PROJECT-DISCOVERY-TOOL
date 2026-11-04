@@ -383,7 +383,9 @@ def test_sha256_file_rejects_invalid_chunk_size(tmp_path: Path):
         sha256_file(source, chunk_size=0)
 
 def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_path: Path):
-    from project_discovery.inventory_store import InventoryStore, StoredFileRecords
+    from project_discovery.inventory_store import (
+        InventoryStore, StoredFileRecords, StoredRecordSequence,
+    )
     from project_discovery.scanner import discover_inventory
 
     root = tmp_path / "store-backed-project"
@@ -401,6 +403,10 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
     with InventoryStore(database, batch_size=1) as store:
         files, directories, symlinks, special, stats = discover_inventory(root, store=store)
         assert isinstance(files, StoredFileRecords)
+        assert isinstance(symlinks, StoredRecordSequence)
+        assert isinstance(special, StoredRecordSequence)
+        assert not isinstance(symlinks, list)
+        assert not isinstance(special, list)
         assert len(files) == 1
         restored_file = files[0]
         assert restored_file.path == "src/main.py"
@@ -434,7 +440,9 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
         assert persisted_src["file_count"] == 1
         assert persisted_src["total_bytes"] == len("print('stored')\n".encode())
         if link is not None:
-            assert any(item["path"] == "source-link" for item in store.iter_records("symlink"))
+            assert any(item.path == "source-link" for item in symlinks)
+            assert symlinks[0].target_state == "unverified"
+        assert len(special) == 0
         assert stats["entry_count"] >= 2
 
 
