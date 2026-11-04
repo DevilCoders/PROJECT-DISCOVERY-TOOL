@@ -64,6 +64,9 @@ def test_inventory_store_orders_casefolded_paths_and_migrates_legacy_schema(
             ("file", "a.py", json.dumps({"path": "a.py"})),
             ("file", "ss.py", json.dumps({"path": "ss.py"})),
             ("file", "A.py", json.dumps({"path": "A.py"})),
+            ("directory", "deep", json.dumps({"path": "deep", "depth": 2})),
+            ("directory", "shallow", json.dumps({"path": "shallow", "depth": 1})),
+            ("directory", ".", json.dumps({"path": ".", "depth": 0})),
         ],
     )
     connection.commit()
@@ -73,10 +76,42 @@ def test_inventory_store_orders_casefolded_paths_and_migrates_legacy_schema(
         assert [
             item["path"] for item in store.iter_records("file")
         ] == ["A.py", "a.py", "ss.py", "ß.py"]
+        assert [
+            item["path"] for item in store.iter_records("directory")
+        ] == [".", "shallow", "deep"]
         store.append("file", {"path": "B.py"})
         assert [
             item["path"] for item in store.iter_records("file")
         ] == ["A.py", "a.py", "B.py", "ss.py", "ß.py"]
+
+
+def test_inventory_store_updates_directory_aggregates_in_bounded_batches(
+    tmp_path: Path,
+):
+    from project_discovery.models import DirectoryRecord
+
+    path = tmp_path / "directories.sqlite3"
+    with InventoryStore(path, batch_size=2) as store:
+        store.append("directory", DirectoryRecord(".", 0))
+        store.append("directory", DirectoryRecord("src", 1))
+        store.adjust_directory(".", direct_child_delta=1)
+        store.adjust_directory(
+            "src",
+            direct_child_delta=2,
+            file_count_delta=3,
+            total_bytes_delta=45,
+            error="permission denied",
+        )
+
+        records = list(store.iter_records("directory", fetch_size=1))
+        assert [record["path"] for record in records] == [".", "src"]
+        assert records[0]["direct_child_count"] == 1
+        assert records[0]["file_count"] == 0
+        assert records[1]["direct_child_count"] == 2
+        assert records[1]["file_count"] == 3
+        assert records[1]["total_bytes"] == 45
+        assert records[1]["error"] == "permission denied"
+        assert store._directory_pending == {}
 
 
 def test_inventory_store_upserts_records_by_kind_and_path(tmp_path: Path):
