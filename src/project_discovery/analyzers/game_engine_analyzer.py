@@ -211,7 +211,10 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
 
     def _json_project(self, path: Path, record: FileRecord, forced_engine: str | None = None) -> list[Finding]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(read_text_bounded(
+                    path, 16 * 1024 * 1024,
+                    expected_identity=record.analysis_identity,
+                ))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return [Finding(
                 "game_engine", f"Game project JSON parse error: {record.path}",
@@ -332,7 +335,10 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
 
     def _web_game_manifest(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(read_text_bounded(
+                    path, 16 * 1024 * 1024,
+                    expected_identity=record.analysis_identity,
+                ))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return []
         if not isinstance(data, dict):
