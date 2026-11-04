@@ -79,6 +79,7 @@ def test_graph_records_explicitly_skipped_modules_as_unknown(tmp_path: Path):
     result, findings = analyze_python_dependencies(tmp_path, [record])
     assert result["modules"] == []
     assert result["skipped_modules"][0]["name"] == "large"
+    assert result["summary"]["graph_complete"] is False
     assert result["summary"]["skipped_module_count"] == 1
     assert findings[0].confidence == "UNKNOWN"
 
@@ -182,3 +183,23 @@ def test_graph_streams_findings_to_sink_without_returning_local_list(tmp_path: P
         item.title == "Internal Python dependency: alpha -> beta"
         for item in persisted
     )
+
+
+
+def test_graph_marks_partial_when_unresolved_import_budget_is_reached(
+    tmp_path: Path, monkeypatch,
+):
+    from project_discovery import python_graph
+
+    path = tmp_path / "alpha.py"
+    path.write_text("import external_one\nimport external_two\n", encoding="utf-8")
+    record = _record(tmp_path, "alpha.py")
+    monkeypatch.setattr(python_graph, "MAX_GRAPH_UNRESOLVED", 1)
+
+    graph, findings = analyze_python_dependencies(tmp_path, [record])
+
+    assert graph["summary"]["unresolved_limit_reached"] is True
+    assert graph["summary"]["unresolved_import_count"] == 1
+    assert graph["summary"]["omitted_unresolved_import_count"] == 1
+    assert graph["summary"]["graph_complete"] is False
+    assert any(item.confidence == "UNKNOWN" for item in findings)
