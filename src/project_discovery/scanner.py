@@ -435,6 +435,7 @@ def discover_inventory(
         root_mode, root_hidden = None, False
     if store is not None:
         store.clear()
+        stats["inventory_store_enabled"] = 1
         store.checkpoint({"inventory_status": "running", "root": str(root)})
     root_directory = DirectoryRecord(".", 0, permissions=root_mode, is_hidden=root_hidden)
     directories_by_path: dict[str, DirectoryRecord] = {".": root_directory}
