@@ -68,7 +68,9 @@ class InventoryStore:
 
     @staticmethod
     def _serialize(record: Mapping[str, Any] | Any) -> tuple[str, str]:
-        if hasattr(record, "to_dict"):
+        if hasattr(record, "to_storage_dict"):
+            value = record.to_storage_dict()
+        elif hasattr(record, "to_dict"):
             value = record.to_dict()
         elif isinstance(record, Mapping):
             value = dict(record)
@@ -157,6 +159,17 @@ class InventoryStore:
             # Callers commonly stop after a page; release the SQLite read
             # cursor immediately instead of waiting for generator collection.
             cursor.close()
+
+    def iter_file_records(self, *, fetch_size: int = 256) -> Iterator["FileRecord"]:
+        """Yield typed file records while retaining their private scan-time identity."""
+        from .models import FileRecord
+
+        payloads = self.iter_records("file", fetch_size=fetch_size)
+        try:
+            for payload in payloads:
+                yield FileRecord.from_storage_dict(payload)
+        finally:
+            payloads.close()
 
     def set_metadata(self, key: str, value: Any) -> None:
         if self._closed:
