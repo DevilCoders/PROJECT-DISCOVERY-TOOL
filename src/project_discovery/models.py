@@ -64,9 +64,15 @@ class FileRecord:
     permissions: int | None = None
     mtime_ns: int | None = None
     content_skipped_reason: str | None = None
+    # Private scan-time identity used to pin analyzer reads; never serialized.
+    analysis_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = field(
+        default=None, repr=False, compare=False,
+    )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        value.pop("analysis_identity", None)
+        return value
 
 
 @dataclass(slots=True)
