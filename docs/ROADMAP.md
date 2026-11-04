@@ -326,7 +326,9 @@ The baseline is not production-ready:
 - [ ] Full supported OS and Python CI matrix, plus native build matrix where Rust/C modules exist.
 - [ ] Analyzer conformance and regression coverage for all claimed capabilities.
 - [ ] Reproducible source/wheel builds, clean install, package metadata, dependency/license inventory and CLI smoke tests.
-- [ ] Complete descriptor-pinned reads for every analyzer; scanner signature classification and SHA-256 cache fingerprinting now use `os.open` descriptors, request `O_NOFOLLOW` where available and verify `fstat` identity against observed no-follow metadata. Analyzer implementations still independently open paths and retain a TOCTOU window.
+- [x] Route built-in analyzer reads of scanned project files through shared descriptor-verified binary/text and bounded-reader helpers; apply private scan-time identity checks where the walker supplies them. SHA-256 and signature sampling use the same descriptor boundary; regression tests cover file replacement, symlink substitution, bounded reads and private identity serialization.
+- [ ] Add a descriptor-aware Analyzer/plugin file-access contract and migrate or reject legacy third-party path-open behavior where strict mode requires enforcement.
+- [ ] Add stable Windows file identity to the Rust walker and verify scan-to-read continuity on Windows/macOS/Linux. The current Windows Rust walker does not yet supply a stable file ID; open-time `lstat`/`fstat` checks alone do not prove continuity from inventory.
 - [ ] Security review of filesystem races, symlink handling, parsers, archive streams, plugin execution, cache databases, output paths and HTML serialization.
 - [ ] Verified read-only, offline and privacy guarantees.
 - [ ] Verified secret/PII redaction across every output surface.
