@@ -6,9 +6,9 @@ connects to, or modifies a database or target project.
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from ..source_utils import read_text_bounded, PurePosixPath
+from ..source_utils import read_text_bounded
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
