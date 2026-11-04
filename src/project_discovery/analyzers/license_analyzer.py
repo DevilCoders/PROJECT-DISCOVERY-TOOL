@@ -85,7 +85,10 @@ class LicenseAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         name = Path(record.path).name.lower()
         try:
-            content = path.read_text(encoding="utf-8")
+            content = read_text_bounded(
+                path, 8 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
             declared = _manifest_license(path, record) if name in {
                 "package.json", "pyproject.toml", "cargo.toml", "composer.json"
             } else []
