@@ -209,7 +209,7 @@ def test_configuration_risk_evidence_is_bounded_per_rule(tmp_path: Path, monkeyp
     from project_discovery.analyzers import configuration_analyzer
 
     monkeypatch.setattr(configuration_analyzer, "_MAX_CONFIG_RISK_LINES", 10)
-    content = "\\n".join(["debug: true"] * 250)
+    content = "\n".join(["debug: true"] * 250)
     findings = _scan(tmp_path, "application.yml", content)
     risks = [item for item in findings if item.category == "security"]
     assert len(risks) == 10
