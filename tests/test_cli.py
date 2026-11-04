@@ -22,6 +22,7 @@ def test_default_report_output_is_sibling_of_target(tmp_path: Path):
     assert "analyzer_registry" in payload["metrics"]
     assert "source_structure" in payload["metrics"]["active_analyzer_domains"]
     assert "native_backend" in payload["metrics"]
+    assert payload["files"][0]["analyzed"] is True
     assert "vcs_provider_signal_count" in payload["metrics"]
     persistence = payload["metrics"]["inventory_persistence"]
     assert persistence["enabled"] is True
