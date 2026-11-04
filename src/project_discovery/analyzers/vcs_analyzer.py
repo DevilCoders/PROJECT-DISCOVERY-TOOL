@@ -4,6 +4,8 @@ from __future__ import annotations
 import configparser
 import re
 from pathlib import Path
+
+from ..source_utils import read_text_bounded
 from urllib.parse import urlsplit, urlunsplit
 
 from .base import Analyzer
@@ -121,7 +123,9 @@ def _hosting_provider(host: str | None) -> str:
 
 def _read_text(path: Path) -> tuple[str | None, str | None]:
     try:
-        return path.read_text(encoding="utf-8", errors="replace"), None
+        return read_text_bounded(
+            path, 2 * 1024 * 1024, encoding="utf-8", errors="replace",
+        ), None
     except OSError as exc:
         return None, f"{type(exc).__name__}: {exc}"
 
