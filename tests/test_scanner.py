@@ -406,6 +406,13 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
         assert restored_file.path == "src/main.py"
         assert restored_file.analysis_identity is not None
         assert not isinstance(files, list)
+        restored_file.analyzed = True
+        restored_file.error = "fixture analyzer diagnostic"
+        assert files.update_records([restored_file]) == 1
+        round_trip = files[0]
+        assert round_trip.analyzed is True
+        assert round_trip.error == "fixture analyzer diagnostic"
+        assert round_trip.analysis_identity == restored_file.analysis_identity
         assert files[1:] == []
         assert files[1:0] == []
         assert files[::-1][0].path == "src/main.py"
