@@ -41,6 +41,44 @@ def test_inventory_store_round_trips_private_file_identity_without_public_serial
         assert "analysis_identity" not in restored.to_dict()
 
 
+def test_inventory_store_orders_casefolded_paths_and_migrates_legacy_schema(
+    tmp_path: Path,
+):
+    import json
+    import sqlite3
+
+    path = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """CREATE TABLE inventory_records (
+            kind TEXT NOT NULL,
+            path TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY(kind, path)
+        ) WITHOUT ROWID"""
+    )
+    connection.executemany(
+        "INSERT INTO inventory_records(kind, path, payload) VALUES (?, ?, ?)",
+        [
+            ("file", "ß.py", json.dumps({"path": "ß.py"})),
+            ("file", "a.py", json.dumps({"path": "a.py"})),
+            ("file", "ss.py", json.dumps({"path": "ss.py"})),
+            ("file", "A.py", json.dumps({"path": "A.py"})),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    with InventoryStore(path) as store:
+        assert [
+            item["path"] for item in store.iter_records("file")
+        ] == ["A.py", "a.py", "ss.py", "ß.py"]
+        store.append("file", {"path": "B.py"})
+        assert [
+            item["path"] for item in store.iter_records("file")
+        ] == ["A.py", "a.py", "B.py", "ss.py", "ß.py"]
+
+
 def test_inventory_store_upserts_records_by_kind_and_path(tmp_path: Path):
     with InventoryStore(tmp_path / "inventory.sqlite3", batch_size=8) as store:
         store.append("file", {"path": "src/app.py", "size_bytes": 10})
