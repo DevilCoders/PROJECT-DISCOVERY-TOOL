@@ -115,6 +115,24 @@ def open_verified_binary(
             os.close(descriptor)
 
 
+@contextmanager
+def open_verified_text(
+    path: Path,
+    *,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+):
+    """Yield a text wrapper over a descriptor-verified file without reopening its path."""
+    with open_verified_binary(path, expected_identity) as binary:
+        text_stream = io.TextIOWrapper(binary, encoding=encoding, errors=errors)
+        try:
+            yield text_stream
+        finally:
+            # The outer context owns the binary descriptor.
+            text_stream.detach()
+
+
 def read_python_source(
     path: Path,
     *,
