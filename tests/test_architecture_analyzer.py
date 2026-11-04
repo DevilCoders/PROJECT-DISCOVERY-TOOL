@@ -52,15 +52,13 @@ def test_project_layout_recognizes_ml_robotics_game_and_delivery_layers():
 
 
 
-def test_architecture_component_index_is_bounded_and_reports_omissions(
-    tmp_path: Path, monkeypatch,
-):
+def test_architecture_component_index_is_bounded_and_reports_omissions(monkeypatch):
     from project_discovery import architecture_analyzer
 
     records = [
-        _record(tmp_path, "alpha/one.py"),
-        _record(tmp_path, "alpha/two.py"),
-        _record(tmp_path, "beta/three.py"),
+        _record("alpha/one.py"),
+        _record("alpha/two.py"),
+        _record("beta/three.py"),
     ]
     monkeypatch.setattr(
         architecture_analyzer, "MAX_ARCHITECTURE_COMPONENTS", 1,
