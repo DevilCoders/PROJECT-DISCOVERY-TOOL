@@ -357,7 +357,16 @@ def test_inventory_store_persists_and_deduplicates_typed_findings(tmp_path: Path
         assert {item.title for item in lazy} == {
             "Hard-coded credential", "Debug mode enabled",
         }
-        assert lazy[0].to_dict() == lazy[0].to_dict()
+        first = lazy[0]
+        assert first.title in {"Hard-coded credential", "Debug mode enabled"}
+        reread = lazy[0]
+        assert reread.to_dict() == first.to_dict()
+        assert [item.title for item in lazy] == sorted(
+            [item.title for item in lazy],
+            key=lambda title: title,
+        )
+        with pytest.raises(IndexError):
+            _ = lazy[2]
 
 
 
