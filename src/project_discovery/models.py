@@ -48,6 +48,16 @@ class Finding:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "Finding":
+        """Restore a finding from its JSON-compatible persisted representation."""
+        data = dict(value)
+        data["code_evidence"] = [
+            item if isinstance(item, CodeEvidence) else CodeEvidence(**item)
+            for item in data.get("code_evidence", [])
+        ]
+        return cls(**data)
+
 
 @dataclass(slots=True)
 class FileRecord:
@@ -152,7 +162,7 @@ class ScanResult:
     started_at: str
     finished_at: str
     files: Sequence[FileRecord] = field(default_factory=list)
-    findings: list[Finding] = field(default_factory=list)
+    findings: Sequence[Finding] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     analyzer_names: list[str] = field(default_factory=list)
