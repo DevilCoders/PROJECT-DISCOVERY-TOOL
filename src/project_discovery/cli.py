@@ -378,6 +378,7 @@ def run_scan(
             "integrity_check": (
                 "ok" if walk_stats.get("inventory_store_integrity_ok", 0) else "failed"
             ),
+            "status": "partial" if walk_stats.get("inventory_store_partial", 0) else "complete",
             "scope": "filesystem metadata only",
             "end_to_end_bounded_memory": False,
         },
