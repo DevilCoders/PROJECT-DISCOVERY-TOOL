@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_text_bounded
 
 
 _FRAMEWORKS = {
@@ -92,9 +93,13 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
-def _python_evidence(path: Path, relative: str) -> list[Finding]:
+def _python_evidence(
+    path: Path, relative: str, expected_identity=None,
+) -> list[Finding]:
     try:
-        source = path.read_text(encoding="utf-8")
+        source = read_text_bounded(
+            path, 16 * 1024 * 1024, expected_identity=expected_identity,
+        )
         tree = ast.parse(source, filename=relative)
     except (OSError, UnicodeDecodeError, SyntaxError) as exc:
         return [Finding(
@@ -233,7 +238,7 @@ class AIMLIntelligenceAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         if record.extension in {".py", ".pyi"}:
-            return _python_evidence(path, record.path)
+            return _python_evidence(path, record.path, record.analysis_identity)
 
         name = Path(record.path).name.lower()
         if record.extension in _MODEL_EXTENSIONS:
@@ -258,7 +263,10 @@ class AIMLIntelligenceAnalyzer(Analyzer):
             )]
         if name in _MODEL_METADATA_NAMES or record.extension == ".json":
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(read_text_bounded(
+                    path, 16 * 1024 * 1024,
+                    expected_identity=record.analysis_identity,
+                ))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 return [Finding(
                     "model_artifacts",
