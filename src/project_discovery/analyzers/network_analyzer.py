@@ -113,6 +113,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
         protocol_counts: dict[str, int] = {}
         unique_indicator_count = 0
         bytes_scanned = 0
+        line_limit_exceeded = 0
         budget_reason: str | None = None
 
         def retain(bucket: set, value: tuple) -> bool:
@@ -152,15 +153,34 @@ class NetworkIndicatorAnalyzer(Analyzer):
                         and not raw_line.endswith(b"\n")
                     ):
                         next_byte = stream.read(1)
-                        if next_byte:
-                            if next_byte == b"\n":
-                                raw_line += next_byte
-                            else:
-                                bytes_scanned += 1
-                                budget_reason = (
-                                    f"physical line exceeded the {_MAX_NETWORK_LINE_BYTES:,}-byte line budget"
+                        if next_byte == b"\n":
+                            raw_line += next_byte
+                        elif next_byte:
+                            # Skip an overlong physical line with bounded reads, then
+                            # continue scanning subsequent lines. Its content remains
+                            # explicitly uninspected in the UNKNOWN diagnostic below.
+                            line_limit_exceeded += 1
+                            bytes_scanned += len(raw_line) + 1
+                            while bytes_scanned < _MAX_NETWORK_FILE_BYTES:
+                                remaining = _MAX_NETWORK_FILE_BYTES - bytes_scanned
+                                discarded = stream.readline(
+                                    min(_MAX_NETWORK_LINE_BYTES, remaining + 1)
                                 )
+                                if not discarded:
+                                    break
+                                if len(discarded) > remaining:
+                                    bytes_scanned = _MAX_NETWORK_FILE_BYTES
+                                    budget_reason = (
+                                        "file byte budget reached while skipping an overlong physical line"
+                                    )
+                                    break
+                                bytes_scanned += len(discarded)
+                                if discarded.endswith(b"\n"):
+                                    line_number += 1
+                                    break
+                            if budget_reason:
                                 break
+                            continue
                     bytes_scanned += len(raw_line)
                     line = raw_line.decode("utf-8", errors="replace")
 
@@ -372,6 +392,22 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     for line in lines
                 ][:_MAX_NETWORK_EVIDENCE],
                 analyzer=self.name,
+            ))
+        if line_limit_exceeded:
+            findings.append(Finding(
+                "network",
+                f"Network indicator scan skipped overlong line(s): {record.path}",
+                f"Skipped {line_limit_exceeded:,} physical line(s) exceeding the "
+                f"{_MAX_NETWORK_LINE_BYTES:,}-byte line budget to keep memory bounded. "
+                "Other lines were still inspected; the skipped content remains unknown.",
+                confidence="UNKNOWN",
+                evidence=[
+                    record.path,
+                    f"overlong_lines_skipped: {line_limit_exceeded:,}",
+                    f"bytes_scanned: {bytes_scanned:,}",
+                ],
+                analyzer=self.name,
+                severity="LOW",
             ))
         if budget_reason:
             findings.append(Finding(
