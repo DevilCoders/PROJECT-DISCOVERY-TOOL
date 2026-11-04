@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_text_bounded
 
 _ROS_IMPORTS = {"rclpy": "ROS 2 Python", "rospy": "ROS 1 Python"}
 _COMMUNICATION = {
@@ -77,7 +78,10 @@ class ROSIntelligenceAnalyzer(Analyzer):
                 confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
             )]
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "robotics", f"ROS source read error: {record.path}",
@@ -246,7 +250,10 @@ class ROSIntelligenceAnalyzer(Analyzer):
 
     def _interface(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = read_text_bounded(
+                path, 4 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            ).splitlines()
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "robotics", f"ROS interface read error: {record.path}",
