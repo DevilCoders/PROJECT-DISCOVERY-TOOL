@@ -111,7 +111,10 @@ class LockfileAnalyzer(Analyzer):
                 analyzer=self.name, severity="LOW",
             )]
         try:
-            content = read_text_bounded(path, _MAX_LOCKFILE_INVENTORY_BYTES)
+            content = read_text_bounded(
+                path, _MAX_LOCKFILE_INVENTORY_BYTES,
+                expected_identity=record.analysis_identity,
+            )
             if name in {"package-lock.json", "composer.lock", "pipfile.lock"}:
                 packages = _json_packages(json.loads(content), name)
             elif name in {"cargo.lock", "poetry.lock"}:
