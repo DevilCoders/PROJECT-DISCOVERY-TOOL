@@ -121,3 +121,64 @@ def test_graph_reports_unknown_when_source_grows_after_inventory(tmp_path: Path,
         for item in graph["unresolved_imports"]
     )
     assert any(item.confidence == "UNKNOWN" for item in findings)
+
+
+
+def test_graph_marks_partial_when_module_budget_is_reached(tmp_path: Path, monkeypatch):
+    from project_discovery import python_graph
+
+    (tmp_path / "alpha.py").write_text("import beta\n", encoding="utf-8")
+    (tmp_path / "beta.py").write_text("value = 1\n", encoding="utf-8")
+    records = [_record(tmp_path, "alpha.py"), _record(tmp_path, "beta.py")]
+    monkeypatch.setattr(python_graph, "MAX_GRAPH_MODULES", 1)
+
+    graph, findings = analyze_python_dependencies(tmp_path, records)
+
+    assert graph["summary"]["module_limit_reached"] is True
+    assert graph["summary"]["omitted_module_record_count"] == 1
+    assert graph["summary"]["graph_complete"] is False
+    assert any(
+        item.confidence == "UNKNOWN"
+        and "resource limit" in item.title.lower()
+        for item in findings
+    )
+
+
+def test_graph_marks_partial_when_edge_budget_is_reached(tmp_path: Path, monkeypatch):
+    from project_discovery import python_graph
+
+    (tmp_path / "alpha.py").write_text("import beta\nimport gamma\n", encoding="utf-8")
+    (tmp_path / "beta.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / "gamma.py").write_text("value = 2\n", encoding="utf-8")
+    records = [
+        _record(tmp_path, "alpha.py"),
+        _record(tmp_path, "beta.py"),
+        _record(tmp_path, "gamma.py"),
+    ]
+    monkeypatch.setattr(python_graph, "MAX_GRAPH_EDGES", 1)
+
+    graph, findings = analyze_python_dependencies(tmp_path, records)
+
+    assert graph["summary"]["edge_count"] == 1
+    assert graph["summary"]["edge_limit_reached"] is True
+    assert graph["summary"]["omitted_edge_count"] == 1
+    assert graph["summary"]["graph_complete"] is False
+    assert any(item.confidence == "UNKNOWN" for item in findings)
+
+
+def test_graph_streams_findings_to_sink_without_returning_local_list(tmp_path: Path):
+    (tmp_path / "alpha.py").write_text("import beta\n", encoding="utf-8")
+    (tmp_path / "beta.py").write_text("value = 1\n", encoding="utf-8")
+    records = [_record(tmp_path, "alpha.py"), _record(tmp_path, "beta.py")]
+    persisted = []
+
+    graph, returned_findings = analyze_python_dependencies(
+        tmp_path, records, finding_sink=persisted.append,
+    )
+
+    assert graph["summary"]["edge_count"] == 1
+    assert returned_findings == []
+    assert any(
+        item.title == "Internal Python dependency: alpha -> beta"
+        for item in persisted
+    )
