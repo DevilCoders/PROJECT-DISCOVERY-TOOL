@@ -204,3 +204,29 @@ def test_graph_marks_partial_when_unresolved_import_budget_is_reached(
     assert graph["summary"]["omitted_unresolved_import_count"] == 1
     assert graph["summary"]["graph_complete"] is False
     assert any(item.confidence == "UNKNOWN" for item in findings)
+
+
+
+def test_graph_marks_partial_when_duplicate_module_candidates_are_capped(
+    tmp_path: Path, monkeypatch,
+):
+    from project_discovery import python_graph
+
+    (tmp_path / "pkg.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("value = 2\n", encoding="utf-8")
+    records = [
+        _record(tmp_path, "pkg.py"),
+        _record(tmp_path, "pkg/__init__.py"),
+    ]
+    monkeypatch.setattr(python_graph, "MAX_DUPLICATE_MODULE_PATHS", 1)
+
+    graph, findings = analyze_python_dependencies(tmp_path, records)
+
+    assert graph["summary"]["duplicate_module_count"] == 1
+    assert graph["summary"]["duplicate_module_candidate_omitted_count"] == 1
+    assert graph["summary"]["graph_complete"] is False
+    assert any(
+        item.confidence == "UNKNOWN" and "resource limit" in item.title.lower()
+        for item in findings
+    )
