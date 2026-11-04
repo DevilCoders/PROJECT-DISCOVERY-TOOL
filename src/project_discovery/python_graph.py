@@ -376,7 +376,13 @@ def analyze_python_dependencies(
             analyzer="python-module-graph",
         ))
 
-    if omitted_module_record_count or omitted_edge_candidate_count or omitted_unresolved_count or omitted_skipped_module_count:
+    if (
+        omitted_module_record_count
+        or omitted_edge_candidate_count
+        or omitted_unresolved_count
+        or omitted_skipped_module_count
+        or duplicate_module_candidate_omitted_count
+    ):
         emit(Finding(
             "architecture",
             "Python dependency graph reached a resource limit",
@@ -386,9 +392,10 @@ def analyze_python_dependencies(
             confidence="UNKNOWN",
             evidence=[
                 f"omitted_modules: {omitted_module_record_count}",
-                f"omitted_edges: {omitted_edge_candidate_count}",
+                f"omitted_edge_candidates: {omitted_edge_candidate_count}",
                 f"omitted_unresolved_imports: {omitted_unresolved_count}",
                 f"omitted_skipped_modules: {omitted_skipped_module_count}",
+                f"omitted_duplicate_module_paths: {duplicate_module_candidate_omitted_count}",
             ],
             analyzer="python-module-graph",
             severity="LOW",
@@ -424,6 +431,7 @@ def analyze_python_dependencies(
             "graph_complete": not any((
                 omitted_module_record_count, omitted_edge_candidate_count,
                 omitted_unresolved_count, omitted_skipped_module_count,
+                duplicate_module_candidate_omitted_count,
             )) and not skipped_modules and not any(
                 item["reason"] == "source_budget_exceeded"
                 or str(item["reason"]).startswith("source_parse_error:")
