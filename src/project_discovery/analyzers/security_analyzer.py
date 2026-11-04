@@ -7,7 +7,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..language_catalog import is_textual_path, textual_language_names
 from ..models import CodeEvidence, FileRecord, Finding
-from ..source_utils import redact_source_excerpt
+from ..source_utils import open_verified_binary, redact_source_excerpt
 from ..native_backend import count_byte as native_count_byte
 
 
@@ -114,7 +114,7 @@ class SecretPatternAnalyzer(Analyzer):
         tail = ""
         stop_reason: str | None = None
         try:
-            with path.open("rb") as stream:
+            with open_verified_binary(path, record.analysis_identity) as stream:
                 while bytes_scanned < _MAX_SCAN_BYTES:
                     raw_chunk = stream.read(min(
                         _CHUNK_BYTES, _MAX_SCAN_BYTES - bytes_scanned
