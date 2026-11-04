@@ -8,6 +8,7 @@ from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..language_catalog import is_source_path
 from ..language_catalog import source_extensions, source_language_names
+from ..source_utils import read_text_bounded
 
 
 _QUOTE = r"""['"\x60]"""
@@ -118,7 +119,10 @@ class TestDiscoveryAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
         try:
-            content = path.read_text(encoding="utf-8")
+            content = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "testing",
