@@ -44,6 +44,10 @@ def test_network_analyzer_uses_bounded_line_chunks(tmp_path: Path):
     source = "x = 1\n" + ("a" * (300 * 1024)) + '\nHOST = "198.51.100.5"\n'
     findings = _scan(tmp_path, source)
     assert any("198.51.100.5" in repr(item.evidence) for item in findings)
+    assert any(
+        item.confidence == "UNKNOWN" and "overlong line" in item.title.lower()
+        for item in findings
+    )
 
 
 def test_bare_container_and_service_ports_are_detected(tmp_path: Path):
