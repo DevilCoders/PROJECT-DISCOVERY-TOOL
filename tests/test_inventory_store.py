@@ -21,6 +21,26 @@ def test_inventory_store_persists_records_in_bounded_batches(tmp_path: Path):
         ]
 
 
+def test_inventory_store_round_trips_private_file_identity_without_public_serialization(
+    tmp_path: Path,
+):
+    identity = (11, 22, 33, 44, 55)
+    record = FileRecord(
+        "src/main.py", 33, ".py", "Python",
+        analysis_identity=identity,
+    )
+    assert "analysis_identity" not in record.to_dict()
+
+    with InventoryStore(tmp_path / "identity.sqlite3") as store:
+        store.append("file", record)
+        payload = next(store.iter_records("file"))
+        assert payload["analysis_identity"] == list(identity)
+        restored = next(store.iter_file_records())
+        assert restored.path == record.path
+        assert restored.analysis_identity == identity
+        assert "analysis_identity" not in restored.to_dict()
+
+
 def test_inventory_store_upserts_records_by_kind_and_path(tmp_path: Path):
     with InventoryStore(tmp_path / "inventory.sqlite3", batch_size=8) as store:
         store.append("file", {"path": "src/app.py", "size_bytes": 10})
