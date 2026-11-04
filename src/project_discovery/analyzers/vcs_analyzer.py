@@ -121,10 +121,14 @@ def _hosting_provider(host: str | None) -> str:
     return "Self-hosted or unclassified"
 
 
-def _read_text(path: Path) -> tuple[str | None, str | None]:
+def _read_text(
+    path: Path,
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+) -> tuple[str | None, str | None]:
     try:
         return read_text_bounded(
             path, 2 * 1024 * 1024, encoding="utf-8", errors="replace",
+            expected_identity=expected_identity,
         ), None
     except OSError as exc:
         return None, f"{type(exc).__name__}: {exc}"
@@ -178,7 +182,7 @@ class VCSHostingAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
         if name in {".git", ".hg", ".svn"}:
-            content, error = _read_text(path)
+            content, error = _read_text(path, record.analysis_identity)
             if error:
                 return [self._unknown(record, error)]
             if name == ".git" and content and content.strip().startswith("gitdir:"):
@@ -239,7 +243,7 @@ class VCSHostingAnalyzer(Analyzer):
         self, path: Path, record: FileRecord, root_name: str, vcs_name: str,
     ) -> list[Finding]:
         name = Path(record.path).name.lower()
-        content, error = _read_text(path)
+        content, error = _read_text(path, record.analysis_identity)
         if error:
             return [self._unknown(record, error)]
         text = content or ""
@@ -401,7 +405,7 @@ class VCSHostingAnalyzer(Analyzer):
         return []
 
     def _gitmodules(self, path: Path, record: FileRecord) -> list[Finding]:
-        content, error = _read_text(path)
+        content, error = _read_text(path, record.analysis_identity)
         if error:
             return [self._unknown(record, error)]
         parser = configparser.ConfigParser(interpolation=None, strict=False)
@@ -427,7 +431,7 @@ class VCSHostingAnalyzer(Analyzer):
         )]
 
     def _gitattributes(self, path: Path, record: FileRecord) -> list[Finding]:
-        content, error = _read_text(path)
+        content, error = _read_text(path, record.analysis_identity)
         if error:
             return [self._unknown(record, error)]
         lines = [
