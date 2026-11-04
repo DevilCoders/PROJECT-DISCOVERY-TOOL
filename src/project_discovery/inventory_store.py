@@ -14,7 +14,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-_RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding"})
+_RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding", "diagnostic"})
 
 
 class InventoryStore:
@@ -100,6 +100,10 @@ class InventoryStore:
             ) WITHOUT ROWID"""
         )
         self.db.commit()
+        row = self.db.execute(
+            "SELECT MAX(CAST(path AS INTEGER)) FROM inventory_records WHERE kind='diagnostic'"
+        ).fetchone()
+        self._diagnostic_counter = int(row[0] or 0) if row else 0
 
     @staticmethod
     def _kind(kind: str) -> str:
@@ -335,6 +339,33 @@ class InventoryStore:
         finally:
             payloads.close()
 
+    def append_diagnostic(self, message: str) -> None:
+        """Persist one scan diagnostic with stable insertion order and no deduplication."""
+        if not isinstance(message, str):
+            raise TypeError("diagnostic messages must be strings")
+        if not message:
+            raise ValueError("diagnostic messages must not be empty")
+        self._diagnostic_counter += 1
+        key = f"{self._diagnostic_counter:020d}"
+        self.append("diagnostic", {"path": key, "message": message})
+
+    def extend_diagnostics(self, messages: Iterable[str]) -> int:
+        """Persist diagnostic messages from an iterable without retaining it."""
+        count = 0
+        for message in messages:
+            self.append_diagnostic(message)
+            count += 1
+        return count
+
+    def iter_diagnostics(self, *, fetch_size: int = 256) -> Iterator[str]:
+        """Yield diagnostics in original insertion order using bounded fetches."""
+        payloads = self.iter_records("diagnostic", fetch_size=fetch_size)
+        try:
+            for payload in payloads:
+                yield str(payload["message"])
+        finally:
+            payloads.close()
+
     def iter_file_records(self, *, fetch_size: int = 256) -> Iterator["FileRecord"]:
         """Yield typed file records while retaining their private scan-time identity."""
         from .models import FileRecord
@@ -376,6 +407,7 @@ class InventoryStore:
             self.db.execute("DELETE FROM inventory_records")
             self.db.execute("DELETE FROM inventory_metadata")
             self.db.execute("DELETE FROM inventory_directory_state")
+        self._diagnostic_counter = 0
 
     def checkpoint(self, metadata: Mapping[str, Any]) -> None:
         """Flush inventory rows, then atomically persist a resumable scan checkpoint.
@@ -591,3 +623,49 @@ class StoredFindingRecords(Sequence["Finding"]):
         finally:
             iterator.close()
 
+
+
+
+class StoredDiagnosticRecords(Sequence[str]):
+    """Lazy sequence of diagnostic messages backed by the scan's SQLite store."""
+
+    def __init__(self, database_path: Path, *, fetch_size: int = 256) -> None:
+        if fetch_size < 1:
+            raise ValueError("fetch_size must be positive")
+        self.database_path = Path(database_path).expanduser().absolute()
+        self.fetch_size = fetch_size
+
+    def __len__(self) -> int:
+        with InventoryStore(self.database_path) as store:
+            return store.count("diagnostic")
+
+    def __iter__(self) -> Iterator[str]:
+        with InventoryStore(self.database_path) as store:
+            yield from store.iter_diagnostics(fetch_size=self.fetch_size)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            if index.step is not None and index.step < 0:
+                return list(self)[index]
+            start, stop, step = index.indices(len(self))
+            if stop <= start:
+                return []
+            iterator = iter(self)
+            try:
+                return list(islice(iterator, start, stop, step))
+            finally:
+                iterator.close()
+        if not isinstance(index, int):
+            raise TypeError("diagnostic indices must be integers or slices")
+        if index < 0:
+            index += len(self)
+        if index < 0:
+            raise IndexError("diagnostic index out of range")
+        iterator = iter(self)
+        try:
+            try:
+                return next(islice(iterator, index, index + 1))
+            except StopIteration as exc:
+                raise IndexError("diagnostic index out of range") from exc
+        finally:
+            iterator.close()
