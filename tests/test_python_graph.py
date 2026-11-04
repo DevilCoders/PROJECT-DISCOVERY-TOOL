@@ -80,6 +80,7 @@ def test_graph_records_explicitly_skipped_modules_as_unknown(tmp_path: Path):
     assert result["modules"] == []
     assert result["skipped_modules"][0]["name"] == "large"
     assert result["summary"]["graph_complete"] is False
+    assert result["summary"]["graph_complete"] is False
     assert result["summary"]["skipped_module_count"] == 1
     assert findings[0].confidence == "UNKNOWN"
 
