@@ -435,7 +435,7 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
         assert [item.path for item in directories] == [".", "src"]
         assert directories[0].direct_child_count == 1 + int(link is not None)
         assert directories[0].file_count == 1
-        assert directories[0].total_bytes == len("print('stored')\\n".encode())
+        assert directories[0].total_bytes == len("print('stored')\n".encode())
         assert directories[1].direct_child_count == 1
         assert directories[1].file_count == 1
         persisted_file = next(store.iter_records("file"))
