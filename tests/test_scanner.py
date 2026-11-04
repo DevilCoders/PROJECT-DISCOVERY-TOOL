@@ -436,3 +436,27 @@ def test_inventory_store_is_reset_for_each_new_scan(tmp_path: Path):
         discover_inventory(root, store=store)
         assert [item["path"] for item in store.iter_records("file")] == ["second.py"]
 
+def test_inventory_checkpoint_is_partial_when_directory_traversal_fails(tmp_path: Path, monkeypatch):
+    import project_discovery.scanner as scanner
+    from project_discovery.inventory_store import InventoryStore
+
+    root = tmp_path / "partial-project"
+    root.mkdir()
+    blocked = root / "blocked"
+    blocked.mkdir()
+    real_scandir = scanner.os.scandir
+
+    def controlled_scandir(path):
+        if Path(path) == blocked:
+            raise PermissionError("fixture permission failure")
+        return real_scandir(path)
+
+    monkeypatch.setattr(scanner.os, "scandir", controlled_scandir)
+    with InventoryStore(tmp_path / "partial.sqlite3") as store:
+        _, directories, _, _, stats = scanner.discover_inventory(root, store=store)
+        assert stats["walk_errors"] == 1
+        assert next(item for item in directories if item.path == "blocked").error
+        assert store.get_metadata("inventory_status") == "partial"
+        assert store.get_metadata("traversal_finished") is True
+        assert store.get_metadata("walk_errors") == 1
+
