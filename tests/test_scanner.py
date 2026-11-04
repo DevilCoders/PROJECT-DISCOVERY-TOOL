@@ -403,6 +403,7 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
     with InventoryStore(database, batch_size=1) as store:
         files, directories, symlinks, special, stats = discover_inventory(root, store=store)
         assert isinstance(files, StoredFileRecords)
+        assert isinstance(directories, StoredRecordSequence)
         assert isinstance(symlinks, StoredRecordSequence)
         assert isinstance(special, StoredRecordSequence)
         assert not isinstance(symlinks, list)
@@ -431,6 +432,12 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
             "symlink": len(symlinks),
             "special": len(special),
         }
+        assert [item.path for item in directories] == [".", "src"]
+        assert directories[0].direct_child_count == 1 + int(link is not None)
+        assert directories[0].file_count == 1
+        assert directories[0].total_bytes == len("print('stored')\\n".encode())
+        assert directories[1].direct_child_count == 1
+        assert directories[1].file_count == 1
         persisted_file = next(store.iter_records("file"))
         assert persisted_file["path"] == "src/main.py"
         assert persisted_file["analysis_identity"] is not None
