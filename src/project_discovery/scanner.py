@@ -437,8 +437,9 @@ def discover_inventory(
 ]:
     """Inventory all entries by default; only explicit excludes prune subtrees.
 
-    The traversal never follows symlinks. The current implementation still retains
-    inventory records in memory; Phase 2 replaces this with a bounded streaming store.
+    The traversal never follows symlinks. With a store, file records are persisted
+    incrementally and returned through a lazy SQLite-backed sequence. Directory records,
+    symlink/special records and the pending-directory stack are still materialized.
     """
     root = root.expanduser().absolute()
     root_info = root.lstat()
