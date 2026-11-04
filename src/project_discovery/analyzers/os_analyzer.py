@@ -7,6 +7,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..language_catalog import is_textual_path
 from ..models import FileRecord, Finding
+from ..source_utils import open_verified_text
 
 
 _TARGET_MARKERS = {
@@ -46,7 +47,10 @@ class OperatingSystemAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         line_hits: dict[str, set[int]] = {}
         try:
-            with path.open("r", encoding="utf-8", errors="replace") as stream:
+            with open_verified_text(
+                path, encoding="utf-8", errors="replace",
+                expected_identity=record.analysis_identity,
+            ) as stream:
                 line_number = 1
                 while True:
                     line = stream.readline(_MAX_LINE_CHARS)
