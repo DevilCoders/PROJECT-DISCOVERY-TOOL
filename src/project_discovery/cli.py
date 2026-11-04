@@ -28,6 +28,7 @@ from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
 from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
+from .inventory_store import InventoryStore
 from .comparison import compare_many_reports, load_report, write_comparison
 from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
@@ -187,12 +188,15 @@ def run_scan(
     _render_banner(console)
     _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
     started = now()
-    records, directories, symlinks, special_entries, walk_stats = discover_inventory(
-        root,
-        max_file_bytes=max_file_mb * 1024 * 1024,
-        skip_oversized=skip_oversized,
-        ignores=ignores,
-    )
+    inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
+    with InventoryStore(inventory_path) as inventory_store:
+        records, directories, symlinks, special_entries, walk_stats = discover_inventory(
+            root,
+            max_file_bytes=max_file_mb * 1024 * 1024,
+            skip_oversized=skip_oversized,
+            ignores=ignores,
+            store=inventory_store,
+        )
     analyzer_load = load_analyzers()
     analyzers = analyzer_load.analyzers
     vulnerability_db_status = {"enabled": False, "advisory_count": 0}
