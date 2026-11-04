@@ -114,7 +114,7 @@ The baseline is not production-ready:
 
 - [ ] Replace the all-in-memory `files/directories/symlinks/pending` model with a streaming inventory iterator and bounded producer/consumer queues.
 - [x] Add a bounded-batch SQLite `InventoryStore` primitive with deterministic streaming reads, atomic resumable metadata checkpoints, SQLite integrity checks, explicit close semantics, private POSIX file permissions and symlink-path rejection.
-- [ ] Integrate `InventoryStore` into the scanner lifecycle and stream report assembly from it; the current scanner still materializes inventory lists.
+- [ ] Replace scanner's materialized inventory lists with store-backed streaming iterators and stream report assembly from the store. **Partial integration (2026-11-04):** CLI scans now persist each discovered file, directory, symlink and special-entry record through bounded SQLite batches at `OUTPUT/.pdt-cache/inventory.sqlite3`, with running/completed metadata checkpoints and final directory aggregates. Scanner/result lists are still materialized, and reports still consume in-memory `ScanResult`; this is durable persistence, not end-to-end bounded-memory scanning.
 - [ ] Implement bounded concurrency, work stealing only if justified, back-pressure, cancellation and resumable checkpoints.
 - [ ] Stream SHA-256 and content scanning; avoid repeated passes when analyzers can share a bounded decoded stream safely.
 - [ ] Add content fingerprint cache with metadata validation, file identity where reliable, stale-entry pruning and corruption recovery.
