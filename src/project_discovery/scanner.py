@@ -11,6 +11,7 @@ from .language_catalog import detect_language, is_source_path, is_textual_path
 from .native_backend import count_byte as native_count_byte
 from .native_backend import detect_signature as native_detect_signature
 from .native_backend import create_walker as native_create_walker
+from .inventory_store import InventoryStore
 from .models import (
     DirectoryRecord,
     FileRecord,
@@ -291,6 +292,7 @@ def _discover_with_rust(
     symlinks: list[SymlinkRecord],
     special_entries: list[SpecialEntryRecord],
     stats: Counter[str],
+    store: InventoryStore | None = None,
 ) -> bool:
     """Consume the optional Rust directory iterator; return False if unavailable."""
     try:
@@ -317,17 +319,23 @@ def _discover_with_rust(
             stats["hidden_entry_count"] += 1
         if kind == "entry_error":
             stats["entry_errors"] += 1
-            files.append(FileRecord(
+            entry_record = FileRecord(
                 relative, 0, Path(relative).suffix.lower(), "Unknown",
                 error=error or "Entry metadata unavailable", is_hidden=hidden,
-            ))
+            )
+            files.append(entry_record)
+            if store is not None:
+                store.append("file", entry_record)
             continue
         if kind == "symlink":
             scope = _symlink_scope(root, root / relative, target)
-            symlinks.append(SymlinkRecord(
+            link_record = SymlinkRecord(
                 relative, target, scope, target_state="unverified",
                 is_hidden=hidden, permissions=mode,
-            ))
+            )
+            symlinks.append(link_record)
+            if store is not None:
+                store.append("symlink", link_record)
             stats["symlink_count"] += 1
             stats[f"symlink_scope:{scope}"] += 1
             continue
@@ -341,6 +349,8 @@ def _discover_with_rust(
                 prune_reason=exclusion, error=error,
             )
             directories_by_path[relative] = record
+            if store is not None:
+                store.append("directory", record)
             if marker:
                 stats["development_directory_count"] += 1
                 stats[f"development_dir:{marker}"] += 1
@@ -368,14 +378,19 @@ def _discover_with_rust(
                 )
                 stats["oversized_content_skipped"] += 1
             files.append(record)
+            if store is not None:
+                store.append("file", record)
             stats["total_bytes"] += size
             stats[f"file_type:{file_type}"] += 1
             stats[f"size_bucket:{record.size_bucket}"] += 1
             stats[f"language:{language}"] += 1
             continue
-        special_entries.append(SpecialEntryRecord(
+        special_record = SpecialEntryRecord(
             relative, kind, is_hidden=hidden, permissions=mode, size_bytes=size,
-        ))
+        )
+        special_entries.append(special_record)
+        if store is not None:
+            store.append("special", special_record)
         stats["special_entry_count"] += 1
         stats[f"special_type:{kind}"] += 1
     return True
@@ -387,6 +402,7 @@ def discover_inventory(
     max_file_bytes: int = 128 * 1024 * 1024,
     skip_oversized: bool = False,
     ignores: set[str] | None = None,
+    store: InventoryStore | None = None,
 ) -> tuple[
     list[FileRecord],
     list[DirectoryRecord],
@@ -417,9 +433,13 @@ def discover_inventory(
         root_hidden = _is_hidden(root.name, root_info) if root.name else False
     except OSError:
         root_mode, root_hidden = None, False
-    directories_by_path: dict[str, DirectoryRecord] = {
-        ".": DirectoryRecord(".", 0, permissions=root_mode, is_hidden=root_hidden)
-    }
+    if store is not None:
+        store.clear()
+        store.checkpoint({"inventory_status": "running", "root": str(root)})
+    root_directory = DirectoryRecord(".", 0, permissions=root_mode, is_hidden=root_hidden)
+    directories_by_path: dict[str, DirectoryRecord] = {".": root_directory}
+    if store is not None:
+        store.append("directory", root_directory)
     files: list[FileRecord] = []
     symlinks: list[SymlinkRecord] = []
     special_entries: list[SpecialEntryRecord] = []
@@ -427,7 +447,7 @@ def discover_inventory(
 
     used_rust = _discover_with_rust(
         root, excluded_names, excluded_paths, max_file_bytes, skip_oversized,
-        directories_by_path, files, symlinks, special_entries, stats,
+        directories_by_path, files, symlinks, special_entries, stats, store,
     )
     if used_rust:
         pending.clear()
@@ -458,10 +478,13 @@ def discover_inventory(
                             scope = _symlink_scope(root, Path(entry.path), target)
                         except OSError:
                             target, scope = "", "unknown"
-                        symlinks.append(SymlinkRecord(
+                        link_record = SymlinkRecord(
                             relative, target, scope, target_state="unverified", is_hidden=hidden,
                             permissions=stat.S_IMODE(info.st_mode),
-                        ))
+                        )
+                        symlinks.append(link_record)
+                        if store is not None:
+                            store.append("symlink", link_record)
                         stats["symlink_count"] += 1
                         stats[f"symlink_scope:{scope}"] += 1
                         continue
@@ -481,6 +504,8 @@ def discover_inventory(
                             prune_reason=exclusion,
                         )
                         directories_by_path[relative] = record
+                        if store is not None:
+                            store.append("directory", record)
                         if marker:
                             stats["development_directory_count"] += 1
                             stats[f"development_dir:{marker}"] += 1
@@ -516,6 +541,8 @@ def discover_inventory(
                             )
                             stats["oversized_content_skipped"] += 1
                         files.append(file_record)
+                        if store is not None:
+                            store.append("file", file_record)
                         stats["total_bytes"] += size
                         stats[f"file_type:{file_type}"] += 1
                         stats[f"size_bucket:{file_record.size_bucket}"] += 1
@@ -532,22 +559,28 @@ def discover_inventory(
                         kind = "character_device"
                     else:
                         kind = "unknown_special"
-                    special_entries.append(SpecialEntryRecord(
+                    special_record = SpecialEntryRecord(
                         relative,
                         kind,
                         is_hidden=hidden,
                         permissions=stat.S_IMODE(info.st_mode),
                         size_bytes=getattr(info, "st_size", 0),
-                    ))
+                    )
+                    special_entries.append(special_record)
+                    if store is not None:
+                        store.append("special", special_record)
                     stats["special_entry_count"] += 1
                     stats[f"special_type:{kind}"] += 1
                 except OSError as exc:
                     stats["entry_errors"] += 1
-                    files.append(FileRecord(
+                    error_record = FileRecord(
                         relative, 0, Path(entry.name).suffix.lower(), "Unknown",
                         error=f"{type(exc).__name__}: {exc}",
                         is_hidden=entry.name.startswith("."),
-                    ))
+                    )
+                    files.append(error_record)
+                    if store is not None:
+                        store.append("file", error_record)
 
         except OSError as exc:
             # A directory iterator can fail after yielding some entries. Keep the
@@ -570,6 +603,21 @@ def discover_inventory(
             if key == ".":
                 break
             parent = parent.parent
+
+    if store is not None:
+        # Directory aggregates and late walk errors are finalized after traversal.
+        store.extend("directory", directories_by_path.values())
+        store.checkpoint({
+            "inventory_status": "complete",
+            "root": str(root),
+            "record_counts": {
+                "file": len(files),
+                "directory": len(directories_by_path),
+                "symlink": len(symlinks),
+                "special": len(special_entries),
+            },
+            "walk_errors": stats.get("walk_errors", 0),
+        })
 
     # Sort the existing record lists in place to avoid a second full-size
     # allocation at the end of large scans.
