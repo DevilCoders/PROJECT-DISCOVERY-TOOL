@@ -9,7 +9,7 @@ import ast
 from collections import defaultdict
 from importlib.util import resolve_name
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .models import FileRecord, Finding
 from .source_utils import SourceBudgetExceeded, read_python_source_bounded
@@ -79,7 +79,7 @@ def _strongly_connected_components(
 
 
 def analyze_python_dependencies(
-    root: Path, records: list[FileRecord]
+    root: Path, records: Iterable[FileRecord]
 ) -> tuple[dict[str, Any], list[Finding]]:
     """Build a local Python import graph from inventoried source files."""
     module_paths: dict[str, list[str]] = defaultdict(list)
