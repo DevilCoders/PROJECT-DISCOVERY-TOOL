@@ -12,7 +12,7 @@ from .language_catalog import detect_language, is_source_path, is_textual_path
 from .native_backend import count_byte as native_count_byte
 from .native_backend import detect_signature as native_detect_signature
 from .native_backend import create_walker as native_create_walker
-from .inventory_store import InventoryStore, StoredFileRecords
+from .inventory_store import InventoryStore, StoredFileRecords, StoredRecordSequence
 from .models import (
     DirectoryRecord,
     FileRecord,
@@ -352,8 +352,9 @@ def _discover_with_rust(
                 relative, target, scope, target_state="unverified",
                 is_hidden=hidden, permissions=mode,
             )
-            symlinks.append(link_record)
-            if store is not None:
+            if store is None:
+                symlinks.append(link_record)
+            else:
                 store.append("symlink", link_record)
             stats["symlink_count"] += 1
             stats[f"symlink_scope:{scope}"] += 1
@@ -411,8 +412,9 @@ def _discover_with_rust(
         special_record = SpecialEntryRecord(
             relative, kind, is_hidden=hidden, permissions=mode, size_bytes=size,
         )
-        special_entries.append(special_record)
-        if store is not None:
+        if store is None:
+            special_entries.append(special_record)
+        else:
             store.append("special", special_record)
         stats["special_entry_count"] += 1
         stats[f"special_type:{kind}"] += 1
@@ -506,8 +508,9 @@ def discover_inventory(
                             relative, target, scope, target_state="unverified", is_hidden=hidden,
                             permissions=stat.S_IMODE(info.st_mode),
                         )
-                        symlinks.append(link_record)
-                        if store is not None:
+                        if store is None:
+                            symlinks.append(link_record)
+                        else:
                             store.append("symlink", link_record)
                         stats["symlink_count"] += 1
                         stats[f"symlink_scope:{scope}"] += 1
@@ -591,8 +594,9 @@ def discover_inventory(
                         permissions=stat.S_IMODE(info.st_mode),
                         size_bytes=getattr(info, "st_size", 0),
                     )
-                    special_entries.append(special_record)
-                    if store is not None:
+                    if store is None:
+                        special_entries.append(special_record)
+                    else:
                         store.append("special", special_record)
                     stats["special_entry_count"] += 1
                     stats[f"special_type:{kind}"] += 1
@@ -657,10 +661,14 @@ def discover_inventory(
     # case-folded path order. The in-memory fallback retains its compatibility sort.
     if store is None:
         files.sort(key=lambda item: (item.path.casefold(), item.path))
+        symlinks.sort(key=lambda item: (item.path.casefold(), item.path))
+        special_entries.sort(key=lambda item: (item.path.casefold(), item.path))
     else:
         files = StoredFileRecords(store.path)
+        symlinks = StoredRecordSequence(store.path, "symlink", SymlinkRecord)
+        special_entries = StoredRecordSequence(
+            store.path, "special", SpecialEntryRecord,
+        )
     directories = list(directories_by_path.values())
     directories.sort(key=lambda item: (item.depth, item.path.casefold(), item.path))
-    symlinks.sort(key=lambda item: (item.path.casefold(), item.path))
-    special_entries.sort(key=lambda item: (item.path.casefold(), item.path))
     return files, directories, symlinks, special_entries, dict(stats)
