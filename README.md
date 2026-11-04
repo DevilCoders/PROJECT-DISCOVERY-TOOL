@@ -73,6 +73,7 @@ The production engine must provide:
 The current branch contains first-pass implementations of:
 
 - File, directory and symlink records; hidden-name indicators; size buckets; permission metadata; directory byte/file totals; common development/cache directory markers; a SQLite fingerprint cache.
+- Incremental SQLite inventory persistence at `OUTPUT/.pdt-cache/inventory.sqlite3` with bounded batches, scan-state checkpoints and final directory aggregates. The current public scanner and report pipeline still materialize inventory/results in memory; this is not yet the 100GB+ bounded-memory implementation.
 - Python AST analysis and a Python internal-import graph with cycle detection.
 - Language/file-format recognition and an optional, offline-first Tree-sitter adapter.
 - Markdown plus optional PDF/DOCX document extraction.
