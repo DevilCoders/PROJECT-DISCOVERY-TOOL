@@ -49,3 +49,31 @@ def test_project_layout_recognizes_ml_robotics_game_and_delivery_layers():
         "machine_learning", "robotics", "game_engine", "delivery",
     }
     assert findings[0].confidence == "INFERRED"
+
+
+
+def test_architecture_component_index_is_bounded_and_reports_omissions(
+    tmp_path: Path, monkeypatch,
+):
+    from project_discovery import architecture_analyzer
+
+    records = [
+        _record(tmp_path, "alpha/one.py"),
+        _record(tmp_path, "alpha/two.py"),
+        _record(tmp_path, "beta/three.py"),
+    ]
+    monkeypatch.setattr(
+        architecture_analyzer, "MAX_ARCHITECTURE_COMPONENTS", 1,
+    )
+
+    layout, findings = analyze_project_architecture(records)
+
+    assert layout["top_level_component_detail_count"] == 1
+    assert layout["top_level_components"] == [{"name": "alpha", "file_count": 2}]
+    assert layout["omitted_top_level_path_count"] == 1
+    assert layout["top_level_component_limit_reached"] is True
+    assert layout["layout_complete"] is False
+    assert any(
+        item.confidence == "UNKNOWN" and "resource limit" in item.title.lower()
+        for item in findings
+    )
