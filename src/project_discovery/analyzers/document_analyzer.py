@@ -130,7 +130,10 @@ class DocumentAnalyzer(Analyzer):
         try:
             if extension in {".html", ".htm"}:
                 parser = _HTMLTextExtractor()
-                parser.feed(read_text_bounded(path, _MAX_TEXT_DOCUMENT_BYTES))
+                parser.feed(read_text_bounded(
+                    path, _MAX_TEXT_DOCUMENT_BYTES,
+                    expected_identity=record.analysis_identity,
+                ))
                 parser.close()
                 text = " ".join(parser.text_parts)
                 title = parser.title_parts[0] if parser.title_parts else Path(record.path).stem
@@ -139,7 +142,10 @@ class DocumentAnalyzer(Analyzer):
                     f"links: {len(parser.links)}; approximately {_word_count(text)} words."
                 )
             elif extension == ".rst":
-                content = read_text_bounded(path, _MAX_TEXT_DOCUMENT_BYTES)
+                content = read_text_bounded(
+                    path, _MAX_TEXT_DOCUMENT_BYTES,
+                    expected_identity=record.analysis_identity,
+                )
                 headings = _rst_headings(content)
                 title = headings[0] if headings else Path(record.path).stem
                 details = (
@@ -147,14 +153,20 @@ class DocumentAnalyzer(Analyzer):
                     f"approximately {_word_count(content)} words."
                 )
             elif extension in {".txt", ".adoc", ".asciidoc", ".tex"}:
-                content = read_text_bounded(path, _MAX_TEXT_DOCUMENT_BYTES)
+                content = read_text_bounded(
+                    path, _MAX_TEXT_DOCUMENT_BYTES,
+                    expected_identity=record.analysis_identity,
+                )
                 title = Path(record.path).stem
                 details = (
                     f"Text document; lines: {len(content.splitlines())}; "
                     f"approximately {_word_count(content)} words."
                 )
             elif extension == ".pdf":
-                raw_document = read_bytes_bounded(path, _MAX_BINARY_DOCUMENT_BYTES)
+                raw_document = read_bytes_bounded(
+                    path, _MAX_BINARY_DOCUMENT_BYTES,
+                    expected_identity=record.analysis_identity,
+                )
                 pypdf = importlib.import_module("pypdf")
                 reader = pypdf.PdfReader(io.BytesIO(raw_document), strict=False)
                 page_count = len(reader.pages)
@@ -183,7 +195,10 @@ class DocumentAnalyzer(Analyzer):
                     f"approximately {_word_count(content)} words."
                 )
             else:
-                raw_document = read_bytes_bounded(path, _MAX_BINARY_DOCUMENT_BYTES)
+                raw_document = read_bytes_bounded(
+                    path, _MAX_BINARY_DOCUMENT_BYTES,
+                    expected_identity=record.analysis_identity,
+                )
                 with zipfile.ZipFile(io.BytesIO(raw_document)) as package:
                     members = package.infolist()
                     if len(members) > _MAX_DOCX_ENTRIES:
