@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
-from ..source_utils import redact_source_excerpt
+from ..source_utils import open_verified_binary, redact_source_excerpt
 from ..language_catalog import is_source_path, source_language_names
 
 
@@ -319,7 +319,7 @@ class SecureCodePatternAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            with path.open("rb") as stream:
+            with open_verified_binary(path, record.analysis_identity) as stream:
                 raw_source = stream.read(_MAX_SECURE_CODE_FILE_BYTES + 1)
             if len(raw_source) > _MAX_SECURE_CODE_FILE_BYTES:
                 return [Finding(
