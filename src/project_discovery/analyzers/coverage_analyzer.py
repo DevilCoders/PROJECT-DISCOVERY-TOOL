@@ -204,7 +204,10 @@ class CoverageArtifactAnalyzer(Analyzer):
                 analyzer=self.name, severity="LOW",
             )]
         try:
-            source = read_text_bounded(path, _MAX_COVERAGE_ARTIFACT_BYTES)
+            source = read_text_bounded(
+                path, _MAX_COVERAGE_ARTIFACT_BYTES,
+                expected_identity=record.analysis_identity,
+            )
             name = Path(record.path).name.lower()
             if name in {"lcov.info", "coverage.lcov"} or path.suffix.lower() == ".lcov":
                 summary, format_name = _lcov_summary(source), "LCOV"
