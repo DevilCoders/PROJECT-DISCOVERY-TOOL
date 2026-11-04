@@ -329,3 +329,9 @@ class StoredFileRecords(Sequence["FileRecord"]):
                 raise IndexError("file record index out of range") from exc
         finally:
             iterator.close()
+
+    def update_records(self, records: Iterable["FileRecord"]) -> int:
+        """Persist mutated records in bounded batches without retaining the batch."""
+        with InventoryStore(self.database_path) as store:
+            return store.extend("file", records)
+
