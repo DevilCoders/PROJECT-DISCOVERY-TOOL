@@ -245,3 +245,35 @@ def test_inventory_store_exposes_lazy_typed_symlink_and_special_sequences(tmp_pa
         assert special[0].entry_type == "fifo"
         assert special[0].permissions == 0o600
 
+def test_inventory_store_buffers_directory_aggregate_deltas_and_errors(tmp_path: Path):
+    from project_discovery.models import DirectoryRecord
+
+    database = tmp_path / "directory-state.sqlite3"
+    with InventoryStore(database, batch_size=100) as store:
+        store.append("directory", DirectoryRecord(".", 0))
+        store.adjust_directory(".", direct_child_delta=3)
+        store.adjust_directory(".", file_count_delta=2, total_bytes_delta=99)
+        store.adjust_directory(".", direct_child_delta=4, error="permission denied")
+        # The bounded update queue is flushed atomically with the initial record.
+        assert store._directory_pending["."] == (7, 2, 99, "permission denied")
+        store.flush()
+
+        from project_discovery.inventory_store import StoredRecordSequence
+        directories = StoredRecordSequence(database, "directory", DirectoryRecord)
+        root = directories[0]
+        assert root.path == "."
+        assert root.direct_child_count == 7
+        assert root.file_count == 2
+        assert root.total_bytes == 99
+        assert root.error == "permission denied"
+
+        # Updates to an already-persisted directory are also applied and visible
+        # through the joined directory-state projection.
+        store.adjust_directory(".", direct_child_delta=1, file_count_delta=1, total_bytes_delta=5)
+        store.flush()
+        updated = directories[0]
+        assert updated.direct_child_count == 8
+        assert updated.file_count == 3
+        assert updated.total_bytes == 104
+        assert updated.error == "permission denied"
+
