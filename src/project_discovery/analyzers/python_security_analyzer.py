@@ -82,7 +82,9 @@ class PythonSecurityAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            source = read_python_source_bounded(path, MAX_AST_FILE_BYTES)
+            source = read_python_source_bounded(
+                path, MAX_AST_FILE_BYTES, expected_identity=record.analysis_identity,
+            )
         except SourceBudgetExceeded as exc:
             return [Finding(
                 "security",
