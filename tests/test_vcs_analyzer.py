@@ -138,3 +138,22 @@ def test_nested_git_checkout_is_recognized(tmp_path: Path):
     )
     assert any(item.category == "hosting_providers" and "GitHub" in item.title
                for item in findings)
+
+def test_vcs_metadata_read_rejects_changed_inventory_identity(tmp_path: Path):
+    path = tmp_path / "config"
+    path.write_text('[remote "origin"]\nurl = https://github.com/acme/project.git\n', encoding="utf-8")
+    observed = path.stat()
+    record = FileRecord(
+        ".git/config", observed.st_size, "", "Metadata",
+        analysis_identity=(
+            observed.st_dev, observed.st_ino, observed.st_size,
+            observed.st_mtime_ns, observed.st_ctime_ns,
+        ),
+    )
+    path.write_text('[remote "origin"]\nurl = https://attacker.invalid/replaced.git\n', encoding="utf-8")
+    findings = VCSHostingAnalyzer().analyze(path, record)
+    assert findings
+    assert findings[0].confidence == "UNKNOWN"
+    assert "identity changed" in findings[0].detail.lower()
+    assert all("attacker.invalid" not in item.detail for item in findings)
+
