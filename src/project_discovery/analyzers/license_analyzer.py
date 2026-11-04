@@ -9,6 +9,7 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_text_bounded
 
 
 _LICENSE_NAMES = {
@@ -33,7 +34,9 @@ _SOURCE_EXTENSIONS = {
 
 def _manifest_license(path: Path, record: FileRecord) -> list[str]:
     name = Path(record.path).name.lower()
-    content = path.read_text(encoding="utf-8")
+    content = read_text_bounded(
+        path, 8 * 1024 * 1024, expected_identity=record.analysis_identity,
+    )
     if name == "package.json":
         data: Any = json.loads(content)
         value = data.get("license")
