@@ -256,3 +256,34 @@ def test_markdown_largest_directory_summary_keeps_only_top_100(tmp_path: Path):
     assert len(rows) == 100
     assert any("synthetic-149" in line for line in rows)
     assert not any("synthetic-000 " in line for line in rows)
+
+
+
+def test_report_writers_stream_lazy_diagnostics(tmp_path: Path):
+    from project_discovery.inventory_store import (
+        InventoryStore, StoredDiagnosticRecords,
+    )
+
+    database = tmp_path / "diagnostics.sqlite3"
+    with InventoryStore(database, batch_size=2) as store:
+        store.extend_diagnostics([
+            "first diagnostic",
+            "same diagnostic",
+            "same diagnostic",
+        ])
+
+    result = _result()
+    result.errors = StoredDiagnosticRecords(database, fetch_size=1)
+    paths = write_reports(result, tmp_path, {"json", "html", "markdown"})
+    assert {path.suffix for path in paths} == {".json", ".html", ".md"}
+
+    payload = json.loads(
+        (tmp_path / "discovery-report.json").read_text(encoding="utf-8")
+    )
+    assert payload["errors"] == [
+        "first diagnostic", "same diagnostic", "same diagnostic",
+    ]
+    html = (tmp_path / "discovery-report.html").read_text(encoding="utf-8")
+    assert "first diagnostic" in html
+    markdown = (tmp_path / "discovery-report.md").read_text(encoding="utf-8")
+    assert markdown.count("same diagnostic") == 2
