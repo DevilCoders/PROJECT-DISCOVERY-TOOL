@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
-from ..source_utils import redact_source_excerpt
+from ..source_utils import open_verified_binary, redact_source_excerpt
 
 
 _ARCHIVE_EXTENSIONS = {
@@ -24,11 +24,15 @@ _MAX_ARCHIVE_ENTRIES = 200_000
 _MAX_ARCHIVE_INDEX_BYTES = 64 * 1024 * 1024
 
 
-def _zip_index_hint(path: Path) -> tuple[int, int] | None:
-    """Read ZIP/ZIP64 central-directory size/count without materializing entries."""
+def _zip_index_hint(
+    path: Path,
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+) -> tuple[int, int] | None:
+    """Read ZIP/ZIP64 bounds through a verified no-follow descriptor."""
     try:
-        size = path.stat().st_size
-        with path.open("rb") as stream:
+        with open_verified_binary(path, expected_identity) as stream:
+            stream.seek(0, 2)
+            size = stream.tell()
             tail_size = min(size, 65_557)
             stream.seek(size - tail_size)
             tail = stream.read(tail_size)
@@ -251,13 +255,15 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if zipfile.is_zipfile(path):
+        suffix = record.path.lower()
+        if record.file_type == "archive/zip" or suffix.endswith((
+            ".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg", ".nupkg",
+        )):
             return self._zip(path, record)
-        try:
-            if tarfile.is_tarfile(path):
-                return self._tar(path, record)
-        except (OSError, tarfile.TarError):
-            pass
+        if record.file_type in {"archive/tar", "archive/tar-or-compressed-tar"} or suffix.endswith((
+            ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
+        )):
+            return self._tar(path, record)
         return [Finding(
             "archive",
             f"Archive/container detected: {record.path}",
@@ -270,7 +276,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         )]
 
     def _zip(self, path: Path, record: FileRecord) -> list[Finding]:
-        index_hint = _zip_index_hint(path)
+        index_hint = _zip_index_hint(path, record.analysis_identity)
         if index_hint is None:
             return [Finding(
                 "archive",
@@ -313,7 +319,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         content_bytes = 0
         content_truncated = 0
         try:
-            with zipfile.ZipFile(path, "r") as archive:
+            with open_verified_binary(path, record.analysis_identity) as archive_stream, zipfile.ZipFile(archive_stream, "r") as archive:
                 infos = archive.infolist()
                 total = len(infos)
                 duplicates = [
@@ -466,7 +472,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         content_truncated = 0
         total = 0
         try:
-            with tarfile.open(path, mode="r|*") as archive:
+            with open_verified_binary(path, record.analysis_identity) as archive_stream, tarfile.open(fileobj=archive_stream, mode="r|*") as archive:
                 for member in archive:
                     if time.monotonic() >= deadline:
                         time_budget_reached = True
