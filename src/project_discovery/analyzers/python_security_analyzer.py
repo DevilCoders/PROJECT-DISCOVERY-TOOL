@@ -53,10 +53,29 @@ _IMPACTS = {
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
 from ..source_utils import SourceBudgetExceeded, read_python_source_bounded, redact_source_excerpt
+from .secure_code_analyzer import python_security_matches
+
+_RULE_DETAILS = {
+    "dynamic_code_execution": ("{callee}() executes dynamically supplied code; validate the input source and use a constrained parser where possible.", "HIGH"),
+    "os_system_shell": ("{callee}() invokes a command through a shell; avoid constructing commands from untrusted input.", "HIGH"),
+    "subprocess_shell_true": ("subprocess is invoked with shell=True; untrusted arguments can create command-injection risk.", "HIGH"),
+    "unsafe_pickle_deserialization": ("{callee} uses pickle-based deserialization, which can execute attacker-controlled code; never load untrusted data this way.", "CRITICAL"),
+    "unsafe_yaml_load": ("yaml.load() is used without a recognized safe loader; use yaml.safe_load or SafeLoader.", "HIGH"),
+    "tls_certificate_verification_disabled": ("TLS certificate or hostname validation is disabled ({callee}).", "HIGH"),
+    "tls_verification_disabled": ("HTTP client call sets verify=False, disabling TLS certificate validation.", "HIGH"),
+    "insecure_temporary_file": ("tempfile.mktemp() is race-prone; use NamedTemporaryFile or mkstemp.", "MEDIUM"),
+    "weak_cryptographic_hash": ("{callee} is unsuitable for collision-resistant security uses; select a modern hash or keyed MAC.", "LOW"),
+    "possible_sql_injection": ("SQL execution receives a dynamically formatted query string; prefer parameterized query arguments.", "HIGH"),
+}
 
 
 class PythonSecurityAnalyzer(Analyzer):
-    """Detect selected high-signal dangerous Python API usage patterns."""
+    """Per-line presentation of the shared Python AST security engine.
+
+    The built-in registry runs SecureCodePatternAnalyzer, which aggregates the same
+    matches per file; registering both would report every issue twice. This class
+    remains available for plugins and integrations that want one finding per line.
+    """
 
     name = "python-security"
     domains = ("secure_code", "application_security")
@@ -121,12 +140,11 @@ class PythonSecurityAnalyzer(Analyzer):
         findings: list[Finding] = []
         seen: set[tuple[str, int]] = set()
 
-        def report(rule: str, detail: str, node: ast.AST, severity: str) -> None:
-            key = (rule, getattr(node, "lineno", 0))
+        def report(rule: str, detail: str, line_number: int, severity: str) -> None:
+            key = (rule, line_number)
             if key in seen:
                 return
             seen.add(key)
-            line_number = getattr(node, "lineno", 0)
             excerpt = (
                 redact_source_excerpt(source_lines[line_number - 1])
                 if 0 < line_number <= len(source_lines) else ""
@@ -151,107 +169,8 @@ class PythonSecurityAnalyzer(Analyzer):
                 recommendation=detail,
             ))
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.id if isinstance(func, ast.Name) else (
-                func.attr if isinstance(func, ast.Attribute) else ""
-            )
-            dotted = ""
-            if isinstance(func, ast.Attribute):
-                base = func.value
-                root = base.id if isinstance(base, ast.Name) else ""
-                dotted = f"{root}.{func.attr}"
-
-            if name in {"eval", "exec"}:
-                report(
-                    "dynamic_code_execution",
-                    f"{name}() executes dynamically supplied code; validate the input source and use a constrained parser where possible.",
-                    node, "HIGH",
-                )
-            elif dotted == "os.system":
-                report(
-                    "os_system_shell",
-                    "os.system() invokes a command through a shell; avoid constructing commands from untrusted input.",
-                    node, "HIGH",
-                )
-            elif name in {"run", "call", "Popen", "check_call", "check_output"} and dotted.startswith("subprocess."):
-                shell_true = any(
-                    keyword.arg == "shell"
-                    and isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value is True
-                    for keyword in node.keywords
-                )
-                if shell_true:
-                    report(
-                        "subprocess_shell_true",
-                        "subprocess is invoked with shell=True; untrusted arguments can create command-injection risk.",
-                        node, "HIGH",
-                    )
-            elif dotted in {"pickle.load", "pickle.loads"}:
-                report(
-                    "unsafe_pickle_deserialization",
-                    "pickle deserialization can execute attacker-controlled code; never load untrusted pickle data.",
-                    node, "CRITICAL",
-                )
-            elif dotted == "yaml.load":
-                safe_loader = any(
-                    keyword.arg == "Loader"
-                    and isinstance(keyword.value, ast.Attribute)
-                    and keyword.value.attr in {"SafeLoader", "CSafeLoader"}
-                    for keyword in node.keywords
-                )
-                if not safe_loader:
-                    report(
-                        "unsafe_yaml_load",
-                        "yaml.load() is used without a recognized safe loader; use yaml.safe_load or SafeLoader.",
-                        node, "HIGH",
-                    )
-            elif dotted == "ssl._create_unverified_context":
-                report(
-                    "tls_certificate_verification_disabled",
-                    "An unverified TLS context disables certificate validation.",
-                    node, "HIGH",
-                )
-            elif dotted == "tempfile.mktemp":
-                report(
-                    "insecure_temporary_file",
-                    "tempfile.mktemp() is race-prone; use NamedTemporaryFile or mkstemp.",
-                    node, "MEDIUM",
-                )
-            elif dotted in {"hashlib.md5", "hashlib.sha1"}:
-                report(
-                    "weak_cryptographic_hash",
-                    f"{dotted} is unsuitable for collision-resistant security uses; select a modern hash or keyed MAC.",
-                    node, "LOW",
-                )
-            elif name in {"execute", "executemany"} and isinstance(func, ast.Attribute) and node.args:
-                query = node.args[0]
-                interpolated = (
-                    isinstance(query, (ast.JoinedStr, ast.BinOp))
-                    or isinstance(query, ast.Call)
-                    and isinstance(query.func, ast.Attribute)
-                    and query.func.attr == "format"
-                )
-                if interpolated:
-                    report(
-                        "possible_sql_injection",
-                        "SQL execution receives a dynamically formatted query string; prefer parameterized query arguments.",
-                        node, "HIGH",
-                    )
-            elif dotted in {"requests.get", "requests.post", "requests.put", "requests.request"}:
-                verify_false = any(
-                    keyword.arg == "verify"
-                    and isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value is False
-                    for keyword in node.keywords
-                )
-                if verify_false:
-                    report(
-                        "tls_verification_disabled",
-                        "HTTP client call sets verify=False, disabling TLS certificate validation.",
-                        node, "HIGH",
-                    )
+        for rule, line_number, callee in python_security_matches(tree):
+            detail, severity = _RULE_DETAILS[rule]
+            report(rule, detail.format(callee=callee), line_number, severity)
 
         return findings

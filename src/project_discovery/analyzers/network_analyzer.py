@@ -3,18 +3,76 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from functools import lru_cache
+from importlib.resources import files as resource_files
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .base import Analyzer
-from ..language_catalog import is_textual_path
+from ..language_catalog import is_source_path, is_textual_path, known_extensions
 from ..models import FileRecord, Finding
 from ..source_utils import open_verified_binary
 
 
 _URI = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://[^\s<>\"']+", re.I)
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
-_IPV6 = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:.])")
+# Identifier characters on either side mean a scope operator or symbol, not an address.
+_IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:.])")
+_STRING_LITERAL = re.compile(r"""(["'`])((?:\\.|(?!\1)[^\\\r\n])*)\1""")
+# Generic TLDs accepted for bare two-label names; other TLDs need a subdomain or URL.
+_COMMON_TLDS = frozenset({
+    "com", "net", "org", "edu", "gov", "mil", "int", "io", "ai", "dev", "app", "cloud",
+    "co", "me", "info", "biz", "xyz", "tech", "online", "site", "store", "us", "uk",
+    "de", "fr", "eu", "nl", "ca", "au", "jp", "cn", "ru", "br", "in", "ch", "se", "local",
+    "internal", "test", "example", "invalid", "localhost", "corp", "lan", "home",
+})
+_REVERSE_DNS_ROOTS = frozenset({
+    "com", "org", "net", "edu", "gov", "io", "de", "fr", "uk", "nl", "eu", "ch", "jp",
+})
+# Reserved/special-use names are not public DNS TLDs but are meaningful in configuration.
+_SPECIAL_USE_TLDS = frozenset({"local", "internal", "test", "example", "invalid", "localhost", "corp", "lan", "home"})
+
+
+@lru_cache(maxsize=1)
+def _iana_tlds() -> frozenset[str]:
+    text = resource_files("project_discovery").joinpath("data/tlds.txt").read_text(encoding="utf-8")
+    return frozenset(
+        line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")
+    )
+
+
+@lru_cache(maxsize=1)
+def _extension_labels() -> frozenset[str]:
+    # File names such as setup.py, README.md and app.zip end in real ccTLDs/gTLDs.
+    return known_extensions() | {"zip", "mov", "exe", "dll", "so", "bin", "log", "lock", "bak", "tmp"}
+
+
+def _plausible_hostname(domain: str) -> bool:
+    labels = domain.split(".")
+    tld = labels[-1]
+    if tld not in _iana_tlds() and tld not in _SPECIAL_USE_TLDS:
+        return False
+    if tld in _extension_labels():
+        return False
+    if len(labels) >= 3 and labels[0] in _REVERSE_DNS_ROOTS:
+        return False  # reverse-DNS identifiers such as com.example.app
+    return len(labels) >= 3 or tld in _COMMON_TLDS
+
+
+def _plausible_ipv6(candidate: str, line: str, start: int) -> bool:
+    """Reject bare "::" and single-group forms unless they appear bracketed or as ::1."""
+    groups = [group for group in candidate.split(":") if group]
+    if len(groups) >= 2 or candidate.lower() == "::1":
+        return True
+    return start > 0 and line[start - 1] == "["
+
+
+def _literal_spans(line: str) -> list[tuple[int, int]]:
+    return [(match.start(2), match.end(2)) for match in _STRING_LITERAL.finditer(line)]
+
+
+def _in_spans(spans: list[tuple[int, int]], start: int, end: int) -> bool:
+    return any(left <= start and end <= right for left, right in spans)
 _IPV6_MAPPED = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,6}(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 _CIDR = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b|(?<![\w:])[0-9A-Fa-f:]{3,}/\d{1,3}\b")
 _PORT_KEY = re.compile(
@@ -83,7 +141,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
 
     name = "network-indicators"
     domains = ("networking",)
-    languages = ("Polyglot text/source/configuration")
+    languages = ("Polyglot text/source/configuration",)
 
     def supports(self, record: FileRecord) -> bool:
         return (
@@ -137,6 +195,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
                 samples.append(line_number)
 
         line_number = 1
+        source_code = is_source_path(record.path)
         try:
             with open_verified_binary(path, record.analysis_identity) as stream:
                 while bytes_scanned < _MAX_NETWORK_FILE_BYTES:
@@ -205,8 +264,16 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     if budget_reason:
                         break
 
+                    # In source code, bare hosts and IPv6 forms only count inside string
+                    # literals; elsewhere "a.b" and "x::y" are member access and scopes.
+                    spans = _literal_spans(line) if source_code else None
                     for pattern in (_IPV6, _IPV6_MAPPED):
-                        for candidate in pattern.findall(line):
+                        for match in pattern.finditer(line):
+                            candidate = match.group(0)
+                            if spans is not None and not _in_spans(spans, match.start(), match.end()):
+                                continue
+                            if pattern is _IPV6 and not _plausible_ipv6(candidate, line, match.start()):
+                                continue
                             try:
                                 parsed = ipaddress.ip_address(candidate)
                                 if parsed.version == 6 and parsed.ipv4_mapped is not None:
@@ -269,12 +336,15 @@ class NetworkIndicatorAnalyzer(Analyzer):
 
                     for match in _DOMAIN.finditer(line):
                         domain = match.group(0).lower().rstrip(".")
-                        if domain not in {
+                        if domain in {
                             "example.com", "example.org", "example.net",
                             "localhost.localdomain",
-                        }:
-                            if not retain(domains, (domain, line_number)):
-                                break
+                        } or not _plausible_hostname(domain):
+                            continue
+                        if spans is not None and not _in_spans(spans, match.start(), match.end()):
+                            continue
+                        if not retain(domains, (domain, line_number)):
+                            break
                     if budget_reason:
                         break
 

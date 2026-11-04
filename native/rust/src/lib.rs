@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::{self, ReadDir};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -15,11 +16,19 @@ struct Walker {
     excluded_paths: HashSet<String>,
 }
 
-fn relative_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+/// Relative path as an OS string. PyO3 converts it losslessly (surrogateescape on
+/// POSIX, WTF-16 on Windows), so non-UTF-8 names stay openable. Python normalizes
+/// separators on Windows only, because a backslash is a legal POSIX name character.
+fn relative_path(root: &Path, path: &Path) -> OsString {
+    path.strip_prefix(root).unwrap_or(path).as_os_str().to_os_string()
+}
+
+/// Case-folded text used only for exclusion matching.
+fn match_key(path: &OsString) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    let text = text.replace('\\', "/");
+    text.to_lowercase()
 }
 
 fn mode_bits(metadata: &fs::Metadata) -> Option<u32> {
@@ -93,7 +102,8 @@ impl Walker {
         slf
     }
 
-    fn __next__(&mut self) -> PyResult<Option<(String, String, u64, Option<u32>, u64, bool, String, Option<String>, usize, Option<u64>, Option<u64>, Option<u64>)>> {
+    #[allow(clippy::type_complexity)]
+    fn __next__(&mut self) -> PyResult<Option<(OsString, String, u64, Option<u32>, u64, bool, OsString, Option<String>, usize, Option<u64>, Option<u64>, Option<u64>)>> {
         loop {
             let (parent, next_entry, parent_depth) = match self.stack.last_mut() {
                 Some((path, entries, depth)) => (path.clone(), entries.next(), *depth),
@@ -105,12 +115,12 @@ impl Walker {
                 Some(Err(error)) => {
                     self.stack.pop();
                     let rel = if parent.as_os_str().is_empty() {
-                        ".".to_string()
+                        OsString::from(".")
                     } else {
                         relative_path(&self.root, &parent)
                     };
                     return Ok(Some((rel, "directory_error".to_string(), 0, None, 0, false,
-                                    String::new(), Some(error.to_string()), parent_depth,
+                                    OsString::new(), Some(error.to_string()), parent_depth,
                                     None, None, None)));
                 }
                 None => {
@@ -126,7 +136,7 @@ impl Walker {
                 Ok(value) => value,
                 Err(error) => {
                     return Ok(Some((rel, "entry_error".to_string(), 0, None, 0, false,
-                                    String::new(), Some(error.to_string()), depth,
+                                    OsString::new(), Some(error.to_string()), depth,
                                     None, None, None)));
                 }
             };
@@ -138,17 +148,17 @@ impl Walker {
             let mode = mode_bits(&metadata);
             let mtime = modified_ns(&metadata);
             let (device, inode, changed) = identity_ns(&metadata);
-            let mut target = String::new();
+            let mut target = OsString::new();
             let mut error = None;
             let kind = if file_type.is_symlink() {
                 match fs::read_link(&path) {
-                    Ok(value) => target = value.to_string_lossy().into_owned(),
+                    Ok(value) => target = value.into_os_string(),
                     Err(value) => error = Some(value.to_string()),
                 }
                 "symlink"
             } else if file_type.is_dir() {
                 let name_key = name.to_lowercase();
-                let path_key = rel.to_lowercase();
+                let path_key = match_key(&rel);
                 if !self.excluded_names.contains(&name_key) &&
                    !self.excluded_paths.contains(&path_key) {
                     match fs::read_dir(&path) {

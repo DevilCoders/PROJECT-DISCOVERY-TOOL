@@ -126,3 +126,47 @@ def test_network_analyzer_reports_overlong_physical_line_as_unknown(tmp_path: Pa
         item.confidence == "UNKNOWN" and "physical line" in item.detail
         for item in findings
     )
+
+
+def _evidence(findings, prefix: str) -> list[str]:
+    return [value for item in findings if item.title.startswith(prefix) for value in item.evidence]
+
+
+def test_member_access_file_names_and_scope_operators_are_not_network_indicators(tmp_path: Path):
+    # Regression: every "identifier.identifier" was reported as a domain and bare "::"
+    # (f-strings, slices, C++ scopes) as an IPv6 literal.
+    findings = _scan(
+        tmp_path,
+        "pattern = re.compile(body.count)\n"
+        "evidence.append(self.id)\n"
+        'manifest = "setup.py"\n'
+        'readme = "README.md"\n'
+        'archive = "release.zip"\n'
+        'app_id = "com.example.mobile.app"\n'
+        'label = f"{archive}::{member}"\n'
+        "values = items[::2]\n",
+    )
+    assert not _evidence(findings, "Hostname and domain indicators")
+    assert not _evidence(findings, "IPv6 address indicators")
+
+
+def test_real_hosts_and_ipv6_literals_are_still_found(tmp_path: Path):
+    findings = _scan(
+        tmp_path,
+        'API = "api.github.com"\n'
+        'HOST = "internal.corp.example.org"\n'
+        'LOOPBACK = "::1"\n'
+        'LINK_LOCAL = "fe80::1"\n',
+    )
+    domains = " ".join(_evidence(findings, "Hostname and domain indicators"))
+    assert "api.github.com" in domains and "internal.corp.example.org" in domains
+    addresses = " ".join(_evidence(findings, "IPv6 address indicators"))
+    assert "(::1)" in addresses and "(fe80::1)" in addresses
+
+
+def test_configuration_hosts_do_not_need_string_literals(tmp_path: Path):
+    path = tmp_path / "app.yaml"
+    path.write_text("database:\n  host: db.internal.example.net\n  user.name: ignored\n", encoding="utf-8")
+    record = FileRecord("config/app.yaml", path.stat().st_size, ".yaml", "YAML", file_type="text")
+    domains = _evidence(NetworkIndicatorAnalyzer().analyze(path, record), "Hostname and domain indicators")
+    assert domains == ["config/app.yaml:2 (db.internal.example.net)"]

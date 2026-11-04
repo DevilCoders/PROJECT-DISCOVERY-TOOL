@@ -8,3 +8,15 @@ build/
 *.egg-info/
 .pdt-cache/
 .pdt-reports/
+
+# Native build outputs (extensions are rebuilt per platform/interpreter)
+*.so
+*.pyd
+*.dylib
+native/rust/target/
+
+# Coverage and test artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

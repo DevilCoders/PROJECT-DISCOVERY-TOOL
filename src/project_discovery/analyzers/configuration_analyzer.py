@@ -13,6 +13,7 @@ from typing import Any
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
 from ..source_utils import open_verified_binary, redact_source_excerpt
+from ..safe_parsers import safe_xml_fromstring, safe_yaml_load
 
 
 _CONFIG_FILENAMES = {
@@ -138,7 +139,7 @@ def _flatten(data: Any, prefix: str = "", keys: list[str] | None = None) -> list
 
 
 def _xml_keys(content: str) -> list[str]:
-    root = ET.fromstring(content)
+    root = safe_xml_fromstring(content)
     keys: list[str] = []
     stack: list[tuple[ET.Element, str]] = [(root, "")]
     while stack:
@@ -219,7 +220,7 @@ def _parse_config(
             )
         else:
             try:
-                keys = _flatten(yaml.safe_load(content))
+                keys = _flatten(safe_yaml_load(content))
             except yaml.YAMLError as exc:
                 raise ValueError(f"YAML parse error: {exc}") from exc
     elif name in {"dockerfile", "containerfile"}:

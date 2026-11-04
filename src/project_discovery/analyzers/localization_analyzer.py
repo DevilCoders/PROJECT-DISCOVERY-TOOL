@@ -10,6 +10,7 @@ from typing import Any
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..source_utils import read_text_bounded
+from ..safe_parsers import safe_xml_fromstring, safe_yaml_load
 
 
 _LOCALE_DIRS = {
@@ -85,7 +86,7 @@ def _po_summary(source: str) -> tuple[int, int]:
 
 
 def _xml_summary(source: str, extension: str) -> tuple[list[str], int]:
-    root = ET.fromstring(source)
+    root = safe_xml_fromstring(source)
     keys: list[str] = []
     empty = 0
     for element in root.iter():
@@ -149,7 +150,6 @@ class LocalizationAnalyzer(Analyzer):
                 path, 16 * 1024 * 1024,
                 expected_identity=record.analysis_identity,
             )
-            name = path.name.lower()
             extension = path.suffix.lower()
             untranslated = 0
             if extension in {".po", ".pot"}:
@@ -193,7 +193,7 @@ class LocalizationAnalyzer(Analyzer):
                     ]
                 else:
                     try:
-                        keys, untranslated = _json_keys(yaml.safe_load(source))
+                        keys, untranslated = _json_keys(safe_yaml_load(source))
                     except yaml.YAMLError as exc:
                         raise ValueError(f"YAML localization parse error: {exc}") from exc
                 format_name = "YAML translation catalog"

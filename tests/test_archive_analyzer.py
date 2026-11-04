@@ -140,7 +140,7 @@ def test_zip_index_is_not_materialized_when_preflight_bounds_are_unknown(tmp_pat
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("one.txt", "small payload")
 
-    monkeypatch.setattr(archive_module, "_zip_index_hint", lambda _path: None)
+    monkeypatch.setattr(archive_module, "_zip_index_hint", lambda _path, *_identity: None)
 
     def forbidden_materialization(*args, **kwargs):
         raise AssertionError("ZipFile must not be opened after an unknown preflight")
@@ -208,3 +208,61 @@ def test_archive_member_matcher_reports_distinct_line_numbers_and_bounded_excerp
     assert [line.line_number for line in email.code_evidence] == [3, 4]
     assert all("secret-" not in line.code for line in credential.code_evidence)
     assert all("@example.test" not in line.code for line in email.code_evidence)
+
+
+def _tar_bytes(members, mode="w"):
+    import io as _io
+    import tarfile as _tarfile
+
+    buffer = _io.BytesIO()
+    with _tarfile.open(fileobj=buffer, mode=mode) as archive:
+        for name, payload, file_mode in members:
+            info = _tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mode = file_mode
+            archive.addfile(info, _io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+def test_tar_members_after_a_large_member_are_still_inspected(tmp_path: Path):
+    # Regression: traversal used to stop at the first member larger than the 1 MiB
+    # sample, hiding later traversal and setuid entries while reporting CONFIRMED.
+    path = tmp_path / "evil.tar"
+    path.write_bytes(_tar_bytes([
+        ("big.bin", b"\0" * (2 * 1024 * 1024), 0o644),
+        ("../../etc/cron.d/evil", b"* * * * * root id\n", 0o644),
+        ("bin/suid-shell", b"\x7fELF", 0o4755),
+    ]))
+    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "evil.tar"))
+    titles = [finding.title for finding in findings]
+    assert any(title.startswith("Archive path traversal indicators") for title in titles)
+    assert any(title.startswith("Risky archive permissions") for title in titles)
+    inventory = next(finding for finding in findings if finding.title.startswith("TAR archive inventory"))
+    assert "Indexed 3 member(s);" in inventory.detail
+
+
+def test_compressed_tar_decompression_budget_is_enforced_inside_reads(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.archive_analyzer as archive_module
+
+    path = tmp_path / "bomb.tar.gz"
+    path.write_bytes(_tar_bytes([
+        ("zeros.bin", b"\0" * (8 * 1024 * 1024), 0o644),
+        ("after.txt", b"late member", 0o644),
+    ], mode="w:gz"))
+    monkeypatch.setattr(archive_module, "_MAX_TAR_DECOMPRESSED_BYTES", 1024 * 1024)
+    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "bomb.tar.gz"))
+    budget = [finding for finding in findings if "decompression budget" in finding.title]
+    assert budget and budget[0].confidence == "UNKNOWN"
+    assert "before a budget stopped traversal" in findings[0].detail
+
+
+def test_case_and_unicode_colliding_member_names_are_reported(tmp_path: Path):
+    path = tmp_path / "collide.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("README.txt", "a")
+        archive.writestr("readme.TXT", "b")
+        archive.writestr("caf\u00e9.txt", "c")
+        archive.writestr("cafe\u0301.txt", "d")
+    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "collide.zip"))
+    collision = next(finding for finding in findings if "colliding" in finding.title)
+    assert len(collision.evidence) == 2

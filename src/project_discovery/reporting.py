@@ -5,11 +5,26 @@ import heapq
 import html
 import io
 import json
+import re
+import secrets
 from importlib.resources import files as resource_files
+from itertools import islice
 from pathlib import Path
 from typing import Any, TextIO
 
 from .models import ScanResult
+
+# The offline HTML report embeds bounded slices so browsers can open reports of very
+# large projects; the JSON report always carries the complete data set.
+HTML_MAX_EMBEDDED = {
+    "findings": 50_000,
+    "files": 100_000,
+    "directories": 50_000,
+    "symlinks": 50_000,
+    "special_entries": 50_000,
+    "errors": 10_000,
+}
+_TEMPLATE_PLACEHOLDER = re.compile(r"__(ROOT|GENERATED|REPORT_JS|CSP_NONCE)__")
 
 
 def _script_json(value: Any) -> str:
@@ -24,14 +39,27 @@ def _script_json(value: Any) -> str:
     )
 
 
-def _html_template(result: ScanResult) -> str:
+def _html_template(result: ScanResult, *, nonce: str, data_marker: str) -> str:
+    """Return the report shell with a unique data marker where the payload belongs.
+
+    Placeholders are substituted in a single pass, so user-controlled text such as a
+    project path containing "__DATA__" is never re-scanned as a template directive.
+    """
     report_js = resource_files("project_discovery").joinpath("web/report.js").read_text(encoding="utf-8")
-    root = html.escape(result.root)
-    generated = html.escape(result.finished_at)
+    if report_js.count("__DATA__") != 1:
+        raise RuntimeError("report.js must contain exactly one __DATA__ placeholder")
+    values = {
+        "ROOT": html.escape(result.root),
+        "GENERATED": html.escape(result.finished_at),
+        "REPORT_JS": report_js.replace("__DATA__", data_marker),
+        "CSP_NONCE": nonce,
+    }
     template = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-__CSP_NONCE__'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>PDT // Project Intelligence Report</title>
@@ -121,6 +149,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
 .raw-json{max-height:520px;overflow:auto;padding:14px;background:#060b13;border:1px solid var(--line);border-radius:10px;
  white-space:pre-wrap;overflow-wrap:anywhere;color:#9db5cf;font:11px/1.5 ui-monospace,monospace}
 .footer{padding:28px 0;color:#667b94;text-align:center;font:10px ui-monospace,monospace;letter-spacing:.12em}
+.truncation{margin-top:18px;padding:12px 14px;border:1px solid #6b5420;border-radius:10px;background:#2a210c;color:#fde68a;font-size:12px}
 .hidden{display:none!important}
 @media(max-width:900px){.main-grid{grid-template-columns:1fr}.sidebar{position:static;display:flex;flex-wrap:wrap;gap:4px}.sidebar h3{width:100%}}
 @media(max-width:600px){.top-meta{display:none}.finding summary{flex-wrap:wrap;padding:10px 0}.finding-title{flex-basis:100%;order:3}.section{padding:15px}}
@@ -145,6 +174,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
    <div class="stat amber"><span>Hidden entries</span><strong id="stat-hidden">0</strong></div>
    <div class="stat"><span>Scan errors</span><strong id="stat-errors">0</strong></div>
   </div>
+  <div id="truncation-notice" class="truncation hidden" role="status"></div>
  </header>
  <div class="main-grid">
   <aside class="sidebar" aria-label="Report navigation">
@@ -184,30 +214,30 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
     <div id="no-vcs" class="empty hidden">No local VCS, source-hosting or delivery-provider metadata was detected.</div>
    </section>
    <section class="section" id="directories">
-    <div class="section-head"><h2>Directory intelligence</h2><span class="kicker">03 / STRUCTURE</span></div>
+    <div class="section-head"><h2>Directory intelligence</h2><span class="kicker">05 / STRUCTURE</span></div>
     <div class="table-wrap"><table><thead><tr><th>Directory</th><th>Depth</th><th>Files</th><th>Aggregate size</th><th>Marker / state</th></tr></thead><tbody id="directory-rows"></tbody></table></div>
    </section>
    <section class="section" id="symlinks">
-    <div class="section-head"><h2>Symbolic links</h2><span class="kicker">04 / NO-FOLLOW INVENTORY</span></div>
+    <div class="section-head"><h2>Symbolic links</h2><span class="kicker">06 / NO-FOLLOW INVENTORY</span></div>
     <div class="table-wrap"><table><thead><tr><th>Link path</th><th>Target</th><th>Lexical scope</th><th>Verification</th><th>Permissions</th><th>Hidden</th></tr></thead><tbody id="symlink-rows"></tbody></table></div>
     <div class="pagination" id="symlink-pagination"><span id="symlink-page-info">0 links</span><button id="symlink-more" class="primary" type="button">Load next page</button></div>
     <div id="no-symlinks" class="empty hidden">No symbolic links were detected.</div>
    </section>
    <section class="section" id="special">
-    <div class="section-head"><h2>Special filesystem entries</h2><span class="kicker">05 / FIFO SOCKET DEVICE</span></div>
+    <div class="section-head"><h2>Special filesystem entries</h2><span class="kicker">07 / FIFO SOCKET DEVICE</span></div>
     <div class="table-wrap"><table><thead><tr><th>Path</th><th>Type</th><th>Permissions</th><th>Hidden</th><th>Size</th></tr></thead><tbody id="special-rows"></tbody></table></div>
     <div class="pagination" id="special-pagination"><span id="special-page-info">0 entries</span><button id="special-more" class="primary" type="button">Load next page</button></div>
     <div id="no-special" class="empty hidden">No FIFO, socket, device or other special entries were detected.</div>
    </section>
    <section class="section" id="files">
-    <div class="section-head"><h2>File browser</h2><span class="kicker">05 / SEARCHABLE INVENTORY</span></div>
+    <div class="section-head"><h2>File browser</h2><span class="kicker">08 / SEARCHABLE INVENTORY</span></div>
     <div class="controls"><input id="file-search" type="search" placeholder="Search paths, languages and file types" aria-label="Search file inventory">
      <select id="file-kind"><option value="">All file types</option></select><button id="file-reset" type="button">Reset</button></div>
     <div class="table-wrap"><table><thead><tr><th>Path</th><th>Size</th><th>Type</th><th>Language</th><th>Flags</th></tr></thead><tbody id="file-rows"></tbody></table></div>
     <div class="pagination"><span id="file-page-info">0 entries</span><button id="file-more" class="primary" type="button">Load next page</button></div>
    </section>
    <section class="section" id="findings">
-    <div class="section-head"><h2>Analysis findings</h2><span class="kicker">06 / EVIDENCE</span></div>
+    <div class="section-head"><h2>Analysis findings</h2><span class="kicker">09 / EVIDENCE</span></div>
     <div class="controls">
      <input id="search" type="search" placeholder="Search findings, evidence and paths" aria-label="Search findings">
      <select id="category"><option value="">All categories</option></select>
@@ -223,7 +253,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
     <div id="no-findings" class="empty hidden">No findings match the current filters.</div>
    </section>
    <section class="section" id="diagnostics">
-    <div class="section-head"><h2>Diagnostics and raw metrics</h2><span class="kicker">07 / TRACE</span></div>
+    <div class="section-head"><h2>Diagnostics and raw metrics</h2><span class="kicker">10 / TRACE</span></div>
     <details><summary>Show scan metrics JSON</summary><pre id="raw-metrics" class="raw-json"></pre></details>
     <details><summary>Show scanner/analyzer errors</summary><pre id="raw-errors" class="raw-json"></pre></details>
     <details><summary>Active analyzers</summary><pre id="raw-analyzers" class="raw-json"></pre></details>
@@ -232,16 +262,12 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
  </div>
  <div class="footer">PDT // LOCAL-FIRST // OFFLINE // READ-ONLY // CONFIDENCE-AWARE</div>
 </div>
-<script>
+<script nonce="__CSP_NONCE__">
 __REPORT_JS__
 </script>
 </body>
 </html>"""
-    return (
-        template.replace("__ROOT__", root)
-        .replace("__GENERATED__", generated)
-        .replace("__REPORT_JS__", report_js)
-    )
+    return _TEMPLATE_PLACEHOLDER.sub(lambda match: values[match.group(1)], template)
 
 
 def _write_json_value(stream: TextIO, value: Any, *, script_safe: bool = False) -> None:
@@ -269,12 +295,31 @@ def _write_json_array(
 
 
 def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
-    stream.write('{"schema_version":"1.3","findings":')
-    _write_json_array(stream, result.findings, lambda item: item.to_dict(), script_safe=True)
+    """Embed bounded, severity-ordered slices plus true totals for the offline client."""
+    totals = {
+        "findings": len(result.findings),
+        "files": len(result.files),
+        "directories": len(result.directories),
+        "symlinks": len(result.symlinks),
+        "special_entries": len(result.special_entries),
+        "errors": len(result.errors),
+    }
+
+    def bounded(name: str, values):
+        return islice(values, HTML_MAX_EMBEDDED[name])
+
+    stream.write('{"schema_version":"1.3","totals":')
+    _write_json_value(stream, totals, script_safe=True)
+    stream.write(',"embedded_limits":')
+    _write_json_value(stream, HTML_MAX_EMBEDDED, script_safe=True)
+    stream.write(',"findings":')
+    _write_json_array(
+        stream, bounded("findings", result.findings), lambda item: item.to_dict(), script_safe=True,
+    )
     stream.write(',"files":')
     _write_json_array(
         stream,
-        result.files,
+        bounded("files", result.files),
         lambda item: {
             "path": item.path,
             "size_bytes": item.size_bytes,
@@ -290,15 +335,23 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
         script_safe=True,
     )
     stream.write(',"directories":')
-    _write_json_array(stream, result.directories, lambda item: item.to_dict(), script_safe=True)
+    _write_json_array(
+        stream, bounded("directories", result.directories), lambda item: item.to_dict(),
+        script_safe=True,
+    )
     stream.write(',"symlinks":')
-    _write_json_array(stream, result.symlinks, lambda item: item.to_dict(), script_safe=True)
+    _write_json_array(
+        stream, bounded("symlinks", result.symlinks), lambda item: item.to_dict(), script_safe=True,
+    )
     stream.write(',"special_entries":')
-    _write_json_array(stream, result.special_entries, lambda item: item.to_dict(), script_safe=True)
+    _write_json_array(
+        stream, bounded("special_entries", result.special_entries), lambda item: item.to_dict(),
+        script_safe=True,
+    )
     stream.write(',"metrics":')
     _write_json_value(stream, result.metrics, script_safe=True)
     stream.write(',"errors":')
-    _write_json_array(stream, result.errors, lambda item: item, script_safe=True)
+    _write_json_array(stream, bounded("errors", result.errors), lambda item: item, script_safe=True)
     stream.write(',"analyzers":')
     _write_json_value(stream, result.analyzer_names, script_safe=True)
     stream.write("}")
@@ -331,9 +384,11 @@ def _write_json_report(stream: TextIO, result: ScanResult) -> None:
 
 
 def _write_html_report(stream: TextIO, result: ScanResult) -> None:
-    template = _html_template(result)
-    before, separator, after = template.partition("__DATA__")
-    if not separator:
+    # A per-report random marker cannot be forged by paths or other report text.
+    data_marker = f"__PDT_DATA_{secrets.token_hex(16)}__"
+    template = _html_template(result, nonce=secrets.token_urlsafe(18), data_marker=data_marker)
+    before, separator, after = template.partition(data_marker)
+    if not separator or data_marker in after:
         raise RuntimeError("HTML report template is missing the report data placeholder")
     stream.write(before)
     _write_html_payload(stream, result)
@@ -344,6 +399,32 @@ def _html_report(result: ScanResult) -> str:
     buffer = io.StringIO()
     _write_html_report(buffer, result)
     return buffer.getvalue()
+
+
+# Underscores only form emphasis at word boundaries (e.g. "__init__.py" renders bold), so
+# intraword underscores such as "snake_case" stay readable in the raw Markdown.
+_MD_INLINE_SPECIAL = re.compile(r"[\\`*\[\]|~]|(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])")
+
+
+def _md(value: object) -> str:
+    """Neutralize untrusted inline text (paths, titles, evidence) for Markdown output.
+
+    Raw HTML and autolinks are disabled by entity-escaping <, > and &; Markdown control
+    characters are backslash-escaped; newlines (legal in POSIX file names) are flattened
+    so a value cannot start new Markdown blocks.
+    """
+    text = " ".join(str(value).splitlines())
+    return _MD_INLINE_SPECIAL.sub(
+        lambda match: "\\" + match.group(0), html.escape(text, quote=False),
+    )
+
+
+def _md_code(value: str) -> str:
+    """Render text as a CommonMark code span; backslash escapes do not work inside spans."""
+    text = " ".join(value.splitlines()) or " "
+    fence = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text[0] == "`" or text[-1] == "`" else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
@@ -357,7 +438,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     for value in (
         "# Project Discovery Report",
         "",
-        f"- Root: {result.root}",
+        f"- Root: {_md(result.root)}",
         "- Schema version: 1.3",
         f"- Completed: {result.finished_at}",
         f"- Files: {len(result.files):,}",
@@ -372,7 +453,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
         f"- Native CPU backend: {native.get('backend', 'not reported')}",
         f"- GPU status: {native.get('gpu_status', 'not reported')}",
-        f"- GPU device: {native.get('gpu_name') or 'not detected'}",
+        f"- GPU device: {_md(native.get('gpu_name') or 'not detected')}",
         f"- GPU byte-count dispatches: {native.get('gpu_dispatches', 0):,}",
         f"- GPU CPU fallbacks: {native.get('gpu_fallbacks', 0):,}",
         "",
@@ -381,17 +462,17 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     ):
         line(value)
     for name, count in sorted(metrics.get("file_types", {}).items()):
-        line(f"- {name}: {count:,}")
+        line(f"- {_md(name)}: {count:,}")
     line()
     line("## File Size Distribution")
     line()
     for name, count in sorted(metrics.get("size_buckets", {}).items()):
-        line(f"- {name}: {count:,}")
+        line(f"- {_md(name)}: {count:,}")
     line()
     line("## Development Dependency and Cache Directories")
     line()
     for name, count in sorted(metrics.get("development_directories", {}).items()):
-        line(f"- {name}: {count:,}")
+        line(f"- {_md(name)}: {count:,}")
     line()
     line("## Largest Directories")
     line()
@@ -401,10 +482,10 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         key=lambda item: (item.total_bytes, item.path.casefold(), item.path),
     )
     for item in largest:
-        marker = f" [{item.development_marker}]" if item.development_marker else ""
+        marker = f" [{_md(item.development_marker)}]" if item.development_marker else ""
         pruned = " [pruned]" if item.pruned else ""
         line(
-            f"- {item.path} — {item.total_bytes:,} bytes, "
+            f"- {_md(item.path)} — {item.total_bytes:,} bytes, "
             f"{item.file_count:,} files, depth {item.depth}{marker}{pruned}"
         )
     line()
@@ -415,8 +496,8 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     else:
         for item in result.symlinks:
             line(
-                f"- {item.path} -> {item.target} "
-                f"(scope: {item.target_scope}, hidden: {item.is_hidden})"
+                f"- {_md(item.path)} -> {_md(item.target)} "
+                f"(scope: {_md(item.target_scope)}, hidden: {item.is_hidden})"
             )
     line()
     line("## Special Filesystem Entries")
@@ -427,7 +508,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         for item in result.special_entries:
             mode = "unknown" if item.permissions is None else oct(item.permissions)
             line(
-                f"- {item.path} — {item.entry_type}, permissions {mode}, "
+                f"- {_md(item.path)} — {_md(item.entry_type)}, permissions {mode}, "
                 f"hidden: {item.is_hidden}, size: {item.size_bytes:,} bytes"
             )
     vuln_meta = metrics.get("vulnerability_intelligence", {})
@@ -441,48 +522,45 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         line("No local advisory database was configured. This is not a vulnerability-free result.")
     else:
         line(f"- Local advisories available: {vuln_meta.get('advisory_count', 0):,}")
-        line(f"- Local advisory snapshot imported: {vuln_meta.get('last_imported_at', 'unknown')}")
+        line(f"- Local advisory snapshot imported: {_md(vuln_meta.get('last_imported_at', 'unknown'))}")
         line(f"- Matched findings: {vulnerability_count:,}")
     for item in result.findings:
         if item.category != "vulnerabilities":
             continue
-        line(f"- [{item.severity}][{item.confidence}] {item.title}")
-        line(f"  - {item.detail}")
-        line("  - Evidence: " + "; ".join(item.evidence))
+        line(f"- [{item.severity}][{item.confidence}] {_md(item.title)}")
+        line(f"  - {_md(item.detail)}")
+        line("  - Evidence: " + "; ".join(_md(value) for value in item.evidence))
     line()
     line("## Findings")
     line()
     if not result.findings:
         line("No findings were produced.")
     for item in result.findings:
-        line(f"### [{item.severity}][{item.confidence}] {item.title}")
+        line(f"### [{item.severity}][{item.confidence}] {_md(item.title)}")
         line()
-        line(item.detail)
+        line(_md(item.detail))
         line()
         if item.impact:
-            line(f"**Potential attacker impact:** {item.impact}")
+            line(f"**Potential attacker impact:** {_md(item.impact)}")
             line()
         if item.recommendation:
-            line(f"**Recommended remediation:** {item.recommendation}")
+            line(f"**Recommended remediation:** {_md(item.recommendation)}")
             line()
         line("Evidence:")
         for value in item.evidence:
-            line(f"- {value}")
+            line(f"- {_md(value)}")
         if item.code_evidence:
             line()
             line("**Vulnerable source lines (redacted):**")
             line()
             for code in item.code_evidence:
-                escaped = code.code.replace(chr(92), chr(92) * 2).replace(
-                    chr(96), chr(92) + chr(96)
-                )
-                line(f"- 🔴 Line {code.line_number}: `{escaped}`")
+                line(f"- 🔴 Line {code.line_number}: {_md_code(code.code)}")
         line()
     line("## Diagnostics")
     line()
     if result.errors:
         for error in result.errors:
-            line(f"- {error}")
+            line(f"- {_md(error)}")
     else:
         line("No scanner/analyzer errors recorded.")
 
@@ -499,17 +577,17 @@ def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[P
     written: list[Path] = []
     if "json" in formats:
         path = output / "discovery-report.json"
-        with path.open("w", encoding="utf-8", newline="\n") as stream:
+        with path.open("w", encoding="utf-8", errors="backslashreplace", newline="\n") as stream:
             _write_json_report(stream, result)
         written.append(path)
     if "markdown" in formats:
         path = output / "discovery-report.md"
-        with path.open("w", encoding="utf-8", newline="\n") as stream:
+        with path.open("w", encoding="utf-8", errors="backslashreplace", newline="\n") as stream:
             _write_markdown_report(stream, result)
         written.append(path)
     if "html" in formats:
         path = output / "discovery-report.html"
-        with path.open("w", encoding="utf-8", newline="\n") as stream:
+        with path.open("w", encoding="utf-8", errors="backslashreplace", newline="\n") as stream:
             _write_html_report(stream, result)
         written.append(path)
     return written

@@ -1,4 +1,8 @@
+import os
+import sys
 from pathlib import Path
+
+import pytest
 
 from project_discovery.scanner import discover_files, discover_inventory
 
@@ -113,7 +117,7 @@ def test_magic_bytes_override_generic_binary_classification(tmp_path: Path):
         "program.elf": (b"\x7fELF" + b"0" * 20, "executable/elf"),
         "index.db": (b"SQLite format 3\x00" + b"0" * 20, "database/sqlite"),
     }
-    for name, (payload, expected) in cases.items():
+    for name, (payload, _) in cases.items():
         (tmp_path / name).write_bytes(payload)
     files, *_ = discover_inventory(tmp_path)
     observed = {item.path: item.file_type for item in files}
@@ -337,30 +341,6 @@ def test_sha256_file_rejects_invalid_chunk_size(tmp_path: Path):
         sha256_file(path, chunk_size=0)
 
 
-
-
-def test_sha256_file_uses_verified_no_follow_descriptor(tmp_path: Path):
-    import hashlib
-    import pytest
-    from project_discovery.scanner import sha256_file
-
-    source = tmp_path / "source.bin"
-    payload = b"bounded hashing fixture" * 4096
-    source.write_bytes(payload)
-    observed = source.stat()
-    assert sha256_file(source, chunk_size=127, expected_info=observed) == hashlib.sha256(
-        payload
-    ).hexdigest()
-
-    link = tmp_path / "source-link.bin"
-    try:
-        link.symlink_to(source)
-    except (OSError, NotImplementedError):
-        pytest.skip("symlink creation is unavailable on this platform")
-    with pytest.raises(OSError, match="non-regular"):
-        sha256_file(link)
-
-
 def test_sha256_file_rejects_changed_file_identity(tmp_path: Path):
     import pytest
     from project_discovery.scanner import sha256_file
@@ -372,16 +352,6 @@ def test_sha256_file_rejects_changed_file_identity(tmp_path: Path):
     with pytest.raises(OSError, match="identity changed"):
         sha256_file(source, expected_info=observed)
 
-
-def test_sha256_file_rejects_invalid_chunk_size(tmp_path: Path):
-    import pytest
-    from project_discovery.scanner import sha256_file
-
-    source = tmp_path / "small.bin"
-    source.write_bytes(b"x")
-    with pytest.raises(ValueError, match="chunk_size"):
-        sha256_file(source, chunk_size=0)
-
 def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_path: Path):
     from project_discovery.inventory_store import (
         InventoryStore, StoredFileRecords, StoredRecordSequence,
@@ -392,7 +362,8 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
     root.mkdir()
     nested = root / "src"
     nested.mkdir()
-    (nested / "main.py").write_text("print('stored')\n", encoding="utf-8")
+    # Write bytes so Windows newline translation cannot change the expected size.
+    (nested / "main.py").write_bytes("print('stored')\n".encode())
     link = root / "source-link"
     try:
         link.symlink_to(nested / "main.py")
@@ -561,3 +532,65 @@ def test_python_fallback_keeps_scandir_iterators_bounded_by_depth(tmp_path: Path
     assert peak_active == 2  # root iterator + one active child; siblings are not queued
     assert active == 0
 
+
+
+def _walkers(monkeypatch):
+    """Yield once per inventory backend: the native walker (if built), then the fallback."""
+    from project_discovery import scanner
+
+    yield "native"
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *_args, **_kwargs: None)
+    yield "python"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NTFS junctions are Windows-specific")
+def test_windows_junction_loops_are_recorded_not_followed(tmp_path: Path, monkeypatch):
+    # Regression: the Python fallback treated junctions as directories and re-walked the
+    # tree until the path-length limit, duplicating the inventory.
+    import subprocess
+
+    from project_discovery.scanner import discover_inventory
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(tmp_path / "src" / "loop"), str(tmp_path)],
+        capture_output=True,
+    )
+    if created.returncode:
+        pytest.skip("junction creation unavailable")
+    for _ in _walkers(monkeypatch):
+        files, directories, links, _, stats = discover_inventory(tmp_path)
+        assert [record.path for record in files] == ["src/a.py"]
+        assert [link.path for link in links] == ["src/loop"]
+        assert stats.get("walk_errors", 0) == 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="unpaired surrogates are legal only in NTFS names")
+def test_windows_names_with_unpaired_surrogates_stay_openable(tmp_path: Path, monkeypatch):
+    from project_discovery.scanner import discover_inventory
+
+    name = "bad\udcffname.py"
+    with open(tmp_path / name, "w", encoding="utf-8") as stream:
+        stream.write("x = 1\n")
+    for _ in _walkers(monkeypatch):
+        files, *_ = discover_inventory(tmp_path)
+        assert [record.path for record in files] == [name]
+        assert files[0].file_type == "source" and files[0].analysis_identity is not None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux allows arbitrary name bytes")
+def test_posix_byte_names_and_backslashes_round_trip(tmp_path: Path, monkeypatch):
+    # Regression: the Rust walker decoded names lossily (U+FFFD) and rewrote "\\" to "/".
+    from project_discovery.scanner import discover_inventory
+
+    raw = os.fsencode(tmp_path) + b"/bad\xffname.py"
+    descriptor = os.open(raw, os.O_WRONLY | os.O_CREAT, 0o600)
+    os.write(descriptor, b"x = 1\n")
+    os.close(descriptor)
+    (tmp_path / r"back\slash.txt").write_text("x\n", encoding="utf-8")
+    for _ in _walkers(monkeypatch):
+        files, *_ = discover_inventory(tmp_path)
+        paths = sorted(record.path for record in files)
+        assert paths == sorted([r"back\slash.txt", os.fsdecode(b"bad\xffname.py")])
+        assert all((tmp_path / path).is_file() for path in paths)

@@ -140,15 +140,19 @@ static void *pdt_load_library_symbol(pdt_library_handle library, const char *nam
 
 static pdt_library_handle pdt_opencl_library(void) {
 #if defined(_WIN32)
-    return LoadLibraryA("OpenCL.dll");
+    /* Never let the DLL search order reach the current directory or PATH: PDT is run
+       inside untrusted repositories, and a planted OpenCL.dll would execute in-process.
+       GPU vendors install the OpenCL ICD loader into System32. */
+#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
+#define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#endif
+    return LoadLibraryExA("OpenCL.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
 #elif defined(__APPLE__)
-    pdt_library_handle handle = dlopen(
+    /* Only the absolute system framework path: a relative dlopen path is resolved
+       against the current directory. */
+    return dlopen(
         "/System/Library/Frameworks/OpenCL.framework/OpenCL", RTLD_NOW | RTLD_LOCAL
     );
-    if (handle == NULL) {
-        handle = dlopen("OpenCL.framework/OpenCL", RTLD_NOW | RTLD_LOCAL);
-    }
-    return handle;
 #else
     pdt_library_handle handle = dlopen("libOpenCL.so.1", RTLD_NOW | RTLD_LOCAL);
     if (handle == NULL) {

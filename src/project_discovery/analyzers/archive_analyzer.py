@@ -1,11 +1,16 @@
 """Metadata-only archive inspection. Archive members are never extracted."""
 from __future__ import annotations
 
+import bz2
+import gzip
+import io
+import lzma
 import re
 import stat
 import struct
 import tarfile
 import time
+import unicodedata
 import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
@@ -60,7 +65,63 @@ def _zip_index_hint(
 _MAX_MEMBER_SCAN_BYTES = 1024 * 1024
 _MAX_ARCHIVE_SCAN_BYTES = 32 * 1024 * 1024
 _MAX_ARCHIVE_WALL_SECONDS = 8.0
+# Compressed TAR streams must be decompressed to reach later headers; this bounds the
+# decompression work independently of the wall-time budget.
+_MAX_TAR_DECOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
 _MEMBER_SCAN_CHUNK = 64 * 1024
+
+
+class _ArchiveBudgetExceeded(Exception):
+    """Raised from inside archive reads when a time or decompression budget is spent."""
+
+
+class _BudgetedReader(io.RawIOBase):
+    """Read-through wrapper that enforces a deadline and byte budget on every read."""
+
+    def __init__(self, stream, deadline: float, max_bytes: int) -> None:
+        self._stream = stream
+        self._deadline = deadline
+        self._remaining = max_bytes
+        self.consumed = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        if time.monotonic() >= self._deadline:
+            raise _ArchiveBudgetExceeded("wall-time budget reached")
+        if self._remaining <= 0:
+            raise _ArchiveBudgetExceeded("decompressed-byte budget reached")
+        view = memoryview(buffer)
+        size = min(len(view), self._remaining, _MEMBER_SCAN_CHUNK * 16)
+        data = self._stream.read(size)
+        view[:len(data)] = data
+        self._remaining -= len(data)
+        self.consumed += len(data)
+        return len(data)
+
+
+def _tar_decompressor(stream):
+    """Return a decompressing file object for gzip/bzip2/xz TAR streams, or None if plain."""
+    head = stream.peek(6)[:6]
+    if head.startswith(b"\x1f\x8b"):
+        return gzip.GzipFile(fileobj=stream, mode="rb")
+    if head.startswith(b"BZh"):
+        return bz2.BZ2File(stream)
+    if head.startswith(b"\xfd7zXZ\x00"):
+        return lzma.LZMAFile(stream)
+    return None
+
+
+def _colliding_names(names) -> list[str]:
+    """Member names that collide on case-insensitive or Unicode-normalizing filesystems."""
+    seen: dict[str, set[str]] = {}
+    for name in names:
+        key = unicodedata.normalize("NFC", name.replace("\\", "/")).casefold()
+        seen.setdefault(key, set()).add(name)
+    return sorted(
+        " / ".join(sorted(variants)) for variants in seen.values() if len(variants) > 1
+    )
 _CONTENT_RULES = (
     (
         "credential-like assignment",
@@ -327,6 +388,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                         item.filename for item in infos
                     ).items() if count > 1
                 ]
+                collisions = _colliding_names({item.filename for item in infos})
                 for info in infos[:_MAX_ARCHIVE_ENTRIES]:
                     if time.monotonic() >= deadline:
                         time_budget_reached = True
@@ -431,6 +493,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         findings.extend(self._risk_findings(
             record, unsafe_paths, symlinks, risky_modes, high_ratios, duplicates, encrypted
         ))
+        if collisions:
+            findings.append(self._collision_finding(record, collisions))
         findings.extend(content_findings)
         if content_truncated:
             findings.append(Finding(
@@ -459,9 +523,17 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         return findings
 
     def _tar(self, path: Path, record: FileRecord) -> list[Finding]:
+        """Traverse every TAR header under budgets; content sampling never ends traversal.
+
+        Stopping at the first large member would hide later traversal, link and setuid
+        entries, so sampling limits only skip sampling. Compressed streams are read through
+        a budgeted reader that enforces wall time and decompressed bytes inside each read.
+        """
         deadline = time.monotonic() + _MAX_ARCHIVE_WALL_SECONDS
         time_budget_reached = False
+        stop_reason: str | None = None
         counts: Counter[str] = Counter()
+        names: list[str] = []
         unsafe_paths: list[str] = []
         symlinks: list[str] = []
         hardlinks: list[str] = []
@@ -471,72 +543,78 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         content_bytes = 0
         content_truncated = 0
         total = 0
+        compressed = False
         try:
-            with open_verified_binary(path, record.analysis_identity) as archive_stream, tarfile.open(fileobj=archive_stream, mode="r|*") as archive:
-                for member in archive:
-                    if time.monotonic() >= deadline:
-                        time_budget_reached = True
-                        break
-                    total += 1
-                    if total > _MAX_ARCHIVE_ENTRIES:
-                        break
-                    if member.isdir():
-                        kind = "directory"
-                    elif member.issym():
-                        kind = "symlink"
-                        symlinks.append(member.name)
-                    elif member.islnk():
-                        kind = "hardlink"
-                        hardlinks.append(member.name)
-                    elif member.isreg():
-                        kind = "file"
-                    else:
-                        kind = "special"
-                        special_entries.append(member.name)
-                    counts[kind] += 1
-                    if _unsafe_member_path(member.name) or (
-                        member.issym() and _unsafe_member_path(member.linkname)
-                    ) or (
-                        member.islnk() and _unsafe_member_path(member.linkname)
-                    ):
-                        unsafe_paths.append(member.name)
-                    for risk in _mode_risks(member.mode):
-                        risky_modes.append(f"{member.name} ({risk})")
+            with open_verified_binary(path, record.analysis_identity) as archive_stream:
+                decompressor = _tar_decompressor(archive_stream)
+                if decompressor is None:
+                    # Plain TAR on a seekable descriptor: headers are reached by seeking.
+                    archive = tarfile.open(fileobj=archive_stream, mode="r:")
+                else:
+                    compressed = True
+                    archive = tarfile.open(
+                        fileobj=_BudgetedReader(decompressor, deadline, _MAX_TAR_DECOMPRESSED_BYTES),
+                        mode="r|",
+                    )
+                with archive:
+                    try:
+                        for member in archive:
+                            if time.monotonic() >= deadline:
+                                time_budget_reached = True
+                                break
+                            total += 1
+                            if total > _MAX_ARCHIVE_ENTRIES:
+                                break
+                            names.append(member.name)
+                            if member.isdir():
+                                kind = "directory"
+                            elif member.issym():
+                                kind = "symlink"
+                                symlinks.append(member.name)
+                            elif member.islnk():
+                                kind = "hardlink"
+                                hardlinks.append(member.name)
+                            elif member.isreg():
+                                kind = "file"
+                            else:
+                                kind = "special"
+                                special_entries.append(member.name)
+                            counts[kind] += 1
+                            if _unsafe_member_path(member.name) or (
+                                (member.issym() or member.islnk())
+                                and _unsafe_member_path(member.linkname)
+                            ):
+                                unsafe_paths.append(member.name)
+                            for risk in _mode_risks(member.mode):
+                                risky_modes.append(f"{member.name} ({risk})")
 
-                    if kind == "file":
-                        remaining = _MAX_ARCHIVE_SCAN_BYTES - content_bytes
-                        if remaining <= 0:
-                            content_truncated += 1
-                            break
-                        member_stream = None
-                        try:
+                            if kind != "file":
+                                continue
+                            remaining = _MAX_ARCHIVE_SCAN_BYTES - content_bytes
+                            if remaining <= 0:
+                                content_truncated += 1
+                                continue
                             member_stream = archive.extractfile(member)
-                            if member_stream is not None:
+                            if member_stream is None:
+                                continue
+                            with member_stream:
                                 sample, consumed, truncated = _read_member_sample(
                                     member_stream, remaining, deadline
                                 )
-                                content_bytes += consumed
-                                member_incomplete = truncated or member.size > consumed
-                                if time.monotonic() >= deadline:
-                                    time_budget_reached = True
-                                if member_incomplete:
-                                    content_truncated += 1
-                                member_findings, member_timed_out = _member_content_findings(
-                                    record.path, member.name, sample, deadline
-                                )
-                                content_findings.extend(member_findings)
-                                if member_timed_out:
-                                    time_budget_reached = True
-                                if member_incomplete or time_budget_reached:
-                                    break
-                        except (OSError, tarfile.TarError, EOFError):
-                            content_truncated += 1
-                            break
-                        finally:
-                            if member_stream is not None:
-                                member_stream.close()
-
-        except (OSError, tarfile.TarError, EOFError) as exc:
+                            content_bytes += consumed
+                            if truncated or member.size > consumed:
+                                content_truncated += 1
+                            member_findings, member_timed_out = _member_content_findings(
+                                record.path, member.name, sample, deadline
+                            )
+                            content_findings.extend(member_findings)
+                            if member_timed_out or time.monotonic() >= deadline:
+                                time_budget_reached = True
+                                break
+                    except _ArchiveBudgetExceeded as exc:
+                        stop_reason = str(exc)
+                        time_budget_reached = "wall-time" in stop_reason
+        except (OSError, tarfile.TarError, EOFError, lzma.LZMAError) as exc:
             return [Finding(
                 "archive",
                 f"TAR metadata read error: {record.path}",
@@ -547,18 +625,35 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             )]
 
         indexed = min(total, _MAX_ARCHIVE_ENTRIES)
+        traversal_complete = not (time_budget_reached or stop_reason or total > _MAX_ARCHIVE_ENTRIES)
         findings = [Finding(
             "archive",
             f"TAR archive inventory: {record.path}",
-            f"Indexed {indexed} member(s); {counts['file']} regular file(s), "
+            f"Indexed {indexed} member(s){'' if traversal_complete else ' before a budget stopped traversal'}; "
+            f"{counts['file']} regular file(s), "
             f"{counts['directory']} directory(ies), {counts['symlink']} symlink(s), "
-            f"{counts['hardlink']} hardlink(s), {counts['special']} special entry(ies). "
+            f"{counts['hardlink']} hardlink(s), {counts['special']} special entry(ies)"
+            f"{' in a compressed stream' if compressed else ''}. "
             f"{content_bytes:,} member bytes were inspected through bounded in-memory streams; "
             "no member was written to disk.",
             confidence="CONFIRMED",
             evidence=[record.path],
             analyzer=self.name,
         )]
+        if stop_reason and not time_budget_reached:
+            findings.append(Finding(
+                "archive",
+                f"TAR decompression budget reached: {record.path}",
+                f"Traversal stopped after {_MAX_TAR_DECOMPRESSED_BYTES:,} decompressed bytes. "
+                "Members after that point were not indexed; this is not a clean result.",
+                confidence="UNKNOWN",
+                evidence=[record.path, f"members_indexed: {indexed:,}"],
+                analyzer=self.name,
+                severity="MEDIUM",
+            ))
+        collisions = _colliding_names(names)
+        if collisions:
+            findings.append(self._collision_finding(record, collisions))
         if total > _MAX_ARCHIVE_ENTRIES:
             findings.append(Finding(
                 "archive",
@@ -618,6 +713,19 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 severity="LOW",
             ))
         return findings
+
+    def _collision_finding(self, record: FileRecord, collisions: list[str]) -> Finding:
+        return Finding(
+            "archive",
+            f"Case- or Unicode-colliding archive member names: {record.path}",
+            f"Detected {len(collisions)} group(s) of distinct member names that map to the same "
+            "path on case-insensitive or Unicode-normalizing filesystems (Windows, macOS). "
+            "Extraction there may overwrite one member with another.",
+            confidence="CONFIRMED",
+            evidence=[f"{record.path}::{group}" for group in collisions[:_MAX_EVIDENCE]],
+            analyzer=self.name,
+            severity="MEDIUM",
+        )
 
     def _risk_findings(
         self,

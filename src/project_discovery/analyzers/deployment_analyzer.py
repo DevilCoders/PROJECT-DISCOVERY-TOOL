@@ -8,6 +8,7 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..safe_parsers import safe_yaml_load_all
 from ..source_utils import read_text_bounded
 
 
@@ -17,28 +18,11 @@ class _SafeDeploymentLoader:
     @staticmethod
     def load_all(text: str) -> list[Any]:
         try:
-            import yaml
-            from yaml.nodes import MappingNode, ScalarNode, SequenceNode
+            import yaml  # noqa: F401 - availability check for the optional extra
         except ImportError as exc:
             raise RuntimeError("PyYAML is not installed; install the infrastructure extra") from exc
-
-        class Loader(yaml.SafeLoader):
-            pass
-
-        def unknown_tag(loader, _tag_suffix, node):
-            if isinstance(node, ScalarNode):
-                return loader.construct_scalar(node)
-            if isinstance(node, SequenceNode):
-                return loader.construct_sequence(node)
-            if isinstance(node, MappingNode):
-                return loader.construct_mapping(node)
-            return None
-
-        Loader.add_multi_constructor("!", unknown_tag)
-        try:
-            return list(yaml.load_all(text, Loader=Loader))
-        except yaml.YAMLError as exc:
-            raise ValueError(f"Invalid YAML: {exc}") from exc
+        # Alias expansion is bounded before Kubernetes/Compose walkers traverse the data.
+        return safe_yaml_load_all(text, allow_unknown_tags=True)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -143,7 +127,6 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             key, value = stripped.split(None, 1)
             instructions.setdefault(key.upper(), []).append((number, value.strip()))
         bases = instructions.get("FROM", [])
-        stages = [value.split()[-1] for _, value in bases]
         ports = [value for _, value in instructions.get("EXPOSE", [])]
         users = instructions.get("USER", [])
         evidence = [

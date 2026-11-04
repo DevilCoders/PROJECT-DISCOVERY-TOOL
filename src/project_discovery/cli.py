@@ -40,6 +40,7 @@ from .python_graph import analyze_python_dependencies
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
 from .scanner import discover_inventory, sha256_file
+from .source_utils import identity_matches, redact_source_excerpt, stat_identity
 from .native_backend import capabilities as native_capabilities, native_available
 from .vulnerability_db import VulnerabilityDatabase, default_database_path
 from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
@@ -58,18 +59,8 @@ def _verified_regular_file_stat(path: Path, expected=None):
     current = path.lstat()
     if not stat.S_ISREG(current.st_mode):
         raise OSError(f"refusing to analyze non-regular or symlink entry: {path}")
-    if expected is not None:
-        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if isinstance(expected, tuple):
-            expected_values = expected
-        else:
-            expected_values = tuple(getattr(expected, key) for key in identity)
-        current_values = tuple(getattr(current, key, None) for key in identity)
-        if any(
-            wanted is not None and wanted != observed
-            for wanted, observed in zip(expected_values, current_values)
-        ):
-            raise OSError(f"file identity changed during scan; refusing analysis: {path}")
+    if expected is not None and not identity_matches(expected, stat_identity(current)):
+        raise OSError(f"file identity changed during scan; refusing analysis: {path}")
     return current
 
 
@@ -117,9 +108,19 @@ def _render_banner(console: Console) -> None:
     console.print(Panel(grid, title="[bold]ENGINE STATUS[/bold]", border_style="blue"))
     console.print("[dim]Inventory  >  Analyze  >  Correlate  >  Report[/dim]\n")
 
+SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+
+# Process exit codes are part of the CLI contract for CI pipelines.
+EXIT_OK = 0
+EXIT_FINDINGS = 1
+EXIT_USAGE = 2
+EXIT_INCOMPLETE = 3
+EXIT_INTERRUPTED = 130
+
+
 def _print_security_findings(console: Console, findings, *, limit: int = 25) -> None:
     """Print top redacted security findings without materializing the full result set."""
-    severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+    severity_rank = SEVERITY_RANK
     is_security = lambda finding: finding.category in {"security", "secrets", "privacy"}
     sort_key = lambda finding: (
         severity_rank.get(finding.severity, 5),
@@ -145,6 +146,12 @@ def _print_security_findings(console: Console, findings, *, limit: int = 25) -> 
         heading = Text(f"[{finding.severity}] ", style=severity_style)
         heading.append(finding.title)
         console.print(heading)
+        if finding.evidence:
+            location = Text("  at ", style="dim")
+            location.append(finding.evidence[0], style="bold")
+            if len(finding.evidence) > 1:
+                location.append(f" (+{len(finding.evidence) - 1} more)", style="dim")
+            console.print(location)
         console.print(Text(f"  {finding.detail}", style="dim"))
         for evidence in finding.code_evidence[:3]:
             line = Text(f"  L{evidence.line_number:>5}  ", style="bold red")
@@ -170,10 +177,15 @@ def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
     *, skip_oversized: bool = False, ignores: set[str] | None = None,
     vulnerability_db: Path | None = None, jobs: int = 0,
+    fail_on: str | None = None, strict: bool = False,
+    quiet: bool = False, no_color: bool = False,
 ) -> int:
-    console = Console(stderr=True)
+    # no_color=None lets Rich honor the NO_COLOR environment convention.
+    console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
     if jobs < 0 or jobs > 64:
         raise ValueError("--jobs must be 0 (automatic) or between 1 and 64")
+    if fail_on is not None and fail_on not in SEVERITY_RANK:
+        raise ValueError(f"--fail-on must be one of: {', '.join(SEVERITY_RANK)}")
     root = root.expanduser().absolute()
     root_info = root.lstat()
     if root_info.st_mode and root.is_symlink():
@@ -188,20 +200,7 @@ def run_scan(
     if output == root or root in output.parents:
         raise ValueError("Report output must be outside the analyzed project directory.")
 
-    _render_banner(console)
-    _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
-    started = now()
-    inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
-    with InventoryStore(inventory_path) as inventory_store:
-        records, directories, symlinks, special_entries, walk_stats = discover_inventory(
-            root,
-            max_file_bytes=max_file_mb * 1024 * 1024,
-            skip_oversized=skip_oversized,
-            ignores=ignores,
-            store=inventory_store,
-        )
-    analyzer_load = load_analyzers()
-    analyzers = analyzer_load.analyzers
+    # Validate the advisory database before the (potentially long) inventory walk.
     vulnerability_db_status = {"enabled": False, "advisory_count": 0}
     if vulnerability_db is not None:
         vulnerability_db = vulnerability_db.expanduser().resolve(strict=True)
@@ -211,11 +210,29 @@ def run_scan(
             )
         if vulnerability_db == root or root in vulnerability_db.parents:
             raise ValueError("The vulnerability database must be outside the analyzed project.")
-        with VulnerabilityDatabase(vulnerability_db) as advisory_store:
+        with VulnerabilityDatabase(vulnerability_db, read_only=True) as advisory_store:
             vulnerability_db_status = {
                 "enabled": True,
                 **advisory_store.status(),
             }
+
+    _render_banner(console)
+    _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
+    started = now()
+    inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
+    with InventoryStore(inventory_path) as inventory_store, console.status(
+        "Inventorying filesystem entries…", spinner="dots",
+    ):
+        records, directories, symlinks, special_entries, walk_stats = discover_inventory(
+            root,
+            max_file_bytes=max_file_mb * 1024 * 1024,
+            skip_oversized=skip_oversized,
+            ignores=ignores,
+            store=inventory_store,
+        )
+    analyzer_load = load_analyzers()
+    analyzers = analyzer_load.analyzers
+    if vulnerability_db is not None:
         analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
@@ -237,6 +254,11 @@ def run_scan(
                 record_updates.clear()
 
     def analyze_one(record, path, digest_hint, expected_stat):
+        """Return (digest, findings, diagnostics, file_error) for one inventoried file.
+
+        file_error is set only when the file itself could not be trusted or read; an
+        individual analyzer failure is reported as a diagnostic plus an UNKNOWN finding.
+        """
         local_findings = []
         local_errors = []
         digest = digest_hint
@@ -245,7 +267,8 @@ def run_scan(
             if digest is None:
                 digest = sha256_file(path, expected_info=expected_stat)
         except OSError as exc:
-            return None, [], [f"{record.path}: {type(exc).__name__}: {exc}"]
+            message = f"{record.path}: {type(exc).__name__}: {exc}"
+            return None, [], [message], message
         for analyzer in analyzers:
             try:
                 lock = analyzer_locks.get(id(analyzer))
@@ -261,17 +284,29 @@ def run_scan(
                             local_findings.extend(analyzer.analyze(path, record))
                             record.analyzed = True
             except Exception as exc:
-                local_errors.append(
-                    f"{record.path} [{analyzer.name}]: {type(exc).__name__}: {exc}"
-                )
+                message = redact_source_excerpt(f"{type(exc).__name__}: {exc}")
+                local_errors.append(f"{record.path} [{analyzer.name}]: {message}")
+                # Keep coverage gaps visible in the findings, not only in diagnostics.
+                local_findings.append(Finding(
+                    "analysis_coverage",
+                    f"Analyzer failed: {analyzer.name}: {record.path}",
+                    f"{message}. This analyzer did not complete for the file; absence of "
+                    "its findings is not evidence of absence.",
+                    confidence="UNKNOWN",
+                    evidence=[record.path],
+                    analyzer=analyzer.name,
+                    severity="LOW",
+                ))
         try:
             _verified_regular_file_stat(path, expected_stat)
         except OSError as exc:
             # Findings produced while the path changed are not trustworthy.
             local_findings.clear()
             record.analyzed = False
-            local_errors.append(f"{record.path}: {type(exc).__name__}: {exc}")
-        return digest, local_findings, local_errors
+            message = f"{record.path}: {type(exc).__name__}: {exc}"
+            local_errors.append(message)
+            return None, [], local_errors, message
+        return digest, local_findings, local_errors, None
 
     progress_columns = (
         SpinnerColumn(),
@@ -289,12 +324,14 @@ def run_scan(
             def collect_one():
                 future, record, file_stat, cache_miss = pending.popleft()
                 try:
-                    digest, file_findings, file_errors = future.result()
+                    digest, file_findings, file_errors, file_error = future.result()
                     finding_store.extend_findings(file_findings)
                     finding_store.extend_diagnostics(file_errors)
-                    if file_errors:
-                        record.error = file_errors[0]
-                    if cache_miss and digest:
+                    if file_error:
+                        record.error = file_error
+                    elif digest and not cache_miss:
+                        record.sha256 = digest
+                    elif digest:
                         current_stat = _verified_regular_file_stat(root / record.path, file_stat)
                         stable = (
                             current_stat.st_size == file_stat.st_size
@@ -303,6 +340,7 @@ def run_scan(
                             and current_stat.st_ino == file_stat.st_ino
                         )
                         if stable:
+                            record.sha256 = digest
                             cache.put(
                                 str(root), record.path, file_stat.st_size,
                                 file_stat.st_mtime_ns, file_stat.st_ctime_ns,
@@ -519,14 +557,39 @@ def run_scan(
         f"Scan complete: {len(records)} files; {len(findings)} findings; reports in {output}",
         "green",
     )
-    if errors:
+    error_count = len(errors)
+    if error_count:
         _status(
             console,
             "WARNING",
-            f"{len(errors)} file/analyzer errors recorded in JSON report.",
+            f"{error_count} file/analyzer errors recorded in JSON report.",
             "yellow",
         )
-    return 0
+
+    exit_code = EXIT_OK
+    if strict and (error_count or metrics["walk_errors"]):
+        exit_code = EXIT_INCOMPLETE
+        _status(
+            console, "FAILED",
+            "--strict: the scan is incomplete because of file, analyzer or traversal errors.",
+            "red",
+        )
+    if fail_on is not None:
+        # UNKNOWN findings describe coverage gaps; --strict is the gate for those.
+        threshold = SEVERITY_RANK[fail_on]
+        gated = sum(
+            1 for finding in findings
+            if finding.confidence != "UNKNOWN"
+            and SEVERITY_RANK.get(finding.severity, len(SEVERITY_RANK)) <= threshold
+        )
+        if gated:
+            exit_code = EXIT_FINDINGS
+            _status(
+                console, "FAILED",
+                f"--fail-on {fail_on}: {gated:,} finding(s) at or above {fail_on} severity.",
+                "red",
+            )
+    return exit_code
 
 
 def main() -> None:
@@ -559,6 +622,21 @@ def main() -> None:
     scan.add_argument(
         "--vuln-db", type=Path, default=None,
         help="Use a local OSV advisory SQLite database; scanning performs no network access",
+    )
+    scan.add_argument(
+        "--fail-on", choices=tuple(SEVERITY_RANK), type=str.upper, default=None,
+        metavar="SEVERITY",
+        help="Exit with status 1 when a CONFIRMED/INFERRED finding is at or above this "
+             "severity (CRITICAL, HIGH, MEDIUM, LOW, INFO)",
+    )
+    scan.add_argument(
+        "--strict", action="store_true",
+        help="Exit with status 3 when any file, analyzer or traversal error left the scan incomplete",
+    )
+    scan.add_argument("--quiet", action="store_true", help="Suppress console output except errors")
+    scan.add_argument(
+        "--no-color", action="store_true",
+        help="Disable colored console output (the NO_COLOR environment variable is also honored)",
     )
     compare = sub.add_parser("compare", help="Compare two or more independent PDT JSON reports")
     compare.add_argument("reports", type=Path, nargs="+")
@@ -655,6 +733,8 @@ def main() -> None:
                 args.path, args.output, formats, args.max_file_mb,
                 skip_oversized=args.skip, ignores=set(args.exclude_dir),
                 vulnerability_db=args.vuln_db, jobs=args.jobs,
+                fail_on=args.fail_on, strict=args.strict,
+                quiet=args.quiet, no_color=args.no_color,
             ))
 
         if not formats or formats - {"json", "markdown"}:
@@ -665,8 +745,10 @@ def main() -> None:
         for report in write_comparison(comparison, args.output, formats):
             print("[ SUCCESS ] Comparison report: " + str(report))
         raise SystemExit(0)
+    except KeyboardInterrupt:
+        parser.exit(EXIT_INTERRUPTED, "\n[ INTERRUPTED ] Scan cancelled; partial output may remain.\n")
     except (OSError, ValueError, sqlite3.Error) as exc:
-        parser.exit(2, "[ ERROR ] " + str(exc) + "\n")
+        parser.exit(EXIT_USAGE, "[ ERROR ] " + str(exc) + "\n")
 
 
 if __name__ == "__main__":

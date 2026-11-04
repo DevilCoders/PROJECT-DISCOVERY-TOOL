@@ -412,3 +412,43 @@ def test_inventory_store_allocates_unique_diagnostic_ids_across_connections(tmp_
         "first connection", "second connection",
     ]
 
+
+
+def test_names_that_are_not_valid_unicode_round_trip_through_the_store(tmp_path: Path):
+    # Regression: surrogate-escaped POSIX names and unpaired NTFS surrogates crashed
+    # SQLite binding ("surrogates not allowed") and aborted the whole scan.
+    from project_discovery.inventory_store import InventoryStore, sqlite_text
+    from project_discovery.models import DirectoryRecord, FileRecord, Finding
+
+    odd = "dir\udcff/bad\udcffname.py"
+    with InventoryStore(tmp_path / "odd.sqlite3") as store:
+        store.append("directory", DirectoryRecord("dir\udcff", 1))
+        store.append("file", FileRecord(odd, 3, ".py", "Python"))
+        store.adjust_directory("dir\udcff", file_count_delta=1, total_bytes_delta=3)
+        store.append_finding(Finding("code", f"Python module: {odd}", "d", evidence=[odd]))
+        store.append_diagnostic(f"{odd}: diagnostic")
+        store.flush()
+        assert [record.path for record in store.iter_file_records()] == [odd]
+        directory = next(item for item in store.iter_records("directory") if item["path"] == "dir\udcff")
+        assert directory["total_bytes"] == 3
+        assert next(store.iter_findings()).evidence == [odd]
+        assert list(store.iter_diagnostics()) == [f"{odd}: diagnostic"]
+    assert sqlite_text("plain.py") == "plain.py"
+    assert sqlite_text("a\udcff") != sqlite_text("a\xed\xb3\xbf")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_store_and_cache_databases_are_private_including_wal_files(tmp_path: Path):
+    import stat as stat_module
+
+    from project_discovery.cache import ScanCache
+    from project_discovery.inventory_store import InventoryStore
+
+    with InventoryStore(tmp_path / "inventory.sqlite3") as store:
+        store.set_metadata("k", "v")
+        for name in ("inventory.sqlite3", "inventory.sqlite3-wal", "inventory.sqlite3-shm"):
+            mode = stat_module.S_IMODE((tmp_path / name).stat().st_mode)
+            assert mode & 0o077 == 0, (name, oct(mode))
+    with ScanCache(tmp_path / "fingerprints.sqlite3"):
+        pass
+    assert stat_module.S_IMODE((tmp_path / "fingerprints.sqlite3").stat().st_mode) & 0o077 == 0

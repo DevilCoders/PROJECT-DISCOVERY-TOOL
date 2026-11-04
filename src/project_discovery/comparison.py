@@ -7,10 +7,17 @@ from pathlib import Path
 from typing import Any
 
 
+SUPPORTED_REPORT_SCHEMA_MAJOR = "1"
+
+
 def load_report(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("schema_version") != "1.0":
-        raise ValueError(f"Unsupported PDT report schema in {path}")
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid PDT report {path}: top-level value is not an object")
+    # Minor schema revisions are additive, so any 1.x scan report is comparable.
+    version = str(data.get("schema_version", ""))
+    if version.split(".", 1)[0] != SUPPORTED_REPORT_SCHEMA_MAJOR:
+        raise ValueError(f"Unsupported PDT report schema {version!r} in {path}")
     required = {"root", "files", "findings", "metrics"}
     missing = required - set(data)
     if missing:

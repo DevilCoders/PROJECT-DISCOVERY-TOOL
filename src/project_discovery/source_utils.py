@@ -10,6 +10,64 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
+FileIdentity = tuple[int | None, int | None, int | None, int | None, int | None]
+
+# Windows stat semantics differ between path- and handle-based calls: DirEntry.stat()
+# reports zero st_dev/st_ino, and st_ctime is the creation time from lstat() but may be
+# the metadata-change time from fstat() on Python 3.12+. Those fields are reported as
+# unknown on Windows instead of producing false "identity changed" refusals.
+_WINDOWS = os.name == "nt"
+
+
+def normalize_identity(identity: FileIdentity | None) -> FileIdentity | None:
+    """Drop identity fields that the current platform cannot compare reliably."""
+    if identity is None:
+        return None
+    device, inode, size, mtime_ns, ctime_ns = identity
+    if _WINDOWS:
+        if not device and not inode:
+            device = inode = None
+        ctime_ns = None
+    return (device, inode, size, mtime_ns, ctime_ns)
+
+
+def stat_identity(info: os.stat_result) -> FileIdentity:
+    """Return the comparable (device, inode, size, mtime_ns, ctime_ns) identity of a stat."""
+    return normalize_identity((
+        getattr(info, "st_dev", None),
+        getattr(info, "st_ino", None),
+        getattr(info, "st_size", None),
+        getattr(info, "st_mtime_ns", None),
+        getattr(info, "st_ctime_ns", None),
+    ))
+
+
+def as_identity(value: os.stat_result | FileIdentity | None) -> FileIdentity | None:
+    """Coerce a stat result or a five-field identity tuple into a normalized identity."""
+    if value is None:
+        return None
+    # os.stat_result is a tuple subclass, so it must be recognized before plain tuples;
+    # zipping its ten positional fields against an identity compares unrelated values.
+    if isinstance(value, os.stat_result):
+        return stat_identity(value)
+    if len(value) != 5:
+        raise ValueError("file identity must contain exactly five fields")
+    return normalize_identity(tuple(value))
+
+
+def identity_matches(
+    expected: os.stat_result | FileIdentity | None,
+    actual: os.stat_result | FileIdentity | None,
+) -> bool:
+    """Compare two identities, skipping fields that either side could not report."""
+    expected, actual = as_identity(expected), as_identity(actual)
+    if expected is None or actual is None:
+        return True
+    return all(
+        wanted is None or observed is None or wanted == observed
+        for wanted, observed in zip(expected, actual, strict=True)
+    )
+
 
 _SECRET_ASSIGNMENT = re.compile(
     r"""(?ix)(["']?[A-Za-z0-9_]*(?:password|passwd|passphrase|secret|token|api[_-]?key|client[_-]?secret|access[_-]?key|private[_-]?key|database[_-]?url|connection[_-]?string|credential|refresh[_-]?token|aws_secret_access_key)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
@@ -56,7 +114,7 @@ def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
 @contextmanager
 def open_verified_binary(
     path: Path,
-    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+    expected_identity: FileIdentity | None = None,
 ) -> Iterator[BinaryIO]:
     """Open a regular file without following symlinks and verify its scan-time identity.
 
@@ -69,27 +127,9 @@ def open_verified_binary(
     observed = path.lstat()
     if not stat.S_ISREG(observed.st_mode):
         raise OSError(f"refusing to read non-regular or symlink entry: {path}")
-
-    def identity(info):
-        return (
-            getattr(info, "st_dev", None),
-            getattr(info, "st_ino", None),
-            getattr(info, "st_size", None),
-            getattr(info, "st_mtime_ns", None),
-            getattr(info, "st_ctime_ns", None),
-        )
-
-    def verify(actual, expected, message: str) -> None:
-        if expected is None:
-            return
-        for expected_value, actual_value in zip(expected, identity(actual)):
-            if expected_value is not None and expected_value != actual_value:
-                raise OSError(message)
-
-    verify(
-        observed, expected_identity,
-        f"file identity changed since inventory: {path}",
-    )
+    observed_identity = stat_identity(observed)
+    if not identity_matches(expected_identity, observed_identity):
+        raise OSError(f"file identity changed since inventory: {path}")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -97,13 +137,11 @@ def open_verified_binary(
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             raise OSError(f"entry changed to a non-regular file: {path}")
-        opened_identity = identity(opened)
-        if opened_identity != identity(observed):
+        opened_identity = stat_identity(opened)
+        if not identity_matches(observed_identity, opened_identity):
             raise OSError(f"file identity changed while opening: {path}")
-        verify(
-            opened, expected_identity,
-            f"file identity changed since inventory: {path}",
-        )
+        if not identity_matches(expected_identity, opened_identity):
+            raise OSError(f"file identity changed since inventory: {path}")
         stream = os.fdopen(descriptor, "rb")
         descriptor = -1
         try:
@@ -121,7 +159,7 @@ def open_verified_text(
     *,
     encoding: str = "utf-8",
     errors: str = "strict",
-    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+    expected_identity: FileIdentity | None = None,
 ):
     """Yield a text wrapper over a descriptor-verified file without reopening its path."""
     with open_verified_binary(path, expected_identity) as binary:
@@ -136,7 +174,7 @@ def open_verified_text(
 def read_python_source(
     path: Path,
     *,
-    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+    expected_identity: FileIdentity | None = None,
 ) -> str:
     """Read Python source using PEP 263 encoding-cookie detection and pinned identity."""
     with open_verified_binary(path, expected_identity) as raw:
@@ -153,7 +191,7 @@ def read_python_source_bounded(
     path: Path,
     max_bytes: int,
     *,
-    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+    expected_identity: FileIdentity | None = None,
 ) -> str:
     """Read at most max_bytes + 1 through a verified descriptor and honor PEP 263."""
     if max_bytes < 1:
@@ -172,7 +210,7 @@ def read_bytes_bounded(
     path: Path,
     max_bytes: int,
     *,
-    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+    expected_identity: FileIdentity | None = None,
 ) -> bytes:
     """Read a binary artifact through a verified descriptor with a max_bytes + 1 budget."""
     if max_bytes < 1:
@@ -192,7 +230,7 @@ def read_text_bounded(
     *,
     encoding: str = "utf-8",
     errors: str = "strict",
-    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+    expected_identity: FileIdentity | None = None,
 ) -> str:
     """Read a text artifact through a verified descriptor and enforce its byte budget."""
     return read_bytes_bounded(

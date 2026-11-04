@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import read_text_bounded
+from ..source_utils import read_python_source_bounded, read_text_bounded
 
 
 _FRAMEWORKS = {
@@ -97,11 +98,11 @@ def _python_evidence(
     path: Path, relative: str, expected_identity=None,
 ) -> list[Finding]:
     try:
-        source = read_text_bounded(
+        source = read_python_source_bounded(
             path, 16 * 1024 * 1024, expected_identity=expected_identity,
         )
         tree = ast.parse(source, filename=relative)
-    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+    except (OSError, ValueError, SyntaxError, LookupError, RecursionError, MemoryError) as exc:
         return [Finding(
             "machine_learning",
             f"AI/ML source analysis unavailable: {relative}",
@@ -146,7 +147,11 @@ def _python_evidence(
             analyzer="ai-ml-intelligence",
         ))
 
-    call_names = {name.lower() for name, _ in calls}
+    if not detected:
+        # Call names such as fit/predict/generate/map/export are ubiquitous outside ML;
+        # without a framework import in the file they are not evidence of an ML pipeline.
+        return findings
+
     base_names = {name.lower() for name, _ in class_bases}
     training = [
         (name, line) for name, line in calls
@@ -198,9 +203,10 @@ def _python_evidence(
             analyzer="ai-ml-intelligence",
         ))
 
+    # Match whole name components: "mps" must not match json.dumps, nor "tpu" output.
     gpu_refs = [
         (name, line) for name, line in calls
-        if any(token in name.lower() for token in _GPU_TOKENS)
+        if _GPU_TOKENS.intersection(re.split(r"[._]", name.lower()))
     ]
     if gpu_refs:
         findings.append(Finding(

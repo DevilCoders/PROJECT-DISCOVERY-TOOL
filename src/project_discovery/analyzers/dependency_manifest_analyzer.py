@@ -12,6 +12,7 @@ from typing import Any
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ..safe_parsers import safe_xml_fromstring, safe_yaml_load
 
 _REQUIREMENT = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
 _GO_REQUIRE = re.compile(r"^\s*([A-Za-z0-9._~+/-]+)\s+(v?[^\s]+)")
@@ -188,7 +189,7 @@ class DependencyManifestAnalyzer(Analyzer):
                 if match:
                     add(match.group(1), match.group(2), "go.mod require")
         elif name in {"pom.xml", "package.xml", "packages.config", "directory.packages.props"} or name.endswith((".csproj", ".fsproj", ".vbproj")):
-            root = ET.fromstring(content)
+            root = safe_xml_fromstring(content)
             for element in root.iter():
                 tag = element.tag.rsplit("}", 1)[-1].lower()
                 if tag == "dependency" and name == "pom.xml":
@@ -263,7 +264,7 @@ class DependencyManifestAnalyzer(Analyzer):
                     add(dep_name, constraint, "YAML dependencies")
             else:
                 try:
-                    data = yaml.safe_load(content) or {}
+                    data = safe_yaml_load(content) or {}
                 except yaml.YAMLError as exc:
                     raise ValueError(f"YAML dependency manifest parse error: {exc}") from exc
                 groups = (
@@ -373,7 +374,7 @@ class DependencyManifestAnalyzer(Analyzer):
             for dep_name, constraint in pattern.findall(content):
                 add(dep_name, constraint or "unspecified", "Nimble requires")
         elif name == "package.xml":
-            root = ET.fromstring(content)
+            root = safe_xml_fromstring(content)
             for element in root.iter():
                 tag = element.tag.rsplit("}", 1)[-1].lower()
                 if tag in {"depend", "build_depend", "buildtool_depend", "exec_depend", "test_depend"} and element.text:

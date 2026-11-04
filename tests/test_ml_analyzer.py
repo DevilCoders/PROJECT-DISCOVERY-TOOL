@@ -70,3 +70,32 @@ def test_unrelated_json_is_not_misclassified(tmp_path: Path):
     analyzer = AIMLIntelligenceAnalyzer()
     record = _record(path, "settings.json")
     assert analyzer.supports(record) is False
+
+
+def test_ordinary_python_is_not_reported_as_an_ml_pipeline(tmp_path: Path):
+    # Regression: fit/predict/map/export/generate calls and substrings such as the
+    # "mps" in json.dumps or "tpu" in output produced ML findings in non-ML code.
+    path = tmp_path / "service.py"
+    path.write_text(
+        "import json\n"
+        "def run(model, items, output):\n"
+        "    model.fit(items)\n"
+        "    result = list(map(str, items))\n"
+        "    output.write(json.dumps(result))\n"
+        "    return generate(output)\n",
+        encoding="utf-8",
+    )
+    assert AIMLIntelligenceAnalyzer().analyze(path, _record(path, "service.py")) == []
+
+
+def test_accelerator_references_match_whole_name_components(tmp_path: Path):
+    path = tmp_path / "gpu.py"
+    path.write_text(
+        "import json\nimport torch\n"
+        "available = torch.cuda.is_available()\n"
+        "payload = json.dumps({})\n",
+        encoding="utf-8",
+    )
+    findings = AIMLIntelligenceAnalyzer().analyze(path, _record(path, "gpu.py"))
+    accelerator = next(item for item in findings if item.title.startswith("Accelerator/device"))
+    assert accelerator.evidence == ["gpu.py:3 (torch.cuda.is_available)"]

@@ -211,3 +211,44 @@ def test_secure_code_lexical_analysis_streams_and_caps_line_locations(tmp_path: 
     assert len(finding.evidence) == 100
     assert len(finding.code_evidence) == 20
     assert [item.line_number for item in finding.code_evidence] == list(range(1, 21))
+
+
+def test_python_import_aliases_and_pickle_based_loaders_are_resolved(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "aliases.py",
+        "import numpy as np\nimport ssl\nimport subprocess as sp\nimport torch\nimport yaml\n"
+        "from pickle import loads as unpickle\n"
+        "unpickle(blob)\n"                                   # 7
+        "sp.run(cmd, shell=True)\n"                          # 8
+        "torch.load(path)\n"                                 # 9
+        "torch.load(path, weights_only=True)\n"              # 10 safe
+        "np.load(path, allow_pickle=True)\n"                 # 11
+        "yaml.load(text, yaml.SafeLoader)\n"                 # 12 safe (positional)
+        "ctx.verify_mode = ssl.CERT_NONE\n",                 # 13
+    )
+    lines = {
+        int(item.split(":")[-1]) for finding in findings for item in finding.evidence
+    }
+    assert {7, 8, 9, 11, 13} <= lines
+    assert not {10, 12} & lines
+
+
+def test_hashlib_usedforsecurity_false_is_not_a_weak_hash_finding(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "digest.py",
+        "import hashlib\nhashlib.md5(b'x', usedforsecurity=False)\nhashlib.new('sha1', b'x')\n",
+    )
+    weak = [finding for finding in findings if "weak cryptographic hash" in finding.title]
+    assert [item.split(":")[-1] for item in weak[0].evidence] == ["3"]
+
+
+def test_member_calls_and_c_apis_in_other_languages_are_not_flagged(tmp_path: Path):
+    # Regression: RegExp.exec, Go db.Exec, JS sprintf and open(filename) were HIGH findings.
+    for name, source in (
+        ("match.js", "const m = /abc/.exec(text);\nconst s = sprintf('%s', x);\n"),
+        ("store.go", 'package store\nfunc f() { db.Exec("DELETE FROM t") }\n'),
+        ("read.rb", "File.open(filename)\n"),
+    ):
+        assert _scan(tmp_path, name, source) == [], name
+    assert _scan(tmp_path, "copy.c", "void f(char *d, char *s) { strcpy(d, s); }\n")
+    assert _scan(tmp_path, "run.js", "eval(userInput);\n")

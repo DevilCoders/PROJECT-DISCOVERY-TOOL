@@ -8,7 +8,8 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import read_text_bounded
+from ..safe_parsers import safe_xml_fromstring
+from ..source_utils import read_bytes_bounded, read_text_bounded
 
 
 _GAME_SCRIPT_EXTENSIONS = {".gd", ".gml", ".rpy", ".lua", ".cs", ".cpp", ".cc", ".h", ".hpp", ".rs"}
@@ -60,7 +61,6 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
         if record.error:
             return False
         name = Path(record.path).name.lower()
-        path = record.path.lower()
         parts = {part.lower() for part in Path(record.path).parts}
         return (
             name in {
@@ -71,7 +71,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
             or record.extension in {
                 ".gd", ".tscn", ".tres", ".gdshader", ".unity", ".prefab", ".asset",
                 ".uproject", ".uplugin", ".uasset", ".umap", ".yyp", ".yy", ".gml",
-                ".collection", ".script", ".rpy", ".rbxlx", ".rbxmx", ".gd", ".tscn",
+                ".collection", ".script", ".rpy", ".rbxlx", ".rbxmx",
             }
             or record.extension == ".go" and bool(parts & {"game", "defold"})
             or record.extension in _GAME_SCRIPT_EXTENSIONS and bool(
@@ -315,8 +315,10 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
 
     def _roblox_xml(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            root = ET.parse(path).getroot()
-        except (OSError, ET.ParseError) as exc:
+            root = safe_xml_fromstring(read_bytes_bounded(
+                path, 64 * 1024 * 1024, expected_identity=record.analysis_identity,
+            ))
+        except (OSError, ValueError, ET.ParseError) as exc:
             return [Finding(
                 "game_engine", f"Roblox model parse error: {record.path}",
                 f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",

@@ -12,6 +12,7 @@ from typing import Any
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ..safe_parsers import safe_xml_fromstring, safe_yaml_load
 
 
 _OPENAPI_NAMES = {"openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.yml", "swagger.json"}
@@ -138,7 +139,7 @@ class APIContractAnalyzer(Analyzer):
             routes, schemas = _flatten_openapi(data)
         else:
             try:
-                yaml = importlib.import_module("yaml")
+                importlib.import_module("yaml")  # optional-extra availability check
             except ImportError:
                 routes = []
                 schemas = []
@@ -160,7 +161,7 @@ class APIContractAnalyzer(Analyzer):
                         method, route = routes[-1]
                         routes[-1] = (method, route + f" ({operation_match.group(1)})")
             else:
-                data = yaml.safe_load(content)
+                data = safe_yaml_load(content)
                 routes, schemas = _flatten_openapi(data)
         return [Finding(
             "api",
@@ -176,10 +177,10 @@ class APIContractAnalyzer(Analyzer):
         if record.extension == ".json":
             return json.loads(content)
         try:
-            yaml = importlib.import_module("yaml")
+            importlib.import_module("yaml")  # optional-extra availability check
         except ImportError:
             return None
-        return yaml.safe_load(content)
+        return safe_yaml_load(content)
 
     def _asyncapi(self, record: FileRecord, content: str) -> list[Finding]:
         data = self._structured_document(record, content)
@@ -293,7 +294,7 @@ class APIContractAnalyzer(Analyzer):
         )]
 
     def _wsdl(self, record: FileRecord, content: str) -> list[Finding]:
-        root = ET.fromstring(content)
+        root = safe_xml_fromstring(content)
         services: list[str] = []
         port_types: list[str] = []
         operations: set[str] = set()

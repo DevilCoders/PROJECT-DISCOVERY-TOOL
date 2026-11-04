@@ -75,3 +75,21 @@ def test_registry_loads_valid_plugin_and_rejects_duplicate_names(monkeypatch):
     result = registry.load_analyzers()
     assert sum(item.name == "custom-test-plugin" for item in result.analyzers) == 1
     assert any("duplicate analyzer name" in item for item in result.diagnostics)
+
+
+def test_builtin_registry_metadata_is_well_formed():
+    # Regression: three analyzers declared languages as a bare string, which serialized
+    # into the registry as a list of single characters.
+    from project_discovery.analyzers import load_analyzers
+
+    analyzers = load_analyzers().analyzers
+    assert len({analyzer.name for analyzer in analyzers}) == len(analyzers)
+    for analyzer in analyzers:
+        for field in ("languages", "domains"):
+            value = getattr(analyzer, field)
+            assert isinstance(value, tuple), (analyzer.name, field)
+            # Single letters are only legitimate as language names (C, D, R, V).
+            assert all(
+                isinstance(item, str) and (len(item) > 1 or item in {"C", "D", "R", "V"})
+                for item in value
+            ), analyzer.name

@@ -5,12 +5,16 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
+from .inventory_store import prepare_private_database, sqlite_text
+
 
 class ScanCache:
     """Persist file fingerprints without storing target file contents."""
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Fingerprints reveal project paths and content hashes; keep them private.
+        prepare_private_database(path)
         self.db = sqlite3.connect(path)
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS fingerprints (
@@ -41,7 +45,7 @@ class ScanCache:
         row = self.db.execute(
             """SELECT size_bytes, mtime_ns, ctime_ns, inode, sha256
                FROM fingerprints WHERE project_root=? AND relative_path=?""",
-            (root, relative_path),
+            (root, sqlite_text(relative_path)),
         ).fetchone()
         if row is None:
             return None
@@ -61,7 +65,7 @@ class ScanCache:
             """INSERT OR REPLACE INTO fingerprints
                (project_root, relative_path, size_bytes, mtime_ns, sha256, ctime_ns, inode)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (root, relative_path, size, mtime_ns, digest, ctime_ns, inode),
+            (root, sqlite_text(relative_path), size, mtime_ns, digest, ctime_ns, inode),
         )
 
     def prune_missing(self, root: str, current_paths: Iterable[str]) -> int:
@@ -72,7 +76,7 @@ class ScanCache:
         self.db.execute("DELETE FROM current_scan_paths")
         self.db.executemany(
             "INSERT OR IGNORE INTO current_scan_paths(relative_path) VALUES (?)",
-            ((path,) for path in current_paths),
+            ((sqlite_text(path),) for path in current_paths),
         )
         cursor = self.db.execute(
             """DELETE FROM fingerprints

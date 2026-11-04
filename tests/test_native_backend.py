@@ -95,3 +95,27 @@ def test_large_mutable_buffers_use_safe_cpu_path():
     assert native_backend.count_byte(memoryview(payload), 10) == expected
     after = native_backend.capabilities()["gpu_dispatches"]
     assert after == before
+
+
+def test_opencl_loader_never_resolves_libraries_from_the_working_directory():
+    # Regression: LoadLibraryA("OpenCL.dll") and dlopen("OpenCL.framework/OpenCL")
+    # could load a library planted in the scanned repository.
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "native" / "pdt_native.c").read_text(encoding="utf-8")
+    assert 'LoadLibraryExA("OpenCL.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32)' in source
+    assert 'LoadLibraryA("OpenCL.dll")' not in source
+    assert 'dlopen("OpenCL.framework/OpenCL"' not in source
+
+
+def test_gpu_and_cpu_byte_counts_agree_when_a_gpu_is_present():
+    import pytest
+
+    capabilities = native_backend.capabilities()
+    if not capabilities.get("gpu_available"):
+        pytest.skip("no OpenCL GPU on this machine")
+    payload = (bytes(range(256)) * (48 * 1024 * 1024 // 256)) + b"\n" * 4093
+    before = native_backend.capabilities()["gpu_dispatches"]
+    for needle in (0, 10, 255):
+        assert native_backend.count_byte(payload, needle) == payload.count(bytes((needle,)))
+    assert native_backend.capabilities()["gpu_dispatches"] > before

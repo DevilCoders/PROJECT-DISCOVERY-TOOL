@@ -62,3 +62,13 @@ def test_api_type_analyzer_reports_oversized_file_metadata_as_unknown(tmp_path: 
     assert len(findings) == 1
     assert findings[0].confidence == "UNKNOWN"
     assert "resource limit" in findings[0].title.lower()
+
+
+def test_dictionary_and_cache_calls_are_not_rest_markers(tmp_path: Path):
+    path = tmp_path / "config.py"
+    path.write_text(
+        "value = settings.get('timeout')\ncache.delete(key)\n# a query string helper\n",
+        encoding="utf-8",
+    )
+    record = FileRecord("config.py", path.stat().st_size, ".py", "Python", file_type="source")
+    assert APITypeAnalyzer().analyze(path, record) == []

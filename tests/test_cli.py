@@ -295,3 +295,123 @@ def test_analysis_guard_accepts_unchanged_regular_file(tmp_path: Path):
     expected = source.lstat()
     current = _verified_regular_file_stat(source, expected)
     assert current.st_ino == expected.st_ino
+
+
+def _sample_project(root: Path) -> Path:
+    root.mkdir()
+    (root / "app.py").write_text(
+        "import subprocess\n"
+        "def run(cmd):\n"
+        "    return subprocess.run(cmd, shell=True)\n",
+        encoding="utf-8",
+    )
+    (root / "settings.env").write_text("API_TOKEN=ghp_" + "A" * 36 + "\n", encoding="utf-8")
+    (root / "shared.txt").write_text("byte-identical content\n", encoding="utf-8")
+    return root
+
+
+def _json_report(output: Path) -> dict:
+    import json
+
+    return json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+
+
+def test_end_to_end_scan_runs_per_file_analyzers_and_fingerprints(tmp_path: Path):
+    # Regression: the analysis guard rejected every file, so no per-file analyzer ever ran.
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True) == 0
+    report = _json_report(tmp_path / "out")
+    analyzers = {finding["analyzer"] for finding in report["findings"]}
+    assert {"python-ast", "secure-code-patterns", "secret-patterns"} <= analyzers
+    assert report["errors"] == []
+    assert all(len(item["sha256"] or "") == 64 for item in report["files"])
+    assert all(item["analyzed"] for item in report["files"])
+
+
+def test_real_scan_reports_can_be_compared(tmp_path: Path):
+    from project_discovery.comparison import compare_many_reports, load_report
+
+    for name in ("alpha", "beta"):
+        project = _sample_project(tmp_path / name)
+        assert run_scan(project, tmp_path / f"{name}-out", {"json"}, 1, quiet=True) == 0
+    comparison = compare_many_reports([
+        load_report(tmp_path / f"{name}-out" / "discovery-report.json") for name in ("alpha", "beta")
+    ])
+    duplicated = {
+        path for item in comparison["duplicate_file_content"]
+        for paths in item["projects"].values() for path in paths
+    }
+    assert {"app.py", "shared.txt", "settings.env"} <= duplicated
+
+
+class _ExplodingAnalyzer:
+    name = "exploding-test-analyzer"
+    version = "1.0"
+    api_version = 1
+    domains = ("tests",)
+    languages = ("Python",)
+    concurrent_safe = True
+
+    def supports(self, record):
+        return record.path == "app.py"
+
+    def analyze(self, path, record):
+        raise RuntimeError("synthetic analyzer failure password=hunter2hunter2")
+
+
+def _with_exploding_analyzer(monkeypatch):
+    import project_discovery.cli as cli
+    from project_discovery.analyzers import load_analyzers
+
+    def patched():
+        result = load_analyzers()
+        result.analyzers.append(_ExplodingAnalyzer())
+        return result
+
+    monkeypatch.setattr(cli, "load_analyzers", patched)
+
+
+def test_analyzer_failure_is_visible_and_does_not_mark_the_file_unreadable(tmp_path: Path, monkeypatch):
+    _with_exploding_analyzer(monkeypatch)
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True) == 0
+    report = _json_report(tmp_path / "out")
+    failure = next(item for item in report["findings"] if item["title"].startswith("Analyzer failed:"))
+    assert failure["confidence"] == "UNKNOWN"
+    assert "hunter2hunter2" not in str(report)
+    app = next(item for item in report["files"] if item["path"] == "app.py")
+    assert app["error"] is None and app["sha256"]
+    assert any("exploding-test-analyzer" in error for error in report["errors"])
+
+
+def test_fail_on_and_strict_exit_codes(tmp_path: Path, monkeypatch):
+    from project_discovery.cli import EXIT_FINDINGS, EXIT_INCOMPLETE
+
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "a", {"json"}, 1, quiet=True, fail_on="HIGH") == EXIT_FINDINGS
+    assert run_scan(project, tmp_path / "b", {"json"}, 1, quiet=True, fail_on="CRITICAL") == 0
+    assert run_scan(project, tmp_path / "c", {"json"}, 1, quiet=True, strict=True) == 0
+    _with_exploding_analyzer(monkeypatch)
+    assert run_scan(project, tmp_path / "d", {"json"}, 1, quiet=True, strict=True) == EXIT_INCOMPLETE
+    with pytest.raises(ValueError, match="--fail-on"):
+        run_scan(project, tmp_path / "e", {"json"}, 1, quiet=True, fail_on="SEVERE")
+
+
+def test_missing_vulnerability_database_is_rejected_before_inventory(tmp_path: Path, monkeypatch):
+    import project_discovery.cli as cli
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("inventory must not start with an invalid --vuln-db")
+
+    monkeypatch.setattr(cli, "discover_inventory", forbidden)
+    project = _sample_project(tmp_path / "project")
+    with pytest.raises(FileNotFoundError):
+        run_scan(project, tmp_path / "out", {"json"}, 1, vulnerability_db=tmp_path / "missing.sqlite3")
+
+
+def test_security_summary_names_the_file_location(tmp_path: Path, capsys):
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, no_color=True) == 0
+    output = capsys.readouterr().err
+    assert "at settings.env:1" in output
+    assert "\x1b[" not in output

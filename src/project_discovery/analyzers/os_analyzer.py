@@ -29,7 +29,7 @@ class OperatingSystemAnalyzer(Analyzer):
 
     name = "operating-system-intelligence"
     domains = ("operating_systems", "configuration", "embedded")
-    languages = ("Polyglot source/configuration/build manifests")
+    languages = ("Polyglot source/configuration/build manifests",)
 
     def supports(self, record: FileRecord) -> bool:
         if record.error or record.content_skipped_reason:

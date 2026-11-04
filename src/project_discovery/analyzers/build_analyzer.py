@@ -10,6 +10,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ..safe_parsers import safe_xml_fromstring
 
 
 _MAX_BUILD_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -132,7 +133,7 @@ class BuildManifestAnalyzer(Analyzer):
                 ]
                 metadata.append("SCons build script")
             elif name == "build.xml":
-                root = ET.fromstring(content)
+                root = safe_xml_fromstring(content)
                 project_name = root.attrib.get("name")
                 if project_name:
                     metadata.append(f"project: {project_name}")
@@ -150,7 +151,7 @@ class BuildManifestAnalyzer(Analyzer):
                 ]
                 metadata.append("Swift Package Manager manifest")
             elif record.extension in {".csproj", ".fsproj", ".vbproj", ".slnx"}:
-                root = ET.fromstring(content)
+                root = safe_xml_fromstring(content)
                 for element in root.iter():
                     tag = _local_name(element.tag)
                     if tag in {"TargetFramework", "TargetFrameworks", "AssemblyName", "OutputType"}:
@@ -231,7 +232,7 @@ class BuildManifestAnalyzer(Analyzer):
                 ]
                 metadata.append("GNU Autotools manifest")
             elif name == "pom.xml":
-                root = ET.fromstring(content)
+                root = safe_xml_fromstring(content)
                 metadata.extend(
                     f"{_local_name(element.tag)}: {element.text.strip()}"
                     for element in root.iter()

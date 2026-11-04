@@ -11,6 +11,7 @@ from typing import Any
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ..safe_parsers import safe_xml_fromstring
 
 
 _MAX_COVERAGE_ARTIFACT_BYTES = 64 * 1024 * 1024
@@ -217,7 +218,7 @@ class CoverageArtifactAnalyzer(Analyzer):
                 summary = _json_summary(json.loads(source), name)
                 format_name = "Istanbul/coverage JSON"
             else:
-                summary = _xml_summary(ET.fromstring(source))
+                summary = _xml_summary(safe_xml_fromstring(source))
                 format_name = "XML coverage report"
         except SourceBudgetExceeded as exc:
             return [Finding(

@@ -260,7 +260,7 @@ class DocumentAnalyzer(Analyzer):
                 )
         except SourceBudgetExceeded as exc:
             return budget_finding(str(exc))
-        except ImportError as exc:
+        except ImportError:
             optional = "pypdf" if extension == ".pdf" else "python-docx"
             return [Finding(
                 "documentation",

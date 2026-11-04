@@ -7,12 +7,16 @@ from pathlib import Path
 from .base import Analyzer
 from ..language_catalog import is_textual_path, source_extensions
 from ..models import FileRecord, Finding
-from ..source_utils import open_verified_text
+from ..source_utils import open_verified_binary
 
 
 _PATTERNS = {
-    "RESTful HTTP": re.compile(r"(?i)(?:\b(?:GET|POST|PUT|PATCH|DELETE)\s+/|\.(?:get|post|put|patch|delete)\s*\(|@(?:Get|Post|Put|Patch|Delete)Mapping\b|\.map(?:Get|Post|Put|Patch|Delete)\s*\(|openapi:|swagger:|fastapi|flask\.route|express\.Router)"),
-    "GraphQL": re.compile(r"(?i)(?:\b(?:query|mutation|subscription)\s+[A-Za-z_]|\bgraphql\b|@apollo/client|type\s+Query\s*\{)"),
+    # Router/client verbs only count when the first argument is a route path or URL
+    # literal; a bare ".get(" also matches dictionary and cache lookups.
+    "RESTful HTTP": re.compile(r"""(?:\b(?:GET|POST|PUT|PATCH|DELETE)\s+/|\.(?:get|post|put|patch|delete|head|options)\s*\(\s*[rfb]?["'`](?:/|https?://)|@(?:Get|Post|Put|Patch|Delete|Request)Mapping\b|\.Map(?:Get|Post|Put|Patch|Delete)\s*\(|(?i:openapi:|swagger:)|\bfastapi\b|\bflask\.route\b|\.route\s*\(\s*["']/|express\.Router)"""),
+    # GraphQL operations need an operation name followed by a selection set or variables;
+    # prose such as "query string" in comments is not an API marker.
+    "GraphQL": re.compile(r"(?:\b(?:query|mutation|subscription)\s+[A-Za-z_]\w*\s*[({]|(?i:\bgraphql\b)|@apollo/client|\btype\s+(?:Query|Mutation|Subscription)\s*\{)"),
     "gRPC/Protocol Buffers": re.compile(r"(?i)(?:\bsyntax\s*=\s*['\"]proto|service\s+[A-Za-z_]\w*\s*\{|grpc\.|grpcio|@GrpcService)"),
     "JSON-RPC": re.compile(r"(?i)(?:jsonrpc|json-rpc|application/json-rpc|rpc\.discover)"),
     "SOAP/WSDL": re.compile(r"(?i)(?:<definitions\b|<soap:|wsdl:|SoapClient|javax\.xml\.ws)"),
@@ -31,7 +35,7 @@ class APITypeAnalyzer(Analyzer):
 
     name = "api-type-classifier"
     domains = ("api_rest", "api_graphql", "api_rpc", "api_event", "networking")
-    languages = ("Polyglot source and API contract formats")
+    languages = ("Polyglot source and API contract formats",)
 
     def supports(self, record: FileRecord) -> bool:
         return (
@@ -69,10 +73,8 @@ class APITypeAnalyzer(Analyzer):
         bytes_scanned = 0
         budget_reached = False
         try:
-            with open_verified_text(
-                path, encoding="utf-8", errors="replace",
-                expected_identity=record.analysis_identity,
-            ) as stream:
+            # Read bytes so the scan budget is enforced in bytes, not decoded characters.
+            with open_verified_binary(path, record.analysis_identity) as stream:
                 while bytes_scanned < _MAX_API_TYPE_FILE_BYTES:
                     remaining = _MAX_API_TYPE_FILE_BYTES - bytes_scanned
                     raw_line = stream.readline(min(_MAX_LINE_BYTES, remaining + 1))
@@ -89,7 +91,7 @@ class APITypeAnalyzer(Analyzer):
                             samples = line_samples.setdefault(api_type, [])
                             if len(samples) < _MAX_API_TYPE_EVIDENCE_PER_STYLE:
                                 samples.append(line_number)
-                    if line.endswith(("\n", "\r")):
+                    if raw_line.endswith(b"\n"):
                         line_number += 1
                 if bytes_scanned >= _MAX_API_TYPE_FILE_BYTES and stream.read(1):
                     budget_reached = True

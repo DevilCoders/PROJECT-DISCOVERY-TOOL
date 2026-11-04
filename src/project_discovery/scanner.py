@@ -19,6 +19,10 @@ from .models import (
     SpecialEntryRecord,
     SymlinkRecord,
 )
+from .source_utils import FileIdentity, as_identity, identity_matches, stat_identity
+
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
 
 # Kept as a compatibility constant. No directory is excluded by default.
 DEFAULT_IGNORES: set[str] = set()
@@ -64,8 +68,7 @@ def sha256_file(
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             raise OSError(f"entry changed to a non-regular file: {path}")
-        identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if any(getattr(opened, key) != getattr(before, key) for key in identity):
+        if not identity_matches(stat_identity(before), stat_identity(opened)):
             raise OSError(f"file identity changed before hashing: {path}")
         digest = hashlib.sha256()
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
@@ -91,24 +94,34 @@ def _is_hidden(name: str, info: os.stat_result) -> bool:
     return bool(attributes & 0x2)
 
 
-def _read_signature_sample(
+def _is_link_like(info: os.stat_result) -> bool:
+    """Symlinks plus Windows junctions/mount points, which os.lstat reports as directories."""
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse_tag = getattr(info, "st_reparse_tag", 0)
+    return bool(
+        attributes & _FILE_ATTRIBUTE_REPARSE_POINT
+        and reparse_tag & _REPARSE_TAG_NAME_SURROGATE
+    )
+
+
+def _read_verified_sample(
     path: Path,
-    expected_info: os.stat_result | tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
-) -> bytes:
-    """Read 512 bytes from a verified descriptor matching walker metadata."""
-    before = path.lstat() if expected_info is None or isinstance(expected_info, tuple) else expected_info
+    expected_info: os.stat_result | FileIdentity | None = None,
+) -> tuple[bytes, FileIdentity]:
+    """Read 512 bytes from a verified descriptor; return them with the opened identity."""
+    # os.stat_result is itself a tuple subclass; only plain tuples are walker identities.
+    walker_stat = isinstance(expected_info, os.stat_result)
+    before = expected_info if walker_stat else path.lstat()
     if not stat.S_ISREG(before.st_mode):
         raise OSError(f"refusing signature read from non-regular entry: {path}")
-    identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-    expected_values = (
-        expected_info if isinstance(expected_info, tuple)
-        else tuple(getattr(before, key) for key in identity)
+    observed_identity = stat_identity(before)
+    expected_identity = (
+        observed_identity if expected_info is None or walker_stat
+        else as_identity(expected_info)
     )
-    observed_values = tuple(getattr(before, key, None) for key in identity)
-    if any(
-        expected is not None and expected != observed
-        for expected, observed in zip(expected_values, observed_values)
-    ):
+    if not identity_matches(expected_identity, observed_identity):
         raise OSError(f"file identity changed before signature read: {path}")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -117,28 +130,28 @@ def _read_signature_sample(
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             raise OSError(f"entry changed to a non-regular file: {path}")
-        opened_values = tuple(getattr(opened, key, None) for key in identity)
-        if opened_values != observed_values or any(
-            expected is not None and expected != actual
-            for expected, actual in zip(expected_values, opened_values)
+        opened_identity = stat_identity(opened)
+        if not (
+            identity_matches(observed_identity, opened_identity)
+            and identity_matches(expected_identity, opened_identity)
         ):
             raise OSError(f"file identity changed during signature read: {path}")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            return stream.read(512)
+            return stream.read(512), opened_identity
     finally:
         os.close(descriptor)
 
 
-def _signature_type(
+def _read_signature_sample(
     path: Path,
-    relative_path: str,
-    expected_info: os.stat_result | tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
-) -> str | None:
-    """Classify common binary formats from a bounded, no-follow signature sample."""
-    try:
-        head = _read_signature_sample(path, expected_info)
-    except OSError:
-        return None
+    expected_info: os.stat_result | FileIdentity | None = None,
+) -> bytes:
+    """Read 512 bytes from a verified descriptor matching walker metadata."""
+    return _read_verified_sample(path, expected_info)[0]
+
+
+def _classify_head(head: bytes, relative_path: str) -> str | None:
+    """Classify common binary formats from a bounded signature sample."""
     if not head:
         return None
     native_type = native_detect_signature(head)
@@ -224,19 +237,45 @@ def _signature_type(
     return None
 
 
+def _signature_type(
+    path: Path,
+    relative_path: str,
+    expected_info: os.stat_result | FileIdentity | None = None,
+) -> str | None:
+    """Classify common binary formats from a bounded, no-follow signature sample."""
+    try:
+        head = _read_signature_sample(path, expected_info)
+    except OSError:
+        return None
+    return _classify_head(head, relative_path)
+
+
+def _classify_file(
+    path: Path,
+    relative_path: str,
+    expected_info: os.stat_result | FileIdentity | None = None,
+) -> tuple[str, FileIdentity | None]:
+    """Return the file type and the descriptor-verified identity observed while sampling."""
+    try:
+        head, opened_identity = _read_verified_sample(path, expected_info)
+    except OSError:
+        head, opened_identity = b"", None
+    signature = _classify_head(head, relative_path)
+    if signature:
+        return signature, opened_identity
+    if is_source_path(relative_path):
+        return "source", opened_identity
+    if is_textual_path(relative_path):
+        return "text", opened_identity
+    return "binary/unclassified", opened_identity
+
+
 def _file_type(
     path: Path,
     relative_path: str,
-    expected_info: os.stat_result | tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+    expected_info: os.stat_result | FileIdentity | None = None,
 ) -> str:
-    signature = _signature_type(path, relative_path, expected_info)
-    if signature:
-        return signature
-    if is_source_path(relative_path):
-        return "source"
-    if is_textual_path(relative_path):
-        return "text"
-    return "binary/unclassified"
+    return _classify_file(path, relative_path, expected_info)[0]
 
 
 
@@ -326,6 +365,10 @@ def _discover_with_rust(
     if walker is None:
         return False
     for relative, kind, size, mode, mtime_ns, hidden, target, error, depth, device_id, inode_id, ctime_ns in walker:
+        # The walker returns lossless OS strings with native separators. A backslash is
+        # a legal POSIX file-name character, so only Windows separators are rewritten.
+        if os.sep == "\\":
+            relative = relative.replace("\\", "/")
         if kind == "directory_error":
             message = error or "Directory read failed"
             if store is None:
@@ -398,15 +441,15 @@ def _discover_with_rust(
             file_identity = (
                 device_id, inode_id, size, mtime_ns, ctime_ns,
             ) if device_id is not None and inode_id is not None else None
-            file_type = _file_type(path, relative, file_identity)
+            file_type, opened_identity = _classify_file(path, relative, file_identity)
             language = detect_language(relative)
             record = FileRecord(
                 relative, size, Path(relative).suffix.lower(), language,
                 file_type=file_type, size_bucket=_size_bucket(size),
                 is_hidden=hidden, permissions=mode, mtime_ns=mtime_ns,
-                analysis_identity=(
-                    device_id, inode_id, size, mtime_ns, ctime_ns,
-                ) if device_id is not None and inode_id is not None else None,
+                # Prefer the descriptor-verified identity; the Windows walker
+                # cannot report a file ID itself.
+                analysis_identity=opened_identity or file_identity,
             )
             if size > max_file_bytes and skip_oversized:
                 record.content_skipped_reason = (
@@ -553,7 +596,7 @@ def discover_inventory(
             if hidden:
                 stats["hidden_entry_count"] += 1
 
-            if stat.S_ISLNK(info.st_mode):
+            if _is_link_like(info):
                 try:
                     target = os.readlink(entry.path)
                     scope = _symlink_scope(root, Path(entry.path), target)
@@ -613,7 +656,7 @@ def discover_inventory(
 
             if stat.S_ISREG(info.st_mode):
                 size = info.st_size
-                file_type = _file_type(Path(entry.path), relative, info)
+                file_type, opened_identity = _classify_file(Path(entry.path), relative, info)
                 language = detect_language(relative)
                 file_record = FileRecord(
                     relative,
@@ -625,10 +668,7 @@ def discover_inventory(
                     is_hidden=hidden,
                     permissions=stat.S_IMODE(info.st_mode),
                     mtime_ns=info.st_mtime_ns,
-                    analysis_identity=(
-                        info.st_dev, info.st_ino, info.st_size,
-                        info.st_mtime_ns, info.st_ctime_ns,
-                    ),
+                    analysis_identity=opened_identity or stat_identity(info),
                 )
                 if size > max_file_bytes and skip_oversized:
                     file_record.content_skipped_reason = (

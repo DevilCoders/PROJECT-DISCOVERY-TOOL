@@ -6,11 +6,11 @@ import plistlib
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import open_verified_binary, read_text_bounded
+from ..safe_parsers import safe_xml_fromstring
+from ..source_utils import open_verified_binary, read_bytes_bounded, read_text_bounded
 
 
 _ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
@@ -81,8 +81,10 @@ class MobileIntelligenceAnalyzer(Analyzer):
 
     def _read_xml(self, path: Path, record: FileRecord):
         try:
-            return ET.parse(path).getroot(), None
-        except (OSError, ET.ParseError) as exc:
+            return safe_xml_fromstring(read_bytes_bounded(
+                path, 16 * 1024 * 1024, expected_identity=record.analysis_identity,
+            )), None
+        except (OSError, ValueError, ET.ParseError) as exc:
             return None, Finding(
                 "mobile", f"Mobile XML parse error: {record.path}",
                 f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",

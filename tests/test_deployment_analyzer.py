@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-import pytest
 
 from project_discovery.analyzers.deployment_analyzer import DeploymentIntelligenceAnalyzer
 from project_discovery.models import FileRecord

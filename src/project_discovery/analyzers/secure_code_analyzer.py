@@ -20,7 +20,9 @@ from ..language_catalog import is_source_path, source_language_names
 _PATTERNS = (
     (
         "dynamic_code_execution",
-        re.compile(r"""\b(?:eval|exec)\s*(?:\(|["'\x60$])""", re.I),
+        # Case-sensitive and not a member call: RegExp.exec(), Go db.Exec() and
+        # cursor.execute() are not dynamic code execution.
+        re.compile(r"""(?<![.\w$])(?:eval|exec)\s*(?:\(|["'\x60$])"""),
         "Dynamic code execution primitive",
         "Review whether the input can be influenced by untrusted data.",
     ),
@@ -57,7 +59,7 @@ _PATTERNS = (
     ),
     (
         "unsafe_c_memory_api",
-        re.compile(r"\b(?:gets|strcpy|strcat|sprintf|vsprintf)\s*\(", re.I),
+        re.compile(r"(?<![.\w$])(?:gets|strcpy|strcat|sprintf|vsprintf)\s*\("),
         "Potentially unsafe C memory/string API",
         "Review buffer bounds and prefer APIs that accept explicit destination sizes.",
     ),
@@ -82,7 +84,7 @@ _PATTERNS = (
     (
         "path_traversal_user_controlled_path",
         re.compile(
-            r"""(?i)\b(?:readFile|writeFile|FileInputStream|Paths\.get|Path\.Combine|sendFile|open)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params|body)|getParameter\s*\(|params\[|user_?input|file_?name)"""
+            r"""(?i)\b(?:readFile|writeFile|FileInputStream|Paths\.get|Path\.Combine|sendFile|open)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params|body)|getParameter\s*\(|params\[|user_?input)"""
         ),
         "Potential user-controlled filesystem path",
         "A filesystem API appears to receive request or user-derived path material. "
@@ -144,6 +146,13 @@ _PATTERNS = (
     ),
 )
 _PYTHON_UNSAFE_LOADERS = {"UnsafeLoader", "Loader", "FullLoader"}
+# Rules that only make sense for particular language families.
+_RULE_EXTENSIONS = {
+    "unsafe_c_memory_api": frozenset({
+        ".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx", ".ipp",
+        ".inc", ".m", ".mm", ".cu", ".cuh", ".ino",
+    }),
+}
 _MAX_SECURE_CODE_FILE_BYTES = 16 * 1024 * 1024
 _MAX_RULE_LOCATIONS = 100
 _MAX_CODE_EXCERPTS_PER_FINDING = 20
@@ -241,58 +250,145 @@ def _dynamic_sql_argument(node: ast.AST) -> bool:
     return False
 
 
-def _python_rules(tree: ast.AST) -> dict[str, set[int]]:
-    matches: dict[str, set[int]] = {}
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map names bound by absolute imports to the fully qualified names they refer to."""
+    aliases: dict[str, str] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        name = _dotted(node.func)
-        rule = None
-        if name in {"eval", "exec", "builtins.eval", "builtins.exec"}:
-            rule = "dynamic_code_execution"
-        elif name == "os.system":
-            rule = "shell_command_execution"
-        elif name.startswith("subprocess.") and any(
-            keyword.arg == "shell" and isinstance(keyword.value, ast.Constant)
-            and keyword.value.value is True for keyword in node.keywords
-        ):
-            rule = "shell_command_execution"
-        elif name in {
-            "pickle.load", "pickle.loads", "marshal.loads", "dill.load", "dill.loads",
-        }:
-            rule = "unsafe_deserialization"
-        elif name == "yaml.load":
-            loader = next(
-                (keyword.value for keyword in node.keywords if keyword.arg == "Loader"),
-                None,
-            )
-            safe = (
-                isinstance(loader, ast.Name) and loader.id in {"SafeLoader", "CSafeLoader"}
-            ) or (
-                isinstance(loader, ast.Attribute)
-                and loader.attr in {"SafeLoader", "CSafeLoader"}
-            )
-            if not safe:
-                rule = "unsafe_deserialization"
-        elif name in {"hashlib.md5", "hashlib.sha1"}:
-            rule = "weak_hash"
-        elif name in {"ssl._create_unverified_context"}:
-            rule = "tls_verification_disabled"
-        elif name == "tempfile.mktemp":
-            rule = "insecure_temporary_file"
-        elif name.rsplit(".", 1)[-1] in {"execute", "executemany"} and node.args:
-            if _dynamic_sql_argument(node.args[0]):
-                rule = "dynamic_sql_query"
-        if rule:
-            _record_rule_line(matches, rule, node.lineno)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                if alias.name != "*":
+                    aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
 
-        if name in {"requests.get", "requests.post", "requests.put", "requests.delete",
-                    "httpx.get", "httpx.post", "httpx.put", "httpx.delete"}:
-            if any(
-                keyword.arg == "verify" and isinstance(keyword.value, ast.Constant)
-                and keyword.value.value is False for keyword in node.keywords
-            ):
-                _record_rule_line(matches, "tls_verification_disabled", node.lineno)
+
+def _resolve(name: str, aliases: dict[str, str]) -> str:
+    head, _, rest = name.partition(".")
+    if head in aliases:
+        return aliases[head] + (f".{rest}" if rest else "")
+    return name
+
+
+def _keyword(node: ast.Call, name: str) -> ast.AST | None:
+    return next((item.value for item in node.keywords if item.arg == name), None)
+
+
+def _is_constant(node: ast.AST | None, value: object) -> bool:
+    return isinstance(node, ast.Constant) and node.value is value
+
+
+_SAFE_YAML_LOADERS = {"SafeLoader", "CSafeLoader"}
+_HTTP_VERBS = {"get", "post", "put", "delete", "patch", "head", "options", "request", "stream"}
+_PICKLE_LOADERS = {
+    "pickle.load", "pickle.loads", "_pickle.load", "_pickle.loads", "cPickle.load",
+    "cPickle.loads", "marshal.load", "marshal.loads", "dill.load", "dill.loads",
+    "cloudpickle.load", "cloudpickle.loads", "jsonpickle.decode", "shelve.open",
+    "pandas.read_pickle", "joblib.load",
+}
+
+
+# Fine-grained Python rules (used by the per-line python-security presentation) mapped
+# onto the secure-code rule catalog. Both presentations share this single engine.
+PYTHON_RULE_CATEGORIES = {
+    "dynamic_code_execution": "dynamic_code_execution",
+    "os_system_shell": "shell_command_execution",
+    "subprocess_shell_true": "shell_command_execution",
+    "unsafe_pickle_deserialization": "unsafe_deserialization",
+    "unsafe_yaml_load": "unsafe_deserialization",
+    "weak_cryptographic_hash": "weak_hash",
+    "tls_certificate_verification_disabled": "tls_verification_disabled",
+    "tls_verification_disabled": "tls_verification_disabled",
+    "insecure_temporary_file": "insecure_temporary_file",
+    "possible_sql_injection": "dynamic_sql_query",
+}
+
+
+def _python_call_rule(node: ast.Call, name: str, aliases: dict[str, str]) -> str | None:
+    if name in {"eval", "exec", "builtins.eval", "builtins.exec"}:
+        return "dynamic_code_execution"
+    if name in {"os.system", "os.popen", "commands.getoutput", "commands.getstatusoutput"}:
+        return "os_system_shell"
+    if name.startswith("subprocess.") and _is_constant(_keyword(node, "shell"), True):
+        return "subprocess_shell_true"
+    if name in _PICKLE_LOADERS:
+        return "unsafe_pickle_deserialization"
+    if name == "torch.load" and not _is_constant(_keyword(node, "weights_only"), True):
+        return "unsafe_pickle_deserialization"  # pickle-based unless weights_only=True
+    if name == "numpy.load" and _is_constant(_keyword(node, "allow_pickle"), True):
+        return "unsafe_pickle_deserialization"
+    if name in {"yaml.load", "yaml.load_all"}:
+        loader = _keyword(node, "Loader") or (node.args[1] if len(node.args) > 1 else None)
+        loader_name = _resolve(_dotted(loader), aliases) if loader is not None else ""
+        if loader_name.rsplit(".", 1)[-1] not in _SAFE_YAML_LOADERS:
+            return "unsafe_yaml_load"
+        return None
+    if name in {"hashlib.md5", "hashlib.sha1"} or (
+        name == "hashlib.new" and node.args and isinstance(node.args[0], ast.Constant)
+        and str(node.args[0].value).lower().replace("-", "") in {"md5", "sha1"}
+    ):
+        # usedforsecurity=False explicitly declares a non-security use (Python 3.9+).
+        if _is_constant(_keyword(node, "usedforsecurity"), False):
+            return None
+        return "weak_cryptographic_hash"
+    if name == "ssl._create_unverified_context":
+        return "tls_certificate_verification_disabled"
+    if name == "tempfile.mktemp":
+        return "insecure_temporary_file"
+    if name.rsplit(".", 1)[-1] in {"execute", "executemany"} and node.args:
+        return "possible_sql_injection" if _dynamic_sql_argument(node.args[0]) else None
+    if _is_constant(_keyword(node, "verify"), False) and (
+        name.rsplit(".", 1)[-1] in _HTTP_VERBS
+        or name.rsplit(".", 1)[-1] in {"Client", "AsyncClient", "Session"}
+    ):
+        return "tls_verification_disabled"
+    return None
+
+
+def python_security_matches(tree: ast.AST) -> list[tuple[str, int, str]]:
+    """Return ordered (fine rule, line, resolved callee) Python AST security matches.
+
+    Import aliases are resolved, so ``from pickle import loads as l; l(x)`` and
+    ``import subprocess as sp; sp.run(cmd, shell=True)`` are recognized.
+    """
+    aliases = _import_aliases(tree)
+    matches: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def add(rule: str, line: int, name: str) -> None:
+        if (rule, line) not in seen:
+            seen.add((rule, line))
+            matches.append((rule, line, name))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = _resolve(_dotted(node.func), aliases)
+            rule = _python_call_rule(node, name, aliases)
+            if rule:
+                add(rule, node.lineno, name)
+        elif isinstance(node, ast.Assign):
+            # ctx.verify_mode = ssl.CERT_NONE / ctx.check_hostname = False / s.verify = False
+            for target in node.targets:
+                if not isinstance(target, ast.Attribute):
+                    continue
+                value = _resolve(_dotted(node.value), aliases)
+                if target.attr == "verify_mode" and value.endswith("CERT_NONE"):
+                    add("tls_certificate_verification_disabled", node.lineno, value)
+                elif target.attr == "check_hostname" and _is_constant(node.value, False):
+                    add("tls_certificate_verification_disabled", node.lineno, target.attr)
+                elif target.attr == "verify" and _is_constant(node.value, False):
+                    add("tls_verification_disabled", node.lineno, target.attr)
+    matches.sort(key=lambda item: (item[1], item[0]))
+    return matches
+
+
+def _python_rules(tree: ast.AST) -> dict[str, set[int]]:
+    """Return secure-code rule -> line numbers for Python AST security indicators."""
+    matches: dict[str, set[int]] = {}
+    for rule, line, _ in python_security_matches(tree):
+        _record_rule_line(matches, PYTHON_RULE_CATEGORIES[rule], line)
     return matches
 
 
@@ -363,8 +459,12 @@ class SecureCodePatternAnalyzer(Analyzer):
         else:
             # Keep line iteration streaming. splitlines() can allocate millions of
             # strings for a newline-heavy 16 MiB source file.
+            rules = [
+                (rule, pattern) for rule, pattern, _, _ in _PATTERNS
+                if record.extension in _RULE_EXTENSIONS.get(rule, (record.extension,))
+            ]
             for line_number, line in enumerate(io.StringIO(source, newline=None), 1):
-                for rule, pattern, _, _ in _PATTERNS:
+                for rule, pattern in rules:
                     if pattern.search(line):
                         _record_rule_line(matches, rule, line_number)
 

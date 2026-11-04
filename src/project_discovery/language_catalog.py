@@ -209,6 +209,13 @@ def _spec_for_path(path: str) -> LanguageSpec | None:
     )
 
 
+def known_extensions() -> frozenset[str]:
+    """Every catalogued file extension, lower-cased and without the leading dot."""
+    return frozenset(
+        extension.lower().lstrip(".") for spec in _SPECS for extension in spec.extensions
+    )
+
+
 def source_extensions() -> set[str]:
     """Extensions belonging to recognized source, schema, low-level and compute languages."""
     return {

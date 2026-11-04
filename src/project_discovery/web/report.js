@@ -24,13 +24,29 @@ function fillBars(targetId,values){
  }
 }
 const metrics=REPORT.metrics||{};
-$("stat-files").textContent=number(REPORT.files.length);
-$("stat-dirs").textContent=number(Math.max(0,REPORT.directories.length-1));
-$("stat-links").textContent=number(REPORT.symlinks.length);
-$("stat-special").textContent=number((REPORT.special_entries||[]).length);
-$("stat-findings").textContent=number(REPORT.findings.length);
+// Large reports embed bounded slices; totals always describe the complete scan.
+const totals=REPORT.totals||{};
+const total=function(name){
+ const value=totals[name];
+ return value===undefined?(REPORT[name]||[]).length:Number(value);
+};
+$("stat-files").textContent=number(total("files"));
+$("stat-dirs").textContent=number(Math.max(0,total("directories")-1));
+$("stat-links").textContent=number(total("symlinks"));
+$("stat-special").textContent=number(total("special_entries"));
+$("stat-findings").textContent=number(total("findings"));
 $("stat-hidden").textContent=number(metrics.hidden_entry_count||0);
-$("stat-errors").textContent=number((REPORT.errors||[]).length+(metrics.walk_errors||0));
+$("stat-errors").textContent=number(total("errors")+(metrics.walk_errors||0));
+const truncated=["findings","files","directories","symlinks","special_entries","errors"].filter(function(name){
+ return (REPORT[name]||[]).length<total(name);
+});
+if(truncated.length){
+ const notice=$("truncation-notice");
+ notice.textContent="Large report: this page embeds a bounded, severity-ordered subset ("+
+  truncated.map(function(name){return number((REPORT[name]||[]).length)+" of "+number(total(name))+" "+name.replace("_"," ");}).join(", ")+
+  "). The JSON report contains the complete data set.";
+ notice.classList.remove("hidden");
+}
 fillBars("file-types",metrics.file_types);fillBars("size-buckets",metrics.size_buckets);
 fillBars("development-dirs",metrics.development_directories);
 $("host-os").textContent=JSON.stringify({
@@ -117,9 +133,9 @@ if(vcsFindingCount>100){
  note.textContent="Showing first 100 VCS/provider findings. Use the global findings view or JSON report for the complete set.";
  vcsTarget.append(note);
 }
-$("inventory-summary").textContent=number(REPORT.files.length)+" files • "+
- number(Math.max(0,REPORT.directories.length-1))+" directories • "+number(REPORT.symlinks.length)+
- " links • "+number((REPORT.special_entries||[]).length)+" special entries • "+formatBytes(metrics.total_bytes)+" • "+number(metrics.hidden_entry_count||0)+
+$("inventory-summary").textContent=number(total("files"))+" files • "+
+ number(Math.max(0,total("directories")-1))+" directories • "+number(total("symlinks"))+
+ " links • "+number(total("special_entries"))+" special entries • "+formatBytes(metrics.total_bytes)+" • "+number(metrics.hidden_entry_count||0)+
  " hidden entries • "+number(metrics.development_directory_count||0)+" development/cache trees";
 $("raw-metrics").textContent=JSON.stringify(metrics,null,2);
 $("raw-errors").textContent=JSON.stringify(REPORT.errors||[],null,2);

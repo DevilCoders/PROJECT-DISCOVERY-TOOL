@@ -12,9 +12,65 @@ import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from itertools import islice
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # string annotations only; models imports this module lazily
+    from .models import FileRecord, Finding
 
 _RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding", "diagnostic"})
+_SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+_CONFIDENCE_ORDER = {"CONFIRMED": 0, "INFERRED": 1, "UNKNOWN": 2}
+# Prefix for keys of names that are not valid Unicode; U+FFFF is a noncharacter.
+_UNDECODABLE_KEY_PREFIX = "￿"
+
+
+def sqlite_text(value: str) -> str:
+    """Return SQLite-bindable text for a file-system string, injectively.
+
+    POSIX names that are not valid UTF-8 (surrogateescape) and unpaired surrogates in
+    Windows names cannot be bound as SQLite TEXT. They are mapped into a separate,
+    prefixed namespace using backslash escapes, so they cannot collide with real names.
+    """
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        escaped = value.encode("utf-8", "surrogatepass").decode("utf-8", "backslashreplace")
+        return _UNDECODABLE_KEY_PREFIX + escaped
+
+
+def _payload_json(value: Any) -> str:
+    """JSON for SQLite storage; falls back to ASCII escapes for unencodable strings."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    if not text.isascii():
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            # \uXXXX escapes round-trip lone surrogates through json.loads exactly.
+            text = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return text
+
+
+def prepare_private_database(path: Path) -> None:
+    """Create a SQLite database file readable only by the current account (POSIX).
+
+    The file is created atomically with mode 0600 before SQLite opens it; SQLite gives
+    its -wal/-shm/-journal sidecars the main file's permissions. Pre-existing files are
+    tightened, and symlinked database paths are refused.
+    """
+    if path.is_symlink():
+        raise ValueError(f"database path must not be a symlink: {path}")
+    if os.name != "posix":
+        return
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        os.close(os.open(path, flags, 0o600))
+    except FileExistsError:
+        if path.is_symlink():
+            raise ValueError(f"database path must not be a symlink: {path}") from None
+    for candidate in (path, *(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm", "-journal"))):
+        if candidate.exists() and not candidate.is_symlink():
+            os.chmod(candidate, 0o600)
 
 
 class InventoryStore:
@@ -30,18 +86,16 @@ class InventoryStore:
             raise ValueError("batch_size must be positive")
         self.path = Path(path).expanduser().absolute()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Do not let SQLite silently follow a pre-planted database symlink.
+        # Inventory databases contain local project paths and metadata. Keep them private
+        # and never let SQLite silently follow a pre-planted database symlink.
         if self.path.is_symlink():
             raise ValueError("inventory database path must not be a symlink")
+        prepare_private_database(self.path)
         self.batch_size = batch_size
         self._pending: list[tuple[str, str, str, str]] = []
         self._directory_pending: dict[str, tuple[int, int, int, str | None]] = {}
         self._closed = False
         self.db = sqlite3.connect(self.path, timeout=30.0)
-        if os.name == "posix":
-            # Inventory databases contain local project paths and metadata.
-            # Keep the database private to the current account by default.
-            os.chmod(self.path, 0o600)
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
@@ -137,16 +191,18 @@ class InventoryStore:
         path = value.get("path")
         if not isinstance(path, str) or not path:
             raise ValueError("inventory record requires a non-empty string path")
-        sort_key = path.casefold()
-        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        return path, sort_key, payload
+        key = sqlite_text(path)
+        return key, key.casefold(), _payload_json(value)
 
-    def append(self, kind: str, record: Mapping[str, Any] | Any) -> None:
+    def append(
+        self, kind: str, record: Mapping[str, Any] | Any, *, sort_key: str | None = None,
+    ) -> None:
         """Queue one record; flush automatically when the bounded batch is full."""
         if self._closed:
             raise RuntimeError("inventory store is closed")
         kind = self._kind(kind)
-        path, sort_key, payload = self._serialize(record)
+        path, default_sort_key, payload = self._serialize(record)
+        sort_key = default_sort_key if sort_key is None else sort_key
         if kind == "directory":
             directory = json.loads(payload)
             depth = max(0, int(directory.get("depth", 0)))
@@ -171,6 +227,7 @@ class InventoryStore:
             raise ValueError("directory path must be a non-empty string")
         if not any((direct_child_delta, file_count_delta, total_bytes_delta, error is not None)):
             return
+        path = sqlite_text(path)
         current = self._directory_pending.get(path, (0, 0, 0, None))
         self._directory_pending[path] = (
             current[0] + direct_child_delta,
@@ -330,8 +387,16 @@ class InventoryStore:
         canonical = json.dumps(
             value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
         )
-        key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        self.append("finding", {"path": key, "finding": value})
+        key = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
+        # Reports stream findings most-severe first; the content key keeps the order total.
+        sort_key = "|".join((
+            str(_SEVERITY_ORDER.get(value.get("severity"), len(_SEVERITY_ORDER))),
+            str(_CONFIDENCE_ORDER.get(value.get("confidence"), len(_CONFIDENCE_ORDER))),
+            sqlite_text(str(value.get("category", ""))).casefold(),
+            sqlite_text(str(value.get("title", ""))).casefold(),
+            key,
+        ))
+        self.append("finding", {"path": key, "finding": value}, sort_key=sort_key)
 
     def extend_findings(self, findings: Iterable[Any]) -> int:
         """Persist an iterable of findings without retaining it in memory."""
@@ -412,7 +477,7 @@ class InventoryStore:
             raise RuntimeError("inventory store is closed")
         if not key:
             raise ValueError("metadata key must be non-empty")
-        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        encoded = _payload_json(value)
         with self.db:
             self.db.execute(
                 """INSERT INTO inventory_metadata(key, value) VALUES (?, ?)
@@ -453,10 +518,7 @@ class InventoryStore:
         if any(not isinstance(key, str) or not key for key in metadata):
             raise ValueError("checkpoint metadata keys must be non-empty strings")
         encoded = [
-            (
-                key,
-                json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-            )
+            (key, _payload_json(value))
             for key, value in metadata.items()
         ]
         self.flush()

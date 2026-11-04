@@ -8,7 +8,8 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import read_text_bounded
+from ..safe_parsers import safe_xml_fromstring
+from ..source_utils import read_bytes_bounded, read_text_bounded
 
 _ROS_IMPORTS = {"rclpy": "ROS 2 Python", "rospy": "ROS 1 Python"}
 _COMMUNICATION = {
@@ -213,8 +214,10 @@ class ROSIntelligenceAnalyzer(Analyzer):
 
     def _package(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            root = ET.parse(path).getroot()
-        except (OSError, ET.ParseError) as exc:
+            root = safe_xml_fromstring(read_bytes_bounded(
+                path, 16 * 1024 * 1024, expected_identity=record.analysis_identity,
+            ))
+        except (OSError, ValueError, ET.ParseError) as exc:
             return [Finding(
                 "robotics", f"ROS package manifest parse error: {record.path}",
                 f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",

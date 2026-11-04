@@ -252,8 +252,10 @@ def test_markdown_largest_directory_summary_keeps_only_top_100(tmp_path: Path):
     section = content.split("## Largest Directories\n", 1)[1].split(
         "## Symbolic Links\n", 1
     )[0]
-    rows = [line for line in section.splitlines() if line.startswith("- synthetic-")]
+    rows = [line for line in section.splitlines() if line.startswith("- ")]
+    # The fixture's 128-byte "src" directory legitimately ranks inside the top 100.
     assert len(rows) == 100
+    assert any(line.startswith("- src ") for line in rows)
     assert any("synthetic-149" in line for line in rows)
     assert not any("synthetic-000 " in line for line in rows)
 
@@ -323,3 +325,69 @@ def test_report_writers_stream_lazy_diagnostics_without_dropping_repeats(tmp_pat
     assert "</script><script>not executable</script>" not in html
     assert "\\u003c/script\\u003e" in html
 
+
+
+def test_html_report_is_not_corrupted_by_template_placeholders_in_paths(tmp_path: Path):
+    # Regression: placeholders were substituted with str.replace over user text, so a
+    # project path containing "__DATA__" split the template at the wrong place.
+    result = _result()
+    result.root = "/work/__DATA__/__REPORT_JS__/__ROOT__/<script>alert(1)</script>"
+    content = write_reports(result, tmp_path, {"html"})[0].read_text(encoding="utf-8")
+    assert content.count("const REPORT = {") == 1
+    assert "/work/__DATA__/__REPORT_JS__/__ROOT__/&lt;script&gt;" in content
+    assert "<script>alert(1)" not in content
+
+
+def test_html_report_declares_a_nonce_csp_that_blocks_network_access(tmp_path: Path):
+    import re
+
+    content = write_reports(_result(), tmp_path, {"html"})[0].read_text(encoding="utf-8")
+    policy = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', content).group(1)
+    nonce = re.search(r"script-src 'nonce-([^']+)'", policy).group(1)
+    assert "default-src 'none'" in policy and "base-uri 'none'" in policy
+    assert content.count(f'<script nonce="{nonce}">') == 1
+    assert content.count("<script") == 1
+    second = write_reports(_result(), tmp_path / "again", {"html"})[0].read_text(encoding="utf-8")
+    assert nonce not in second
+
+
+def test_html_report_embeds_bounded_slices_with_true_totals(tmp_path: Path, monkeypatch):
+    import json
+    import re
+
+    import project_discovery.reporting as reporting
+
+    monkeypatch.setitem(reporting.HTML_MAX_EMBEDDED, "findings", 1)
+    content = write_reports(_result(), tmp_path, {"html"})[0].read_text(encoding="utf-8")
+    payload = json.loads(re.search(r"const REPORT = (\{.*?\});\n", content, re.S).group(1))
+    assert payload["totals"]["findings"] == 4
+    assert len(payload["findings"]) == 1
+    assert "truncation-notice" in content
+
+
+def test_markdown_neutralizes_html_links_and_code_span_breakouts(tmp_path: Path):
+    result = _result()
+    result.findings = [Finding(
+        "security", "<img src=x onerror=alert(1)> [x](javascript:alert(1))",
+        "multi\nline detail", evidence=["src/__init__.py:1"], severity="HIGH",
+        code_evidence=[CodeEvidence(1, "value = `x` + ``y``")],
+    )]
+    content = write_reports(result, tmp_path, {"markdown"})[0].read_text(encoding="utf-8")
+    assert "<img" not in content and "&lt;img src=x onerror=alert(1)&gt;" in content
+    assert r"\[x\](javascript:alert(1))" in content
+    assert "multi line detail" in content
+    assert r"src/\_\_init\_\_.py:1" in content
+    # The fence outgrows the longest backtick run; content ending in "`" is space-padded.
+    assert "``` value = `x` + ``y`` ```" in content
+
+
+def test_findings_stream_most_severe_first(tmp_path: Path):
+    from project_discovery.inventory_store import InventoryStore
+
+    with InventoryStore(tmp_path / "order.sqlite3") as store:
+        # "code" findings keep INFO; security categories raise INFO to MEDIUM by design.
+        for severity in ("INFO", "CRITICAL", "LOW", "HIGH"):
+            store.append_finding(Finding("code", f"{severity} item", "d", severity=severity))
+        store.flush()
+        order = [finding.severity for finding in store.iter_findings()]
+    assert order == ["CRITICAL", "HIGH", "LOW", "INFO"]
