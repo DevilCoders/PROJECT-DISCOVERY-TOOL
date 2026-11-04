@@ -100,7 +100,7 @@ def analyze_python_dependencies(
     module_path_counts: dict[str, int] = {}
     eligible: dict[str, FileRecord] = {}
     skipped_modules: list[dict[str, str | int]] = []
-    omitted_module_count = 0
+    omitted_module_record_count = 0
     omitted_skipped_module_count = 0
     findings: list[Finding] = []
 
@@ -141,7 +141,7 @@ def analyze_python_dependencies(
         paths = module_paths.get(module)
         if paths is None:
             if len(module_paths) >= MAX_GRAPH_MODULES:
-                omitted_module_count += 1
+                omitted_module_record_count += 1
                 continue
             module_paths[module] = [record.path]
             module_path_counts[module] = 1
@@ -361,7 +361,7 @@ def analyze_python_dependencies(
             analyzer="python-module-graph",
         ))
 
-    if omitted_module_count or omitted_edge_count or omitted_unresolved_count or omitted_skipped_module_count:
+    if omitted_module_record_count or omitted_edge_count or omitted_unresolved_count or omitted_skipped_module_count:
         emit(Finding(
             "architecture",
             "Python dependency graph reached a resource limit",
@@ -370,7 +370,7 @@ def analyze_python_dependencies(
             "treating absent edges or imports as evidence of absence.",
             confidence="UNKNOWN",
             evidence=[
-                f"omitted_modules: {omitted_module_count}",
+                f"omitted_modules: {omitted_module_record_count}",
                 f"omitted_edges: {omitted_edge_count}",
                 f"omitted_unresolved_imports: {omitted_unresolved_count}",
                 f"omitted_skipped_modules: {omitted_skipped_module_count}",
@@ -397,16 +397,16 @@ def analyze_python_dependencies(
             "edge_count": len(edges),
             "unresolved_import_count": len(unresolved),
             "cycle_count": len(cycles),
-            "module_limit_reached": omitted_module_count > 0,
-            "omitted_module_count": omitted_module_count,
+            "module_limit_reached": omitted_module_record_count > 0,
+            "omitted_module_record_count": omitted_module_record_count,
             "edge_limit_reached": omitted_edge_count > 0,
             "omitted_edge_count": omitted_edge_count,
             "unresolved_limit_reached": omitted_unresolved_count > 0,
             "omitted_unresolved_import_count": omitted_unresolved_count,
             "graph_complete": not any((
-                omitted_module_count, omitted_edge_count,
+                omitted_module_record_count, omitted_edge_count,
                 omitted_unresolved_count, omitted_skipped_module_count,
-            )),
+            )) and not skipped_modules,
         },
     }
     skipped_modules.sort(key=lambda item: (str(item["name"]), str(item["path"])))
