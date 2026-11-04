@@ -7,7 +7,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..language_catalog import is_textual_path
 from ..models import CodeEvidence, FileRecord, Finding
-from ..source_utils import redact_source_excerpt
+from ..source_utils import open_verified_binary, redact_source_excerpt
 
 
 _EMAIL = re.compile(
@@ -77,7 +77,7 @@ class DataExposureAnalyzer(Analyzer):
         budget_reached = False
         line_budget_reached = False
         try:
-            with path.open("rb") as stream:
+            with open_verified_binary(path, record.analysis_identity) as stream:
                 line_number = 1
                 while bytes_scanned < _MAX_DATA_EXPOSURE_FILE_BYTES:
                     remaining = _MAX_DATA_EXPOSURE_FILE_BYTES - bytes_scanned
