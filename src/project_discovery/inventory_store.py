@@ -335,3 +335,67 @@ class StoredFileRecords(Sequence["FileRecord"]):
         with InventoryStore(self.database_path) as store:
             return store.extend("file", records)
 
+class StoredRecordSequence(Sequence[Any]):
+    """Lazy typed sequence for one inventory kind stored in SQLite.
+
+    Iteration is cursor-backed and fetch-bounded. Indexing supports the same
+    sequence contract as StoredFileRecords without keeping a record list alive.
+    """
+
+    def __init__(
+        self,
+        database_path: Path,
+        kind: str,
+        record_type: type[Any],
+        *,
+        fetch_size: int = 256,
+    ) -> None:
+        if kind not in _RECORD_KINDS:
+            raise ValueError(f"unsupported inventory record kind: {kind}")
+        if fetch_size < 1:
+            raise ValueError("fetch_size must be positive")
+        self.database_path = Path(database_path).expanduser().absolute()
+        self.kind = kind
+        self.record_type = record_type
+        self.fetch_size = fetch_size
+
+    def __len__(self) -> int:
+        with InventoryStore(self.database_path) as store:
+            return store.count(self.kind)
+
+    def __iter__(self) -> Iterator[Any]:
+        with InventoryStore(self.database_path) as store:
+            payloads = store.iter_records(self.kind, fetch_size=self.fetch_size)
+            try:
+                for payload in payloads:
+                    yield self.record_type(**payload)
+            finally:
+                payloads.close()
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            if index.step is not None and index.step < 0:
+                return list(self)[index]
+            start, stop, step = index.indices(len(self))
+            if stop <= start:
+                return []
+            iterator = iter(self)
+            try:
+                return list(islice(iterator, start, stop, step))
+            finally:
+                iterator.close()
+        if not isinstance(index, int):
+            raise TypeError("inventory record indices must be integers or slices")
+        if index < 0:
+            index += len(self)
+        if index < 0:
+            raise IndexError("inventory record index out of range")
+        iterator = iter(self)
+        try:
+            try:
+                return next(islice(iterator, index, index + 1))
+            except StopIteration as exc:
+                raise IndexError("inventory record index out of range") from exc
+        finally:
+            iterator.close()
+
