@@ -8,7 +8,9 @@ from pathlib import Path
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..language_catalog import source_extensions, source_language_names
-from ..source_utils import SourceBudgetExceeded, read_python_source_bounded
+from ..source_utils import (
+    SourceBudgetExceeded, open_verified_text, read_python_source_bounded,
+)
 
 
 _SOURCE_EXTENSIONS = source_extensions()
@@ -136,7 +138,10 @@ class APIEndpointAnalyzer(Analyzer):
                     severity="LOW",
                 )]
             try:
-                source = read_python_source_bounded(path, MAX_PYTHON_ENDPOINT_AST_BYTES)
+                source = read_python_source_bounded(
+                    path, MAX_PYTHON_ENDPOINT_AST_BYTES,
+                    expected_identity=record.analysis_identity,
+                )
                 routes = _python_routes(source, record.path)
             except SourceBudgetExceeded as exc:
                 return [Finding(
@@ -154,7 +159,10 @@ class APIEndpointAnalyzer(Analyzer):
             bytes_scanned = 0
             line_number = 1
             try:
-                with path.open("r", encoding="utf-8", errors="replace") as stream:
+                with open_verified_text(
+                    path, encoding="utf-8", errors="replace",
+                    expected_identity=record.analysis_identity,
+                ) as stream:
                     while bytes_scanned < MAX_SOURCE_ENDPOINT_SCAN_BYTES:
                         line = stream.readline(min(
                             MAX_ENDPOINT_LINE_CHARS,
