@@ -1,5 +1,6 @@
 """PDT command line."""
 import argparse
+import heapq
 import os
 import platform
 import sqlite3
@@ -28,7 +29,7 @@ from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
 from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
-from .inventory_store import InventoryStore, StoredFileRecords
+from .inventory_store import InventoryStore, StoredFileRecords, StoredFindingRecords
 from .comparison import compare_many_reports, load_report, write_comparison
 from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
@@ -114,22 +115,22 @@ def _render_banner(console: Console) -> None:
     console.print(Panel(grid, title="[bold]ENGINE STATUS[/bold]", border_style="blue"))
     console.print("[dim]Inventory  >  Analyze  >  Correlate  >  Report[/dim]\n")
 
-def _print_security_findings(console: Console, findings: list[Finding], *, limit: int = 25) -> None:
-    """Print bounded, redacted security evidence with severity, impact and remediation."""
+def _print_security_findings(console: Console, findings, *, limit: int = 25) -> None:
+    """Print top redacted security findings without materializing the full result set."""
     severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-    security_findings = sorted(
-        (
-            finding for finding in findings
-            if finding.category in {"security", "secrets", "privacy"}
-        ),
-        key=lambda finding: (
-            severity_rank.get(finding.severity, 5),
-            finding.title.casefold(),
-            finding.analyzer,
-        ),
+    is_security = lambda finding: finding.category in {"security", "secrets", "privacy"}
+    sort_key = lambda finding: (
+        severity_rank.get(finding.severity, 5),
+        finding.title.casefold(),
+        finding.analyzer,
     )
-    if not security_findings:
+    security_count = sum(1 for finding in findings if is_security(finding))
+    if not security_count:
         return
+    security_findings = heapq.nsmallest(
+        limit, (finding for finding in findings if is_security(finding)),
+        key=sort_key,
+    )
 
     console.print()
     console.print("[bold red]SECURITY FINDINGS // REDACTED SOURCE EVIDENCE[/bold red]")
@@ -156,7 +157,7 @@ def _print_security_findings(console: Console, findings: list[Finding], *, limit
             remediation.append(finding.recommendation)
             console.print(remediation)
         console.print()
-    omitted = len(security_findings) - limit
+    omitted = security_count - len(security_findings)
     if omitted > 0:
         console.print(
             f"[dim]... {omitted:,} additional security findings are available in the reports.[/dim]"
@@ -214,7 +215,6 @@ def run_scan(
                 **advisory_store.status(),
             }
         analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
-    findings = []
     errors = list(analyzer_load.diagnostics)
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
@@ -279,7 +279,7 @@ def run_scan(
         MofNCompleteColumn(),
         TimeElapsedColumn(),
     )
-    with ScanCache(cache_path) as cache:
+    with InventoryStore(inventory_path) as finding_store, ScanCache(cache_path) as cache:
         with Progress(*progress_columns, console=console) as progress:
             task = progress.add_task("Analyzing project files", total=len(records))
             pending = deque()
@@ -288,7 +288,7 @@ def run_scan(
                 future, record, file_stat, cache_miss = pending.popleft()
                 try:
                     digest, file_findings, file_errors = future.result()
-                    findings.extend(file_findings)
+                    finding_store.extend_findings(file_findings)
                     errors.extend(file_errors)
                     if file_errors:
                         record.error = file_errors[0]
@@ -362,19 +362,20 @@ def run_scan(
             cache.prune_missing(str(root), (record.path for record in records))
 
     python_graph, graph_findings = analyze_python_dependencies(root, records)
-    findings.extend(graph_findings)
     architecture_layout, architecture_findings = analyze_project_architecture(records)
-    findings.extend(architecture_findings)
+    with InventoryStore(inventory_path) as finding_store:
+        finding_store.extend_findings(graph_findings)
+        finding_store.extend_findings(architecture_findings)
+    findings = StoredFindingRecords(inventory_path)
     domain_catalog = analyzer_domain_catalog()
-    vcs_provider_findings = [
-        item for item in findings
+    vcs_provider_categories = Counter(
+        item.category for item in findings
         if item.category in {"vcs", "hosting_providers", "ci_cd", "cloud_services"}
-    ]
+    )
+    vcs_provider_signal_count = sum(vcs_provider_categories.values())
     metrics = {
-        "vcs_provider_signal_count": len(vcs_provider_findings),
-        "vcs_provider_categories": dict(sorted(Counter(
-            item.category for item in vcs_provider_findings
-        ).items())),
+        "vcs_provider_signal_count": vcs_provider_signal_count,
+        "vcs_provider_categories": dict(sorted(vcs_provider_categories.items())),
         "native_backend": native_capabilities(),
         "native_extension_available": native_available(),
         "execution": {
@@ -384,6 +385,12 @@ def run_scan(
             "ordering": "deterministic-submission-order",
         },
         "vulnerability_intelligence": vulnerability_db_status,
+        "finding_persistence": {
+            "backend": "sqlite",
+            "record_count": len(findings),
+            "deduplicate_identical": True,
+            "public_schema_unchanged": True,
+        },
         "inventory_persistence": {
             "backend": "sqlite",
             "enabled": bool(walk_stats.get("inventory_store_enabled", 0)),
