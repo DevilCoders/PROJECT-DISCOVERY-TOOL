@@ -50,6 +50,36 @@ def test_network_analyzer_uses_bounded_line_chunks(tmp_path: Path):
     )
 
 
+
+def test_network_analyzer_rejects_file_changed_since_inventory(tmp_path: Path):
+    path = tmp_path / "changed-network.py"
+    original = 'HOST = "198.51.100.5"\n'
+    path.write_text(original, encoding="utf-8")
+    info = path.stat()
+    record = FileRecord(
+        path.name,
+        info.st_size,
+        ".py",
+        "Python",
+        file_type="text",
+        analysis_identity=(
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ),
+    )
+
+    path.write_text('HOST = "203.0.113.5"\n', encoding="utf-8")
+    findings = NetworkIndicatorAnalyzer().analyze(path, record)
+
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "changed" in findings[0].detail.lower()
+    assert "203.0.113.5" not in repr(findings[0].to_dict())
+
+
 def test_bare_container_and_service_ports_are_detected(tmp_path: Path):
     findings = _scan(
         tmp_path,
