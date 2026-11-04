@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import redact_source_excerpt
+from ..source_utils import open_verified_binary, redact_source_excerpt
 
 
 _MAX_IDENTITY_SOURCE_BYTES = 16 * 1024 * 1024
@@ -169,7 +169,7 @@ class IdentityIntelligenceAnalyzer(Analyzer):
                 analyzer=self.name, severity="LOW",
             )]
         try:
-            with path.open("rb") as stream:
+            with open_verified_binary(path, record.analysis_identity) as stream:
                 raw_source = stream.read(_MAX_IDENTITY_SOURCE_BYTES + 1)
             if len(raw_source) > _MAX_IDENTITY_SOURCE_BYTES:
                 return [Finding(
