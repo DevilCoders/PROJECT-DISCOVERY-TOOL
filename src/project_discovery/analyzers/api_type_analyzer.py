@@ -7,6 +7,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..language_catalog import is_textual_path, source_extensions
 from ..models import FileRecord, Finding
+from ..source_utils import open_verified_text
 
 
 _PATTERNS = {
@@ -68,7 +69,10 @@ class APITypeAnalyzer(Analyzer):
         bytes_scanned = 0
         budget_reached = False
         try:
-            with path.open("rb") as stream:
+            with open_verified_text(
+                path, encoding="utf-8", errors="replace",
+                expected_identity=record.analysis_identity,
+            ) as stream:
                 while bytes_scanned < _MAX_API_TYPE_FILE_BYTES:
                     remaining = _MAX_API_TYPE_FILE_BYTES - bytes_scanned
                     raw_line = stream.readline(min(_MAX_LINE_BYTES, remaining + 1))
