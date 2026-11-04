@@ -373,7 +373,7 @@ def run_scan(
         "vulnerability_intelligence": vulnerability_db_status,
         "inventory_persistence": {
             "backend": "sqlite",
-            "enabled": bool(walk_stats.get("inventory_store_record_count", 0)),
+            "enabled": bool(walk_stats.get("inventory_store_enabled", 0)),
             "record_count": walk_stats.get("inventory_store_record_count", 0),
             "integrity_check": (
                 "ok" if walk_stats.get("inventory_store_integrity_ok", 0) else "failed"
