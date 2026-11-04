@@ -8,6 +8,9 @@ from typing import Any, Iterable
 from .models import FileRecord, Finding
 
 
+MAX_ARCHITECTURE_COMPONENTS = 10_000
+
+
 _LAYER_ALIASES = {
     "presentation": {
         "presentation", "ui", "views", "view", "frontend", "web", "client",
@@ -52,6 +55,7 @@ def analyze_project_architecture(
     layer_counts: Counter[str] = Counter()
     layer_examples: dict[str, list[str]] = defaultdict(list)
     file_count = 0
+    omitted_top_level_path_count = 0
 
     for record in records:
         if record.error:
@@ -61,7 +65,13 @@ def analyze_project_architecture(
             continue
         file_count += 1
         if len(parts) > 1 and not parts[0].startswith("."):
-            top_level[parts[0]] += 1
+            component = parts[0]
+            if component in top_level:
+                top_level[component] += 1
+            elif len(top_level) < MAX_ARCHITECTURE_COMPONENTS:
+                top_level[component] = 1
+            else:
+                omitted_top_level_path_count += 1
 
         matched: set[str] = set()
         for part in parts[:-1]:
@@ -89,6 +99,10 @@ def analyze_project_architecture(
     metrics = {
         "file_count": file_count,
         "top_level_components": components,
+        "top_level_component_detail_count": len(components),
+        "omitted_top_level_path_count": omitted_top_level_path_count,
+        "top_level_component_limit_reached": omitted_top_level_path_count > 0,
+        "layout_complete": omitted_top_level_path_count == 0,
         "layers": layers,
         "classification_basis": "directory naming conventions only",
     }
@@ -117,4 +131,20 @@ def analyze_project_architecture(
         analyzer="architecture-layout",
         severity="INFO",
     )
-    return metrics, [finding]
+    findings = [finding]
+    if omitted_top_level_path_count:
+        findings.append(Finding(
+            "architecture",
+            "Project architecture component index reached a resource limit",
+            "The layout summary is partial because the top-level component index reached "
+            f"its {MAX_ARCHITECTURE_COMPONENTS:,}-component cap. "
+            "Additional top-level path observations were not retained.",
+            confidence="UNKNOWN",
+            evidence=[
+                f"retained_component_details: {len(components):,}",
+                f"omitted_top_level_path_observations: {omitted_top_level_path_count:,}",
+            ],
+            analyzer="architecture-layout",
+            severity="LOW",
+        ))
+    return metrics, findings
