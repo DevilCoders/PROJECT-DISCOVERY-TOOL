@@ -162,7 +162,7 @@ def test_graph_marks_partial_when_edge_budget_is_reached(tmp_path: Path, monkeyp
 
     assert graph["summary"]["edge_count"] == 1
     assert graph["summary"]["edge_limit_reached"] is True
-    assert graph["summary"]["omitted_edge_count"] == 1
+    assert graph["summary"]["omitted_edge_candidate_count"] == 1
     assert graph["summary"]["graph_complete"] is False
     assert any(item.confidence == "UNKNOWN" for item in findings)
 
