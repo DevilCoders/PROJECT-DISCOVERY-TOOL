@@ -9,7 +9,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..safe_parsers import safe_xml_fromstring
-from ..source_utils import read_bytes_bounded, read_text_bounded
+from ..source_utils import parse_python, read_bytes_bounded, read_text_bounded
 
 _ROS_IMPORTS = {"rclpy": "ROS 2 Python", "rospy": "ROS 1 Python"}
 _COMMUNICATION = {
@@ -108,7 +108,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
 
     def _python(self, source: str, record: FileRecord) -> list[Finding]:
         try:
-            tree = ast.parse(source, filename=record.path)
+            tree = parse_python(source, filename=record.path)
         except SyntaxError as exc:
             return [Finding(
                 "robotics", f"ROS Python parse error: {record.path}",

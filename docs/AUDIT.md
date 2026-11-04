@@ -55,6 +55,7 @@ Status values: **Fixed** (implemented and covered by regression tests) · **Open
 | PDT-108 | Local databases | On POSIX, the inventory DB was created with umask permissions before `chmod`; the `-wal`/`-shm` files and the fingerprint cache were never restricted. | Fixed |
 | PDT-109 | Rust walker | `to_string_lossy()` paths made non-UTF-8 names unopenable and allowed collisions. | Fixed |
 | PDT-110 | Native packaging | PyO3 0.23.5 refuses CPython 3.14, so the optional Rust walker silently disappeared on current Python (found on Ubuntu 26.04 / Python 3.14). Upgraded to PyO3 0.30.1; 3.14 added to CI. | Fixed |
+| PDT-225 | Redaction | The detector and redactor used separate token lists: Docker PATs, Stripe restricted keys and Azure AccountKey values were detected but copied verbatim into report excerpts. One shared registry (secret_patterns) now drives both. | Fixed |
 
 ### P2: correctness, precision and operability
 
@@ -71,10 +72,10 @@ Status values: **Fixed** (implemented and covered by regression tests) · **Open
 | PDT-209 | ML | Substring device tokens (`mps` matched `dumps`, `tpu` matched `output`), and training/dataset findings were not gated on ML imports. | Fixed |
 | PDT-210 | API types | The REST pattern matched every `.get(` call; the GraphQL pattern matched prose. | Fixed |
 | PDT-211 | Secure code | False positives from `RegExp.exec`, Go `db.Exec`, `sprintf` in non-C code and `open(filename)`. Positional `SafeLoader` was flagged, and import aliases went unresolved. | Fixed |
-| PDT-212 | Import graph | `src/` layouts left absolute imports unresolved (640 on a self-scan). | Open |
-| PDT-213 | Python AST | One finding per function, class and import made up 69% of all findings, which bloats reports at scale. | Open |
+| PDT-212 | Import graph | `src/` layouts left absolute imports unresolved (640 on a self-scan). | Fixed |
+| PDT-213 | Python AST | One finding per function, class and import made up 69% of all findings, which bloats reports at scale. | Fixed |
 | PDT-214 | Registry | `languages` was a string instead of a tuple in 3 analyzers, so it serialized as single characters. | Fixed |
-| PDT-215 | Secrets | UTF-8 was split at chunk boundaries; read failures were reported as MEDIUM security findings; detection and redaction token lists had drifted; archives used weaker rules. | Open |
+| PDT-215 | Secrets | UTF-8 was split at chunk boundaries; read failures were reported as MEDIUM security findings; detection and redaction token lists had drifted; archives used weaker rules. | Fixed |
 | PDT-216 | Coverage visibility | Analyzer exceptions produced diagnostics only, with no `UNKNOWN` finding. | Fixed |
 | PDT-217 | Reports | Findings were ordered by SHA-256 key rather than by severity. | Fixed |
 | PDT-218 | Terminal | The security summary omitted file locations. | Fixed |

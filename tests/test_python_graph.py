@@ -230,3 +230,42 @@ def test_graph_marks_partial_when_duplicate_module_candidates_are_capped(
         item.confidence == "UNKNOWN" and "resource limit" in item.title.lower()
         for item in findings
     )
+
+
+def _write(root: Path, files: dict[str, str]) -> list[FileRecord]:
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    return [_record(root, relative) for relative in files]
+
+
+def test_absolute_imports_resolve_through_src_layout_package_roots(tmp_path: Path):
+    # Regression: module names were derived from the repository root ("src.pkg.a"), so
+    # absolute imports of "pkg.a" in a src/ layout never resolved.
+    records = _write(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/a.py": "from pkg import b\nfrom pkg.b import helper\n",
+        "src/pkg/b.py": "def helper():\n    return 1\n",
+        "tests/test_a.py": "import pkg.a\nfrom pkg.b import helper\nimport json\n",
+    })
+    graph, _ = analyze_python_dependencies(tmp_path, records)
+    edges = {(edge["source"], edge["target"]) for edge in graph["edges"]}
+    assert ("src.pkg.a", "src.pkg.b") in edges
+    assert ("tests.test_a", "src.pkg.a") in edges
+    assert ("tests.test_a", "src.pkg.b") in edges
+    unresolved = {item["import"] for item in graph["unresolved_imports"]}
+    assert unresolved == {"json"}
+
+
+def test_package_aliases_shared_by_several_subprojects_are_ambiguous(tmp_path: Path):
+    records = _write(tmp_path, {
+        "one/pkgx/__init__.py": "",
+        "one/pkgx/mod.py": "",
+        "two/pkgx/__init__.py": "",
+        "two/pkgx/mod.py": "",
+        "app.py": "import pkgx.mod\n",
+    })
+    graph, _ = analyze_python_dependencies(tmp_path, records)
+    assert not [edge for edge in graph["edges"] if edge["source"] == "app"]
+    ambiguous = [item for item in graph["unresolved_imports"] if item["reason"] == "ambiguous_package_alias"]
+    assert ambiguous and ambiguous[0]["candidates"] == ["one.pkgx.mod", "two.pkgx.mod"]

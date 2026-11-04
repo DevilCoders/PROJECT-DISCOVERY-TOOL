@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import read_text_bounded
+from ..source_utils import parse_python, read_text_bounded
 from ..language_catalog import source_extensions, source_language_names
 
 
@@ -98,7 +98,7 @@ _OPERATIONS = {
 
 def _python_imports(source: str, relative: str) -> tuple[dict[str, set[int]], dict[str, set[int]]]:
     try:
-        tree = ast.parse(source, filename=relative)
+        tree = parse_python(source, filename=relative)
     except SyntaxError:
         return {}, {}
     imports: dict[str, set[int]] = {}

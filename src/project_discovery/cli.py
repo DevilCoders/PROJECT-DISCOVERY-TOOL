@@ -4,10 +4,8 @@ import heapq
 import os
 import platform
 import sqlite3
-import stat
-import threading
 from collections import Counter, deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +23,10 @@ from rich.text import Text
 from rich.panel import Panel
 
 from . import __version__
+from .analysis_engine import (
+    BATCH_MAX_BYTES, BATCH_MAX_FILES, EXECUTOR_MODES, AnalysisExecutor, FileOutcome, FileTask,
+    verified_regular_file_stat,
+)
 from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
 from .analyzers.tree_sitter_analyzer import parser_capabilities
@@ -35,12 +37,12 @@ from .inventory_store import (
 from .comparison import compare_many_reports, load_report, write_comparison
 from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
-from .models import Finding, ScanResult
+from .models import ScanResult
 from .python_graph import analyze_python_dependencies
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
-from .scanner import discover_inventory, sha256_file
-from .source_utils import identity_matches, redact_source_excerpt, stat_identity
+from .runtime_metrics import PhaseTimer, peak_rss_bytes
+from .scanner import discover_inventory
 from .native_backend import capabilities as native_capabilities, native_available
 from .vulnerability_db import VulnerabilityDatabase, default_database_path
 from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
@@ -50,18 +52,8 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _verified_regular_file_stat(path: Path, expected=None):
-    """Reject symlink/non-regular substitutions and detect file identity changes.
-
-    This narrows path-based TOCTOU exposure. Analyzer adapters still open paths
-    independently, so descriptor-pinned reads remain a separate hardening task.
-    """
-    current = path.lstat()
-    if not stat.S_ISREG(current.st_mode):
-        raise OSError(f"refusing to analyze non-regular or symlink entry: {path}")
-    if expected is not None and not identity_matches(expected, stat_identity(current)):
-        raise OSError(f"file identity changed during scan; refusing analysis: {path}")
-    return current
+# Kept under its historical name; the guard lives in the analysis engine.
+_verified_regular_file_stat = verified_regular_file_stat
 
 
 def _status(console: Console, label: str, message: str, style: str) -> None:
@@ -178,7 +170,7 @@ def run_scan(
     *, skip_oversized: bool = False, ignores: set[str] | None = None,
     vulnerability_db: Path | None = None, jobs: int = 0,
     fail_on: str | None = None, strict: bool = False,
-    quiet: bool = False, no_color: bool = False,
+    quiet: bool = False, no_color: bool = False, executor: str = "auto",
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -219,6 +211,7 @@ def run_scan(
     _render_banner(console)
     _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
     started = now()
+    timer = PhaseTimer()
     inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
     with InventoryStore(inventory_path) as inventory_store, console.status(
         "Inventorying filesystem entries…", spinner="dots",
@@ -230,6 +223,7 @@ def run_scan(
             ignores=ignores,
             store=inventory_store,
         )
+    timer.lap("inventory")
     analyzer_load = load_analyzers()
     analyzers = analyzer_load.analyzers
     if vulnerability_db is not None:
@@ -238,12 +232,6 @@ def run_scan(
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
     hardware_threads = max(1, int(native_capabilities().get("hardware_threads", os.cpu_count() or 1)))
     worker_count = jobs or max(1, min(8, hardware_threads * 2))
-    max_pending = max(worker_count, worker_count * 2)
-    analyzer_locks = {
-        id(analyzer): threading.Lock()
-        for analyzer in analyzers
-        if not getattr(analyzer, "concurrent_safe", True)
-    }
     record_updates = []
 
     def persist_record(record):
@@ -253,61 +241,6 @@ def run_scan(
                 records.update_records(record_updates)
                 record_updates.clear()
 
-    def analyze_one(record, path, digest_hint, expected_stat):
-        """Return (digest, findings, diagnostics, file_error) for one inventoried file.
-
-        file_error is set only when the file itself could not be trusted or read; an
-        individual analyzer failure is reported as a diagnostic plus an UNKNOWN finding.
-        """
-        local_findings = []
-        local_errors = []
-        digest = digest_hint
-        try:
-            _verified_regular_file_stat(path, expected_stat)
-            if digest is None:
-                digest = sha256_file(path, expected_info=expected_stat)
-        except OSError as exc:
-            message = f"{record.path}: {type(exc).__name__}: {exc}"
-            return None, [], [message], message
-        for analyzer in analyzers:
-            try:
-                lock = analyzer_locks.get(id(analyzer))
-                if lock is None:
-                    supported = analyzer.supports(record)
-                    if supported:
-                        local_findings.extend(analyzer.analyze(path, record))
-                        record.analyzed = True
-                else:
-                    with lock:
-                        supported = analyzer.supports(record)
-                        if supported:
-                            local_findings.extend(analyzer.analyze(path, record))
-                            record.analyzed = True
-            except Exception as exc:
-                message = redact_source_excerpt(f"{type(exc).__name__}: {exc}")
-                local_errors.append(f"{record.path} [{analyzer.name}]: {message}")
-                # Keep coverage gaps visible in the findings, not only in diagnostics.
-                local_findings.append(Finding(
-                    "analysis_coverage",
-                    f"Analyzer failed: {analyzer.name}: {record.path}",
-                    f"{message}. This analyzer did not complete for the file; absence of "
-                    "its findings is not evidence of absence.",
-                    confidence="UNKNOWN",
-                    evidence=[record.path],
-                    analyzer=analyzer.name,
-                    severity="LOW",
-                ))
-        try:
-            _verified_regular_file_stat(path, expected_stat)
-        except OSError as exc:
-            # Findings produced while the path changed are not trustworthy.
-            local_findings.clear()
-            record.analyzed = False
-            message = f"{record.path}: {type(exc).__name__}: {exc}"
-            local_errors.append(message)
-            return None, [], local_errors, message
-        return digest, local_findings, local_errors, None
-
     progress_columns = (
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -315,52 +248,90 @@ def run_scan(
         MofNCompleteColumn(),
         TimeElapsedColumn(),
     )
-    with InventoryStore(inventory_path) as finding_store, ScanCache(cache_path) as cache:
-        finding_store.extend_diagnostics(analyzer_load.diagnostics)
-        with Progress(*progress_columns, console=console) as progress:
-            task = progress.add_task("Analyzing project files", total=len(records))
-            pending = deque()
+    # The worker pool serves both per-file analysis and import-graph parsing.
+    engine = AnalysisExecutor(
+        executor, worker_count, analyzers,
+        file_count=len(records), vulnerability_db=vulnerability_db,
+    )
+    try:
+        with InventoryStore(inventory_path) as finding_store, ScanCache(cache_path) as cache:
+            finding_store.extend_diagnostics(analyzer_load.diagnostics)
+            with Progress(*progress_columns, console=console) as progress:
+                task = progress.add_task("Analyzing project files", total=len(records))
+                max_pending = max(2, engine.workers * 2)
+                pending: deque = deque()
+                batch: list[FileTask] = []
+                batch_bytes = 0
 
-            def collect_one():
-                future, record, file_stat, cache_miss = pending.popleft()
-                try:
-                    digest, file_findings, file_errors, file_error = future.result()
-                    finding_store.extend_findings(file_findings)
-                    finding_store.extend_diagnostics(file_errors)
-                    if file_error:
-                        record.error = file_error
-                    elif digest and not cache_miss:
-                        record.sha256 = digest
-                    elif digest:
-                        current_stat = _verified_regular_file_stat(root / record.path, file_stat)
-                        stable = (
-                            current_stat.st_size == file_stat.st_size
-                            and current_stat.st_mtime_ns == file_stat.st_mtime_ns
-                            and current_stat.st_ctime_ns == file_stat.st_ctime_ns
-                            and current_stat.st_ino == file_stat.st_ino
-                        )
-                        if stable:
+                def batch_outcomes(future, tasks):
+                    try:
+                        return future.result()
+                    except BrokenProcessPool:
+                        # A worker died (native fault or OOM kill). Restart the pool and rerun
+                        # this batch file by file so only the culprit file is lost.
+                        engine.restart()
+                        outcomes = []
+                        for item in tasks:
+                            try:
+                                outcomes.extend(engine.submit([item]).result())
+                            except BrokenProcessPool:
+                                engine.restart()
+                                message = f"{item.record.path}: analysis worker process terminated"
+                                outcomes.append(FileOutcome(file_error=message, errors=[message]))
+                        return outcomes
+
+                def collect_one():
+                    future, tasks = pending.popleft()
+                    for item, outcome in zip(tasks, batch_outcomes(future, tasks), strict=True):
+                        apply_outcome(item, outcome)
+
+                def flush_batch():
+                    nonlocal batch, batch_bytes
+                    if batch:
+                        pending.append((engine.submit(batch), batch))
+                        batch, batch_bytes = [], 0
+                    while len(pending) >= max_pending:
+                        collect_one()
+
+                def apply_outcome(item: FileTask, outcome: FileOutcome):
+                    record, file_stat = item.record, item.expected_stat
+                    cache_miss = item.digest_hint is None
+                    try:
+                        record.analyzed = outcome.analyzed
+                        finding_store.extend_findings(outcome.findings)
+                        finding_store.extend_diagnostics(outcome.errors)
+                        digest = outcome.digest
+                        if outcome.file_error:
+                            record.error = outcome.file_error
+                        elif digest and not cache_miss:
                             record.sha256 = digest
-                            cache.put(
-                                str(root), record.path, file_stat.st_size,
-                                file_stat.st_mtime_ns, file_stat.st_ctime_ns,
-                                file_stat.st_ino, digest,
+                        elif digest:
+                            current_stat = _verified_regular_file_stat(root / record.path, file_stat)
+                            stable = (
+                                current_stat.st_size == file_stat.st_size
+                                and current_stat.st_mtime_ns == file_stat.st_mtime_ns
+                                and current_stat.st_ctime_ns == file_stat.st_ctime_ns
+                                and current_stat.st_ino == file_stat.st_ino
                             )
-                        else:
-                            message = f"{record.path}: file changed while scan was in progress"
-                            record.error = message
-                            finding_store.append_diagnostic(message)
-                except Exception as exc:
-                    message = f"{record.path}: {type(exc).__name__}: {exc}"
-                    record.error = message
-                    finding_store.append_diagnostic(message)
-                finally:
-                    persist_record(record)
-                    progress.advance(task)
+                            if stable:
+                                record.sha256 = digest
+                                cache.put(
+                                    str(root), record.path, file_stat.st_size,
+                                    file_stat.st_mtime_ns, file_stat.st_ctime_ns,
+                                    file_stat.st_ino, digest,
+                                )
+                            else:
+                                message = f"{record.path}: file changed while scan was in progress"
+                                record.error = message
+                                finding_store.append_diagnostic(message)
+                    except Exception as exc:
+                        message = f"{record.path}: {type(exc).__name__}: {exc}"
+                        record.error = message
+                        finding_store.append_diagnostic(message)
+                    finally:
+                        persist_record(record)
+                        progress.advance(task)
 
-            with ThreadPoolExecutor(
-                max_workers=worker_count, thread_name_prefix="pdt-analyzer"
-            ) as executor:
                 for record in records:
                     counts[record.language] += 1
                     if record.error or record.content_skipped_reason:
@@ -383,31 +354,42 @@ def run_scan(
                             and cached[3] == file_stat.st_ino
                         )
                         digest_hint = cached[4] if cache_hit else None
-                        future = executor.submit(analyze_one, record, path, digest_hint, file_stat)
-                        pending.append((future, record, file_stat, not cache_hit))
-                        if len(pending) >= max_pending:
-                            collect_one()
                     except OSError as exc:
                         record.error = str(exc)
                         finding_store.append_diagnostic(record.path + ": " + str(exc))
                         persist_record(record)
                         progress.advance(task)
+                        continue
+                    batch.append(FileTask(record, str(path), digest_hint, file_stat))
+                    batch_bytes += record.size_bytes
+                    if len(batch) >= BATCH_MAX_FILES or batch_bytes >= BATCH_MAX_BYTES:
+                        flush_batch()
+                flush_batch()
                 while pending:
                     collect_one()
-            if record_updates:
-                records.update_records(record_updates)
-                record_updates.clear()
+                if record_updates:
+                    records.update_records(record_updates)
+                    record_updates.clear()
 
-        if walk_stats.get("walk_errors", 0) == 0:
-            cache.prune_missing(str(root), (record.path for record in records))
+            timer.lap("analysis")
+            if walk_stats.get("walk_errors", 0) == 0:
+                cache.prune_missing(str(root), (record.path for record in records))
+            timer.lap("cache_maintenance")
 
-    with InventoryStore(inventory_path) as finding_store:
-        python_graph, graph_findings = analyze_python_dependencies(
-            root, records, finding_sink=finding_store.append_finding,
-        )
-        architecture_layout, architecture_findings = analyze_project_architecture(records)
-        finding_store.extend_findings(graph_findings)
-        finding_store.extend_findings(architecture_findings)
+        with InventoryStore(inventory_path) as finding_store:
+            python_graph, graph_findings = analyze_python_dependencies(
+                root, records, finding_sink=finding_store.append_finding,
+                import_parser=lambda items: engine.map_python_imports(root, items),
+            )
+            timer.lap("python_graph")
+            architecture_layout, architecture_findings = analyze_project_architecture(records)
+            finding_store.extend_findings(graph_findings)
+            finding_store.extend_findings(architecture_findings)
+    except BaseException:
+        engine.shutdown(cancel=True)
+        raise
+    engine.shutdown()
+    timer.lap("architecture")
     findings = StoredFindingRecords(inventory_path)
     errors = StoredDiagnosticRecords(inventory_path)
     domain_catalog = analyzer_domain_catalog()
@@ -422,9 +404,11 @@ def run_scan(
         "native_backend": native_capabilities(),
         "native_extension_available": native_available(),
         "execution": {
-            "mode": "bounded-thread-pool",
-            "worker_count": worker_count,
+            "mode": f"bounded-{engine.mode}-pool",
+            "executor": engine.mode,
+            "worker_count": engine.workers,
             "max_pending_tasks": max_pending,
+            "batch_max_files": BATCH_MAX_FILES,
             "ordering": "deterministic-submission-order",
         },
         "vulnerability_intelligence": vulnerability_db_status,
@@ -505,6 +489,14 @@ def run_scan(
             item["id"] for item in domain_catalog if item["status"] == "partial"
         ],
         "python_dependency_graph": python_graph,
+        "performance": {
+            "phase_seconds": dict(timer.phases),
+            "elapsed_seconds_before_reporting": timer.elapsed(),
+            "files_per_second": round(len(records) / max(timer.elapsed(), 1e-9), 1),
+            "bytes_per_second": round(walk_stats.get("total_bytes", 0) / max(timer.elapsed(), 1e-9)),
+            "peak_rss_bytes": peak_rss_bytes(),
+            "peak_rss_scope": "coordinator process (worker processes are separate)",
+        },
         "architecture_layout": architecture_layout,
     }
     result = ScanResult(
@@ -515,6 +507,7 @@ def run_scan(
         special_entries=special_entries,
     )
     reports = write_reports(result, output, formats)
+    timer.lap("reporting")
     for report in reports:
         _status(console, "SUCCESS", "Report: " + str(report), "green")
 
@@ -542,7 +535,16 @@ def run_scan(
     summary.add_row("GPU acceleration", metrics["native_backend"].get("gpu_status", "cpu-fallback"))
     summary.add_row("GPU byte-count dispatches", str(metrics["native_backend"].get("gpu_dispatches", 0)))
     summary.add_row("GPU CPU fallbacks", str(metrics["native_backend"].get("gpu_fallbacks", 0)))
-    summary.add_row("Analysis workers", str(metrics["execution"]["worker_count"]))
+    summary.add_row(
+        "Analysis workers",
+        f"{metrics['execution']['worker_count']} ({metrics['execution']['executor']}s)",
+    )
+    summary.add_row(
+        "Phase timings",
+        " / ".join(f"{name} {seconds:.1f}s" for name, seconds in timer.phases.items()),
+    )
+    rss = metrics["performance"]["peak_rss_bytes"]
+    summary.add_row("Peak coordinator memory", f"{rss / 1024 / 1024:,.0f} MiB" if rss else "unavailable")
     summary.add_row(
         "Local vulnerability advisories",
         str(vulnerability_db_status.get("advisory_count", 0))
@@ -632,6 +634,11 @@ def main() -> None:
     scan.add_argument(
         "--strict", action="store_true",
         help="Exit with status 3 when any file, analyzer or traversal error left the scan incomplete",
+    )
+    scan.add_argument(
+        "--executor", choices=EXECUTOR_MODES, default="auto",
+        help="Analysis executor: worker processes (parallel CPU), threads, or auto "
+             "(processes for large inventories; default: auto)",
     )
     scan.add_argument("--quiet", action="store_true", help="Suppress console output except errors")
     scan.add_argument(
@@ -734,7 +741,7 @@ def main() -> None:
                 skip_oversized=args.skip, ignores=set(args.exclude_dir),
                 vulnerability_db=args.vuln_db, jobs=args.jobs,
                 fail_on=args.fail_on, strict=args.strict,
-                quiet=args.quiet, no_color=args.no_color,
+                quiet=args.quiet, no_color=args.no_color, executor=args.executor,
             ))
 
         if not formats or formats - {"json", "markdown"}:

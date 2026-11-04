@@ -103,11 +103,11 @@ def test_tar_member_content_is_scanned_without_extracting(tmp_path: Path):
         archive.addfile(member, io.BytesIO(payload))
     before = path.read_bytes()
     findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "credentials.tar"))
-    assert any("Cloud Access-Key Identifier inside archive member" in item.title for item in findings)
+    assert any("Provider Credential Token inside archive member" in item.title for item in findings)
     serialized = repr([item.to_dict() for item in findings])
     assert "AKIAABCDEFGHIJKLMNOP" not in serialized
     assert "credentials.tar::config/.env" in serialized
-    credential = next(item for item in findings if "Cloud Access-Key Identifier" in item.title)
+    credential = next(item for item in findings if "Provider Credential Token" in item.title)
     assert credential.code_evidence[0].line_number == 1
     assert "AKIAABCDEFGHIJKLMNOP" not in credential.code_evidence[0].code
     assert credential.impact and credential.recommendation

@@ -9,9 +9,14 @@ def test_python_analyzer_extracts_symbols_without_execution(tmp_path: Path):
     rec = FileRecord("sample.py",source.stat().st_size,".py","Python")
     findings = PythonAnalyzer().analyze(source,rec)
     titles = [f.title for f in findings]
-    assert "Class: Widget" in titles
-    assert "Function: helper" in titles
-    assert "Python import: os" in titles
+    module = next(f for f in findings if f.title == "Python module: sample.py")
+    assert "sample.py:2 (class Widget)" in module.evidence
+    assert "sample.py:4 (function helper)" in module.evidence
+    imports = next(f for f in findings if f.title == "Python imports: sample.py")
+    assert imports.evidence == ["os"]
+    # Symbol listings are aggregated per module, not emitted as one finding per symbol.
+    assert len(findings) == 2
+    assert titles == ["Python module: sample.py", "Python imports: sample.py"]
 
 def test_markdown_analyzer_counts_headings(tmp_path: Path):
     source = tmp_path/"README.md"

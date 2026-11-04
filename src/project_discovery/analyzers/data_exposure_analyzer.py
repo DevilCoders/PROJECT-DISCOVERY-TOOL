@@ -24,6 +24,11 @@ _PII_FIELDS = {
     "date_of_birth": re.compile(r"(?i)\b(?:date_?of_?birth|birth_?date|dob)\b"),
     "government_id": re.compile(r"(?i)\b(?:ssn|social_?security|passport_?number|national_?id)\b"),
 }
+# One pass per line: a named-group alternation reports which PII categories appear.
+_PII_ANY = re.compile(
+    "|".join(f"(?P<{name}>{pattern.pattern.removeprefix('(?i)')})" for name, pattern in _PII_FIELDS.items()),
+    re.IGNORECASE,
+)
 _SECRET_FIELDS = re.compile(
     r"(?i)\b(?:password|passwd|passphrase|api[_-]?key|client[_-]?secret|"
     r"access[_-]?token|refresh[_-]?token|private[_-]?key|secret)\b"
@@ -102,27 +107,27 @@ class DataExposureAnalyzer(Analyzer):
                     bytes_scanned += len(raw_line)
                     line = raw_line.decode("utf-8", errors="replace")
                     current_line = line_number
-                    excerpt = redact_source_excerpt(line)
+                    # Redaction is the costliest step; only redact lines that are kept.
+                    excerpt: str | None = None
 
-                    for field_name, pattern in _PII_FIELDS.items():
-                        if (
-                            pattern.search(line)
-                            and field_last_line.get(field_name) != current_line
-                        ):
+                    for field_name in {match.lastgroup for match in _PII_ANY.finditer(line)}:
+                        if field_last_line.get(field_name) != current_line:
                             field_last_line[field_name] = current_line
                             field_line_counts[field_name] = field_line_counts.get(field_name, 0) + 1
                             samples = field_line_samples.setdefault(field_name, [])
                             if len(samples) < _MAX_EVIDENCE_LINES:
                                 samples.append(current_line)
                             if len(samples) <= _MAX_CODE_EXCERPTS:
+                                excerpt = excerpt or redact_source_excerpt(line)
                                 field_excerpts[(field_name, current_line)] = excerpt
 
-                    if _EMAIL.search(line) and email_last_line != current_line:
+                    if "@" in line and _EMAIL.search(line) and email_last_line != current_line:
                         email_last_line = current_line
                         email_line_count += 1
                         if len(email_lines) < _MAX_EVIDENCE_LINES:
                             email_lines.append(current_line)
                         if len(email_excerpts) < _MAX_CODE_EXCERPTS:
+                            excerpt = excerpt or redact_source_excerpt(line)
                             email_excerpts[current_line] = excerpt
 
                     if _SECRET_FIELDS.search(line) and secret_last_line != current_line:
@@ -131,6 +136,7 @@ class DataExposureAnalyzer(Analyzer):
                         if len(secret_field_lines) < _MAX_EVIDENCE_LINES:
                             secret_field_lines.append(current_line)
                         if len(secret_excerpts) < _MAX_CODE_EXCERPTS:
+                            excerpt = excerpt or redact_source_excerpt(line)
                             secret_excerpts[current_line] = excerpt
 
                     if line.endswith(("\n", "\r")):

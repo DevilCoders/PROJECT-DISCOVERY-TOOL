@@ -9,7 +9,7 @@ from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..language_catalog import source_extensions, source_language_names
 from ..source_utils import (
-    SourceBudgetExceeded, open_verified_text, read_python_source_bounded,
+    SourceBudgetExceeded, open_verified_text, parse_python, read_python_source_bounded,
 )
 
 
@@ -72,7 +72,7 @@ def _literal(node: ast.AST) -> str | None:
 
 
 def _python_routes(source: str, relative: str) -> list[tuple[str, str, int]]:
-    tree = ast.parse(source, filename=relative)
+    tree = parse_python(source, filename=relative)
     routes: list[tuple[str, str, int]] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

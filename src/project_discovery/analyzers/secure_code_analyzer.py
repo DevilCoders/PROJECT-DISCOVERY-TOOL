@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
-from ..source_utils import open_verified_binary, redact_source_excerpt
+from ..source_utils import open_verified_binary, parse_python, redact_source_excerpt
 from ..language_catalog import is_source_path, source_language_names
 
 
@@ -446,7 +446,7 @@ class SecureCodePatternAnalyzer(Analyzer):
         matches: dict[str, set[int]] = {}
         if record.extension in {".py", ".pyi"}:
             try:
-                matches = _python_rules(ast.parse(source, filename=record.path))
+                matches = _python_rules(parse_python(source, filename=record.path))
             except (SyntaxError, RecursionError, MemoryError) as exc:
                 return [Finding(
                     "security",

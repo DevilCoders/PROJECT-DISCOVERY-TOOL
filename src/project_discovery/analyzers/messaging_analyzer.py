@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import read_text_bounded
+from ..source_utils import parse_python, read_text_bounded
 
 
 _SOURCE_EXTENSIONS = {
@@ -52,7 +52,7 @@ _OPERATIONS = {
 
 def _python_scan(source: str, relative: str):
     try:
-        tree = ast.parse(source, filename=relative)
+        tree = parse_python(source, filename=relative)
     except SyntaxError:
         return {}, {}
     imports: dict[str, set[int]] = {}

@@ -6,9 +6,9 @@ Only imports resolved to inventoried modules become confirmed graph edges.
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from importlib.util import resolve_name
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .models import FileRecord, Finding
@@ -30,6 +30,23 @@ def _module_name(relative_path: str) -> str | None:
     if parts[-1] == "__init__":
         parts.pop()
     if not parts or any(not part.isidentifier() for part in parts):
+        return None
+    return ".".join(parts)
+
+
+def _import_name(relative_path: str, package_dirs: set[str]) -> str | None:
+    """Return the absolute import name implied by the enclosing package chain.
+
+    Python resolves ``import pkg.mod`` from the directory above the topmost package
+    (a directory with ``__init__.py``), so ``src/pkg/mod.py`` imports as ``pkg.mod``.
+    """
+    path = PurePosixPath(relative_path)
+    parts = [] if path.stem == "__init__" else [path.stem]
+    directory = path.parent
+    while directory.as_posix() in package_dirs:
+        parts.insert(0, directory.name)
+        directory = directory.parent
+    if not parts or not all(part.isidentifier() for part in parts):
         return None
     return ".".join(parts)
 
@@ -83,11 +100,42 @@ def _strongly_connected_components(
     return sorted(components)
 
 
+def parse_python_imports(root: Path, record: FileRecord) -> tuple:
+    """Read and parse one module; return a compact, picklable import summary.
+
+    Results: ("ok", [(line, level, module, names, is_import), ...]),
+    ("budget", detail), ("read_error", exc_name, line) or ("parse_error", exc_name, line).
+    """
+    try:
+        source_text = read_python_source_bounded(
+            root / record.path, MAX_GRAPH_AST_FILE_BYTES,
+            expected_identity=record.analysis_identity,
+        )
+    except SourceBudgetExceeded as exc:
+        return ("budget", str(exc))
+    except (OSError, ValueError, SyntaxError, LookupError) as exc:
+        return ("read_error", type(exc).__name__, getattr(exc, "lineno", None))
+    try:
+        tree = ast.parse(source_text, filename=record.path)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        return ("parse_error", type(exc).__name__, getattr(exc, "lineno", None))
+    statements = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            statements.append((node.lineno, 0, None, tuple(a.name for a in node.names), True))
+        elif isinstance(node, ast.ImportFrom):
+            statements.append((
+                node.lineno, node.level, node.module, tuple(a.name for a in node.names), False,
+            ))
+    return ("ok", statements)
+
+
 def analyze_python_dependencies(
     root: Path,
     records: Sequence[FileRecord],
     *,
     finding_sink: Callable[[Finding], None] | None = None,
+    import_parser: Callable[[list[FileRecord]], Iterable[tuple]] | None = None,
 ) -> tuple[dict[str, Any], list[Finding]]:
     """Build a local Python import graph under explicit memory ceilings.
 
@@ -98,6 +146,7 @@ def analyze_python_dependencies(
     """
     module_paths: dict[str, list[str]] = {}
     module_path_counts: dict[str, int] = {}
+    package_dirs: set[str] = set()
     eligible: dict[str, FileRecord] = {}
     skipped_modules: list[dict[str, str | int]] = []
     omitted_module_record_count = 0
@@ -113,6 +162,8 @@ def analyze_python_dependencies(
     for record in records:
         if record.extension not in {".py", ".pyi"} or record.error:
             continue
+        if PurePosixPath(record.path).stem == "__init__" and len(package_dirs) < MAX_GRAPH_MODULES:
+            package_dirs.add(PurePosixPath(record.path).parent.as_posix())
         module = _module_name(record.path)
         if module is None:
             continue
@@ -167,6 +218,18 @@ def analyze_python_dependencies(
         for name in duplicate_modules
     )
     known_modules = set(unique_modules) | set(duplicate_modules)
+    # Absolute-import aliases from package roots (src/ layouts, monorepo subprojects).
+    package_aliases: dict[str, set[str]] = {}
+    for name, paths in module_paths.items():
+        import_name = _import_name(paths[0], package_dirs)
+        if import_name and import_name != name and import_name not in known_modules:
+            package_aliases.setdefault(import_name, set()).add(name)
+
+    def canonical(target: str) -> str | None:
+        if target in known_modules:
+            return target
+        owners = package_aliases.get(target)
+        return next(iter(owners)) if owners and len(owners) == 1 else None
     edges: list[dict[str, Any]] = []
     edge_keys: set[tuple[str, str, str, int, str]] = set()
     omitted_edge_candidate_count = 0
@@ -192,71 +255,56 @@ def analyze_python_dependencies(
             item["candidates"] = duplicate_modules[target]
         add_unresolved(item)
 
-    for source_module, record in sorted(eligible.items(), key=lambda item: item[1].path):
-        if source_module not in unique_modules:
-            continue
-        try:
-            source_text = read_python_source_bounded(
-                root / record.path, MAX_GRAPH_AST_FILE_BYTES,
-                expected_identity=record.analysis_identity,
-            )
-        except SourceBudgetExceeded as exc:
+    work = [
+        (module, record)
+        for module, record in sorted(eligible.items(), key=lambda item: item[1].path)
+        if module in unique_modules
+    ]
+    # Parsing can be farmed out (the CLI uses its worker pool); results arrive in order.
+    parsed_results = (
+        import_parser([record for _, record in work]) if import_parser is not None
+        else (parse_python_imports(root, record) for _, record in work)
+    )
+    for (source_module, record), parsed in zip(work, parsed_results, strict=True):
+        status = parsed[0]
+        if status == "budget":
             add_unresolved({
                 "source": source_module,
                 "path": record.path,
                 "line": None,
                 "import": None,
                 "reason": "source_budget_exceeded",
-                "detail": str(exc),
+                "detail": parsed[1],
                 "confidence": "UNKNOWN",
             })
             emit(Finding(
                 "architecture",
                 f"Python dependency graph budget reached: {record.path}",
                 "The module was inventoried but its import graph could not be extracted: "
-                + str(exc),
+                + parsed[1],
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer="python-module-graph",
                 severity="LOW",
             ))
             continue
-        except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
+        if status in {"read_error", "parse_error"}:
             add_unresolved({
                 "source": source_module,
                 "path": record.path,
-                "line": getattr(exc, "lineno", None),
+                "line": parsed[2],
                 "import": None,
-                "reason": f"source_parse_error: {type(exc).__name__}",
+                "reason": f"source_parse_error: {parsed[1]}",
                 "confidence": "UNKNOWN",
             })
             emit(Finding(
                 "architecture",
-                f"Python dependency graph source unavailable: {record.path}",
-                "The inventoried source could not be read or decoded for graph extraction: "
-                + type(exc).__name__,
-                confidence="UNKNOWN",
-                evidence=[record.path],
-                analyzer="python-module-graph",
-                severity="LOW",
-            ))
-            continue
-        try:
-            tree = ast.parse(source_text, filename=record.path)
-        except (SyntaxError, RecursionError, MemoryError) as exc:
-            add_unresolved({
-                "source": source_module,
-                "path": record.path,
-                "line": getattr(exc, "lineno", None),
-                "import": None,
-                "reason": f"source_parse_error: {type(exc).__name__}",
-                "confidence": "UNKNOWN",
-            })
-            emit(Finding(
-                "architecture",
-                f"Python dependency graph parse unavailable: {record.path}",
-                "The module could not be parsed within interpreter limits: "
-                + type(exc).__name__,
+                f"Python dependency graph {'source unavailable' if status == 'read_error' else 'parse unavailable'}: {record.path}",
+                (
+                    "The inventoried source could not be read or decoded for graph extraction: "
+                    if status == "read_error" else
+                    "The module could not be parsed within interpreter limits: "
+                ) + parsed[1],
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer="python-module-graph",
@@ -266,16 +314,16 @@ def analyze_python_dependencies(
 
         is_package = Path(record.path).stem == "__init__"
         package = source_module if is_package else source_module.rpartition(".")[0]
-        for node in ast.walk(tree):
+        for lineno, level, module, names, is_import in parsed[1]:
             imports: list[tuple[str, str]] = []
-            if isinstance(node, ast.Import):
-                imports.extend((alias.name, alias.name) for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                import_text = "." * node.level + (node.module or "")
-                if node.level:
+            if is_import:
+                imports.extend((name, name) for name in names)
+            else:
+                import_text = "." * level + (module or "")
+                if level:
                     if not package:
                         record_unresolved(
-                            source_module, record.path, node.lineno, import_text,
+                            source_module, record.path, lineno, import_text,
                             "relative_import_without_package_context",
                         )
                         continue
@@ -283,43 +331,52 @@ def analyze_python_dependencies(
                         base = resolve_name(import_text, package)
                     except ImportError:
                         record_unresolved(
-                            source_module, record.path, node.lineno, import_text,
+                            source_module, record.path, lineno, import_text,
                             "relative_import_resolution_failed",
                         )
                         continue
                 else:
-                    base = node.module or ""
+                    base = module or ""
 
                 candidates: list[str] = []
-                if base and base in known_modules and base != source_module:
-                    candidates.append(base)
-                child_modules = [
-                    f"{base}.{alias.name}" for alias in node.names
-                    if alias.name != "*" and f"{base}.{alias.name}" in known_modules
-                ] if base else [
-                    alias.name for alias in node.names if alias.name in known_modules
+                resolved_base = canonical(base) if base else None
+                if resolved_base and resolved_base != source_module:
+                    candidates.append(resolved_base)
+                child_names = [
+                    f"{base}.{name}" if base else name
+                    for name in names if name != "*"
                 ]
-                candidates.extend(child_modules)
-                if not candidates and base in known_modules and base != source_module:
-                    candidates.append(base)
+                candidates.extend(
+                    resolved for name in child_names if (resolved := canonical(name))
+                )
                 if not candidates:
                     record_unresolved(
-                        source_module, record.path, node.lineno, base or import_text,
+                        source_module, record.path, lineno, base or import_text,
                         "not_resolved_to_inventoried_module",
                     )
                     continue
                 imports.extend((target, import_text) for target in sorted(set(candidates)))
 
             for target, import_text in imports:
+                if target in package_aliases and canonical(target) is None:
+                    item_candidates = sorted(package_aliases[target])
+                    add_unresolved({
+                        "source": source_module, "path": record.path, "line": lineno,
+                        "import": target, "reason": "ambiguous_package_alias",
+                        "candidates": item_candidates[:MAX_DUPLICATE_MODULE_PATHS],
+                        "confidence": "UNKNOWN",
+                    })
+                    continue
+                target = canonical(target) or target
                 if target in duplicate_modules:
                     record_unresolved(
-                        source_module, record.path, node.lineno, target,
+                        source_module, record.path, lineno, target,
                         "ambiguous_duplicate_module",
                     )
                     continue
                 if target not in unique_modules:
                     record_unresolved(
-                        source_module, record.path, node.lineno, target,
+                        source_module, record.path, lineno, target,
                         "not_resolved_to_inventoried_module",
                     )
                     continue
@@ -328,7 +385,7 @@ def analyze_python_dependencies(
                     "target": target,
                     "source_path": record.path,
                     "target_path": unique_modules[target],
-                    "line": node.lineno,
+                    "line": lineno,
                     "import": import_text,
                     "confidence": "CONFIRMED",
                 }
@@ -346,9 +403,9 @@ def analyze_python_dependencies(
                     emit(Finding(
                         "dependency",
                         f"Internal Python dependency: {source_module} -> {target}",
-                        f"Static import resolves to an inventoried module at line {node.lineno}.",
+                        f"Static import resolves to an inventoried module at line {lineno}.",
                         confidence="CONFIRMED",
-                        evidence=[f"{record.path}:{node.lineno}", unique_modules[target]],
+                        evidence=[f"{record.path}:{lineno}", unique_modules[target]],
                         analyzer="python-module-graph",
                     ))
 

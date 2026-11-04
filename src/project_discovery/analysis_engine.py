@@ -1,0 +1,232 @@
+"""Per-file analysis execution in a thread pool or a multi-process pool.
+
+Analyzers are CPU-bound Python, so threads share one interpreter lock; large scans use
+worker processes instead. Workers never touch the scan databases: they return outcomes
+that the coordinator persists in deterministic submission order.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import stat
+import threading
+from collections import deque
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterator, Sequence
+
+from .models import FileRecord, Finding
+from .scanner import sha256_file
+from .source_utils import (
+    identity_matches,
+    open_verified_binary,
+    prefetched_content,
+    redact_source_excerpt,
+    stat_identity,
+)
+
+# Files up to this size are read once per worker and served to every analyzer.
+PREFETCH_MAX_BYTES = 4 * 1024 * 1024
+# Small files are grouped into one task to amortize inter-process overhead.
+BATCH_MAX_FILES = 32
+BATCH_MAX_BYTES = 4 * 1024 * 1024
+# Below this many files a process pool's start-up cost outweighs its parallelism.
+PROCESS_POOL_MIN_FILES = 1000
+EXECUTOR_MODES = ("auto", "process", "thread")
+
+
+@dataclass(slots=True)
+class FileOutcome:
+    digest: str | None = None
+    findings: list[Finding] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    file_error: str | None = None
+    analyzed: bool = False
+
+
+@dataclass(slots=True)
+class FileTask:
+    record: FileRecord
+    path: str
+    digest_hint: str | None
+    expected_stat: os.stat_result
+
+
+def verified_regular_file_stat(path: Path, expected=None) -> os.stat_result:
+    """Reject symlink/non-regular substitutions and detect file identity changes."""
+    current = path.lstat()
+    if not stat.S_ISREG(current.st_mode):
+        raise OSError(f"refusing to analyze non-regular or symlink entry: {path}")
+    if expected is not None and not identity_matches(expected, stat_identity(current)):
+        raise OSError(f"file identity changed during scan; refusing analysis: {path}")
+    return current
+
+
+def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: FileOutcome) -> None:
+    for analyzer in analyzers:
+        try:
+            lock = locks.get(id(analyzer))
+            with lock if lock is not None else nullcontext():
+                if analyzer.supports(record):
+                    outcome.findings.extend(analyzer.analyze(path, record))
+                    outcome.analyzed = True
+        except Exception as exc:
+            message = redact_source_excerpt(f"{type(exc).__name__}: {exc}")
+            outcome.errors.append(f"{record.path} [{analyzer.name}]: {message}")
+            # Keep coverage gaps visible in the findings, not only in diagnostics.
+            outcome.findings.append(Finding(
+                "analysis_coverage",
+                f"Analyzer failed: {analyzer.name}: {record.path}",
+                f"{message}. This analyzer did not complete for the file; absence of "
+                "its findings is not evidence of absence.",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=analyzer.name,
+                severity="LOW",
+            ))
+
+
+def analyze_file(analyzers, locks, task: FileTask) -> FileOutcome:
+    """Analyze one inventoried file; file_error is set only if the file is untrusted."""
+    record, path = task.record, Path(task.path)
+    outcome = FileOutcome(digest=task.digest_hint)
+    content = None
+    try:
+        verified_regular_file_stat(path, task.expected_stat)
+        if record.size_bytes <= PREFETCH_MAX_BYTES:
+            # Read once through the verified descriptor; hash and analyze that buffer.
+            with open_verified_binary(path, stat_identity(task.expected_stat)) as stream:
+                content = stream.read(record.size_bytes + 1)
+            if len(content) != record.size_bytes:
+                raise OSError(f"file changed while being read: {path}")
+            if outcome.digest is None:
+                outcome.digest = hashlib.sha256(content).hexdigest()
+        elif outcome.digest is None:
+            outcome.digest = sha256_file(path, expected_info=task.expected_stat)
+    except OSError as exc:
+        outcome.file_error = f"{record.path}: {type(exc).__name__}: {exc}"
+        outcome.errors.append(outcome.file_error)
+        outcome.digest = None
+        return outcome
+    with (
+        prefetched_content(path, content, stat_identity(task.expected_stat))
+        if content is not None else nullcontext()
+    ):
+        _run_analyzers(analyzers, locks, record, path, outcome)
+    try:
+        verified_regular_file_stat(path, task.expected_stat)
+    except OSError as exc:
+        # Findings produced while the path changed are not trustworthy.
+        outcome.findings.clear()
+        outcome.analyzed = False
+        outcome.digest = None
+        outcome.file_error = f"{record.path}: {type(exc).__name__}: {exc}"
+        outcome.errors.append(outcome.file_error)
+    return outcome
+
+
+_worker_state: dict[str, Any] = {}
+
+
+def _initialize_worker(vulnerability_db: str | None) -> None:
+    """Load this worker process's own analyzer instances (built-ins and plugins)."""
+    from .analyzers import load_analyzers
+    from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
+
+    analyzers = load_analyzers().analyzers
+    if vulnerability_db:
+        analyzers.append(LocalVulnerabilityAnalyzer(Path(vulnerability_db)))
+    _worker_state["analyzers"] = analyzers
+
+
+def _parse_imports_batch(root: str, records: list[FileRecord]) -> list[tuple]:
+    from .python_graph import parse_python_imports
+
+    return [parse_python_imports(Path(root), record) for record in records]
+
+
+def _analyze_batch_in_worker(tasks: list[FileTask]) -> list[FileOutcome]:
+    analyzers = _worker_state["analyzers"]
+    return [analyze_file(analyzers, {}, task) for task in tasks]
+
+
+class AnalysisExecutor:
+    """Submit batches of FileTasks to a thread or process pool and return futures."""
+
+    def __init__(
+        self,
+        mode: str,
+        workers: int,
+        analyzers: Sequence[Any],
+        *,
+        file_count: int,
+        vulnerability_db: Path | None = None,
+    ) -> None:
+        if mode not in EXECUTOR_MODES:
+            raise ValueError(f"--executor must be one of: {', '.join(EXECUTOR_MODES)}")
+        if mode == "auto":
+            mode = "process" if workers > 1 and file_count >= PROCESS_POOL_MIN_FILES else "thread"
+        self.mode = mode
+        self.workers = workers
+        self._analyzers = list(analyzers)
+        self._vulnerability_db = str(vulnerability_db) if vulnerability_db else None
+        self._locks = {
+            id(analyzer): threading.Lock()
+            for analyzer in self._analyzers
+            if not getattr(analyzer, "concurrent_safe", True)
+        }
+        self._pool = self._create_pool()
+
+    def _create_pool(self):
+        if self.mode == "process":
+            return ProcessPoolExecutor(
+                max_workers=self.workers,
+                initializer=_initialize_worker,
+                initargs=(self._vulnerability_db,),
+            )
+        return ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="pdt-analyzer")
+
+    def restart(self) -> None:
+        """Replace a broken process pool; in-flight work on the old pool is abandoned."""
+        self._pool.shutdown(wait=False, cancel_futures=True)
+        self._pool = self._create_pool()
+
+    def submit(self, tasks: list[FileTask]) -> Future:
+        if self.mode == "process":
+            return self._pool.submit(_analyze_batch_in_worker, tasks)
+        return self._pool.submit(
+            lambda batch: [analyze_file(self._analyzers, self._locks, task) for task in batch],
+            tasks,
+        )
+
+    def map_python_imports(self, root: Path, records: list[FileRecord]) -> Iterator[tuple]:
+        """Parse Python imports in the pool; yield results in input order, bounded in flight."""
+        pending: deque = deque()
+
+        def drain_one():
+            future, batch = pending.popleft()
+            try:
+                return future.result()
+            except BrokenProcessPool:
+                self.restart()
+                return _parse_imports_batch(str(root), batch)
+
+        for start in range(0, len(records), BATCH_MAX_FILES):
+            batch = records[start:start + BATCH_MAX_FILES]
+            pending.append((self._pool.submit(_parse_imports_batch, str(root), batch), batch))
+            while len(pending) >= self.workers * 2:
+                yield from drain_one()
+        while pending:
+            yield from drain_one()
+
+    def shutdown(self, *, cancel: bool = False) -> None:
+        self._pool.shutdown(wait=True, cancel_futures=cancel)
+
+    def __enter__(self) -> "AnalysisExecutor":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.shutdown(cancel=exc_type is not None)

@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
+from ..secret_patterns import ANY_TOKEN, PRIVATE_KEY_MARKER
 from ..source_utils import open_verified_binary, redact_source_excerpt
 
 
@@ -132,16 +133,9 @@ _CONTENT_RULES = (
         ),
         "secrets",
     ),
-    (
-        "private-key marker",
-        re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-        "secrets",
-    ),
-    (
-        "cloud access-key identifier",
-        re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-        "secrets",
-    ),
+    ("private-key marker", PRIVATE_KEY_MARKER, "secrets"),
+    # The same provider-token registry as the source secret scanner.
+    ("provider credential token", ANY_TOKEN, "secrets"),
     (
         "email-shaped value",
         re.compile(

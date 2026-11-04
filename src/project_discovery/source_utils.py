@@ -1,16 +1,20 @@
 """Source-reading helpers that honor language declarations and redact report excerpts."""
 from __future__ import annotations
 
+import ast
 import io
 import os
 import re
 import stat
+import threading
 import tokenize
 from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
-FileIdentity = tuple[int | None, int | None, int | None, int | None, int | None]
+from .secret_patterns import ANY_TOKEN
+
+FileIdentity =tuple[int | None, int | None, int | None, int | None, int | None]
 
 # Windows stat semantics differ between path- and handle-based calls: DirEntry.stat()
 # reports zero st_dev/st_ino, and st_ctime is the creation time from lstat() but may be
@@ -70,7 +74,7 @@ def identity_matches(
 
 
 _SECRET_ASSIGNMENT = re.compile(
-    r"""(?ix)(["']?[A-Za-z0-9_]*(?:password|passwd|passphrase|secret|token|api[_-]?key|client[_-]?secret|access[_-]?key|private[_-]?key|database[_-]?url|connection[_-]?string|credential|refresh[_-]?token|aws_secret_access_key)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
+    r"""(?ix)(["']?[A-Za-z0-9_]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|client[_-]?secret|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|sas[_-]?token|private[_-]?key|database[_-]?url|connection[_-]?string|credential|refresh[_-]?token|aws_secret_access_key)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
 )
 _IDENTITY_ASSIGNMENT = re.compile(
     r"""(?ix)(["']?[A-Za-z0-9_]*(?:first_?name|given_?name|middle_?name|last_?name|family_?name|surname|user_?name|login_?name|account_?name|email|e_mail|email_?address|phone|telephone|mobile|cell_?number|street_?address|postal_?address|home_?address|date_?of_?birth|birth_?date|dob|ssn|social_?security|passport_?number|national_?id)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
@@ -89,7 +93,7 @@ _TOKEN = re.compile(
     r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
     r"hf_[A-Za-z0-9]{24,}|npm_[A-Za-z0-9]{24,}|pypi-[A-Za-z0-9_-]{30,})\b"
 )
-_PRIVATE_KEY_BODY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*", re.I)
+_PRIVATE_KEY_BODY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*", re.I)
 # PEM payload lines are base64-only; redact them conservatively even when a finding
 # excerpt contains the body line but not the BEGIN marker.
 _PRIVATE_KEY_MATERIAL_LINE = re.compile(r"(?m)^([ \t]*)[A-Za-z0-9+/]{32,}={0,2}([ \t]*)$")
@@ -104,11 +108,57 @@ def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     value = _SECRET_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _IDENTITY_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _CREDENTIAL_URL.sub(r"\1[REDACTED]\2", value)
+    # The shared registry guarantees every detected format is also redacted.
+    value = ANY_TOKEN.sub("[REDACTED_TOKEN]", value)
     value = _TOKEN.sub("[REDACTED_TOKEN]", value)
     value = _EMAIL.sub("[REDACTED_EMAIL]", value)
     if len(value) > max_chars:
         value = value[:max_chars] + " … [truncated]"
     return value
+
+
+_prefetch = threading.local()
+_parsed = threading.local()
+
+
+def parse_python(source: str, filename: str = "<unknown>") -> ast.AST:
+    """``ast.parse`` with a one-entry per-thread memo so analyzers of a file share a tree.
+
+    Several analyzers parse the same module back to back; the tree (or the parse error)
+    is reused when the source text is identical. Callers must treat trees as read-only.
+    """
+    cached = getattr(_parsed, "entry", None)
+    if cached is not None and (cached[0] is source or cached[0] == source):
+        result = cached[1]
+    else:
+        try:
+            result = ast.parse(source, filename=filename)
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+            result = exc
+        _parsed.entry = (source, result)
+    if isinstance(result, BaseException):
+        # Raise a fresh instance so repeated failures do not chain tracebacks.
+        raise type(result)(*result.args)
+    return result
+
+
+def _prefetch_key(path: Path) -> str:
+    return os.path.normcase(os.fspath(path))
+
+
+@contextmanager
+def prefetched_content(path: Path, data: bytes, identity: FileIdentity | None) -> Iterator[None]:
+    """Serve this thread's verified reads of ``path`` from ``data`` (read-once analysis).
+
+    ``data`` must itself have been read through ``open_verified_binary``; the caller
+    re-verifies the file after analysis, so the identity guarantees are unchanged.
+    """
+    previous = getattr(_prefetch, "entry", None)
+    _prefetch.entry = (_prefetch_key(path), identity, data)
+    try:
+        yield
+    finally:
+        _prefetch.entry = previous
 
 
 @contextmanager
@@ -124,6 +174,16 @@ def open_verified_binary(
     still performed on platforms that do not expose that flag.
     """
     path = Path(path)
+    entry = getattr(_prefetch, "entry", None)
+    if (
+        entry is not None
+        and entry[0] == _prefetch_key(path)
+        and identity_matches(expected_identity, entry[1])
+    ):
+        # BufferedReader keeps peek()/readline()/seek() semantics of a real file.
+        with io.BufferedReader(io.BytesIO(entry[2])) as stream:
+            yield stream
+        return
     observed = path.lstat()
     if not stat.S_ISREG(observed.st_mode):
         raise OSError(f"refusing to read non-regular or symlink entry: {path}")

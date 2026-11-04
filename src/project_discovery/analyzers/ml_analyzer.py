@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import read_python_source_bounded, read_text_bounded
+from ..source_utils import parse_python, read_python_source_bounded, read_text_bounded
 
 
 _FRAMEWORKS = {
@@ -101,7 +101,7 @@ def _python_evidence(
         source = read_python_source_bounded(
             path, 16 * 1024 * 1024, expected_identity=expected_identity,
         )
-        tree = ast.parse(source, filename=relative)
+        tree = parse_python(source, filename=relative)
     except (OSError, ValueError, SyntaxError, LookupError, RecursionError, MemoryError) as exc:
         return [Finding(
             "machine_learning",

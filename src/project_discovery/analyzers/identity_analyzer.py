@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
-from ..source_utils import open_verified_binary, redact_source_excerpt
+from ..source_utils import open_verified_binary, parse_python, redact_source_excerpt
 
 
 _MAX_IDENTITY_SOURCE_BYTES = 16 * 1024 * 1024
@@ -106,7 +106,7 @@ _PATTERNS = (
 
 def _python_markers(source: str, relative: str) -> tuple[dict[str, set[int]], dict[str, set[int]]]:
     try:
-        tree = ast.parse(source, filename=relative)
+        tree = parse_python(source, filename=relative)
     except SyntaxError:
         return {}, {}
     frameworks: dict[str, set[int]] = {}

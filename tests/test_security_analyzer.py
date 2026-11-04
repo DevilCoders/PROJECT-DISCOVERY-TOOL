@@ -178,3 +178,63 @@ def test_authorization_bearer_value_is_redacted_without_leaving_token_tail():
     token = "bearer-secret-value-0123456789"
     excerpt = redact_source_excerpt(f"Authorization: Bearer {token}")
     assert token not in excerpt
+
+
+def test_every_detected_token_format_is_redacted_from_report_excerpts(tmp_path: Path):
+    # Regression: the detector and redactor kept separate lists, so Docker PATs, Stripe
+    # restricted keys and Azure account keys were reported with the raw value.
+    from project_discovery.secret_patterns import TOKEN_FORMATS
+
+    samples = {
+        "docker_pat": "docker login -p dckr_pat_" + "a1B2" * 7,
+        "stripe_secret_key": "client = Stripe(rk_live_" + "Ab12" * 6 + ")",
+        "azure_storage_account_key": "DefaultEndpointsProtocol=https;AccountKey=" + "Q0" * 43 + "==",
+        "telegram_bot_token": "bot = Bot(123456789:AA" + "x1Y2" * 8 + "z)",
+        "age_secret_key": "AGE-SECRET-KEY-1" + "QPZRY9X8GF" * 5 + "QPZRY9X8",
+        "slack_webhook_url": "send(https://hooks.slack.com/services/T0ABCDEF1/B0ABCDEF1/" + "x" * 24 + ")",
+    }
+    assert set(samples) <= {item.name for item in TOKEN_FORMATS}
+    lines = list(samples.values())
+    path = tmp_path / "config.txt.cfg"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    record = FileRecord("deploy/config.cfg", path.stat().st_size, ".cfg", "INI", file_type="text")
+    findings = SecretPatternAnalyzer().analyze(path, record)
+    detected = {finding.title.rsplit(": ", 1)[-1] for finding in findings}
+    assert set(samples) <= detected
+    report = repr([finding.to_dict() for finding in findings])
+    for value in ("dckr_pat_a1B2", "rk_live_Ab12", "Q0Q0Q0Q0Q0", "AAx1Y2", "SECRET-KEY-1QPZ", "B0ABCDEF1/xxxx"):
+        assert value not in report, value
+
+
+def test_pgp_private_key_headers_and_connection_string_passwords_are_redacted():
+    from project_discovery.source_utils import redact_source_excerpt
+
+    assert "PGP PRIVATE" not in redact_source_excerpt("-----BEGIN PGP PRIVATE KEY BLOCK-----")
+    redacted = redact_source_excerpt("Server=db;User Id=app;Pwd=Sup3rS3cret!;Encrypt=true")
+    assert "Sup3rS3cret" not in redacted
+
+
+def test_test_fixture_credentials_are_downgraded_and_placeholders_ignored(tmp_path: Path):
+    path = tmp_path / "fixture.py"
+    path.write_text(
+        'API_KEY = "ghp_' + "Z" * 36 + '"\n'
+        'password = "{{ secrets.DB_PASSWORD }}"\n'
+        'token = "xxxxxxxxxxxx"\n',
+        encoding="utf-8",
+    )
+    record = FileRecord("tests/fixtures/fixture.py", path.stat().st_size, ".py", "Python", file_type="text")
+    findings = SecretPatternAnalyzer().analyze(path, record)
+    assert [finding.title for finding in findings] == ["Potential hardcoded credential: github_token"]
+    assert findings[0].severity == "MEDIUM" and "test, fixture" in findings[0].detail
+
+
+def test_multibyte_characters_split_across_chunks_do_not_hide_tokens(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.security_analyzer as module
+
+    monkeypatch.setattr(module, "_CHUNK_BYTES", 7)
+    path = tmp_path / "notes.txt"
+    token = "glpat-" + "k" * 24
+    path.write_text("caf\u00e9 \u20ac\u20ac\u20ac " + token + "\n", encoding="utf-8")
+    record = FileRecord("notes.txt", path.stat().st_size, ".txt", "Text", file_type="text")
+    findings = module.SecretPatternAnalyzer().analyze(path, record)
+    assert [finding.evidence for finding in findings] == [["notes.txt:1"]]

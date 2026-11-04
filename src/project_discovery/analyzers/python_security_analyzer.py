@@ -1,7 +1,6 @@
 """Python AST security heuristics; target code is parsed but never executed."""
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 MAX_AST_FILE_BYTES = 16 * 1024 * 1024
@@ -52,7 +51,7 @@ _IMPACTS = {
 
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
-from ..source_utils import SourceBudgetExceeded, read_python_source_bounded, redact_source_excerpt
+from ..source_utils import SourceBudgetExceeded, parse_python, read_python_source_bounded, redact_source_excerpt
 from .secure_code_analyzer import python_security_matches
 
 _RULE_DETAILS = {
@@ -124,7 +123,7 @@ class PythonSecurityAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
         try:
-            tree = ast.parse(source, filename=record.path)
+            tree = parse_python(source, filename=record.path)
         except (SyntaxError, RecursionError, MemoryError) as exc:
             return [Finding(
                 "security",
