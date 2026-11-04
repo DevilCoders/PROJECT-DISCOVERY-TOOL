@@ -29,7 +29,9 @@ from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
 from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
-from .inventory_store import InventoryStore, StoredFileRecords, StoredFindingRecords
+from .inventory_store import (
+    InventoryStore, StoredDiagnosticRecords, StoredFileRecords, StoredFindingRecords,
+)
 from .comparison import compare_many_reports, load_report, write_comparison
 from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
@@ -215,7 +217,6 @@ def run_scan(
                 **advisory_store.status(),
             }
         analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
-    errors = list(analyzer_load.diagnostics)
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
     hardware_threads = max(1, int(native_capabilities().get("hardware_threads", os.cpu_count() or 1)))
@@ -280,6 +281,7 @@ def run_scan(
         TimeElapsedColumn(),
     )
     with InventoryStore(inventory_path) as finding_store, ScanCache(cache_path) as cache:
+        finding_store.extend_diagnostics(analyzer_load.diagnostics)
         with Progress(*progress_columns, console=console) as progress:
             task = progress.add_task("Analyzing project files", total=len(records))
             pending = deque()
@@ -289,7 +291,7 @@ def run_scan(
                 try:
                     digest, file_findings, file_errors = future.result()
                     finding_store.extend_findings(file_findings)
-                    errors.extend(file_errors)
+                    finding_store.extend_diagnostics(file_errors)
                     if file_errors:
                         record.error = file_errors[0]
                     if cache_miss and digest:
@@ -309,11 +311,11 @@ def run_scan(
                         else:
                             message = f"{record.path}: file changed while scan was in progress"
                             record.error = message
-                            errors.append(message)
+                            finding_store.append_diagnostic(message)
                 except Exception as exc:
                     message = f"{record.path}: {type(exc).__name__}: {exc}"
                     record.error = message
-                    errors.append(message)
+                    finding_store.append_diagnostic(message)
                 finally:
                     persist_record(record)
                     progress.advance(task)
@@ -349,7 +351,7 @@ def run_scan(
                             collect_one()
                     except OSError as exc:
                         record.error = str(exc)
-                        errors.append(record.path + ": " + str(exc))
+                        finding_store.append_diagnostic(record.path + ": " + str(exc))
                         persist_record(record)
                         progress.advance(task)
                 while pending:
@@ -367,6 +369,7 @@ def run_scan(
         finding_store.extend_findings(graph_findings)
         finding_store.extend_findings(architecture_findings)
     findings = StoredFindingRecords(inventory_path)
+    errors = StoredDiagnosticRecords(inventory_path)
     domain_catalog = analyzer_domain_catalog()
     vcs_provider_categories = Counter(
         item.category for item in findings
