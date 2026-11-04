@@ -618,6 +618,8 @@ def discover_inventory(
             },
             "walk_errors": stats.get("walk_errors", 0),
         })
+        stats["inventory_store_record_count"] = sum(store.counts().values())
+        stats["inventory_store_integrity_ok"] = int(store.integrity_check() == "ok")
 
     # Sort the existing record lists in place to avoid a second full-size
     # allocation at the end of large scans.
