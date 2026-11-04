@@ -221,3 +221,27 @@ def test_inventory_store_integrity_check_rejects_closed_store(tmp_path: Path):
     store.close()
     with pytest.raises(RuntimeError, match="closed"):
         store.integrity_check()
+
+def test_inventory_store_exposes_lazy_typed_symlink_and_special_sequences(tmp_path: Path):
+    from project_discovery.inventory_store import StoredRecordSequence
+    from project_discovery.models import SpecialEntryRecord, SymlinkRecord
+
+    database = tmp_path / "typed-records.sqlite3"
+    with InventoryStore(database, batch_size=1) as store:
+        store.append("symlink", SymlinkRecord("alias", "target", "internal"))
+        store.append(
+            "special",
+            SpecialEntryRecord("events.pipe", "fifo", permissions=0o600),
+        )
+        links = StoredRecordSequence(database, "symlink", SymlinkRecord, fetch_size=1)
+        special = StoredRecordSequence(
+            database, "special", SpecialEntryRecord, fetch_size=1,
+        )
+        assert len(links) == 1
+        assert links[0].path == "alias"
+        assert links[0].target == "target"
+        assert links[:1] == [links[0]]
+        assert len(special) == 1
+        assert special[0].entry_type == "fifo"
+        assert special[0].permissions == 0o600
+
