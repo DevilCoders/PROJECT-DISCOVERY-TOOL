@@ -431,15 +431,16 @@ def discover_inventory(
 ) -> tuple[
     Sequence[FileRecord],
     list[DirectoryRecord],
-    list[SymlinkRecord],
-    list[SpecialEntryRecord],
+    Sequence[SymlinkRecord],
+    Sequence[SpecialEntryRecord],
     dict[str, int],
 ]:
     """Inventory all entries by default; only explicit excludes prune subtrees.
 
-    The traversal never follows symlinks. With a store, file records are persisted
-    incrementally and returned through a lazy SQLite-backed sequence. Directory records,
-    symlink/special records and the pending-directory stack are still materialized.
+    The traversal never follows symlinks. With a store, file, symlink and special-entry
+    records are persisted in bounded batches and returned through lazy SQLite-backed
+    sequences. Directory records/maps and Python fallback traversal state remain in
+    memory; this is not yet a fully bounded-memory inventory pipeline.
     """
     root = root.expanduser().absolute()
     root_info = root.lstat()
