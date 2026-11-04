@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ class InventoryStore:
         if self.path.is_symlink():
             raise ValueError("inventory database path must not be a symlink")
         self.batch_size = batch_size
-        self._pending: list[tuple[str, str, str]] = []
+        self._pending: list[tuple[str, str, str, str]] = []
         self._closed = False
         self.db = sqlite3.connect(self.path, timeout=30.0)
         if os.name == "posix":
@@ -48,10 +49,33 @@ class InventoryStore:
             """CREATE TABLE IF NOT EXISTS inventory_records (
                 kind TEXT NOT NULL,
                 path TEXT NOT NULL,
+                sort_key TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 PRIMARY KEY(kind, path)
             ) WITHOUT ROWID"""
         )
+        columns = {
+            str(row[1]) for row in self.db.execute("PRAGMA table_info(inventory_records)")
+        }
+        if "sort_key" not in columns:
+            # Migrate stores created before deterministic case-folded streaming order.
+            self.db.execute(
+                "ALTER TABLE inventory_records ADD COLUMN sort_key TEXT NOT NULL DEFAULT ''"
+            )
+            cursor = self.db.execute("SELECT kind, path FROM inventory_records")
+            try:
+                while rows := cursor.fetchmany(self.batch_size):
+                    updates = [
+                        (str(path).casefold(), str(kind), str(path))
+                        for kind, path in rows
+                    ]
+                    with self.db:
+                        self.db.executemany(
+                            "UPDATE inventory_records SET sort_key=? WHERE kind=? AND path=?",
+                            updates,
+                        )
+            finally:
+                cursor.close()
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS inventory_metadata (
                 key TEXT PRIMARY KEY,
@@ -67,7 +91,7 @@ class InventoryStore:
         return kind
 
     @staticmethod
-    def _serialize(record: Mapping[str, Any] | Any) -> tuple[str, str]:
+    def _serialize(record: Mapping[str, Any] | Any) -> tuple[str, str, str]:
         if hasattr(record, "to_storage_dict"):
             value = record.to_storage_dict()
         elif hasattr(record, "to_dict"):
@@ -79,15 +103,17 @@ class InventoryStore:
         path = value.get("path")
         if not isinstance(path, str) or not path:
             raise ValueError("inventory record requires a non-empty string path")
-        return path, json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        sort_key = path.casefold()
+        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return path, sort_key, payload
 
     def append(self, kind: str, record: Mapping[str, Any] | Any) -> None:
         """Queue one record; flush automatically when the bounded batch is full."""
         if self._closed:
             raise RuntimeError("inventory store is closed")
         kind = self._kind(kind)
-        path, payload = self._serialize(record)
-        self._pending.append((kind, path, payload))
+        path, sort_key, payload = self._serialize(record)
+        self._pending.append((kind, path, sort_key, payload))
         if len(self._pending) >= self.batch_size:
             self.flush()
 
@@ -109,9 +135,11 @@ class InventoryStore:
         try:
             with self.db:
                 self.db.executemany(
-                    """INSERT INTO inventory_records(kind, path, payload)
-                       VALUES (?, ?, ?)
-                       ON CONFLICT(kind, path) DO UPDATE SET payload=excluded.payload""",
+                    """INSERT INTO inventory_records(kind, path, sort_key, payload)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(kind, path) DO UPDATE SET
+                           sort_key=excluded.sort_key,
+                           payload=excluded.payload""",
                     pending,
                 )
         except Exception:
@@ -137,7 +165,7 @@ class InventoryStore:
         return {str(kind): int(count) for kind, count in rows}
 
     def iter_records(self, kind: str, *, fetch_size: int = 256) -> Iterator[dict[str, Any]]:
-        """Yield decoded records in deterministic path order using bounded fetches."""
+        """Yield decoded records in case-folded path order using bounded fetches."""
         if self._closed:
             raise RuntimeError("inventory store is closed")
         if fetch_size < 1:
@@ -145,7 +173,8 @@ class InventoryStore:
         kind = self._kind(kind)
         self.flush()
         cursor = self.db.execute(
-            "SELECT payload FROM inventory_records WHERE kind=? ORDER BY path COLLATE BINARY",
+            """SELECT payload FROM inventory_records WHERE kind=?
+               ORDER BY sort_key COLLATE BINARY, path COLLATE BINARY""",
             (kind,),
         )
         try:
@@ -249,3 +278,42 @@ class InventoryStore:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+
+class StoredFileRecords(Sequence["FileRecord"]):
+    """Lazy file-record sequence backed by a private SQLite inventory database.
+
+    Each iteration opens a short-lived store connection and uses fetchmany; no
+    collection of FileRecord objects is retained between iterations.
+    """
+
+    def __init__(self, database_path: Path, *, fetch_size: int = 256) -> None:
+        if fetch_size < 1:
+            raise ValueError("fetch_size must be positive")
+        self.database_path = Path(database_path).expanduser().absolute()
+        self.fetch_size = fetch_size
+
+    def __len__(self) -> int:
+        with InventoryStore(self.database_path) as store:
+            return store.count("file")
+
+    def __iter__(self) -> Iterator["FileRecord"]:
+        with InventoryStore(self.database_path) as store:
+            yield from store.iter_file_records(fetch_size=self.fetch_size)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            if index.step is not None and index.step < 0:
+                return list(self)[index]
+            start, stop, step = index.indices(len(self))
+            return list(islice(iter(self), start, stop, step))
+
+        if index < 0:
+            index += len(self)
+        if index < 0:
+            raise IndexError("file record index out of range")
+        try:
+            return next(islice(iter(self), index, index + 1))
+        except StopIteration as exc:
+            raise IndexError("file record index out of range") from exc
