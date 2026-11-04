@@ -29,7 +29,16 @@ def test_default_report_output_is_sibling_of_target(tmp_path: Path):
     assert persistence["integrity_check"] == "ok"
     assert persistence["status"] == "complete"
     assert persistence["record_count"] >= 2
-    assert (tmp_path / "project-pdt-report" / ".pdt-cache" / "inventory.sqlite3").is_file()
+    finding_persistence = payload["metrics"]["finding_persistence"]
+    assert finding_persistence["backend"] == "sqlite"
+    assert finding_persistence["record_count"] == len(payload["findings"])
+    assert finding_persistence["deduplicate_identical"] is True
+    assert finding_persistence["public_schema_unchanged"] is True
+    database_path = tmp_path / "project-pdt-report" / ".pdt-cache" / "inventory.sqlite3"
+    assert database_path.is_file()
+    from project_discovery.inventory_store import InventoryStore
+    with InventoryStore(database_path) as store:
+        assert store.count("finding") == len(payload["findings"])
 
 
 def test_scan_writes_reports_without_touching_target(tmp_path: Path):
