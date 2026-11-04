@@ -12,7 +12,7 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import CodeEvidence, FileRecord, Finding
-from ..source_utils import redact_source_excerpt
+from ..source_utils import open_verified_binary, redact_source_excerpt
 
 
 _CONFIG_FILENAMES = {
