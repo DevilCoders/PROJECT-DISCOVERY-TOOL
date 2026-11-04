@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_text_bounded
 
 
 _BLOCK = re.compile(
@@ -26,7 +27,10 @@ class PrismaSchemaAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            content = path.read_text(encoding="utf-8")
+            content = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "database",
