@@ -249,8 +249,8 @@ def test_markdown_largest_directory_summary_keeps_only_top_100(tmp_path: Path):
     )
     path = write_reports(result, tmp_path, {"markdown"})[0]
     content = path.read_text(encoding="utf-8")
-    section = content.split("## Largest Directories\\n", 1)[1].split(
-        "## Symbolic Links\\n", 1
+    section = content.split("## Largest Directories\n", 1)[1].split(
+        "## Symbolic Links\n", 1
     )[0]
     rows = [line for line in section.splitlines() if line.startswith("- synthetic-")]
     assert len(rows) == 100
