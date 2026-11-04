@@ -383,7 +383,7 @@ def test_sha256_file_rejects_invalid_chunk_size(tmp_path: Path):
         sha256_file(source, chunk_size=0)
 
 def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_path: Path):
-    from project_discovery.inventory_store import InventoryStore
+    from project_discovery.inventory_store import InventoryStore, StoredFileRecords
     from project_discovery.scanner import discover_inventory
 
     root = tmp_path / "store-backed-project"
@@ -400,6 +400,12 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
     database = tmp_path / "inventory.sqlite3"
     with InventoryStore(database, batch_size=1) as store:
         files, directories, symlinks, special, stats = discover_inventory(root, store=store)
+        assert isinstance(files, StoredFileRecords)
+        assert len(files) == 1
+        restored_file = files[0]
+        assert restored_file.path == "src/main.py"
+        assert restored_file.analysis_identity is not None
+        assert not isinstance(files, list)
         assert store.integrity_check() == "ok"
         assert store.get_metadata("inventory_status") == "complete"
         counts = store.get_metadata("record_counts")
@@ -411,6 +417,7 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
         }
         persisted_file = next(store.iter_records("file"))
         assert persisted_file["path"] == "src/main.py"
+        assert persisted_file["analysis_identity"] is not None
         persisted_src = next(
             item for item in store.iter_records("directory") if item["path"] == "src"
         )
