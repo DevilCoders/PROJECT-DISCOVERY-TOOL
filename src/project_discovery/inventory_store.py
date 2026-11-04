@@ -34,6 +34,7 @@ class InventoryStore:
             raise ValueError("inventory database path must not be a symlink")
         self.batch_size = batch_size
         self._pending: list[tuple[str, str, str, str]] = []
+        self._directory_pending: dict[str, tuple[int, int, int, str | None]] = {}
         self._closed = False
         self.db = sqlite3.connect(self.path, timeout=30.0)
         if os.name == "posix":
@@ -62,13 +63,19 @@ class InventoryStore:
             self.db.execute(
                 "ALTER TABLE inventory_records ADD COLUMN sort_key TEXT NOT NULL DEFAULT ''"
             )
-            cursor = self.db.execute("SELECT kind, path FROM inventory_records")
+            cursor = self.db.execute(
+                "SELECT kind, path, payload FROM inventory_records"
+            )
             try:
                 while rows := cursor.fetchmany(self.batch_size):
-                    updates = [
-                        (str(path).casefold(), str(kind), str(path))
-                        for kind, path in rows
-                    ]
+                    updates = []
+                    for kind, path, payload in rows:
+                        sort_key = str(path).casefold()
+                        if kind == "directory":
+                            data = json.loads(payload)
+                            depth = max(0, int(data.get("depth", 0)))
+                            sort_key = f"{depth:012d}|{sort_key}"
+                        updates.append((sort_key, str(kind), str(path)))
                     with self.db:
                         self.db.executemany(
                             "UPDATE inventory_records SET sort_key=? WHERE kind=? AND path=?",
@@ -80,6 +87,15 @@ class InventoryStore:
             """CREATE TABLE IF NOT EXISTS inventory_metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            ) WITHOUT ROWID"""
+        )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS inventory_directory_state (
+                path TEXT PRIMARY KEY,
+                direct_child_count INTEGER NOT NULL DEFAULT 0,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                error TEXT
             ) WITHOUT ROWID"""
         )
         self.db.commit()
@@ -113,8 +129,38 @@ class InventoryStore:
             raise RuntimeError("inventory store is closed")
         kind = self._kind(kind)
         path, sort_key, payload = self._serialize(record)
+        if kind == "directory":
+            directory = json.loads(payload)
+            depth = max(0, int(directory.get("depth", 0)))
+            sort_key = f"{depth:012d}|{sort_key}"
         self._pending.append((kind, path, sort_key, payload))
-        if len(self._pending) >= self.batch_size:
+        if len(self._pending) + len(self._directory_pending) >= self.batch_size:
+            self.flush()
+
+    def adjust_directory(
+        self,
+        path: str,
+        *,
+        direct_child_delta: int = 0,
+        file_count_delta: int = 0,
+        total_bytes_delta: int = 0,
+        error: str | None = None,
+    ) -> None:
+        """Queue bounded directory aggregate updates for the next atomic flush."""
+        if self._closed:
+            raise RuntimeError("inventory store is closed")
+        if not isinstance(path, str) or not path:
+            raise ValueError("directory path must be a non-empty string")
+        if not any((direct_child_delta, file_count_delta, total_bytes_delta, error is not None)):
+            return
+        current = self._directory_pending.get(path, (0, 0, 0, None))
+        self._directory_pending[path] = (
+            current[0] + direct_child_delta,
+            current[1] + file_count_delta,
+            current[2] + total_bytes_delta,
+            error if error is not None else current[3],
+        )
+        if len(self._pending) + len(self._directory_pending) >= self.batch_size:
             self.flush()
 
     def extend(self, kind: str, records: Iterable[Mapping[str, Any] | Any]) -> int:
@@ -129,23 +175,66 @@ class InventoryStore:
         """Atomically persist the pending bounded batch and return its row count."""
         if self._closed:
             raise RuntimeError("inventory store is closed")
-        if not self._pending:
+        if not self._pending and not self._directory_pending:
             return 0
         pending, self._pending = self._pending, []
+        directory_pending, self._directory_pending = self._directory_pending, {}
         try:
             with self.db:
-                self.db.executemany(
-                    """INSERT INTO inventory_records(kind, path, sort_key, payload)
-                       VALUES (?, ?, ?, ?)
-                       ON CONFLICT(kind, path) DO UPDATE SET
-                           sort_key=excluded.sort_key,
-                           payload=excluded.payload""",
-                    pending,
-                )
+                if pending:
+                    self.db.executemany(
+                        """INSERT INTO inventory_records(kind, path, sort_key, payload)
+                           VALUES (?, ?, ?, ?)
+                           ON CONFLICT(kind, path) DO UPDATE SET
+                               sort_key=excluded.sort_key,
+                               payload=excluded.payload""",
+                        pending,
+                    )
+                    initial_directory_state = []
+                    for kind, path, _sort_key, payload in pending:
+                        if kind == "directory":
+                            data = json.loads(payload)
+                            initial_directory_state.append((
+                                path,
+                                int(data.get("direct_child_count", 0)),
+                                int(data.get("file_count", 0)),
+                                int(data.get("total_bytes", 0)),
+                                data.get("error"),
+                            ))
+                    if initial_directory_state:
+                        self.db.executemany(
+                            """INSERT OR IGNORE INTO inventory_directory_state(
+                                   path, direct_child_count, file_count, total_bytes, error
+                               ) VALUES (?, ?, ?, ?, ?)""",
+                            initial_directory_state,
+                        )
+                if directory_pending:
+                    self.db.executemany(
+                        """INSERT INTO inventory_directory_state(
+                               path, direct_child_count, file_count, total_bytes, error
+                           ) VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(path) DO UPDATE SET
+                               direct_child_count=direct_child_count+excluded.direct_child_count,
+                               file_count=file_count+excluded.file_count,
+                               total_bytes=total_bytes+excluded.total_bytes,
+                               error=COALESCE(excluded.error, inventory_directory_state.error)""",
+                        [
+                            (path, *deltas)
+                            for path, deltas in directory_pending.items()
+                        ],
+                    )
         except Exception:
             self._pending = pending + self._pending
+            for path, deltas in directory_pending.items():
+                current = self._directory_pending.get(path, (0, 0, 0, None))
+                self._directory_pending[path] = (
+                    current[0] + deltas[0],
+                    current[1] + deltas[1],
+                    current[2] + deltas[2],
+                    deltas[3] if deltas[3] is not None else current[3],
+                )
             raise
-        return len(pending)
+        return len(pending) + len(directory_pending)
 
     def count(self, kind: str | None = None) -> int:
         self.flush()
@@ -172,18 +261,40 @@ class InventoryStore:
             raise ValueError("fetch_size must be positive")
         kind = self._kind(kind)
         self.flush()
-        cursor = self.db.execute(
-            """SELECT payload FROM inventory_records WHERE kind=?
-               ORDER BY sort_key COLLATE BINARY, path COLLATE BINARY""",
-            (kind,),
-        )
+        if kind == "directory":
+            cursor = self.db.execute(
+                """SELECT r.payload, d.direct_child_count, d.file_count,
+                          d.total_bytes, d.error
+                   FROM inventory_records AS r
+                   LEFT JOIN inventory_directory_state AS d ON d.path=r.path
+                   WHERE r.kind=?
+                   ORDER BY r.sort_key COLLATE BINARY, r.path COLLATE BINARY""",
+                (kind,),
+            )
+        else:
+            cursor = self.db.execute(
+                """SELECT payload FROM inventory_records WHERE kind=?
+                   ORDER BY sort_key COLLATE BINARY, path COLLATE BINARY""",
+                (kind,),
+            )
         try:
             while True:
                 rows = cursor.fetchmany(fetch_size)
                 if not rows:
                     break
-                for (payload,) in rows:
-                    yield json.loads(payload)
+                for row in rows:
+                    if kind == "directory":
+                        payload, children, files, total_bytes, error = row
+                        value = json.loads(payload)
+                        if children is not None:
+                            value["direct_child_count"] = int(children)
+                            value["file_count"] = int(files)
+                            value["total_bytes"] = int(total_bytes)
+                            if error is not None:
+                                value["error"] = str(error)
+                        yield value
+                    else:
+                        yield json.loads(row[0])
         finally:
             # Callers commonly stop after a page; release the SQLite read
             # cursor immediately instead of waiting for generator collection.
@@ -225,9 +336,11 @@ class InventoryStore:
         if self._closed:
             raise RuntimeError("inventory store is closed")
         self._pending.clear()
+        self._directory_pending.clear()
         with self.db:
             self.db.execute("DELETE FROM inventory_records")
             self.db.execute("DELETE FROM inventory_metadata")
+            self.db.execute("DELETE FROM inventory_directory_state")
 
     def checkpoint(self, metadata: Mapping[str, Any]) -> None:
         """Flush inventory rows, then atomically persist a resumable scan checkpoint.
