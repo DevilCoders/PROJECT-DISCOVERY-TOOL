@@ -628,8 +628,11 @@ def discover_inventory(
     if store is not None:
         # Directory aggregates and late walk errors are finalized after traversal.
         store.extend("directory", directories_by_path.values())
+        walk_errors = stats.get("walk_errors", 0)
+        entry_errors = stats.get("entry_errors", 0)
         store.checkpoint({
-            "inventory_status": "complete",
+            "inventory_status": "complete" if not (walk_errors or entry_errors) else "partial",
+            "traversal_finished": True,
             "root": str(root),
             "record_counts": {
                 "file": len(files),
@@ -637,7 +640,8 @@ def discover_inventory(
                 "symlink": len(symlinks),
                 "special": len(special_entries),
             },
-            "walk_errors": stats.get("walk_errors", 0),
+            "walk_errors": walk_errors,
+            "entry_errors": entry_errors,
         })
         stats["inventory_store_record_count"] = sum(store.counts().values())
         stats["inventory_store_integrity_ok"] = int(store.integrity_check() == "ok")
