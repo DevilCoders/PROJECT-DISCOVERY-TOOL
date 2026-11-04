@@ -406,6 +406,9 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
         assert restored_file.path == "src/main.py"
         assert restored_file.analysis_identity is not None
         assert not isinstance(files, list)
+        assert files[1:] == []
+        assert files[1:0] == []
+        assert files[::-1][0].path == "src/main.py"
         assert store.integrity_check() == "ok"
         assert store.get_metadata("inventory_status") == "complete"
         counts = store.get_metadata("record_counts")
