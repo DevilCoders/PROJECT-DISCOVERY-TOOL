@@ -9,6 +9,7 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_text_bounded
 
 
 _LOCALE_DIRS = {
@@ -144,7 +145,10 @@ class LocalizationAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
             name = path.name.lower()
             extension = path.suffix.lower()
             untranslated = 0
