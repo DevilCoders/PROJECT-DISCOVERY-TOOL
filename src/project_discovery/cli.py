@@ -56,7 +56,15 @@ def _verified_regular_file_stat(path: Path, expected=None):
         raise OSError(f"refusing to analyze non-regular or symlink entry: {path}")
     if expected is not None:
         identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if any(getattr(current, key) != getattr(expected, key) for key in identity):
+        if isinstance(expected, tuple):
+            expected_values = expected
+        else:
+            expected_values = tuple(getattr(expected, key) for key in identity)
+        current_values = tuple(getattr(current, key, None) for key in identity)
+        if any(
+            wanted is not None and wanted != observed
+            for wanted, observed in zip(expected_values, current_values)
+        ):
             raise OSError(f"file identity changed during scan; refusing analysis: {path}")
     return current
 
@@ -307,7 +315,7 @@ def run_scan(
                         continue
                     path = root / record.path
                     try:
-                        file_stat = _verified_regular_file_stat(path)
+                        file_stat = _verified_regular_file_stat(path, record.analysis_identity)
                         if (
                             file_stat.st_size != record.size_bytes
                             or (record.mtime_ns is not None and file_stat.st_mtime_ns != record.mtime_ns)
