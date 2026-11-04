@@ -287,3 +287,39 @@ def test_report_writers_stream_lazy_diagnostics(tmp_path: Path):
     assert "first diagnostic" in html
     markdown = (tmp_path / "discovery-report.md").read_text(encoding="utf-8")
     assert markdown.count("same diagnostic") == 2
+
+def test_report_writers_stream_lazy_diagnostics_without_dropping_repeats(tmp_path: Path):
+    from project_discovery.inventory_store import InventoryStore, StoredDiagnosticRecords
+
+    database = tmp_path / "report-diagnostics.sqlite3"
+    with InventoryStore(database, batch_size=2) as store:
+        store.extend_diagnostics([
+            "first analyzer warning",
+            "repeated file read error",
+            "repeated file read error",
+            "</script><script>not executable</script>",
+        ])
+
+    result = _result()
+    result.errors = StoredDiagnosticRecords(database, fetch_size=1)
+    paths = write_reports(result, tmp_path / "reports", {"json", "markdown", "html"})
+    assert {path.suffix for path in paths} == {".json", ".md", ".html"}
+
+    payload = json.loads((tmp_path / "reports" / "discovery-report.json").read_text(
+        encoding="utf-8"
+    ))
+    assert payload["errors"] == [
+        "first analyzer warning",
+        "repeated file read error",
+        "repeated file read error",
+        "</script><script>not executable</script>",
+    ]
+
+    markdown = (tmp_path / "reports" / "discovery-report.md").read_text(encoding="utf-8")
+    assert markdown.count("repeated file read error") == 2
+    assert "first analyzer warning" in markdown
+
+    html = (tmp_path / "reports" / "discovery-report.html").read_text(encoding="utf-8")
+    assert "</script><script>not executable</script>" not in html
+    assert "\\u003c/script\\u003e" in html
+
