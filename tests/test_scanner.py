@@ -381,3 +381,58 @@ def test_sha256_file_rejects_invalid_chunk_size(tmp_path: Path):
     source.write_bytes(b"x")
     with pytest.raises(ValueError, match="chunk_size"):
         sha256_file(source, chunk_size=0)
+
+def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_path: Path):
+    from project_discovery.inventory_store import InventoryStore
+    from project_discovery.scanner import discover_inventory
+
+    root = tmp_path / "store-backed-project"
+    root.mkdir()
+    nested = root / "src"
+    nested.mkdir()
+    (nested / "main.py").write_text("print('stored')\n", encoding="utf-8")
+    link = root / "source-link"
+    try:
+        link.symlink_to(nested / "main.py")
+    except (OSError, NotImplementedError):
+        link = None
+
+    database = tmp_path / "inventory.sqlite3"
+    with InventoryStore(database, batch_size=1) as store:
+        files, directories, symlinks, special, stats = discover_inventory(root, store=store)
+        assert store.integrity_check() == "ok"
+        assert store.get_metadata("inventory_status") == "complete"
+        counts = store.get_metadata("record_counts")
+        assert counts == {
+            "file": len(files),
+            "directory": len(directories),
+            "symlink": len(symlinks),
+            "special": len(special),
+        }
+        persisted_file = next(store.iter_records("file"))
+        assert persisted_file["path"] == "src/main.py"
+        persisted_src = next(
+            item for item in store.iter_records("directory") if item["path"] == "src"
+        )
+        assert persisted_src["file_count"] == 1
+        assert persisted_src["total_bytes"] == len("print('stored')\n".encode())
+        if link is not None:
+            assert any(item["path"] == "source-link" for item in store.iter_records("symlink"))
+        assert stats["entry_count"] >= 2
+
+
+def test_inventory_store_is_reset_for_each_new_scan(tmp_path: Path):
+    from project_discovery.inventory_store import InventoryStore
+    from project_discovery.scanner import discover_inventory
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "first.py").write_text("pass\n", encoding="utf-8")
+    with InventoryStore(tmp_path / "inventory.sqlite3") as store:
+        discover_inventory(root, store=store)
+        assert store.count("file") == 1
+        (root / "first.py").unlink()
+        (root / "second.py").write_text("pass\n", encoding="utf-8")
+        discover_inventory(root, store=store)
+        assert [item["path"] for item in store.iter_records("file")] == ["second.py"]
+
