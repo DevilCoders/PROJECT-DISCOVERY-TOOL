@@ -1,7 +1,7 @@
 """Bounded, SQLite-backed persistence for filesystem inventory records.
 
-This store is the persistence boundary for the planned streaming scanner. It stores
-metadata records only; target file contents are never copied into the inventory DB.
+The store supports incremental scanner persistence and lazy file-record iteration.
+It stores metadata only; target file contents are never copied into the inventory DB.
 """
 from __future__ import annotations
 
