@@ -64,7 +64,8 @@ class FileRecord:
     permissions: int | None = None
     mtime_ns: int | None = None
     content_skipped_reason: str | None = None
-    # Private scan-time identity used to pin analyzer reads; never serialized.
+    # Private scan-time identity used to pin analyzer reads. It is excluded from
+    # public reports but retained by the private SQLite inventory store.
     analysis_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = field(
         default=None, repr=False, compare=False,
     )
@@ -73,6 +74,33 @@ class FileRecord:
         value = asdict(self)
         value.pop("analysis_identity", None)
         return value
+
+    def to_storage_dict(self) -> dict[str, Any]:
+        """Serialize internal metadata for the private inventory database."""
+        value = self.to_dict()
+        if self.analysis_identity is not None:
+            value["analysis_identity"] = list(self.analysis_identity)
+        return value
+
+    @classmethod
+    def from_storage_dict(cls, value: dict[str, Any]) -> "FileRecord":
+        """Reconstruct a file record persisted by InventoryStore."""
+        data = dict(value)
+        identity = data.get("analysis_identity")
+        if identity is not None:
+            if (
+                not isinstance(identity, (list, tuple))
+                or len(identity) != 5
+                or any(
+                    item is not None and (
+                        isinstance(item, bool) or not isinstance(item, int)
+                    )
+                    for item in identity
+                )
+            ):
+                raise ValueError("stored analysis_identity must contain five integers or nulls")
+            data["analysis_identity"] = tuple(identity)
+        return cls(**data)
 
 
 @dataclass(slots=True)
