@@ -11,6 +11,7 @@ from pathlib import Path
 from .base import Analyzer
 from ..language_catalog import is_source_path, source_language_names
 from ..models import FileRecord, Finding
+from ..source_utils import read_text_bounded
 
 
 _CONFIG_NAMES = {
@@ -71,7 +72,10 @@ class ObservabilityAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "observability", f"Observability scan unavailable: {record.path}",
