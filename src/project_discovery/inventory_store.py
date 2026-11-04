@@ -307,13 +307,25 @@ class StoredFileRecords(Sequence["FileRecord"]):
             if index.step is not None and index.step < 0:
                 return list(self)[index]
             start, stop, step = index.indices(len(self))
-            return list(islice(iter(self), start, stop, step))
+            if stop <= start:
+                return []
+            iterator = iter(self)
+            try:
+                return list(islice(iterator, start, stop, step))
+            finally:
+                iterator.close()
 
+        if not isinstance(index, int):
+            raise TypeError("file record indices must be integers or slices")
         if index < 0:
             index += len(self)
         if index < 0:
             raise IndexError("file record index out of range")
+        iterator = iter(self)
         try:
-            return next(islice(iter(self), index, index + 1))
-        except StopIteration as exc:
-            raise IndexError("file record index out of range") from exc
+            try:
+                return next(islice(iterator, index, index + 1))
+            except StopIteration as exc:
+                raise IndexError("file record index out of range") from exc
+        finally:
+            iterator.close()
