@@ -58,6 +58,22 @@ fn modified_ns(metadata: &fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+fn identity_ns(metadata: &fs::Metadata) -> (Option<u64>, Option<u64>, Option<u64>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let changed = (metadata.ctime() as i128) * 1_000_000_000
+            + (metadata.ctime_nsec() as i128);
+        let changed = changed.max(0).min(u64::MAX as i128) as u64;
+        return (Some(metadata.dev()), Some(metadata.ino()), Some(changed));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        (None, None, None)
+    }
+}
+
 #[pymethods]
 impl Walker {
     #[new]
@@ -77,7 +93,7 @@ impl Walker {
         slf
     }
 
-    fn __next__(&mut self) -> PyResult<Option<(String, String, u64, Option<u32>, u64, bool, String, Option<String>, usize)>> {
+    fn __next__(&mut self) -> PyResult<Option<(String, String, u64, Option<u32>, u64, bool, String, Option<String>, usize, Option<u64>, Option<u64>, Option<u64>)>> {
         loop {
             let (parent, next_entry, parent_depth) = match self.stack.last_mut() {
                 Some((path, entries, depth)) => (path.clone(), entries.next(), *depth),
@@ -94,7 +110,8 @@ impl Walker {
                         relative_path(&self.root, &parent)
                     };
                     return Ok(Some((rel, "directory_error".to_string(), 0, None, 0, false,
-                                    String::new(), Some(error.to_string()), parent_depth)));
+                                    String::new(), Some(error.to_string()), parent_depth,
+                                    None, None, None)));
                 }
                 None => {
                     self.stack.pop();
@@ -109,7 +126,8 @@ impl Walker {
                 Ok(value) => value,
                 Err(error) => {
                     return Ok(Some((rel, "entry_error".to_string(), 0, None, 0, false,
-                                    String::new(), Some(error.to_string()), depth)));
+                                    String::new(), Some(error.to_string()), depth,
+                                    None, None, None)));
                 }
             };
 
@@ -119,6 +137,7 @@ impl Walker {
             let size = metadata.len();
             let mode = mode_bits(&metadata);
             let mtime = modified_ns(&metadata);
+            let (device, inode, changed) = identity_ns(&metadata);
             let mut target = String::new();
             let mut error = None;
             let kind = if file_type.is_symlink() {
@@ -157,7 +176,7 @@ impl Walker {
             };
 
             return Ok(Some((rel, kind.to_string(), size, mode, mtime, hidden,
-                            target, error, depth)));
+                            target, error, depth, device, inode, changed)));
         }
     }
 }
