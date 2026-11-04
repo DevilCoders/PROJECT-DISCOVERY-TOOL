@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_text_bounded
 
 
 _GAME_SCRIPT_EXTENSIONS = {".gd", ".gml", ".rpy", ".lua", ".cs", ".cpp", ".cc", ".h", ".hpp", ".rs"}
@@ -154,7 +155,10 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
 
     def _read_text(self, path: Path, record: FileRecord):
         try:
-            return path.read_text(encoding="utf-8"), None
+            return read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            ), None
         except (OSError, UnicodeDecodeError) as exc:
             return None, Finding(
                 "game_engine", f"Game project file read error: {record.path}",
