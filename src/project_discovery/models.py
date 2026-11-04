@@ -156,9 +156,9 @@ class ScanResult:
     metrics: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     analyzer_names: list[str] = field(default_factory=list)
-    directories: list[DirectoryRecord] = field(default_factory=list)
-    symlinks: list[SymlinkRecord] = field(default_factory=list)
-    special_entries: list[SpecialEntryRecord] = field(default_factory=list)
+    directories: Sequence[DirectoryRecord] = field(default_factory=list)
+    symlinks: Sequence[SymlinkRecord] = field(default_factory=list)
+    special_entries: Sequence[SpecialEntryRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
