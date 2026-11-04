@@ -390,3 +390,25 @@ def test_inventory_store_streams_ordered_diagnostics_without_deduplication(tmp_p
     assert list(lazy) == [
         "first diagnostic", "repeat", "repeat", "after reopen",
     ]
+
+def test_inventory_store_allocates_unique_diagnostic_ids_across_connections(tmp_path: Path):
+    from project_discovery.inventory_store import StoredDiagnosticRecords
+
+    database = tmp_path / "concurrent-diagnostics.sqlite3"
+    first = InventoryStore(database, batch_size=100)
+    second = InventoryStore(database, batch_size=100)
+    try:
+        first.append_diagnostic("first connection")
+        second.append_diagnostic("second connection")
+        # Commit in reverse order to prove retrieval uses reserved sequence IDs,
+        # not transaction commit order.
+        second.close()
+        first.close()
+    finally:
+        first.close()
+        second.close()
+
+    assert list(StoredDiagnosticRecords(database, fetch_size=1)) == [
+        "first connection", "second connection",
+    ]
+
