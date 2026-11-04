@@ -28,7 +28,7 @@ from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
 from .analyzers import load_analyzers
 from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
-from .inventory_store import InventoryStore
+from .inventory_store import InventoryStore, StoredFileRecords
 from .comparison import compare_many_reports, load_report, write_comparison
 from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
@@ -226,6 +226,14 @@ def run_scan(
         for analyzer in analyzers
         if not getattr(analyzer, "concurrent_safe", True)
     }
+    record_updates = []
+
+    def persist_record(record):
+        if isinstance(records, StoredFileRecords):
+            record_updates.append(record)
+            if len(record_updates) >= 512:
+                records.update_records(record_updates)
+                record_updates.clear()
 
     def analyze_one(record, path, digest_hint, expected_stat):
         local_findings = []
@@ -307,6 +315,7 @@ def run_scan(
                     record.error = message
                     errors.append(message)
                 finally:
+                    persist_record(record)
                     progress.advance(task)
 
             with ThreadPoolExecutor(
@@ -341,9 +350,13 @@ def run_scan(
                     except OSError as exc:
                         record.error = str(exc)
                         errors.append(record.path + ": " + str(exc))
+                        persist_record(record)
                         progress.advance(task)
                 while pending:
                     collect_one()
+            if record_updates:
+                records.update_records(record_updates)
+                record_updates.clear()
 
         if walk_stats.get("walk_errors", 0) == 0:
             cache.prune_missing(str(root), (record.path for record in records))
