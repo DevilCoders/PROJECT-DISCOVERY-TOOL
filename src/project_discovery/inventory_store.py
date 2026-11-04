@@ -5,6 +5,7 @@ It stores metadata only; target file contents are never copied into the inventor
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -13,7 +14,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-_RECORD_KINDS = frozenset({"file", "directory", "symlink", "special"})
+_RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding"})
 
 
 class InventoryStore:
@@ -300,6 +301,40 @@ class InventoryStore:
             # cursor immediately instead of waiting for generator collection.
             cursor.close()
 
+    def append_finding(self, finding: Any) -> None:
+        """Persist one finding under a deterministic content key.
+
+        Identical analyzer findings are de-duplicated at the store boundary. The
+        canonical key includes all public finding fields, including source evidence.
+        """
+        if not hasattr(finding, "to_dict"):
+            raise TypeError("finding must expose to_dict()")
+        value = finding.to_dict()
+        canonical = json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        )
+        key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        self.append("finding", {"path": key, "finding": value})
+
+    def extend_findings(self, findings: Iterable[Any]) -> int:
+        """Persist an iterable of findings without retaining it in memory."""
+        count = 0
+        for finding in findings:
+            self.append_finding(finding)
+            count += 1
+        return count
+
+    def iter_findings(self, *, fetch_size: int = 256) -> Iterator["Finding"]:
+        """Yield persisted typed findings in deterministic content-key order."""
+        from .models import Finding
+
+        payloads = self.iter_records("finding", fetch_size=fetch_size)
+        try:
+            for payload in payloads:
+                yield Finding.from_dict(payload["finding"])
+        finally:
+            payloads.close()
+
     def iter_file_records(self, *, fetch_size: int = 256) -> Iterator["FileRecord"]:
         """Yield typed file records while retaining their private scan-time identity."""
         from .models import FileRecord
@@ -509,6 +544,50 @@ class StoredRecordSequence(Sequence[Any]):
                 return next(islice(iterator, index, index + 1))
             except StopIteration as exc:
                 raise IndexError("inventory record index out of range") from exc
+        finally:
+            iterator.close()
+
+class StoredFindingRecords(Sequence["Finding"]):
+    """Lazy, deduplicated finding sequence backed by the scan's SQLite store."""
+
+    def __init__(self, database_path: Path, *, fetch_size: int = 256) -> None:
+        if fetch_size < 1:
+            raise ValueError("fetch_size must be positive")
+        self.database_path = Path(database_path).expanduser().absolute()
+        self.fetch_size = fetch_size
+
+    def __len__(self) -> int:
+        with InventoryStore(self.database_path) as store:
+            return store.count("finding")
+
+    def __iter__(self) -> Iterator["Finding"]:
+        with InventoryStore(self.database_path) as store:
+            yield from store.iter_findings(fetch_size=self.fetch_size)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            if index.step is not None and index.step < 0:
+                return list(self)[index]
+            start, stop, step = index.indices(len(self))
+            if stop <= start:
+                return []
+            iterator = iter(self)
+            try:
+                return list(islice(iterator, start, stop, step))
+            finally:
+                iterator.close()
+        if not isinstance(index, int):
+            raise TypeError("finding indices must be integers or slices")
+        if index < 0:
+            index += len(self)
+        if index < 0:
+            raise IndexError("finding index out of range")
+        iterator = iter(self)
+        try:
+            try:
+                return next(islice(iterator, index, index + 1))
+            except StopIteration as exc:
+                raise IndexError("finding index out of range") from exc
         finally:
             iterator.close()
 
