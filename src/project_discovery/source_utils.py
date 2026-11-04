@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import io
+import os
 import re
+import stat
 import tokenize
+from contextlib import contextmanager
 from pathlib import Path
+from typing import BinaryIO, Iterator
 
 
 _SECRET_ASSIGNMENT = re.compile(
@@ -49,21 +53,94 @@ def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     return value
 
 
-def read_python_source(path: Path) -> str:
-    """Read Python source using PEP 263 encoding-cookie detection."""
-    with path.open("rb") as raw:
-        encoding, _ = tokenize.detect_encoding(raw.readline)
-    return path.read_text(encoding=encoding)
+@contextmanager
+def open_verified_binary(
+    path: Path,
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+) -> Iterator[BinaryIO]:
+    """Open a regular file without following symlinks and verify its scan-time identity.
+
+    The identity tuple is (device, inode, size, mtime_ns, ctime_ns). Missing
+    platform fields are represented by None and are not compared. O_NOFOLLOW
+    is requested where the operating system provides it; fstat comparison is
+    still performed on platforms that do not expose that flag.
+    """
+    path = Path(path)
+    observed = path.lstat()
+    if not stat.S_ISREG(observed.st_mode):
+        raise OSError(f"refusing to read non-regular or symlink entry: {path}")
+
+    def identity(info):
+        return (
+            getattr(info, "st_dev", None),
+            getattr(info, "st_ino", None),
+            getattr(info, "st_size", None),
+            getattr(info, "st_mtime_ns", None),
+            getattr(info, "st_ctime_ns", None),
+        )
+
+    def verify(actual, expected, message: str) -> None:
+        if expected is None:
+            return
+        for expected_value, actual_value in zip(expected, identity(actual)):
+            if expected_value is not None and expected_value != actual_value:
+                raise OSError(message)
+
+    verify(
+        observed, expected_identity,
+        f"file identity changed since inventory: {path}",
+    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(f"entry changed to a non-regular file: {path}")
+        opened_identity = identity(opened)
+        if opened_identity != identity(observed):
+            raise OSError(f"file identity changed while opening: {path}")
+        verify(
+            opened, expected_identity,
+            f"file identity changed since inventory: {path}",
+        )
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = -1
+        try:
+            yield stream
+        finally:
+            stream.close()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def read_python_source(
+    path: Path,
+    *,
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+) -> str:
+    """Read Python source using PEP 263 encoding-cookie detection and pinned identity."""
+    with open_verified_binary(path, expected_identity) as raw:
+        raw_source = raw.read()
+    encoding, _ = tokenize.detect_encoding(io.BytesIO(raw_source).readline)
+    return raw_source.decode(encoding)
+
 
 class SourceBudgetExceeded(ValueError):
     """Raised when a source file exceeds a parser's bounded read budget."""
 
 
-def read_python_source_bounded(path: Path, max_bytes: int) -> str:
-    """Read at most max_bytes + 1 and decode Python source using its PEP 263 cookie."""
+def read_python_source_bounded(
+    path: Path,
+    max_bytes: int,
+    *,
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+) -> str:
+    """Read at most max_bytes + 1 through a verified descriptor and honor PEP 263."""
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
-    with path.open("rb") as stream:
+    with open_verified_binary(path, expected_identity) as stream:
         raw_source = stream.read(max_bytes + 1)
     if len(raw_source) > max_bytes:
         raise SourceBudgetExceeded(
@@ -73,11 +150,16 @@ def read_python_source_bounded(path: Path, max_bytes: int) -> str:
     return raw_source.decode(encoding)
 
 
-def read_bytes_bounded(path: Path, max_bytes: int) -> bytes:
-    """Read a binary artifact with a race-safe max_bytes + 1 content budget."""
+def read_bytes_bounded(
+    path: Path,
+    max_bytes: int,
+    *,
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+) -> bytes:
+    """Read a binary artifact through a verified descriptor with a max_bytes + 1 budget."""
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
-    with path.open("rb") as stream:
+    with open_verified_binary(path, expected_identity) as stream:
         raw_content = stream.read(max_bytes + 1)
     if len(raw_content) > max_bytes:
         raise SourceBudgetExceeded(
@@ -92,7 +174,10 @@ def read_text_bounded(
     *,
     encoding: str = "utf-8",
     errors: str = "strict",
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
 ) -> str:
-    """Read a text artifact with a race-safe max_bytes + 1 content budget."""
-    return read_bytes_bounded(path, max_bytes).decode(encoding, errors=errors)
+    """Read a text artifact through a verified descriptor and enforce its byte budget."""
+    return read_bytes_bounded(
+        path, max_bytes, expected_identity=expected_identity,
+    ).decode(encoding, errors=errors)
 
