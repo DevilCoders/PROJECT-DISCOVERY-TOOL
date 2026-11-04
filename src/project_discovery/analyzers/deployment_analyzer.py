@@ -8,6 +8,7 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import read_text_bounded
 
 
 class _SafeDeploymentLoader:
@@ -107,7 +108,10 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
 
     def _read_yaml(self, path: Path, record: FileRecord) -> tuple[list[Any] | None, Finding | None]:
         try:
-            text = path.read_text(encoding="utf-8")
+            text = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
             return _SafeDeploymentLoader.load_all(text), None
         except Exception as exc:
             return None, Finding(
@@ -121,7 +125,10 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
 
     def _dockerfile(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            ).splitlines()
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "containers", f"Dockerfile read error: {record.path}",
@@ -183,7 +190,10 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
 
     def _terraform(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "infrastructure", f"Terraform file read error: {record.path}",
@@ -452,7 +462,10 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
 
     def _json_deployment(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            root = _mapping(json.loads(path.read_text(encoding="utf-8")))
+            root = _mapping(json.loads(read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return [Finding(
                 "infrastructure", f"Deployment JSON parse error: {record.path}",
@@ -465,7 +478,10 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
 
     def _jenkins(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "ci_cd", f"Jenkinsfile read error: {record.path}",
