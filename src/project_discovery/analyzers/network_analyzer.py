@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from .base import Analyzer
 from ..language_catalog import is_textual_path
 from ..models import FileRecord, Finding
+from ..source_utils import open_verified_binary
 
 
 _URI = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://[^\s<>\"']+", re.I)
@@ -137,7 +138,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
 
         line_number = 1
         try:
-            with path.open("rb") as stream:
+            with open_verified_binary(path, record.analysis_identity) as stream:
                 while bytes_scanned < _MAX_NETWORK_FILE_BYTES:
                     remaining = _MAX_NETWORK_FILE_BYTES - bytes_scanned
                     raw_line = stream.readline(
