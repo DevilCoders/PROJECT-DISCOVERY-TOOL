@@ -316,23 +316,34 @@ def _discover_with_rust(
     try:
         walker = native_create_walker(root, excluded_names, excluded_paths)
     except OSError as exc:
-        directories_by_path["."].error = f"{type(exc).__name__}: {exc}"
+        message = f"{type(exc).__name__}: {exc}"
+        if store is None:
+            directories_by_path["."].error = message
+        else:
+            store.adjust_directory(".", error=message)
         stats["walk_errors"] += 1
         return True
     if walker is None:
         return False
     for relative, kind, size, mode, mtime_ns, hidden, target, error, depth, device_id, inode_id, ctime_ns in walker:
         if kind == "directory_error":
-            record = directories_by_path.get(relative)
-            if record is not None:
-                record.error = error or "Directory read failed"
+            message = error or "Directory read failed"
+            if store is None:
+                record = directories_by_path.get(relative)
+                if record is not None:
+                    record.error = message
+            else:
+                store.adjust_directory(relative, error=message)
             stats["walk_errors"] += 1
             continue
         stats["entry_count"] += 1
         parent = PurePosixPath(relative).parent.as_posix() or "."
-        parent_record = directories_by_path.get(parent)
-        if parent_record is not None:
-            parent_record.direct_child_count += 1
+        if store is None:
+            parent_record = directories_by_path.get(parent)
+            if parent_record is not None:
+                parent_record.direct_child_count += 1
+        else:
+            store.adjust_directory(parent, direct_child_delta=1)
         if hidden:
             stats["hidden_entry_count"] += 1
         if kind == "entry_error":
@@ -345,6 +356,7 @@ def _discover_with_rust(
                 files.append(entry_record)
             else:
                 store.append("file", entry_record)
+                _update_file_ancestor_totals(relative, 0, store)
             continue
         if kind == "symlink":
             scope = _symlink_scope(root, root / relative, target)
@@ -368,8 +380,9 @@ def _discover_with_rust(
                 development_marker=marker, pruned=exclusion is not None,
                 prune_reason=exclusion, error=error,
             )
-            directories_by_path[relative] = record
-            if store is not None:
+            if store is None:
+                directories_by_path[relative] = record
+            else:
                 store.append("directory", record)
             if marker:
                 stats["development_directory_count"] += 1
@@ -404,6 +417,7 @@ def _discover_with_rust(
                 files.append(record)
             else:
                 store.append("file", record)
+                _update_file_ancestor_totals(relative, size, store)
             stats["total_bytes"] += size
             stats[f"file_type:{file_type}"] += 1
             stats[f"size_bucket:{record.size_bucket}"] += 1
@@ -421,6 +435,22 @@ def _discover_with_rust(
     return True
 
 
+
+def _update_file_ancestor_totals(
+    relative_path: str,
+    size_bytes: int,
+    store: InventoryStore,
+) -> None:
+    """Update directory aggregates incrementally without retaining directory objects."""
+    parent = PurePosixPath(relative_path).parent
+    while True:
+        key = parent.as_posix() or "."
+        store.adjust_directory(key, file_count_delta=1, total_bytes_delta=size_bytes)
+        if key == ".":
+            break
+        parent = parent.parent
+
+
 def discover_inventory(
     root: Path,
     *,
@@ -430,17 +460,18 @@ def discover_inventory(
     store: InventoryStore | None = None,
 ) -> tuple[
     Sequence[FileRecord],
-    list[DirectoryRecord],
+    Sequence[DirectoryRecord],
     Sequence[SymlinkRecord],
     Sequence[SpecialEntryRecord],
     dict[str, int],
 ]:
     """Inventory all entries by default; only explicit excludes prune subtrees.
 
-    The traversal never follows symlinks. With a store, file, symlink and special-entry
-    records are persisted in bounded batches and returned through lazy SQLite-backed
-    sequences. Directory records/maps and Python fallback traversal state remain in
-    memory; this is not yet a fully bounded-memory inventory pipeline.
+    The traversal never follows symlinks. With a store, file, directory, symlink and
+    special-entry records are persisted in bounded batches and returned through lazy
+    SQLite-backed sequences. Directory counters and errors are updated incrementally
+    in SQLite; only the active Python fallback iterator stack remains depth-bounded in
+    memory. Analyzer findings and report aggregation still have separate memory gates.
     """
     root = root.expanduser().absolute()
     root_info = root.lstat()
@@ -465,8 +496,10 @@ def discover_inventory(
         stats["inventory_store_enabled"] = 1
         store.checkpoint({"inventory_status": "running", "root": str(root)})
     root_directory = DirectoryRecord(".", 0, permissions=root_mode, is_hidden=root_hidden)
-    directories_by_path: dict[str, DirectoryRecord] = {".": root_directory}
-    if store is not None:
+    directories_by_path: dict[str, DirectoryRecord] = {}
+    if store is None:
+        directories_by_path["."] = root_directory
+    else:
         store.append("directory", root_directory)
     files: list[FileRecord] = []
     symlinks: list[SymlinkRecord] = []
@@ -480,7 +513,11 @@ def discover_inventory(
         try:
             root_iterator = os.scandir(root)
         except OSError as exc:
-            root_directory.error = f"{type(exc).__name__}: {exc}"
+            message = f"{type(exc).__name__}: {exc}"
+            if store is None:
+                root_directory.error = message
+            else:
+                store.adjust_directory(".", error=message)
             stats["walk_errors"] += 1
         else:
             scandir_stack.append((root, ".", 0, root_directory, root_iterator))
@@ -496,14 +533,20 @@ def discover_inventory(
             scandir_stack.pop()
             continue
         except OSError as exc:
-            directory_record.error = f"{type(exc).__name__}: {exc}"
+            message = f"{type(exc).__name__}: {exc}"
+            directory_record.error = message
+            if store is not None:
+                store.adjust_directory(relative_dir, error=message)
             stats["walk_errors"] += 1
             entries.close()
             scandir_stack.pop()
             continue
         relative = entry.name if relative_dir == "." else f"{relative_dir}/{entry.name}"
         stats["entry_count"] += 1
-        directory_record.direct_child_count += 1
+        if store is None:
+            directory_record.direct_child_count += 1
+        else:
+            store.adjust_directory(relative_dir, direct_child_delta=1)
         try:
             info = entry.stat(follow_symlinks=False)
             hidden = _is_hidden(entry.name, info)
@@ -542,8 +585,9 @@ def discover_inventory(
                     pruned=exclusion is not None,
                     prune_reason=exclusion,
                 )
-                directories_by_path[relative] = record
-                if store is not None:
+                if store is None:
+                    directories_by_path[relative] = record
+                else:
                     store.append("directory", record)
                 if marker:
                     stats["development_directory_count"] += 1
@@ -555,7 +599,10 @@ def discover_inventory(
                     try:
                         child_iterator = os.scandir(entry.path)
                     except OSError as exc:
-                        record.error = f"{type(exc).__name__}: {exc}"
+                        message = f"{type(exc).__name__}: {exc}"
+                        record.error = message
+                        if store is not None:
+                            store.adjust_directory(relative, error=message)
                         stats["walk_errors"] += 1
                     else:
                         scandir_stack.append((
@@ -592,6 +639,7 @@ def discover_inventory(
                     files.append(file_record)
                 else:
                     store.append("file", file_record)
+                    _update_file_ancestor_totals(relative, size, store)
                 stats["total_bytes"] += size
                 stats[f"file_type:{file_type}"] += 1
                 stats[f"size_bucket:{file_record.size_bucket}"] += 1
@@ -632,26 +680,25 @@ def discover_inventory(
                 files.append(error_record)
             else:
                 store.append("file", error_record)
+                _update_file_ancestor_totals(relative, 0, store)
 
-
-    # Aggregate regular files into every inventoried ancestor. Pruned subtrees
-    # intentionally do not acquire file totals because their content is unscanned.
-    file_records = store.iter_file_records() if store is not None else iter(files)
-    for file_record in file_records:
-        parent = PurePosixPath(file_record.path).parent
-        while True:
-            key = parent.as_posix() or "."
-            record = directories_by_path.get(key)
-            if record is not None:
-                record.file_count += 1
-                record.total_bytes += file_record.size_bytes
-            if key == ".":
-                break
-            parent = parent.parent
+    # The no-store compatibility path still aggregates from its in-memory file list.
+    if store is None:
+        for file_record in files:
+            parent = PurePosixPath(file_record.path).parent
+            while True:
+                key = parent.as_posix() or "."
+                record = directories_by_path.get(key)
+                if record is not None:
+                    record.file_count += 1
+                    record.total_bytes += file_record.size_bytes
+                if key == ".":
+                    break
+                parent = parent.parent
 
     if store is not None:
-        # Directory aggregates and late walk errors are finalized after traversal.
-        store.extend("directory", directories_by_path.values())
+        # Directory records and aggregate deltas are persisted as traversal proceeds.
+        store.flush()
         walk_errors = stats.get("walk_errors", 0)
         entry_errors = stats.get("entry_errors", 0)
         store.checkpoint({
@@ -683,6 +730,9 @@ def discover_inventory(
         special_entries = StoredRecordSequence(
             store.path, "special", SpecialEntryRecord,
         )
-    directories = list(directories_by_path.values())
-    directories.sort(key=lambda item: (item.depth, item.path.casefold(), item.path))
+    if store is None:
+        directories = list(directories_by_path.values())
+        directories.sort(key=lambda item: (item.depth, item.path.casefold(), item.path))
+    else:
+        directories = StoredRecordSequence(store.path, "directory", DirectoryRecord)
     return files, directories, symlinks, special_entries, dict(stats)
