@@ -100,10 +100,23 @@ class InventoryStore:
             ) WITHOUT ROWID"""
         )
         self.db.commit()
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS inventory_sequences (
+                name TEXT PRIMARY KEY,
+                value INTEGER NOT NULL CHECK(value >= 0)
+            ) WITHOUT ROWID"""
+        )
         row = self.db.execute(
             "SELECT MAX(CAST(path AS INTEGER)) FROM inventory_records WHERE kind='diagnostic'"
         ).fetchone()
-        self._diagnostic_counter = int(row[0] or 0) if row else 0
+        initial_diagnostic_value = int(row[0] or 0) if row else 0
+        with self.db:
+            self.db.execute(
+                """INSERT INTO inventory_sequences(name, value) VALUES ('diagnostic', ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                       value=MAX(inventory_sequences.value, excluded.value)""",
+                (initial_diagnostic_value,),
+            )
 
     @staticmethod
     def _kind(kind: str) -> str:
@@ -345,8 +358,25 @@ class InventoryStore:
             raise TypeError("diagnostic messages must be strings")
         if not message:
             raise ValueError("diagnostic messages must not be empty")
-        self._diagnostic_counter += 1
-        key = f"{self._diagnostic_counter:020d}"
+        # Reserve the sequence value transactionally so independent store
+        # connections cannot reuse a diagnostic key. A crash can leave a gap,
+        # but can never cause an earlier diagnostic to be overwritten.
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute(
+                "SELECT value FROM inventory_sequences WHERE name='diagnostic'"
+            ).fetchone()
+            sequence = int(row[0] if row else 0) + 1
+            self.db.execute(
+                """INSERT INTO inventory_sequences(name, value) VALUES ('diagnostic', ?)
+                   ON CONFLICT(name) DO UPDATE SET value=excluded.value""",
+                (sequence,),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        key = f"{sequence:020d}"
         self.append("diagnostic", {"path": key, "message": message})
 
     def extend_diagnostics(self, messages: Iterable[str]) -> int:
@@ -407,7 +437,7 @@ class InventoryStore:
             self.db.execute("DELETE FROM inventory_records")
             self.db.execute("DELETE FROM inventory_metadata")
             self.db.execute("DELETE FROM inventory_directory_state")
-        self._diagnostic_counter = 0
+            self.db.execute("DELETE FROM inventory_sequences")
 
     def checkpoint(self, metadata: Mapping[str, Any]) -> None:
         """Flush inventory rows, then atomically persist a resumable scan checkpoint.
