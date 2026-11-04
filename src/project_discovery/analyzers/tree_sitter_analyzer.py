@@ -287,7 +287,10 @@ class TreeSitterAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            source = read_text_bounded(path, _MAX_TREE_SITTER_FILE_BYTES)
+            source = read_text_bounded(
+                path, _MAX_TREE_SITTER_FILE_BYTES,
+                expected_identity=record.analysis_identity,
+            )
         except SourceBudgetExceeded as exc:
             return [Finding(
                 "code",
