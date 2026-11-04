@@ -363,9 +363,11 @@ def run_scan(
         if walk_stats.get("walk_errors", 0) == 0:
             cache.prune_missing(str(root), (record.path for record in records))
 
-    python_graph, graph_findings = analyze_python_dependencies(root, records)
-    architecture_layout, architecture_findings = analyze_project_architecture(records)
     with InventoryStore(inventory_path) as finding_store:
+        python_graph, graph_findings = analyze_python_dependencies(
+            root, records, finding_sink=finding_store.append_finding,
+        )
+        architecture_layout, architecture_findings = analyze_project_architecture(records)
         finding_store.extend_findings(graph_findings)
         finding_store.extend_findings(architecture_findings)
     findings = StoredFindingRecords(inventory_path)
