@@ -159,6 +159,13 @@ def analyze_python_dependencies(
         name: sorted(paths) for name, paths in module_paths.items()
         if module_path_counts[name] > 1
     }
+    duplicate_module_path_counts = {
+        name: module_path_counts[name] for name in duplicate_modules
+    }
+    duplicate_module_candidate_omitted_count = sum(
+        max(0, module_path_counts[name] - len(duplicate_modules[name]))
+        for name in duplicate_modules
+    )
     known_modules = set(unique_modules) | set(duplicate_modules)
     edges: list[dict[str, Any]] = []
     edge_keys: set[tuple[str, str, str, int, str]] = set()
@@ -225,6 +232,16 @@ def analyze_python_dependencies(
                 "reason": f"source_parse_error: {type(exc).__name__}",
                 "confidence": "UNKNOWN",
             })
+            emit(Finding(
+                "architecture",
+                f"Python dependency graph source unavailable: {record.path}",
+                "The inventoried source could not be read or decoded for graph extraction: "
+                + type(exc).__name__,
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer="python-module-graph",
+                severity="LOW",
+            ))
             continue
         try:
             tree = ast.parse(source_text, filename=record.path)
@@ -387,13 +404,16 @@ def analyze_python_dependencies(
         "skipped_modules": skipped_modules,
         "omitted_skipped_module_count": omitted_skipped_module_count,
         "duplicate_modules": duplicate_modules,
+        "duplicate_module_path_counts": duplicate_module_path_counts,
         "edges": edges,
         "unresolved_imports": unresolved,
         "cycles": cycles,
         "summary": {
             "module_count": len(unique_modules),
-            "skipped_module_count": len(skipped_modules),
+            "skipped_module_count": len(skipped_modules) + omitted_skipped_module_count,
+            "skipped_module_detail_count": len(skipped_modules),
             "duplicate_module_count": len(duplicate_modules),
+            "duplicate_module_candidate_omitted_count": duplicate_module_candidate_omitted_count,
             "edge_count": len(edges),
             "unresolved_import_count": len(unresolved),
             "cycle_count": len(cycles),
@@ -406,7 +426,11 @@ def analyze_python_dependencies(
             "graph_complete": not any((
                 omitted_module_record_count, omitted_edge_count,
                 omitted_unresolved_count, omitted_skipped_module_count,
-            )) and not skipped_modules,
+            )) and not skipped_modules and not any(
+                item["reason"] == "source_budget_exceeded"
+                or str(item["reason"]).startswith("source_parse_error:")
+                for item in unresolved
+            ),
         },
     }
     skipped_modules.sort(key=lambda item: (str(item["name"]), str(item["path"])))
