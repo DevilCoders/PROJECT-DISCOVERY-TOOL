@@ -5,13 +5,14 @@ import hashlib
 import os
 import stat
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
 from .language_catalog import detect_language, is_source_path, is_textual_path
 from .native_backend import count_byte as native_count_byte
 from .native_backend import detect_signature as native_detect_signature
 from .native_backend import create_walker as native_create_walker
-from .inventory_store import InventoryStore
+from .inventory_store import InventoryStore, StoredFileRecords
 from .models import (
     DirectoryRecord,
     FileRecord,
@@ -340,8 +341,9 @@ def _discover_with_rust(
                 relative, 0, Path(relative).suffix.lower(), "Unknown",
                 error=error or "Entry metadata unavailable", is_hidden=hidden,
             )
-            files.append(entry_record)
-            if store is not None:
+            if store is None:
+                files.append(entry_record)
+            else:
                 store.append("file", entry_record)
             continue
         if kind == "symlink":
@@ -397,8 +399,9 @@ def _discover_with_rust(
                     f"Explicit --skip: exceeds {max_file_bytes} bytes"
                 )
                 stats["oversized_content_skipped"] += 1
-            files.append(record)
-            if store is not None:
+            if store is None:
+                files.append(record)
+            else:
                 store.append("file", record)
             stats["total_bytes"] += size
             stats[f"file_type:{file_type}"] += 1
@@ -424,7 +427,7 @@ def discover_inventory(
     ignores: set[str] | None = None,
     store: InventoryStore | None = None,
 ) -> tuple[
-    list[FileRecord],
+    Sequence[FileRecord],
     list[DirectoryRecord],
     list[SymlinkRecord],
     list[SpecialEntryRecord],
@@ -561,8 +564,9 @@ def discover_inventory(
                                 f"Explicit --skip: exceeds {max_file_bytes} bytes"
                             )
                             stats["oversized_content_skipped"] += 1
-                        files.append(file_record)
-                        if store is not None:
+                        if store is None:
+                            files.append(file_record)
+                        else:
                             store.append("file", file_record)
                         stats["total_bytes"] += size
                         stats[f"file_type:{file_type}"] += 1
@@ -599,8 +603,9 @@ def discover_inventory(
                         error=f"{type(exc).__name__}: {exc}",
                         is_hidden=entry.name.startswith("."),
                     )
-                    files.append(error_record)
-                    if store is not None:
+                    if store is None:
+                        files.append(error_record)
+                    else:
                         store.append("file", error_record)
 
         except OSError as exc:
@@ -613,7 +618,8 @@ def discover_inventory(
 
     # Aggregate regular files into every inventoried ancestor. Pruned subtrees
     # intentionally do not acquire file totals because their content is unscanned.
-    for file_record in files:
+    file_records = store.iter_file_records() if store is not None else iter(files)
+    for file_record in file_records:
         parent = PurePosixPath(file_record.path).parent
         while True:
             key = parent.as_posix() or "."
@@ -635,10 +641,10 @@ def discover_inventory(
             "traversal_finished": True,
             "root": str(root),
             "record_counts": {
-                "file": len(files),
-                "directory": len(directories_by_path),
-                "symlink": len(symlinks),
-                "special": len(special_entries),
+                "file": store.count("file"),
+                "directory": store.count("directory"),
+                "symlink": store.count("symlink"),
+                "special": store.count("special"),
             },
             "walk_errors": walk_errors,
             "entry_errors": entry_errors,
@@ -647,9 +653,12 @@ def discover_inventory(
         stats["inventory_store_integrity_ok"] = int(store.integrity_check() == "ok")
         stats["inventory_store_partial"] = int(bool(walk_errors or entry_errors))
 
-    # Sort the existing record lists in place to avoid a second full-size
-    # allocation at the end of large scans.
-    files.sort(key=lambda item: (item.path.casefold(), item.path))
+    # With a store, file records are read lazily from SQLite in deterministic
+    # case-folded path order. The in-memory fallback retains its compatibility sort.
+    if store is None:
+        files.sort(key=lambda item: (item.path.casefold(), item.path))
+    else:
+        files = StoredFileRecords(store.path)
     directories = list(directories_by_path.values())
     directories.sort(key=lambda item: (item.depth, item.path.casefold(), item.path))
     symlinks.sort(key=lambda item: (item.path.casefold(), item.path))
