@@ -508,3 +508,49 @@ def test_signature_reader_rejects_rust_walker_identity_mismatch(tmp_path: Path):
     with pytest.raises(OSError, match="identity changed"):
         _read_signature_sample(path, identity)
 
+def test_python_fallback_keeps_scandir_iterators_bounded_by_depth(tmp_path: Path, monkeypatch):
+    import project_discovery.scanner as scanner
+
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *args, **kwargs: None)
+    for index in range(20):
+        folder = tmp_path / f"dir-{index:02}"
+        folder.mkdir()
+        (folder / "module.py").write_text("pass\n", encoding="utf-8")
+
+    real_scandir = scanner.os.scandir
+    active = 0
+    peak_active = 0
+
+    class TrackedScandir:
+        def __init__(self, iterator):
+            nonlocal active, peak_active
+            self.iterator = iterator
+            self.closed = False
+            active += 1
+            peak_active = max(peak_active, active)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self.iterator)
+
+        def close(self):
+            nonlocal active
+            if not self.closed:
+                self.closed = True
+                self.iterator.close()
+                active -= 1
+
+    def tracked_scandir(path):
+        return TrackedScandir(real_scandir(path))
+
+    monkeypatch.setattr(scanner.os, "scandir", tracked_scandir)
+    files, directories, _, _, stats = scanner.discover_inventory(tmp_path)
+
+    assert len(files) == 20
+    assert len(directories) == 21
+    assert stats["entry_count"] == 40
+    assert peak_active == 2  # root iterator + one active child; siblings are not queued
+    assert active == 0
+
