@@ -92,7 +92,10 @@ class APIContractAnalyzer(Analyzer):
                 analyzer=self.name, severity="LOW",
             )]
         try:
-            content = read_text_bounded(path, _MAX_API_CONTRACT_BYTES)
+            content = read_text_bounded(
+                path, _MAX_API_CONTRACT_BYTES,
+                expected_identity=record.analysis_identity,
+            )
             name = Path(record.path).name.lower()
             if name in _OPENAPI_NAMES:
                 return self._openapi(path, record, content)
