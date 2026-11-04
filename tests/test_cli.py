@@ -26,6 +26,7 @@ def test_default_report_output_is_sibling_of_target(tmp_path: Path):
     persistence = payload["metrics"]["inventory_persistence"]
     assert persistence["enabled"] is True
     assert persistence["integrity_check"] == "ok"
+    assert persistence["status"] == "complete"
     assert persistence["record_count"] >= 2
     assert (tmp_path / "project-pdt-report" / ".pdt-cache" / "inventory.sqlite3").is_file()
 
