@@ -461,3 +461,25 @@ def test_inventory_checkpoint_is_partial_when_directory_traversal_fails(tmp_path
         assert store.get_metadata("traversal_finished") is True
         assert store.get_metadata("walk_errors") == 1
 
+def test_signature_reader_accepts_rust_walker_identity_tuple(tmp_path: Path):
+    from project_discovery.scanner import _read_signature_sample
+
+    path = tmp_path / "rust-walker.bin"
+    path.write_bytes(b"\x7fELF" + b"r" * 600)
+    info = path.stat()
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    assert _read_signature_sample(path, identity) == b"\x7fELF" + b"r" * 508
+
+
+def test_signature_reader_rejects_rust_walker_identity_mismatch(tmp_path: Path):
+    import pytest
+    from project_discovery.scanner import _read_signature_sample
+
+    path = tmp_path / "changed-after-walk.bin"
+    path.write_bytes(b"first")
+    info = path.stat()
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    path.write_bytes(b"second version")
+    with pytest.raises(OSError, match="identity changed"):
+        _read_signature_sample(path, identity)
+
