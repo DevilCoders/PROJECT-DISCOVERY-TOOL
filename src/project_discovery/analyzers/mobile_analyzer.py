@@ -10,6 +10,7 @@ from typing import Any
 
 from .base import Analyzer
 from ..models import FileRecord, Finding
+from ..source_utils import open_verified_binary, read_text_bounded
 
 
 _ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
@@ -145,7 +146,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
 
     def _plist(self, path: Path, record: FileRecord, entitlements: bool) -> list[Finding]:
         try:
-            with path.open("rb") as stream:
+            with open_verified_binary(path, record.analysis_identity) as stream:
                 data = plistlib.load(stream)
         except (OSError, plistlib.InvalidFileException, ValueError) as exc:
             return [Finding(
@@ -233,7 +234,10 @@ class MobileIntelligenceAnalyzer(Analyzer):
 
     def _json_manifest(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            ))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return [Finding(
                 "mobile", f"Mobile JSON manifest parse error: {record.path}",
