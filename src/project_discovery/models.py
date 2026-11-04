@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -151,7 +151,7 @@ class ScanResult:
     root: str
     started_at: str
     finished_at: str
-    files: list[FileRecord] = field(default_factory=list)
+    files: Sequence[FileRecord] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
