@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Iterable
 
 from .models import FileRecord, Finding
 
@@ -45,7 +45,7 @@ _LAYER_ALIASES = {
 
 
 def analyze_project_architecture(
-    records: list[FileRecord],
+    records: Iterable[FileRecord],
 ) -> tuple[dict[str, Any], list[Finding]]:
     """Infer likely architectural layers from repository paths without reading source."""
     top_level: Counter[str] = Counter()
