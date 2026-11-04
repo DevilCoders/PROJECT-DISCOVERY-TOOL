@@ -141,7 +141,8 @@ def analyze_python_dependencies(
             continue
         try:
             source_text = read_python_source_bounded(
-                root / record.path, MAX_GRAPH_AST_FILE_BYTES
+                root / record.path, MAX_GRAPH_AST_FILE_BYTES,
+                expected_identity=record.analysis_identity,
             )
         except SourceBudgetExceeded as exc:
             unresolved.append({
