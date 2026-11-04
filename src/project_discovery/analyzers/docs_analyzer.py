@@ -23,7 +23,9 @@ class MarkdownAnalyzer(Analyzer):
                 analyzer=self.name, severity="LOW",
             )]
         try:
-            text = read_text_bounded(path, _MAX_MARKDOWN_BYTES)
+            text = read_text_bounded(
+                path, _MAX_MARKDOWN_BYTES, expected_identity=record.analysis_identity,
+            )
         except SourceBudgetExceeded as exc:
             return [Finding(
                 "documentation", f"Markdown resource limit: {record.path}", str(exc),
