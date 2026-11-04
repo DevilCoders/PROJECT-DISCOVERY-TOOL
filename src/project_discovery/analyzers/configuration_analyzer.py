@@ -281,7 +281,7 @@ class ConfigurationAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
-            with path.open("rb") as stream:
+            with open_verified_binary(path, record.analysis_identity) as stream:
                 raw_content = stream.read(_MAX_CONFIG_FILE_BYTES + 1)
             if len(raw_content) > _MAX_CONFIG_FILE_BYTES:
                 return [Finding(
