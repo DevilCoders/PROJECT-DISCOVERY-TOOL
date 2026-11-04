@@ -270,7 +270,10 @@ class MobileIntelligenceAnalyzer(Analyzer):
 
     def _flutter_manifest(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Flutter manifest read error: {record.path}",
@@ -289,7 +292,10 @@ class MobileIntelligenceAnalyzer(Analyzer):
 
     def _podfile(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Podfile read error: {record.path}",
@@ -309,7 +315,10 @@ class MobileIntelligenceAnalyzer(Analyzer):
 
     def _gradle(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Android Gradle manifest read error: {record.path}",
@@ -335,7 +344,10 @@ class MobileIntelligenceAnalyzer(Analyzer):
 
     def _xcode_project(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Xcode project read error: {record.path}",
@@ -352,7 +364,10 @@ class MobileIntelligenceAnalyzer(Analyzer):
 
     def _mobile_source(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Mobile source read error: {record.path}",
