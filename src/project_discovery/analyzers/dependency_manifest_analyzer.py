@@ -82,7 +82,10 @@ class DependencyManifestAnalyzer(Analyzer):
                 analyzer=self.name, severity="LOW",
             )]
         try:
-            content = read_text_bounded(path, _MAX_DEPENDENCY_MANIFEST_BYTES)
+            content = read_text_bounded(
+                path, _MAX_DEPENDENCY_MANIFEST_BYTES,
+                expected_identity=record.analysis_identity,
+            )
             declarations = self._extract(path, record, content)
         except SourceBudgetExceeded as exc:
             return [Finding(
