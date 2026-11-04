@@ -312,3 +312,50 @@ def test_inventory_store_buffers_directory_aggregate_deltas_and_errors(tmp_path:
         assert updated.total_bytes == 104
         assert updated.error == "permission denied"
 
+def test_inventory_store_persists_and_deduplicates_typed_findings(tmp_path: Path):
+    from project_discovery.inventory_store import StoredFindingRecords
+    from project_discovery.models import CodeEvidence, Finding
+
+    database = tmp_path / "findings.sqlite3"
+    finding = Finding(
+        category="security",
+        title="Hard-coded credential",
+        detail="A credential-like literal is assigned in source.",
+        evidence=["src/settings.py:12"],
+        analyzer="secret-scanner",
+        severity="HIGH",
+        code_evidence=[CodeEvidence(12, "password = 'example-secret'")],
+        impact="An attacker with repository access could recover the credential.",
+        recommendation="Move the secret to a managed secret store and rotate it.",
+    )
+    duplicate = Finding.from_dict(finding.to_dict())
+    other = Finding(
+        category="configuration",
+        title="Debug mode enabled",
+        detail="The configuration sets a development-only mode.",
+        analyzer="configuration",
+        evidence=["config.yml:1"],
+    )
+
+    with InventoryStore(database, batch_size=2) as store:
+        store.append_finding(finding)
+        store.extend_findings([duplicate, other])
+        assert store.count("finding") == 2
+        restored = list(store.iter_findings(fetch_size=1))
+        assert {item.title for item in restored} == {
+            "Hard-coded credential", "Debug mode enabled",
+        }
+        credential = next(item for item in restored if item.title == "Hard-coded credential")
+        assert credential.severity == "HIGH"
+        assert credential.code_evidence[0].line_number == 12
+        assert "example-secret" not in credential.code_evidence[0].code
+        assert credential.impact == finding.impact
+        assert credential.recommendation == finding.recommendation
+
+        lazy = StoredFindingRecords(database, fetch_size=1)
+        assert len(lazy) == 2
+        assert {item.title for item in lazy} == {
+            "Hard-coded credential", "Debug mode enabled",
+        }
+        assert lazy[0].to_dict() == lazy[0].to_dict()
+
