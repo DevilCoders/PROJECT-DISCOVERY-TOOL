@@ -23,6 +23,11 @@ def test_default_report_output_is_sibling_of_target(tmp_path: Path):
     assert "source_structure" in payload["metrics"]["active_analyzer_domains"]
     assert "native_backend" in payload["metrics"]
     assert "vcs_provider_signal_count" in payload["metrics"]
+    persistence = payload["metrics"]["inventory_persistence"]
+    assert persistence["enabled"] is True
+    assert persistence["integrity_check"] == "ok"
+    assert persistence["record_count"] >= 2
+    assert (tmp_path / "project-pdt-report" / ".pdt-cache" / "inventory.sqlite3").is_file()
 
 
 def test_scan_writes_reports_without_touching_target(tmp_path: Path):
