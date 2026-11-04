@@ -73,7 +73,7 @@ The production engine must provide:
 The current branch contains first-pass implementations of:
 
 - File, directory and symlink records; hidden-name indicators; size buckets; permission metadata; directory byte/file totals; common development/cache directory markers; a SQLite fingerprint cache.
-- Incremental SQLite inventory persistence at `OUTPUT/.pdt-cache/inventory.sqlite3` with bounded batches, scan-state checkpoints and final directory aggregates. The current public scanner and report pipeline still materialize inventory/results in memory; this is not yet the 100GB+ bounded-memory implementation.
+- Incremental SQLite inventory persistence at `OUTPUT/.pdt-cache/inventory.sqlite3` with bounded batches, running/complete/partial checkpoints, final directory aggregates, record-count telemetry and integrity status. The current public scanner and report pipeline still materialize inventory/results in memory; this is not yet the 100GB+ bounded-memory implementation.
 - Python AST analysis and a Python internal-import graph with cycle detection.
 - Language/file-format recognition and an optional, offline-first Tree-sitter adapter.
 - Markdown plus optional PDF/DOCX document extraction.
@@ -89,9 +89,9 @@ The current branch contains first-pass implementations of:
 - JSON/Markdown reports and an offline dark HTML report with search, filters, pagination and collapsible findings.
 - A Rich CLI with an ASCII banner, progress phases, compact summary panels and TTY-aware screen clearing.
 - Bounded concurrent file analysis through a ThreadPoolExecutor (`--jobs 0` auto or `--jobs N`) plus a C-native OpenCL GPU byte-count path for large immutable buffers, with runtime detection and C/SIMD/Python fallback.
-- An initial SQLite `InventoryStore` primitive for bounded-batch persistence of inventory metadata, deterministic streaming reads, scan metadata, explicit cursor/close behavior, symlink database-path rejection and private POSIX database permissions. It is not yet wired into scanner traversal or report generation.
+- A bounded-batch SQLite `InventoryStore` integrated into CLI scanner traversal. It persists inventory records as discovered, exposes deterministic streaming reads, scan-state checkpoints, SQLite integrity checks, explicit cursor/close behavior, symlink database-path rejection and private POSIX database permissions. It is not yet used as the scanner's primary in-memory replacement or as the report data source.
 
-These are initial implementations with varying depth. The Python filesystem fallback streams `os.scandir` entries without materializing each directory's full `DirEntry` list, but the complete inventory and findings are still retained in memory; the new SQLite `InventoryStore` is not yet wired into the scanner or report pipeline. Dependency/cache/build directories are traversed by default unless explicitly excluded, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
+These are initial implementations with varying depth. The Python filesystem fallback streams `os.scandir` entries without materializing each directory's full `DirEntry` list, but the complete inventory and findings are still retained in memory; the SQLite `InventoryStore` now mirrors inventory records durably but is not yet the primary scanner or report data source. Dependency/cache/build directories are traversed by default unless explicitly excluded, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
 
 See [Analyzer Coverage](docs/ANALYZER_COVERAGE.md), [Architecture](docs/ARCHITECTURE.md), [Analyzer Resource Budgets](docs/ANALYZER_RESOURCE_BUDGETS.md), and [Roadmap](docs/ROADMAP.md).
 
