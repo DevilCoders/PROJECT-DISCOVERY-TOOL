@@ -76,7 +76,10 @@ class BuildManifestAnalyzer(Analyzer):
                 analyzer=self.name, severity="LOW",
             )]
         try:
-            content = read_text_bounded(path, _MAX_BUILD_MANIFEST_BYTES)
+            content = read_text_bounded(
+                path, _MAX_BUILD_MANIFEST_BYTES,
+                expected_identity=record.analysis_identity,
+            )
             targets: list[str] = []
             metadata: list[str] = []
             if name in {"makefile", "gnumakefile", "justfile"} or record.extension == ".mk":
