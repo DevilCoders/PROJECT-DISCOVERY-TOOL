@@ -301,7 +301,7 @@ def _discover_with_rust(
         return True
     if walker is None:
         return False
-    for relative, kind, size, mode, mtime_ns, hidden, target, error, depth in walker:
+    for relative, kind, size, mode, mtime_ns, hidden, target, error, depth, device_id, inode_id, ctime_ns in walker:
         if kind == "directory_error":
             record = directories_by_path.get(relative)
             if record is not None:
@@ -358,6 +358,9 @@ def _discover_with_rust(
                 relative, size, Path(relative).suffix.lower(), language,
                 file_type=file_type, size_bucket=_size_bucket(size),
                 is_hidden=hidden, permissions=mode, mtime_ns=mtime_ns,
+                analysis_identity=(
+                    device_id, inode_id, size, mtime_ns, ctime_ns,
+                ) if device_id is not None and inode_id is not None else None,
             )
             if size > max_file_bytes and skip_oversized:
                 record.content_skipped_reason = (
@@ -502,6 +505,10 @@ def discover_inventory(
                             is_hidden=hidden,
                             permissions=stat.S_IMODE(info.st_mode),
                             mtime_ns=info.st_mtime_ns,
+                            analysis_identity=(
+                                info.st_dev, info.st_ino, info.st_size,
+                                info.st_mtime_ns, info.st_ctime_ns,
+                            ),
                         )
                         if size > max_file_bytes and skip_oversized:
                             file_record.content_skipped_reason = (
