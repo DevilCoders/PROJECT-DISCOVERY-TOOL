@@ -55,7 +55,7 @@ Before a host imports the plugin, it attempts each forbidden action: a write out
 | Memory limit (`--plugin-memory-mb`, default 4096) | `RLIMIT_AS` | Not enforced by macOS | Job memory limit |
 | Lifetime | Dies with PDT | Exits within 1 s of PDT | Dies with PDT (kill-on-close job) |
 
-Run `pdt capabilities` to see what the sandbox verifies on a given machine and whether each installed plugin loads.
+On every CI runner (Linux, macOS and Windows, CPython 3.11–3.14), the test suite runs a hostile test plugin under the real sandbox and checks the file-write, file-read, network and process-creation rows. Run `pdt capabilities` to see what the sandbox verifies on a given machine and whether each installed plugin loads.
 
 ## Writing plugins that work in the sandbox
 
