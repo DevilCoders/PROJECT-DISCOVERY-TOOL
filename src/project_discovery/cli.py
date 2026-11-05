@@ -48,7 +48,7 @@ from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
 from .remote import (
     DEFAULT_REMOTE_TIMEOUT, REMOTE_VCS, is_remote_target,
-    load_remote_targets, parse_remote_target, remote_checkout,
+    load_remote_targets, parse_remote_target, remote_checkout, remote_vcs_capabilities,
 )
 from .runtime_metrics import PhaseTimer, peak_rss_bytes
 from .scanner import discover_inventory
@@ -750,6 +750,7 @@ def capabilities_report() -> dict:
         "python": platform.python_version(),
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
         "native_backend": native_capabilities(),
+        "remote_vcs_clients": remote_vcs_capabilities(),
         "optional_integrations": {
             "tree-sitter-language-pack": version_of("tree-sitter-language-pack"),
             "provisioned_grammars": grammars,
@@ -1009,6 +1010,15 @@ def main() -> None:
             table.add_row("GPU (OpenCL)", f"{native.get('gpu_status')} {native.get('gpu_name') or ''}".strip())
             table.add_row("C++ signature classifier", "online" if native.get("cpp_signature_classifier") else "fallback")
             table.add_row("Rust filesystem walker", "online" if native.get("rust_filesystem_walker") else "fallback")
+            for backend, client in report["remote_vcs_clients"].items():
+                executable = client.get("executable")
+                alternatives = " or ".join(client.get("alternatives", []))
+                status = (
+                    f"available ({Path(str(executable)).name})"
+                    if client.get("available") and executable
+                    else f"not installed ({alternatives})"
+                )
+                table.add_row(f"Remote VCS: {backend}", status)
             for name, value in report["optional_integrations"].items():
                 if name == "provisioned_grammars":
                     value = "n/a" if value is None else f"{len(value)} grammar(s) provisioned locally"
