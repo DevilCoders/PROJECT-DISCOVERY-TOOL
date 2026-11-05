@@ -13,8 +13,9 @@ presence only (CONFIRMED). This is an initial domain implementation, not full ML
 architecture or dataset lineage analysis.
 
 ## Robotics and ROS
-ROS coverage remains planned until the dedicated ROS analyzer is implemented and
-tested. Future work must distinguish ROS 1 and ROS 2, static package metadata,
-nodes/topics/services/actions, launch descriptions, message/service/action
-interfaces, QoS and runtime discovery. File names alone must not be reported as
-confirmed runtime communication graphs.
+The ROS analyzer (`ros-intelligence`) classifies ROS 1 and ROS 2 packages from
+`package.xml` dependencies and inventories Python and C++ node APIs, publisher,
+subscription, service and action call sites with literal topic names, launch files
+and `.msg`/`.srv`/`.action` interfaces. See [ROS_ANALYZER.md](ROS_ANALYZER.md) for
+its scope and limits. File names alone are never reported as confirmed runtime
+communication graphs, and QoS, remapping and runtime discovery are not inferred.

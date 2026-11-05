@@ -44,6 +44,17 @@ plugin that reads every file:
 The cost covers staging a verified copy and one JSON round trip per supported file, plus one
 batched `supports()` round trip per 32 files and host start-up.
 
+Code intelligence cost (2026-11-06, same workstation) on 4,684 real third-party files (65 MB,
+2,061 of them modelled source files, mostly Python), measured per analyzer in one process:
+
+| Measure | Result |
+|---|---|
+| Analysis time, the 35 earlier analyzers | 113.4 s |
+| Analysis time, the 12 code-intelligence and domain analyzers | 21.7 s (+19%) |
+| Costliest new analyzers per file | code index 2.1 ms (includes building the code model), performance 2.0 ms, data flow 1.8 ms |
+| Full `pdt scan` (8 workers, processes) | about 30 s, 156 files/s; `code_index` phase 1.0 s |
+| Code index storage | 293,632 rows, 41.6 MB (about 20 KiB per modelled source file) |
+
 ## Large-corpus release gate (open)
 
 Planned runs at 2 GB, 10 GB, 50 GB and 100 GB+ on operator-provided data should record, for

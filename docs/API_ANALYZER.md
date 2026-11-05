@@ -1,9 +1,9 @@
 # API Contract Intelligence
 
-The initial API contract analyzer statically inventories:
-- OpenAPI/Swagger JSON and YAML files, including HTTP operations and component schemas.
-- GraphQL schema definitions and named query/mutation/subscription operations.
-- Protocol Buffers messages, enums, services and RPC declarations.
-- Thrift services, structs, exceptions, enums and typedef declarations.
+PDT inventories APIs from three directions.
 
-JSON OpenAPI parsing uses the Python standard library. YAML OpenAPI parsing uses PyYAML when installed; without it, a deliberately shallow line-based fallback inventories common paths, methods and operation IDs. The analyzer does not make network requests or claim that an API is deployed, reachable, authorized, or behaviorally correct. Runtime route discovery, framework-specific handlers, compatibility analysis and security testing remain future analyzer work.
+**Contracts** (`api-contracts`): OpenAPI/Swagger JSON and YAML (HTTP operations and component schemas), AsyncAPI (channels and publish/subscribe operations), OpenRPC, WSDL (services, port types, bindings and operations), RAML, GraphQL schema definitions and named query/mutation/subscription operations, Protocol Buffers messages, enums, services and RPCs, Thrift services, structs, exceptions, enums and typedefs, and Postman collections (request grouping only; request secrets are not reported). JSON is parsed with the standard library; YAML uses PyYAML when installed, otherwise a deliberately shallow line-based fallback inventories common paths, methods and operation IDs. Each contract is read with a 16 MiB budget.
+
+**Source declarations** (`api-endpoints`): framework route declarations found statically in source code, for example Flask, FastAPI and Django in Python (from the syntax tree), Express-style routers, Spring and JAX-RS annotations, ASP.NET attributes and Laravel routes. The API-style classifier (`api-type-classifier`) adds REST, GraphQL, gRPC, JSON-RPC, SOAP, WebSocket and event-driven markers. Outbound HTTP calls and served endpoints also feed the scan's integration summary and the cross-project integration map in `pdt compare` (see [CODE_INTELLIGENCE.md](CODE_INTELLIGENCE.md)).
+
+**Limits.** Contracts and route declarations are static evidence. PDT does not make network requests or claim that an API is deployed, reachable, authorized or behaviorally correct. Route prefixes added at run time, middleware, dynamic registration, compatibility analysis between contract versions and security testing are not covered.

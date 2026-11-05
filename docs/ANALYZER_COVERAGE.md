@@ -61,7 +61,7 @@ Dependency declarations are now extracted from Maven POMs, Gradle, .NET project 
 
 ## Initial filesystem, archive, network and platform intelligence
 
-The filesystem inventory now uses separate records for regular files, directories and symbolic links. It inventories hidden state, permissions, selected file signatures, size buckets, directory aggregates and common development/cache directory markers. Symbolic links are classified lexically and never traversed. Special filesystem entries are counted but still need per-entry records.
+The filesystem inventory now uses separate records for regular files, directories and symbolic links. It inventories hidden state, permissions, selected file signatures, size buckets, directory aggregates and common development/cache directory markers. Symbolic links are classified lexically and never traversed. Special filesystem entries (FIFOs, sockets, devices and unknown types) get their own inventory records.
 
 Oversized-file skipping is opt-in through the scan CLI flag. Initial Python AST analyzers and the Python import graph use an independent 16 MiB parser budget and report UNKNOWN when that budget is exceeded; this does not globally skip the file for streaming analyzers.
 

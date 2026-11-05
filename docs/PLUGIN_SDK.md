@@ -74,6 +74,7 @@ On every CI runner (Linux, macOS and Windows, CPython 3.11–3.14), the test sui
   | File size handed to a plugin | 1 GiB |
 
 - `concurrent_safe` matters only with `--plugin-isolation off`, because isolated hosts never run requests in parallel.
+- Isolated plugins contribute findings only. Code facts (`project_discovery.code_facts.emit_fact`), which feed the cross-file code index, are not part of the host protocol, so calls to them inside a host are ignored. A plugin run with `--plugin-isolation off` executes inside PDT's fact collector and can record facts.
 
 ## Limits of the isolation
 

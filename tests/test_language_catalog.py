@@ -13,7 +13,14 @@ def test_catalog_reports_optional_parser_backend():
     entries = {item["name"]: item for item in language_catalog()}
     assert entries["Python"]["analysis_status"] == "implemented"
     assert entries["Rust"]["parser_backend"] == "optional:tree-sitter-language-pack"
-    assert entries["Rust"]["analysis_status"] == "optional_parser"
+    # Rust always gets PDT's structural model; the Tree-sitter grammar is an optional extra.
+    assert entries["Rust"]["analysis_status"] == "lexical_structure"
+    assert entries["Rust"]["structural_model"] == "lexical"
+    # A language with a grammar mapping but no built-in model keeps the optional-parser status.
+    optional_only = [item for item in entries.values()
+                     if item["parser_backend"] == "optional:tree-sitter-language-pack"
+                     and item["structural_model"] is None]
+    assert optional_only and all(item["analysis_status"] == "optional_parser" for item in optional_only)
 
 
 

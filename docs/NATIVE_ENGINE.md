@@ -30,9 +30,11 @@ Scope limitation: only byte counting/reduction is GPU-accelerated. Source parsin
 
 ## Bounded concurrent analysis
 
-The CLI uses a bounded ThreadPoolExecutor for independent file/analyzer work. --jobs 0 selects an automatic worker count; --jobs N sets an explicit count (1–64). At most twice the worker count is queued. Results are collected in submission order to keep report output deterministic, and SQLite cache operations remain on the coordinator thread. Analyzer plug-ins are assumed concurrent-safe unless they explicitly set concurrent_safe = False, in which case their instance is serialized with a lock.
+The analysis engine runs per-file analyzers in worker processes or threads. `--executor auto` (the default) uses processes for inventories of 1,000 files or more and threads below that; `--executor process|thread` forces either. `--jobs 0` selects an automatic worker count (twice the hardware threads, at most 8); `--jobs N` sets 1–64 workers. Files are batched per task (up to 4 MiB of content per batch), at most twice the worker count of batches is pending, and results are collected in submission order so reports are deterministic. Each file up to 4 MiB is read once through the verified descriptor and served to every analyzer.
 
-This is concurrent thread-pool execution, not a claim that every analyzer is internally asynchronous. The scheduler still consumes an in-memory inventory and accumulates findings in memory; persistent streaming inventory, bounded report data, cancellation and resumable checkpoints remain release gates.
+Worker processes never write to the scan databases: the coordinator persists inventory records, findings, diagnostics and code facts in bounded SQLite batches (`OUTPUT/.pdt-cache/inventory.sqlite3`), and later phases read them back as lazy sequences. If a worker process dies, the pool restarts and the affected batch is re-run file by file. Ctrl-C terminates workers immediately and keeps what was persisted, and `--resume` continues an interrupted scan. Analyzer plugins that set `concurrent_safe = False` are serialized with a lock in thread mode.
+
+This is parallel execution of independent per-file work, not a claim that every analyzer is internally asynchronous. Report metrics, the Python import graph (within its caps) and each per-file analyzer's working set are still held in memory; bounded-memory behavior at 100 GB+ is unverified until the large-corpus benchmarks run.
 
 ## Safety and portability
 

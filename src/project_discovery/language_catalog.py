@@ -192,10 +192,11 @@ def language_catalog() -> list[dict[str, str | None]]:
             "family": spec.family,
             "parser_backend": backend,
             "recognition": "CONFIRMED",
+            # The built-in structural model always runs; an optional grammar only when provisioned.
             "analysis_status": (
                 "implemented" if spec.name == "Python"
-                else "optional_parser" if spec.name in GRAMMARS
                 else "lexical_structure" if spec.name in LEXICAL_LANGUAGES
+                else "optional_parser" if spec.name in GRAMMARS
                 else "inventory_only"
             ),
             # The shared code model: syntax tree (Python), structural lexer, or none.

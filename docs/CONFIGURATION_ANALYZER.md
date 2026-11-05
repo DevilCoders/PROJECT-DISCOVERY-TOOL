@@ -1,6 +1,6 @@
 # Configuration Intelligence
 
-The initial configuration analyzer inventories key paths from selected JSON, TOML, INI, environment, YAML, HCL/Terraform, properties and container configuration files. It intentionally does not place configuration values in findings.
+The configuration analyzer inventories key paths from JSON (including JSON5 and JSONC), TOML, INI/CFG/CNF, `.env`/`.envrc`, YAML, HCL/Terraform, Nix, Java properties, XML (for example `web.config` and property lists), systemd units, desktop entries, server configurations (nginx, sshd, Redis, PHP, MySQL) and container files (Dockerfile, Containerfile, Compose). It intentionally does not place configuration values in findings.
 
 A conservative set of security-sensitive settings is flagged as INFERRED for manual review: debug mode, disabled TLS verification, wildcard CORS, privileged containers, privilege escalation, root-user allowances and host networking.
 
