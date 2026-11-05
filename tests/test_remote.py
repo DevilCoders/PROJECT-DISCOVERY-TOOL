@@ -472,7 +472,7 @@ def test_bzr_checkout_exports_remote_branch_without_working_copy_metadata(
     ],
 )
 def test_native_vcs_checkouts_exclude_control_metadata(
-    tmp_path: Path, monkeypatch, backend, metadata_directory, checkout_function, command_prefix,
+    tmp_path: Path, monkeypatch, backend, metadata_directory, command_prefix,
 ):
     target_urls = {
         "darcs": "darcs+https://code.example.net/team/project",
