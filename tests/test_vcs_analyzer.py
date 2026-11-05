@@ -66,6 +66,12 @@ def test_other_vcs_and_hosting_providers(tmp_path: Path):
     assert "AWS CodeCommit" in bzr[0].detail
 
 
+def test_fossil_checkout_marker_is_recognized(tmp_path: Path):
+    findings = _scan(tmp_path, "_FOSSIL_", "local Fossil checkout metadata")
+    assert len(findings) == 1
+    assert "Fossil" in findings[0].title
+
+
 def test_ci_and_cloud_delivery_providers(tmp_path: Path):
     checks = [
         (".github/workflows/ci.yml", "name: CI\njobs: {}\n", "GitHub Actions"),
