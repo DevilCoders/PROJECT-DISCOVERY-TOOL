@@ -107,6 +107,35 @@ def test_remote_target_rejects_credential_bearing_or_unsafe_urls(url: str):
         remote.parse_remote_target(url)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "cvs+pserver://anonymous:secret@cvs.example.net/cvsroot/project",
+        "p4+ssl://token:secret@perforce.example.net:1666/depot/project",
+        "darcs+https://user:secret@code.example.net/team/project",
+        "jj+https://github.com/acme/project?auth_token=secret",
+        "pijul+https://nest.pijul.com/acme/project?private_token=secret",
+    ],
+)
+def test_remote_target_rejects_embedded_credentials_for_native_vcs(url: str):
+    with pytest.raises(RemoteScanError):
+        remote.parse_remote_target(url)
+
+
+def test_url_file_does_not_deduplicate_distinct_vcs_for_same_remote_url(tmp_path: Path):
+    url_file = tmp_path / "same-url-different-vcs.txt"
+    url_file.write_text(
+        "https://code.example.net/team/project\n"
+        "hg+https://code.example.net/team/project\n",
+        encoding="utf-8",
+    )
+
+    targets = remote.load_remote_targets(url_file)
+
+    assert [item.vcs for item in targets] == ["git", "hg"]
+    assert targets[0].identity != targets[1].identity
+
+
 def test_remote_target_can_force_hg_or_svn_for_ambiguous_https_urls():
     hg = remote.parse_remote_target("https://hg.example.net/team/project", vcs="hg")
     svn = remote.parse_remote_target("https://svn.example.net/repos/project/trunk", vcs="svn")
@@ -413,6 +442,8 @@ def test_hg_checkout_exports_committed_tree_without_working_copy_update(
     assert (checkout / "main.py").is_file()
     assert metadata["revision"] == "revision-123"
     assert metadata["branch"] == "default"
+    archive_command = next(command for command in commands if "archive" in command)
+    assert "--no-decode" in archive_command
     assert not any("update" in command for command in commands)
 
 
