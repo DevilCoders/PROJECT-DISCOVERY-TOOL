@@ -27,6 +27,9 @@ MATCH_ONLY = {
     # failed for the rest of the line, and an unterminated verbatim string ends the scan.
     "project_discovery.code_model.lexical._QUOTED": "matched at quote openers by clean_source",
     "project_discovery.code_model.lexical._VERBATIM": "matched after @\" openers by clean_source",
+    "project_discovery.code_model.lexical._ARROW_AFTER": (
+        "matched once after the closing parenthesis of a `const x = (` candidate"
+    ),
 }
 
 

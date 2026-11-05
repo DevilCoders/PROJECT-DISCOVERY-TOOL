@@ -527,6 +527,179 @@ def _module_graph(context: _Context) -> tuple[dict, list[Finding]]:
     return value, findings
 
 
+# --------------------------------------------------------------------------- fact summaries
+
+def _fact_totals(db: sqlite3.Connection, kind: str) -> tuple[dict[str, Counter], Counter]:
+    """Sum the numeric fields of one fact kind per language: (totals, file counts)."""
+    totals: dict[str, Counter] = defaultdict(Counter)
+    files: Counter = Counter()
+    for language, detail in db.execute("SELECT name, detail FROM code_facts WHERE kind = ?", (kind,)):
+        try:
+            values = json.loads(detail)
+        except ValueError:
+            continue
+        if not isinstance(values, dict):
+            continue
+        files[language] += 1
+        for key, number in values.items():
+            if isinstance(number, (int, float)) and not isinstance(number, bool):
+                if key == "maximum":
+                    totals[language][key] = max(totals[language][key], number)
+                else:
+                    totals[language][key] += number
+    return totals, files
+
+
+def _percent(part: int, whole: int) -> str:
+    return f"{100 * part / whole:.1f}%" if whole else "n/a"
+
+
+def _complexity(context: _Context) -> tuple[dict, list[Finding]]:
+    totals, files = _fact_totals(context.db, "complexity_stats")
+    functions = sum(counts["functions"] for counts in totals.values())
+    if not functions:
+        return {"functions": 0}, []
+    total = sum(counts["total"] for counts in totals.values())
+    high = sum(counts["high"] for counts in totals.values())
+    heaviest = []
+    for name, path, detail in context.db.execute(
+        "SELECT name, path, detail FROM code_facts WHERE kind = 'complex_function'"
+    ):
+        try:
+            values = json.loads(detail)
+            heaviest.append((int(values["complexity"]), path, int(values.get("line", 0)), name))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if len(heaviest) > 4 * MAX_LISTED:
+            heaviest = sorted(heaviest, reverse=True)[:MAX_LISTED]
+    heaviest = sorted(heaviest, reverse=True)[:MAX_LISTED]
+    value = {
+        "functions": functions, "mean": round(total / functions, 2), "high": high,
+        "maximum": max(counts["maximum"] for counts in totals.values()),
+        "by_language": {
+            language: {"files": files[language], "functions": counts["functions"],
+                       "mean": round(counts["total"] / counts["functions"], 2) if counts["functions"] else 0,
+                       "maximum": counts["maximum"], "high": counts["high"]}
+            for language, counts in sorted(totals.items())
+        },
+        "most_complex": [{"name": name, "path": path, "line": line, "complexity": score}
+                         for score, path, line, name in heaviest[:20]],
+    }
+    return value, [Finding(
+        "performance", "Code complexity summary",
+        f"{functions:,} functions measured; mean cyclomatic complexity {value['mean']}, maximum "
+        f"{value['maximum']}; {high:,} function(s) at 25 or more. Python complexity comes from the "
+        "syntax tree; other languages count decision keywords and operators in each function body.",
+        confidence="INFERRED", analyzer="code-index",
+        evidence=[f"{path}:{line} {name} (complexity {score})" for score, path, line, name in heaviest[:15]],
+    )]
+
+
+def _type_summary(context: _Context) -> tuple[dict, list[Finding]]:
+    totals, files = _fact_totals(context.db, "type_stats")
+    if not totals:
+        return {}, []
+    parts = []
+    python = totals.get("Python")
+    if python and python["functions"]:
+        parts.append(
+            f"Python: {python['fully_annotated']:,} of {python['functions']:,} functions fully annotated "
+            f"({_percent(python['fully_annotated'], python['functions'])}), "
+            f"{_percent(python['typed_parameters'], python['parameters'])} of parameters typed, "
+            f"{python['any']:,} `Any`, {python['suppressions']:,} `# type: ignore`"
+            + (f", {python['file_ignored']:,} module(s) excluded from checking" if python["file_ignored"] else "")
+        )
+    typescript = Counter()
+    for language in ("TypeScript", "Vue", "Svelte"):
+        if totals.get(language, Counter())["typescript"]:
+            typescript.update(totals[language])
+    if typescript:
+        parts.append(
+            f"TypeScript ({typescript['typescript']:,} files): {typescript['any']:,} `any`, "
+            f"{typescript['suppressions']:,} `@ts-ignore`/`@ts-expect-error`, "
+            f"{typescript['non_null_assertions']:,} non-null assertions"
+            + (f", {typescript['nocheck']:,} file(s) with `@ts-nocheck`" if typescript["nocheck"] else "")
+        )
+    javascript = files.get("JavaScript", 0)
+    if javascript:
+        parts.append(f"JavaScript: {totals['JavaScript']['checked']:,} of {javascript:,} files with "
+                     "functions opt into type checking (`// @ts-check` or `// @flow`)")
+    labels = {
+        "Kotlin": ("not_null_assertions", "`!!` not-null assertions"),
+        "Swift": ("forced", "forced casts or tries (`as!`, `try!`)"),
+        "C#": ("dynamic", "`dynamic` declarations"),
+        "Java": ("suppressions", "unchecked or raw-type warning suppressions"),
+        "Go": ("empty_interfaces", "empty interfaces (`interface{}`)"),
+    }
+    for language, (key, label) in labels.items():
+        if language in totals:
+            parts.append(f"{language}: {totals[language][key]:,} {label}")
+    value = {
+        language: dict(sorted(counts.items())) | {"files": files[language]}
+        for language, counts in sorted(totals.items())
+    }
+    if not parts:
+        return value, []
+    return value, [Finding(
+        "type_systems", "Type system usage",
+        "; ".join(parts) + ". Escape hatches are counted in code with comments and strings removed.",
+        confidence="INFERRED", analyzer="code-index",
+    )]
+
+
+_CONCURRENCY_LABELS = {
+    "async_functions": "async functions", "async_tasks": "task spawns or joins", "threads": "thread starts",
+    "thread_pools": "thread pools", "process_pools": "process pools", "processes": "processes",
+    "goroutines": "goroutines", "channels": "channels or queues", "queues": "queues", "locks": "locks",
+    "workers": "web workers", "atomics": "atomics",
+}
+
+
+def _concurrency_summary(context: _Context) -> tuple[dict, list[Finding]]:
+    totals, files = _fact_totals(context.db, "concurrency")
+    if not totals:
+        return {}, []
+    parts = []
+    for language, counts in sorted(totals.items(), key=lambda item: -sum(item[1].values())):
+        described = ", ".join(
+            f"{count:,} {_CONCURRENCY_LABELS.get(key, key.replace('_', ' '))}"
+            for key, count in counts.most_common() if count
+        )
+        if described:
+            parts.append(f"{language} ({files[language]:,} files): {described}")
+    value = {language: dict(sorted(counts.items())) | {"files": files[language]}
+             for language, counts in sorted(totals.items())}
+    return value, [Finding(
+        "concurrency", "Concurrency model",
+        "; ".join(parts[:12]) + ".", confidence="INFERRED", analyzer="code-index",
+    )] if parts else []
+
+
+def _memory_summary(context: _Context) -> tuple[dict, list[Finding]]:
+    totals, files = _fact_totals(context.db, "memory_stats")
+    if not totals:
+        return {}, []
+    native = Counter()
+    for language, counts in totals.items():
+        if language != "Rust":
+            native.update(counts)
+    parts = []
+    if native["allocations"] or native["raw_new"]:
+        parts.append(
+            f"C/C++: {native['allocations']:,} malloc/calloc/realloc and {native['frees']:,} free calls; "
+            f"{native['raw_new']:,} raw `new` expressions and {native['smart_pointers']:,} smart-pointer uses"
+        )
+    if totals.get("Rust", Counter())["unsafe_blocks"]:
+        parts.append(f"Rust: {totals['Rust']['unsafe_blocks']:,} `unsafe` blocks in {files['Rust']:,} files")
+    value = {language: dict(sorted(counts.items())) | {"files": files[language]}
+             for language, counts in sorted(totals.items())}
+    return value, [Finding(
+        "resource_management", "Manual memory management",
+        "; ".join(parts) + ". Per-file findings flag allocations, handles and unsafe operations "
+        "without a visible release.", confidence="INFERRED", analyzer="code-index",
+    )] if parts else []
+
+
 QUERY_KINDS = ("symbol", "callers", "callees", "references")
 
 
@@ -579,4 +752,8 @@ _PASSES = (
     ("unreferenced", _unreferenced),
     ("test_links", _test_links),
     ("module_graph", _module_graph),
+    ("complexity", _complexity),
+    ("type_systems", _type_summary),
+    ("concurrency", _concurrency_summary),
+    ("memory", _memory_summary),
 )

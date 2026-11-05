@@ -149,6 +149,8 @@ _FUNCTION_EXPRESSION = re.compile(
     r"(?<![\w$])(?:const|let|var)[ \t\r\n]++([A-Za-z_$][\w$]*+)[ \t\r\n]*+"
     r"(?::[^=;\n]{0,200}+)?=[ \t\r\n]*+(?:async[ \t\r\n]++)?(?=function\b|\(|[A-Za-z_$][\w$]*+[ \t]*+=>)"
 )
+# After a parenthesised parameter list: optional return type, then the arrow.
+_ARROW_AFTER = re.compile(r"[ \t\r\n]*+(?::[^=;{}\n]{0,200}+)?=>")
 _GO_FUNC = re.compile(r"(?<![\w$])func[ \t]*+(?:\(([^()]{0,200}+)\)[ \t]*+)?([A-Za-z_]\w*+)")
 _GO_TYPE = re.compile(
     r"(?<![\w$])type[ \t]++([A-Za-z_]\w*+)[ \t]++(?:\[[^\]\n]{0,200}+\][ \t]*+)?(struct|interface)\b"
@@ -636,6 +638,11 @@ def build_lexical_model(path: str, language: str, text: str) -> FileModel:
     definitions += _keyword_functions(clean, spec, braces, parens)
     if family == "js":
         for match in _FUNCTION_EXPRESSION.finditer(clean):
+            if clean.startswith("(", match.end()):
+                # ``const x = (a + b)`` is an expression, not an arrow function.
+                close = parens.get(match.end())
+                if close is None or not _ARROW_AFTER.match(clean, close + 1):
+                    continue
             arrow = clean.find("=>", match.end(), match.end() + _SIGNATURE_LOOKAHEAD)
             body = _body_after(clean, arrow + 2 if arrow != -1 else match.end(), braces)
             definitions.append(_Definition(match.start(1), match.start(), "function", match.group(1), body))

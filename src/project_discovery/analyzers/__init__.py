@@ -41,6 +41,7 @@ def builtin_analyzers() -> list[Analyzer]:
     from .archive_analyzer import ArchiveIntelligenceAnalyzer
     from .build_analyzer import BuildManifestAnalyzer
     from .code_index_analyzer import CodeIndexAnalyzer
+    from .concurrency_analyzer import ConcurrencyAnalyzer
     from .configuration_analyzer import ConfigurationAnalyzer
     from .coverage_analyzer import CoverageArtifactAnalyzer
     from .data_exposure_analyzer import DataExposureAnalyzer
@@ -63,6 +64,7 @@ def builtin_analyzers() -> list[Analyzer]:
     from .os_analyzer import OperatingSystemAnalyzer
     from .performance_analyzer import PerformanceHotspotAnalyzer
     from .prisma_analyzer import PrismaSchemaAnalyzer
+    from .resource_analyzer import ResourceManagementAnalyzer
     from .python_analyzer import PythonAnalyzer
     from .ros_analyzer import ROSIntelligenceAnalyzer
     from .secure_code_analyzer import SecureCodePatternAnalyzer
@@ -70,12 +72,16 @@ def builtin_analyzers() -> list[Analyzer]:
     from .sql_analyzer import SQLSchemaAnalyzer
     from .test_analyzer import TestDiscoveryAnalyzer
     from .tree_sitter_analyzer import TreeSitterAnalyzer
+    from .type_system_analyzer import TypeSystemAnalyzer
     from .vcs_analyzer import VCSHostingAnalyzer
 
     return [
         PythonAnalyzer(),
         CodeIndexAnalyzer(),
         PerformanceHotspotAnalyzer(),
+        ConcurrencyAnalyzer(),
+        ResourceManagementAnalyzer(),
+        TypeSystemAnalyzer(),
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
         DeploymentIntelligenceAnalyzer(),
