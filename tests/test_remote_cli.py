@@ -138,3 +138,58 @@ def test_cli_continues_url_batch_after_one_remote_checkout_failure(
 
     assert result.value.code == cli.EXIT_INCOMPLETE
     assert len(scan_calls) == 1
+
+
+
+def test_cli_scans_mixed_vcs_url_batch_and_keeps_backend_metadata(
+    tmp_path: Path, monkeypatch,
+):
+    import sys
+
+    from project_discovery import cli
+    from project_discovery.remote import RemoteCheckout
+
+    url_file = tmp_path / "repositories.txt"
+    url_file.write_text(
+        "https://github.com/acme/git-project\n"
+        "hg+https://hg.example.net/team/hg-project\n"
+        "svn+https://svn.example.net/repos/svn-project/trunk\n"
+        "bzr+https://code.example.net/team/bzr-project\n"
+        "p4+ssl://perforce.example.net:1666/depot/p4-project\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "reports"
+    calls = []
+
+    @contextmanager
+    def fake_checkout(target, *, timeout):
+        checkout = tmp_path / f"checkout-{target.vcs}"
+        checkout.mkdir(exist_ok=True)
+        calls.append(("checkout", target.vcs))
+        yield RemoteCheckout(
+            checkout,
+            {
+                "mode": "remote", "vcs": target.vcs,
+                "provider": target.provider, "warnings": [],
+            },
+        )
+
+    def fake_run_scan(root, report_output, formats, max_file_mb, **kwargs):
+        calls.append(("scan", kwargs["source_metadata"]["vcs"], report_output))
+        return 0
+
+    monkeypatch.setattr(cli, "remote_checkout", fake_checkout)
+    monkeypatch.setattr(cli, "run_scan", fake_run_scan)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["pdt", "scan", "--url", str(url_file), "--output", str(output), "--quiet"],
+    )
+
+    with pytest.raises(SystemExit) as result:
+        cli.main()
+
+    assert result.value.code == 0
+    scan_calls = [item for item in calls if item[0] == "scan"]
+    assert [item[1] for item in scan_calls] == ["git", "hg", "svn", "bzr", "p4"]
+    assert len({item[2] for item in scan_calls}) == 5
+    assert all(item[2].parent == output for item in scan_calls)
