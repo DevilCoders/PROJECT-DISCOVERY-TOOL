@@ -180,13 +180,14 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
         raise RemoteScanError("Repository URLs cannot contain control characters.")
 
     clone_url = raw
+    prefixed_backend = None
+    for prefix, backend in _VCS_PREFIXES:
+        if raw.lower().startswith(prefix):
+            prefixed_backend = backend
+            clone_url = raw[len(prefix):]
+            break
     if selected_vcs == "auto":
-        selected_vcs = "git"
-        for prefix, backend in _VCS_PREFIXES:
-            if raw.lower().startswith(prefix):
-                selected_vcs = backend
-                clone_url = raw[len(prefix):]
-                break
+        selected_vcs = prefixed_backend or "git"
         if raw.lower().startswith("svn://"):
             selected_vcs = "svn"
 
@@ -922,17 +923,17 @@ def _p4_checkout(target: RemoteTarget, checkout: Path, *, timeout: int) -> dict:
                 0o644,
             )
             os.close(descriptor)
-            try:
-                _run(
-                    ["p4", "print", "-q", "-o", str(destination), f"{depot_file}#{revision}"],
-                    timeout=timeout, env=environment, label="Perforce file materialization",
-                )
-            except Exception:
-                destination.unlink(missing_ok=True)
-                raise
-            materialized += 1
         except (OSError, RemoteScanError):
             continue
+        try:
+            _run(
+                ["p4", "print", "-q", "-o", str(destination), f"{depot_file}#{revision}"],
+                timeout=timeout, env=environment, label="Perforce file materialization",
+            )
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        materialized += 1
 
     changes = [
         int(item["change"]) for item in entries
