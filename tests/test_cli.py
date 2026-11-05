@@ -566,3 +566,33 @@ def test_file_records_are_committed_only_after_their_findings(tmp_path: Path, mo
     project = _secret_files(tmp_path / "project")
     assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True, executor="thread", jobs=1) == 0
     assert unflushed_at_commit and set(unflushed_at_commit) == {0}
+
+
+
+def test_capabilities_report_includes_remote_vcs_client_status(monkeypatch):
+    from types import SimpleNamespace
+    import project_discovery.cli as cli
+
+    loaded = SimpleNamespace(analyzers=[], diagnostics=[], plugins=[], close=lambda: None)
+    monkeypatch.setattr(cli, "load_analyzers", lambda: loaded)
+    monkeypatch.setattr(cli, "analyzer_domain_catalog", lambda: [])
+    monkeypatch.setattr(cli, "native_capabilities", lambda: {})
+    monkeypatch.setattr(cli, "probe_sandbox", lambda: {})
+    monkeypatch.setattr(cli, "recognized_language_count", lambda: 0)
+    monkeypatch.setattr(
+        cli.importlib, "import_module",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("optional package absent")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "remote_vcs_capabilities",
+        lambda: {
+            "git": {"available": True, "executable": "/usr/bin/git", "alternatives": ["git"]},
+            "fossil": {"available": False, "executable": None, "alternatives": ["fossil"]},
+        },
+    )
+
+    report = cli.capabilities_report()
+
+    assert report["remote_vcs_clients"]["git"]["available"] is True
+    assert report["remote_vcs_clients"]["fossil"]["available"] is False

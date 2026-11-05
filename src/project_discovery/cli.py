@@ -47,6 +47,10 @@ from .python_graph import analyze_python_dependencies
 from .code_index import QUERY_KINDS, analyze_code_index, query_code_index
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
+from .remote import (
+    DEFAULT_REMOTE_TIMEOUT, REMOTE_VCS, is_remote_target,
+    load_remote_targets, parse_remote_target, remote_checkout, remote_vcs_capabilities,
+)
 from .runtime_metrics import PhaseTimer, peak_rss_bytes
 from .scanner import discover_inventory
 from .native_backend import capabilities as native_capabilities, native_available
@@ -228,6 +232,8 @@ def run_scan(
     resume: bool = False, inventory_only: bool = False,
     plugin_isolation: str = "sandbox", plugin_timeout: float = DEFAULT_TIMEOUT_SECONDS,
     plugin_memory_mb: int = DEFAULT_MEMORY_LIMIT_MB,
+    source_metadata: dict | None = None,
+    display_root: str | None = None,
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -350,6 +356,8 @@ def run_scan(
     try:
         with InventoryStore(inventory_path) as finding_store, ScanCache(cache_path) as cache:
             finding_store.extend_diagnostics(analyzer_load.diagnostics)
+            if source_metadata is not None:
+                finding_store.extend_diagnostics(source_metadata.get("warnings", []))
             with Progress(*progress_columns, console=console) as progress:
                 task = progress.add_task("Analyzing project files", total=len(records))
                 max_pending = max(2, engine.workers * 2)
@@ -515,6 +523,10 @@ def run_scan(
     )
     vcs_provider_signal_count = sum(vcs_provider_categories.values())
     metrics = {
+        "source": {
+            "mode": "remote" if source_metadata is not None else "local",
+            "remote": source_metadata,
+        },
         "vcs_provider_signal_count": vcs_provider_signal_count,
         "vcs_provider_categories": dict(sorted(vcs_provider_categories.items())),
         "native_backend": native_capabilities(),
@@ -629,7 +641,7 @@ def run_scan(
         "architecture_layout": architecture_layout,
     }
     result = ScanResult(
-        str(root), started, now(), records, findings, metrics, errors,
+        display_root or str(root), started, now(), records, findings, metrics, errors,
         [analyzer.name for analyzer in analyzers] + ["python-module-graph"],
         directories=directories,
         symlinks=symlinks,
@@ -749,6 +761,7 @@ def capabilities_report() -> dict:
         "python": platform.python_version(),
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
         "native_backend": native_capabilities(),
+        "remote_vcs_clients": remote_vcs_capabilities(),
         "optional_integrations": {
             "tree-sitter-language-pack": version_of("tree-sitter-language-pack"),
             "provisioned_grammars": grammars,
@@ -784,14 +797,86 @@ def _sandbox_summary(probe: dict) -> str:
     return summary
 
 
+def _run_remote_targets(
+    targets,
+    *,
+    output: Path | None,
+    formats: set[str],
+    max_file_mb: int,
+    remote_timeout: int,
+    scan_options: dict,
+) -> int:
+    """Scan one or more remote repositories, continuing after target-specific failures."""
+    multiple = len(targets) > 1
+    base_output = output
+    if multiple and base_output is None:
+        base_output = Path.cwd() / "pdt-remote-reports"
+
+    failed = 0
+    findings_failed = False
+    console = Console(stderr=True)
+    for target in targets:
+        target_output = (
+            base_output / target.output_name
+            if multiple
+            else base_output or Path.cwd() / f"{target.output_name}-pdt-report"
+        )
+        try:
+            console.print(
+                f"[cyan]REMOTE[/cyan] {target.provider} / {target.repository_name} "
+                f"({target.vcs})"
+            )
+            with remote_checkout(target, timeout=remote_timeout) as checkout:
+                code = run_scan(
+                    checkout.path,
+                    target_output,
+                    formats,
+                    max_file_mb,
+                    source_metadata=checkout.metadata,
+                    display_root=target.clone_url,
+                    **scan_options,
+                )
+            if code == EXIT_FINDINGS:
+                findings_failed = True
+            elif code != EXIT_OK:
+                failed += 1
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            failed += 1
+            console.print(
+                f"[red]REMOTE FAILED[/red] {target.provider} / {target.repository_name}: {exc}"
+            )
+
+    console.print(
+        f"[bold]Remote batch complete:[/bold] {len(targets) - failed}/{len(targets)} "
+        f"repository scan(s) completed; {failed} failed or incomplete."
+    )
+    if findings_failed:
+        return EXIT_FINDINGS
+    return EXIT_INCOMPLETE if failed else EXIT_OK
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="pdt", description="Local-first project intelligence analyzer"
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
-    scan = sub.add_parser("scan", help="Analyze a project without modifying it")
-    scan.add_argument("path", type=Path)
+    scan = sub.add_parser(
+        "scan", help="Analyze a local project or scan a remote VCS repository",
+    )
+    scan.add_argument("path", nargs="?", type=str, metavar="PATH_OR_URL")
+    scan.add_argument(
+        "--url", type=Path, default=None, metavar="FILE",
+        help="Read one repository URL per line from a UTF-8 text file; providers and VCS backends may be mixed",
+    )
+    scan.add_argument(
+        "--vcs", choices=REMOTE_VCS, default="auto",
+        help="Remote VCS backend: auto, git, hg, svn, bzr/bazaar, darcs, jj, pijul, cvs or p4/perforce",
+    )
+    scan.add_argument(
+        "--remote-timeout", type=int, default=DEFAULT_REMOTE_TIMEOUT, metavar="SECONDS",
+        help="Timeout for each remote clone/checkout operation (default: 600)",
+    )
     scan.add_argument("--output", type=Path, default=None)
     scan.add_argument("--format", default="json,markdown,html")
     scan.add_argument(
@@ -970,6 +1055,15 @@ def main() -> None:
             table.add_row("GPU (OpenCL)", f"{native.get('gpu_status')} {native.get('gpu_name') or ''}".strip())
             table.add_row("C++ signature classifier", "online" if native.get("cpp_signature_classifier") else "fallback")
             table.add_row("Rust filesystem walker", "online" if native.get("rust_filesystem_walker") else "fallback")
+            for backend, client in report["remote_vcs_clients"].items():
+                executable = client.get("executable")
+                alternatives = " or ".join(client.get("alternatives", []))
+                status = (
+                    f"available ({Path(str(executable)).name})"
+                    if client.get("available") and executable
+                    else f"not installed ({alternatives})"
+                )
+                table.add_row(f"Remote VCS: {backend}", status)
             for name, value in report["optional_integrations"].items():
                 if name == "provisioned_grammars":
                     value = "n/a" if value is None else f"{len(value)} grammar(s) provisioned locally"
@@ -1021,8 +1115,55 @@ def main() -> None:
                 parser.error("scan --format accepts json, markdown, html")
             if args.max_file_mb < 1:
                 parser.error("--max-file-mb must be >= 1")
+            if args.remote_timeout < 1 or args.remote_timeout > 86_400:
+                parser.error("--remote-timeout must be between 1 and 86400 seconds")
+            if args.url is not None and args.path is not None:
+                parser.error("Use either scan --url FILE or scan PATH_OR_URL, not both")
+            if args.url is None and args.path is None:
+                parser.error("Provide a local PATH, a remote URL, or --url FILE")
+            if args.resume and (args.url is not None or is_remote_target(args.path or "")):
+                parser.error("--resume is supported for local scan roots, not temporary remote checkouts")
+
+            scan_options = {
+                "skip_oversized": args.skip,
+                "ignores": set(args.exclude_dir),
+                "vulnerability_db": args.vuln_db,
+                "jobs": args.jobs,
+                "fail_on": args.fail_on,
+                "strict": args.strict,
+                "quiet": args.quiet,
+                "no_color": args.no_color,
+                "executor": args.executor,
+                "resume": args.resume,
+                "inventory_only": args.inventory_only,
+                "plugin_isolation": args.plugin_isolation,
+                "plugin_timeout": args.plugin_timeout,
+                "plugin_memory_mb": args.plugin_memory_mb,
+            }
+            if args.url is not None:
+                targets = load_remote_targets(args.url, vcs=args.vcs)
+                raise SystemExit(_run_remote_targets(
+                    targets,
+                    output=args.output,
+                    formats=formats,
+                    max_file_mb=args.max_file_mb,
+                    remote_timeout=args.remote_timeout,
+                    scan_options=scan_options,
+                ))
+            if is_remote_target(args.path):
+                target = parse_remote_target(args.path, vcs=args.vcs)
+                raise SystemExit(_run_remote_targets(
+                    [target],
+                    output=args.output,
+                    formats=formats,
+                    max_file_mb=args.max_file_mb,
+                    remote_timeout=args.remote_timeout,
+                    scan_options=scan_options,
+                ))
+            if args.vcs != "auto":
+                parser.error("--vcs can be used only when scanning a remote repository URL")
             raise SystemExit(run_scan(
-                args.path, args.output, formats, args.max_file_mb,
+                Path(args.path), args.output, formats, args.max_file_mb,
                 skip_oversized=args.skip, ignores=set(args.exclude_dir),
                 vulnerability_db=args.vuln_db, jobs=args.jobs,
                 fail_on=args.fail_on, strict=args.strict,
