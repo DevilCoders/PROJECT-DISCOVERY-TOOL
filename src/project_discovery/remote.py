@@ -11,6 +11,7 @@ import hashlib
 import os
 import posixpath
 import re
+import shutil
 import subprocess
 import stat
 import tempfile
@@ -27,7 +28,24 @@ MAX_URL_LINE_CHARS = 8_192
 MAX_GIT_PATH_BYTES = 1 * 1024 * 1024
 MAX_SYMLINK_TARGET_BYTES = 4_096
 DEFAULT_REMOTE_TIMEOUT = 600
-REMOTE_VCS = ("auto", "git", "hg", "svn")
+REMOTE_VCS = (
+    "auto", "git", "hg", "svn", "bzr", "bazaar", "darcs",
+    "jj", "pijul", "cvs", "p4", "perforce",
+)
+_VCS_ALIASES = {"bazaar": "bzr", "perforce": "p4"}
+_VCS_PREFIXES = (
+    ("perforce+", "p4"),
+    ("p4+", "p4"),
+    ("cvs+", "cvs"),
+    ("pijul+", "pijul"),
+    ("darcs+", "darcs"),
+    ("jj+", "jj"),
+    ("bzr+", "bzr"),
+    ("brz+", "bzr"),
+    ("svn+", "svn"),
+    ("hg+", "hg"),
+    ("git+", "git"),
+)
 
 _SCP_URL = re.compile(r"^(?P<user>[^@/\s:]+)@(?P<host>[^:/\s]+):(?P<path>.+)$")
 _SCHEME_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
@@ -152,31 +170,25 @@ def _canonical_git_path(host: str, path: str, provider: str) -> str:
 def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
     if vcs not in REMOTE_VCS:
         raise ValueError(f"--vcs must be one of: {', '.join(REMOTE_VCS)}")
+    selected_vcs = _VCS_ALIASES.get(vcs, vcs)
     raw = raw_url.strip()
     if not raw or len(raw) > MAX_URL_LINE_CHARS:
         raise RemoteScanError("Repository URL is empty or exceeds the supported line length.")
     if any(ord(char) < 32 or ord(char) == 127 for char in raw):
         raise RemoteScanError("Repository URLs cannot contain control characters.")
 
-    selected_vcs = vcs
     clone_url = raw
-    if raw.lower().startswith("git+"):
-        selected_vcs = "git" if vcs == "auto" else vcs
-        clone_url = raw[4:]
-    elif raw.lower().startswith("hg+"):
-        selected_vcs = "hg" if vcs == "auto" else vcs
-        clone_url = raw[3:]
-    elif raw.lower().startswith("svn+"):
-        selected_vcs = "svn" if vcs == "auto" else vcs
-        clone_url = raw[4:]
-    elif raw.lower().startswith("svn://"):
-        selected_vcs = "svn" if vcs == "auto" else vcs
-
     if selected_vcs == "auto":
         selected_vcs = "git"
+        for prefix, backend in _VCS_PREFIXES:
+            if raw.lower().startswith(prefix):
+                selected_vcs = backend
+                clone_url = raw[len(prefix):]
+                break
+        if raw.lower().startswith("svn://"):
+            selected_vcs = "svn"
 
     host = ""
-    parsed = None
     scp = _SCP_URL.match(clone_url)
     if scp:
         host = scp.group("host").lower()
@@ -186,24 +198,34 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
     else:
         if not _SCHEME_URL.match(clone_url):
             raise RemoteScanError(
-                "Use an HTTPS/SSH repository URL, an SSH scp-style URL, or an explicit "
-                "hg+/svn+ URL for non-Git repositories."
+                "Use an HTTPS/SSH repository URL, a Git SSH scp-style URL, or a VCS-prefixed "
+                "URL such as hg+https://, svn+https://, bzr+https://, darcs+https://, "
+                "jj+https://, pijul+https://, cvs+pserver:// or p4+ssl://."
             )
         parsed = urlsplit(clone_url)
         scheme = parsed.scheme.lower()
-        allowed = {"https", "ssh", "git"} if selected_vcs == "git" else {
-            "https", "ssh", "svn", "http"
+        allowed_schemes = {
+            "git": {"https", "ssh", "git"},
+            "jj": {"https", "ssh", "git"},
+            "hg": {"https", "ssh", "http"},
+            "svn": {"https", "ssh", "svn", "http"},
+            "bzr": {"https", "ssh", "bzr"},
+            "darcs": {"https", "ssh", "http"},
+            "pijul": {"https", "ssh", "http"},
+            "cvs": {"pserver", "ssh"},
+            "p4": {"ssl", "tcp"},
         }
+        allowed = allowed_schemes[selected_vcs]
         if scheme not in allowed:
             raise RemoteScanError(
                 f"Unsupported {selected_vcs} URL scheme {scheme!r}; allowed: "
                 + ", ".join(sorted(allowed))
             )
         if parsed.password is not None or (
-            parsed.username is not None and scheme != "ssh"
+            parsed.username is not None and scheme not in {"ssh", "pserver"}
         ):
             raise RemoteScanError(
-                "Credentials must not be embedded in repository URLs. Use an SSH agent "
+                "Passwords must not be embedded in repository URLs. Use an SSH agent "
                 "or your configured VCS credential manager."
             )
         if parsed.query and _SENSITIVE_QUERY.search(parsed.query):
@@ -215,8 +237,10 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
             port = parsed.port
         except ValueError as exc:
             raise RemoteScanError("Repository URL contains an invalid port.") from exc
+        if selected_vcs == "p4" and port is None:
+            raise RemoteScanError("Perforce URLs must include the server port, for example :1666.")
         host_part = f"[{host}]" if ":" in host else host
-        username = parsed.username if scheme == "ssh" else None
+        username = parsed.username if scheme in {"ssh", "pserver"} else None
         netloc = f"{username}@{host_part}" if username else host_part
         if port is not None:
             netloc += f":{port}"
@@ -224,15 +248,28 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
         if selected_vcs == "git":
             provider = _provider(host)
             path = _canonical_git_path(host, path, provider)
-            clone_url = urlunsplit((scheme, netloc, path, "", ""))
         else:
             provider = _provider(host)
-            clone_url = urlunsplit((scheme, netloc, path, "", ""))
+        if selected_vcs == "cvs":
+            parts = [part for part in path.split("/") if part]
+            if len(parts) < 2:
+                raise RemoteScanError(
+                    "CVS URL must include both the repository root and module, "
+                    "for example cvs+pserver://host/cvsroot/project."
+                )
+        if selected_vcs == "p4":
+            parts = [part for part in path.split("/") if part]
+            if len(parts) < 2:
+                raise RemoteScanError(
+                    "Perforce URL must include a depot and project path, "
+                    "for example p4+ssl://server:1666/depot/project."
+                )
+        clone_url = urlunsplit((scheme, netloc, path, "", ""))
+
     if scp:
         provider = _provider(host)
-        # Preserve the path exactly; scp-style URLs are already clone endpoints.
-    if selected_vcs != "git" and scp:
-        raise RemoteScanError("Mercurial/Subversion targets must use an explicit URL scheme.")
+    if scp and selected_vcs not in {"git", "jj"}:
+        raise RemoteScanError("SCP-style URLs are supported only for Git and Jujutsu remotes.")
 
     if selected_vcs == "git" and scheme not in {"https", "ssh", "git"}:
         raise RemoteScanError("Git repository transport must use HTTPS, SSH or git://.")
@@ -251,13 +288,14 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
         safe_identity = urlunsplit((
             scheme.lower(), (normalized.netloc or "").lower(), normalized.path, "", "",
         ))
-    digest = hashlib.sha256(safe_identity.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha256(
+        f"{selected_vcs}|{safe_identity}".encode("utf-8")
+    ).hexdigest()[:10]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", repository_name).strip("-.")[:48] or "repository"
-    safe_url = clone_url
-    insecure = scheme in {"git", "http", "svn"}
+    insecure = scheme in {"git", "http", "svn", "tcp", "pserver"}
     return RemoteTarget(
         input_url=raw,
-        clone_url=safe_url,
+        clone_url=clone_url,
         provider=provider,
         vcs=selected_vcs,
         repository_name=repository_name,
@@ -265,7 +303,6 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
         identity=digest,
         insecure_transport=insecure,
     )
-
 
 def load_remote_targets(path: Path, *, vcs: str = "auto") -> list[RemoteTarget]:
     source = path.expanduser()
