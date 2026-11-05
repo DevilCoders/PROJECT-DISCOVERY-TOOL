@@ -169,6 +169,7 @@ A single remote repository is scanned by passing its URL as the target:
 pdt scan https://github.com/owner/repository
 pdt scan hg+https://hg.example.net/team/project
 pdt scan svn+https://svn.example.net/repos/project/trunk
+pdt scan fossil+https://fossil.example.net/project
 ```
 
 For a batch, create a UTF-8 text file with one URL per line. Blank lines and lines beginning with `#` are ignored; duplicate targets are removed. A single file can mix providers and VCS types:
@@ -188,6 +189,7 @@ jj+https://github.com/owner/project-h
 pijul+https://nest.pijul.com/owner/project-i
 cvs+pserver://cvs.example.net/cvsroot/project-j
 p4+ssl://perforce.example.net:1666/depot/project-k
+fossil+https://fossil.example.net/project-l
 ```
 
 Then run:
@@ -196,9 +198,9 @@ Then run:
 pdt scan --url repositories.txt --output ./remote-reports
 ```
 
-The batch creates a separate report directory for each repository and continues after a repository-specific checkout/scan failure. Supported backends are Git (including GitHub, GitLab, Bitbucket, Azure Repos, CodeCommit, SourceHut and compatible/self-hosted hosts), Mercurial, Subversion, Bazaar/Breezy, Darcs, Jujutsu Git-backed repositories, Pijul, CVS and Perforce. Native VCS command-line clients must be installed for the corresponding backend. Use `--vcs` to force a backend for an ambiguous URL; `auto` uses a VCS prefix when present and otherwise treats the target as Git.
+The batch creates a separate report directory for each repository and continues after a repository-specific checkout/scan failure. Supported backends are Git (including GitHub, GitLab, Bitbucket, Azure Repos, CodeCommit, SourceHut and compatible/self-hosted hosts), Mercurial, Subversion, Bazaar/Breezy, Darcs, Jujutsu Git-backed repositories, Pijul, CVS, Perforce and Fossil SCM. Native VCS command-line clients must be installed for the corresponding backend; `pdt capabilities --json` reports which clients are present. Use `--vcs` to force a backend for an ambiguous URL; `auto` uses a VCS prefix when present and otherwise treats the target as Git.
 
-Remote acquisition is read-only: PDT does not push, commit, modify remote repositories, fetch submodules/externals or download Git LFS objects. SSH agent/credential helpers and locally configured VCS credentials are used instead of passwords embedded in URLs. Git, Mercurial, SVN, Bazaar, Darcs, Jujutsu and Pijul source metadata is excluded from the temporary analysis tree where the adapter can export clean source; temporary checkouts are deleted when scanning finishes. CVS and Perforce downloads are also temporary. Plain `git://`, CVS pserver, Perforce TCP and other non-TLS transports are explicitly marked as insecure in report metadata.
+Remote acquisition is read-only: PDT does not push, commit, modify remote repositories, fetch submodules/externals or download Git LFS objects. SSH agent/credential helpers and locally configured VCS credentials are used instead of passwords embedded in URLs. Git, Mercurial, SVN, Bazaar, Darcs, Jujutsu and Pijul source metadata is excluded from the temporary analysis tree where the adapter can export clean source; temporary checkouts are deleted when scanning finishes. CVS and Perforce downloads are also temporary. Plain `git://`, HTTP Fossil remotes, CVS pserver, Perforce TCP and other non-TLS transports are explicitly marked as insecure in report metadata.
 
 The output directory must remain outside the analyzed project. PDT never changes target files.
 
