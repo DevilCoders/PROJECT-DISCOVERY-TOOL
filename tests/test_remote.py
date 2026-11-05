@@ -345,6 +345,15 @@ def test_remote_target_recognizes_native_vcs_transports(
     assert target.output_name
 
 
+def test_remote_target_auto_detects_native_bzr_and_cvs_schemes():
+    bazaar = remote.parse_remote_target("bzr://bzr.example.net/team/project")
+    cvs = remote.parse_remote_target("pserver://anonymous@cvs.example.net/cvsroot/project")
+
+    assert bazaar.vcs == "bzr"
+    assert cvs.vcs == "cvs"
+    assert cvs.insecure_transport is True
+
+
 def test_remote_target_supports_vcs_aliases_and_forced_backend_with_prefixed_url():
     bazaar = remote.parse_remote_target("bzr+https://code.example.net/team/project", vcs="bazaar")
     perforce = remote.parse_remote_target(
