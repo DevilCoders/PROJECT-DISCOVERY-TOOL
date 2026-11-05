@@ -28,6 +28,8 @@ MAX_URL_LINE_CHARS = 8_192
 MAX_GIT_PATH_BYTES = 1 * 1024 * 1024
 MAX_SYMLINK_TARGET_BYTES = 4_096
 DEFAULT_REMOTE_TIMEOUT = 600
+MAX_P4_LISTING_BYTES = 64 * 1024 * 1024
+MAX_P4_FILES = 50_000
 REMOTE_VCS = (
     "auto", "git", "hg", "svn", "bzr", "bazaar", "darcs",
     "jj", "pijul", "cvs", "p4", "perforce",
@@ -681,28 +683,47 @@ def _git_checkout(
     }
 
 
-def _hg_checkout(target: RemoteTarget, checkout: Path, *, timeout: int) -> dict:
+def _copy_tree_without_metadata(
+    source: Path,
+    destination: Path,
+    *,
+    metadata_names: tuple[str, ...],
+) -> None:
+    """Copy a VCS working tree without copying its control directory."""
+    if not source.is_dir():
+        raise RemoteScanError("VCS client did not create the expected working directory.")
+    shutil.copytree(
+        source,
+        destination,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(*metadata_names),
+    )
+
+
+def _hg_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, timeout: int) -> dict:
     environment = os.environ.copy()
     environment["HGPLAIN"] = "1"
-    empty_hgrc = checkout.parent / "empty-hgrc"
+    empty_hgrc = temporary / "empty-hgrc"
     empty_hgrc.write_text("", encoding="utf-8")
     environment["HGRCPATH"] = str(empty_hgrc)
+    repository = temporary / "hg-repository"
     _run(
-        ["hg", "--noninteractive", "clone", "--noupdate", target.clone_url, str(checkout)],
+        ["hg", "--noninteractive", "clone", "--noupdate", target.clone_url, str(repository)],
         timeout=timeout, env=environment, label="Mercurial clone",
     )
-    _run(
-        ["hg", "--cwd", str(checkout), "--noninteractive", "update", "--rev", "tip"],
-        timeout=timeout, env=environment, label="Mercurial working-tree update",
-    )
     revision = _run(
-        ["hg", "--cwd", str(checkout), "log", "-r", ".", "-T", "{node}"],
+        ["hg", "--cwd", str(repository), "log", "-r", "tip", "-T", "{node}"],
         timeout=timeout, env=environment, label="Mercurial revision lookup",
     ).stdout.decode("ascii", errors="replace").strip()
     branch = _run(
-        ["hg", "--cwd", str(checkout), "branch"],
+        ["hg", "--cwd", str(repository), "log", "-r", "tip", "-T", "{branch}"],
         timeout=timeout, env=environment, label="Mercurial branch lookup",
     ).stdout.decode("utf-8", errors="replace").strip()
+    # Archive committed files without updating an untrusted working copy.
+    _run(
+        ["hg", "--cwd", str(repository), "archive", "--rev", "tip", "--type", "files", str(checkout)],
+        timeout=timeout, env=environment, label="Mercurial source export",
+    )
     return {
         "mode": "remote", "vcs": "hg", "provider": target.provider,
         "url": target.clone_url, "repository": target.repository_name,
@@ -713,21 +734,221 @@ def _hg_checkout(target: RemoteTarget, checkout: Path, *, timeout: int) -> dict:
 
 def _svn_checkout(target: RemoteTarget, checkout: Path, *, timeout: int) -> dict:
     environment = os.environ.copy()
-    _run(
-        ["svn", "checkout", "--non-interactive", "--ignore-externals",
-         target.clone_url, str(checkout)],
-        timeout=timeout, env=environment, label="Subversion checkout",
-    )
     revision = _run(
-        ["svn", "info", "--show-item", "revision", str(checkout)],
+        ["svn", "info", "--show-item", "revision", target.clone_url],
         timeout=timeout, env=environment, label="Subversion revision lookup",
     ).stdout.decode("utf-8", errors="replace").strip()
+    _run(
+        ["svn", "export", "--non-interactive", "--ignore-externals",
+         target.clone_url, str(checkout)],
+        timeout=timeout, env=environment, label="Subversion source export",
+    )
     return {
         "mode": "remote", "vcs": "svn", "provider": target.provider,
         "url": target.clone_url, "repository": target.repository_name,
         "revision": revision, "branch": None, "history_complete": False,
         "externals_fetched": False,
-        "warnings": ["Subversion externals were not fetched."],
+        "warnings": ["Subversion externals were not fetched; the source was exported without .svn metadata."],
+    }
+
+
+def _bzr_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, timeout: int) -> dict:
+    executable = shutil.which("brz") or shutil.which("bzr")
+    if executable is None:
+        raise RemoteScanError("Bazaar/Breezy remote scans require the 'brz' or 'bzr' client on PATH.")
+    environment = os.environ.copy()
+    environment["BRZ_HOME"] = str(temporary / "brz-home")
+    environment["BRZ_PLUGIN_PATH"] = ""
+    _run(
+        [executable, "export", "--quiet", "--format=dir", str(checkout), target.clone_url],
+        timeout=timeout, env=environment, label="Bazaar/Breezy source export",
+    )
+    return {
+        "mode": "remote", "vcs": "bzr", "provider": target.provider,
+        "url": target.clone_url, "repository": target.repository_name,
+        "revision": None, "branch": None, "history_complete": False,
+        "warnings": ["Bazaar/Breezy export contains the committed source tree; history metadata is not retained."],
+    }
+
+
+def _darcs_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, timeout: int) -> dict:
+    environment = os.environ.copy()
+    environment["DARCS_DONT_COLOR"] = "1"
+    repository = temporary / "darcs-repository"
+    _run(
+        ["darcs", "clone", "--lazy", "--no-set-default", target.clone_url, str(repository)],
+        timeout=timeout, env=environment, label="Darcs clone",
+    )
+    _copy_tree_without_metadata(
+        repository, checkout, metadata_names=("_darcs",),
+    )
+    return {
+        "mode": "remote", "vcs": "darcs", "provider": target.provider,
+        "url": target.clone_url, "repository": target.repository_name,
+        "revision": None, "branch": None, "history_complete": False,
+        "warnings": ["Darcs source was materialized from a lazy clone; repository metadata was excluded."],
+    }
+
+
+def _jj_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, timeout: int) -> dict:
+    repository = temporary / "jj-repository"
+    environment = os.environ.copy()
+    _run(
+        ["jj", "git", "clone", "--no-colocate", target.clone_url, str(repository)],
+        timeout=timeout, env=environment, label="Jujutsu Git-backed clone",
+    )
+    revision = _run(
+        ["jj", "--repository", str(repository), "log", "-r", "@", "--no-graph", "-T", "commit_id ++ '\\n'"],
+        timeout=timeout, env=environment, label="Jujutsu revision lookup",
+    ).stdout.decode("utf-8", errors="replace").strip()
+    _copy_tree_without_metadata(
+        repository, checkout, metadata_names=(".jj", ".git"),
+    )
+    return {
+        "mode": "remote", "vcs": "jj", "provider": target.provider,
+        "url": target.clone_url, "repository": target.repository_name,
+        "revision": revision or None, "branch": None, "history_complete": False,
+        "warnings": ["Jujutsu remote mode currently supports Git-backed Jujutsu repositories."],
+    }
+
+
+def _pijul_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, timeout: int) -> dict:
+    repository = temporary / "pijul-repository"
+    environment = os.environ.copy()
+    _run(
+        ["pijul", "clone", target.clone_url, str(repository)],
+        timeout=timeout, env=environment, label="Pijul clone",
+    )
+    _copy_tree_without_metadata(
+        repository, checkout, metadata_names=(".pijul",),
+    )
+    return {
+        "mode": "remote", "vcs": "pijul", "provider": target.provider,
+        "url": target.clone_url, "repository": target.repository_name,
+        "revision": None, "branch": "main", "history_complete": False,
+        "warnings": ["Pijul source was materialized from the main channel; repository metadata was excluded."],
+    }
+
+
+def _cvs_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, timeout: int) -> dict:
+    parsed = urlsplit(target.clone_url)
+    components = [part for part in parsed.path.split("/") if part]
+    if len(components) < 2:
+        raise RemoteScanError("CVS URL must include a repository root and module.")
+    module = components[-1]
+    repository_root = "/" + "/".join(components[:-1])
+    username = parsed.username
+    user_prefix = f"{username}@" if username else ""
+    port_suffix = f":{parsed.port}" if parsed.port is not None else ""
+    if parsed.scheme == "pserver":
+        cvsroot = f":pserver:{user_prefix}{parsed.hostname}{port_suffix}:{repository_root}"
+    else:
+        cvsroot = f":ext:{user_prefix}{parsed.hostname}:{repository_root}"
+    repository = temporary / "cvs-repository"
+    _run(
+        ["cvs", "-d", cvsroot, "checkout", "-P", "-d", str(repository), module],
+        timeout=timeout, env=os.environ.copy(), label="CVS checkout",
+    )
+    _copy_tree_without_metadata(
+        repository, checkout, metadata_names=("CVS",),
+    )
+    return {
+        "mode": "remote", "vcs": "cvs", "provider": target.provider,
+        "url": target.clone_url, "repository": target.repository_name,
+        "revision": None, "branch": None, "history_complete": False,
+        "warnings": ["CVS working-copy metadata was excluded; revision history was not imported."],
+    }
+
+
+def _p4_checkout(target: RemoteTarget, checkout: Path, *, timeout: int) -> dict:
+    parsed = urlsplit(target.clone_url)
+    depot_parts = [part for part in parsed.path.split("/") if part]
+    if len(depot_parts) < 2 or parsed.port is None:
+        raise RemoteScanError("Perforce URL must identify //depot/project and a server port.")
+    depot_root = "//" + "/".join(depot_parts)
+    depot_prefix = depot_root.rstrip("/") + "/"
+    depot_pattern = depot_root.rstrip("/") + "/..."
+    port = f"{parsed.scheme}:{parsed.hostname}:{parsed.port}"
+    environment = os.environ.copy()
+    environment["P4PORT"] = port
+    environment["P4CONFIG"] = ""
+    listing = _run(
+        ["p4", "-ztag", "files", depot_pattern],
+        timeout=timeout, env=environment, label="Perforce depot listing",
+    ).stdout
+    if len(listing) > MAX_P4_LISTING_BYTES:
+        raise RemoteScanError(
+            f"Perforce depot listing exceeds the {MAX_P4_LISTING_BYTES // (1024 * 1024)} MiB safety limit."
+        )
+
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in listing.decode("utf-8", errors="replace").splitlines():
+        if not line.startswith("... "):
+            continue
+        fields = line[4:].split(" ", 1)
+        if len(fields) != 2:
+            continue
+        key, value = fields
+        if key == "depotFile":
+            if current:
+                entries.append(current)
+            current = {"depotFile": value}
+        elif current:
+            current[key] = value
+    if current:
+        entries.append(current)
+
+    if len(entries) > MAX_P4_FILES:
+        omitted = len(entries) - MAX_P4_FILES
+        entries = entries[:MAX_P4_FILES]
+    else:
+        omitted = 0
+
+    checkout.mkdir(parents=True, exist_ok=False)
+    materialized = 0
+    for entry in entries:
+        depot_file = entry.get("depotFile", "")
+        revision = entry.get("rev", "")
+        if not depot_file.startswith(depot_prefix) or not revision.isdigit():
+            continue
+        relative = depot_file[len(depot_prefix):]
+        try:
+            destination = _safe_destination(checkout, os.fsencode(relative))
+            _ensure_safe_parent(checkout, destination.parent)
+            descriptor = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o644,
+            )
+            os.close(descriptor)
+            try:
+                _run(
+                    ["p4", "print", "-q", "-o", str(destination), f"{depot_file}#{revision}"],
+                    timeout=timeout, env=environment, label="Perforce file materialization",
+                )
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+            materialized += 1
+        except (OSError, RemoteScanError):
+            continue
+
+    changes = [
+        int(item["change"]) for item in entries
+        if item.get("change", "").isdigit()
+    ]
+    warnings = []
+    if omitted:
+        warnings.append(f"{omitted:,} depot file(s) were not fetched because the Perforce file-count limit was reached.")
+    return {
+        "mode": "remote", "vcs": "p4", "provider": target.provider,
+        "url": target.clone_url, "repository": target.repository_name,
+        "revision": str(max(changes)) if changes else None,
+        "branch": depot_root, "history_complete": False,
+        "tracked_file_count": materialized,
+        "omitted_file_count": omitted,
+        "warnings": warnings,
     }
 
 
