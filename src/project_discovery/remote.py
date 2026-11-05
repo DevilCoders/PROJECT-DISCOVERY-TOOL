@@ -729,7 +729,7 @@ def _hg_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, timeo
     ).stdout.decode("utf-8", errors="replace").strip()
     # Archive committed files without updating an untrusted working copy.
     _run(
-        ["hg", "--cwd", str(repository), "archive", "--rev", "tip", "--type", "files", str(checkout)],
+        ["hg", "--cwd", str(repository), "archive", "--no-decode", "--rev", "tip", "--type", "files", str(checkout)],
         timeout=timeout, env=environment, label="Mercurial source export",
     )
     return {
