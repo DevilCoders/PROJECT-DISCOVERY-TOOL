@@ -77,6 +77,14 @@ def _provider(host: str) -> str:
     for pattern, name in _PROVIDER_HOSTS:
         if pattern.search(normalized):
             return name
+    if "github" in normalized:
+        return "GitHub Enterprise"
+    if "gitlab" in normalized:
+        return "GitLab self-managed"
+    if "bitbucket" in normalized:
+        return "Bitbucket Data Center"
+    if "azure" in normalized:
+        return "Azure DevOps Server"
     if "gitea" in normalized:
         return "Gitea"
     if "forgejo" in normalized or normalized == "codeberg.org":
@@ -95,9 +103,9 @@ def _canonical_git_path(host: str, path: str, provider: str) -> str:
     parts = [part for part in path.split("/") if part]
     lower_parts = [part.lower() for part in parts]
 
-    if provider == "GitHub" and len(parts) >= 2:
+    if provider in {"GitHub", "GitHub Enterprise"} and len(parts) >= 2:
         parts = parts[:2]
-    elif provider == "GitLab":
+    elif provider in {"GitLab", "GitLab self-managed"}:
         if "-" in parts:
             parts = parts[:parts.index("-")]
         else:
@@ -108,7 +116,7 @@ def _canonical_git_path(host: str, path: str, provider: str) -> str:
                 if item in markers:
                     parts = parts[:index]
                     break
-    elif provider == "Bitbucket" and len(parts) >= 2:
+    elif provider in {"Bitbucket", "Bitbucket Data Center"} and len(parts) >= 2:
         markers = {"src", "commits", "branches", "pull-requests", "issues",
                    "downloads", "pipelines", "deployments", "admin", "wiki"}
         for index, item in enumerate(lower_parts):
@@ -151,7 +159,10 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
 
     selected_vcs = vcs
     clone_url = raw
-    if raw.lower().startswith("hg+"):
+    if raw.lower().startswith("git+"):
+        selected_vcs = "git" if vcs == "auto" else vcs
+        clone_url = raw[4:]
+    elif raw.lower().startswith("hg+"):
         selected_vcs = "hg" if vcs == "auto" else vcs
         clone_url = raw[3:]
     elif raw.lower().startswith("svn+"):
@@ -203,7 +214,11 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
             port = parsed.port
         except ValueError as exc:
             raise RemoteScanError("Repository URL contains an invalid port.") from exc
-        netloc = host if port is None else f"{host}:{port}"
+        host_part = f"[{host}]" if ":" in host else host
+        username = parsed.username if scheme == "ssh" else None
+        netloc = f"{username}@{host_part}" if username else host_part
+        if port is not None:
+            netloc += f":{port}"
         path = parsed.path or "/"
         if selected_vcs == "git":
             provider = _provider(host)
@@ -639,9 +654,6 @@ def _hg_checkout(target: RemoteTarget, checkout: Path, *, timeout: int) -> dict:
 
 def _svn_checkout(target: RemoteTarget, checkout: Path, *, timeout: int) -> dict:
     environment = os.environ.copy()
-    config_dir = checkout.parent / "svn-config"
-    config_dir.mkdir()
-    environment["SVN_CONFIG_DIR"] = str(config_dir)
     _run(
         ["svn", "checkout", "--non-interactive", "--ignore-externals",
          target.clone_url, str(checkout)],
