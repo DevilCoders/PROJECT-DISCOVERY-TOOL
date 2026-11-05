@@ -97,6 +97,12 @@ class FileModel:
             self._line_starts = starts
         return bisect.bisect_right(self._line_starts, offset)
 
+    def line_start(self, line: int) -> int:
+        """Offset of the first character of a 1-based line (clamped to the file)."""
+        self.line_of(0)
+        starts = self._line_starts
+        return starts[min(max(line, 1), len(starts)) - 1]
+
     def line_text(self, line: int) -> str:
         """The source text of a 1-based line."""
         self.line_of(0)

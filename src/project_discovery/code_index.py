@@ -700,6 +700,91 @@ def _memory_summary(context: _Context) -> tuple[dict, list[Finding]]:
     )] if parts else []
 
 
+def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
+    """Totals of per-file taint flows, plus Python flows that cross module boundaries:
+    a call passing untrusted input to an imported function whose parameter reaches a sink."""
+    from .analyzers.dataflow_analyzer import KINDS
+
+    db = context.db
+    totals, files = _fact_totals(db, "dataflow_stats")
+    by_kind: Counter = Counter()
+    for counts in totals.values():
+        by_kind.update({key: value for key, value in counts.items() if key in KINDS})
+    summaries: dict[str, list[dict]] = defaultdict(list)
+    for name, detail, path, module in db.execute(
+        """SELECT f.name, f.detail, f.path, files.module FROM code_facts f JOIN files ON files.path = f.path
+           WHERE f.kind = 'taint_sink_param' AND files.module IS NOT NULL"""
+    ):
+        try:
+            summaries[f"{module}.{name}"].append(json.loads(detail) | {"path": path})
+        except (ValueError, TypeError):
+            continue
+    cross: dict[str, list[str]] = defaultdict(list)
+    cross_count = 0
+    if summaries:
+        for target, detail, path, module, package in db.execute(
+            """SELECT f.name, f.detail, f.path, files.module, files.package FROM code_facts f
+               JOIN files ON files.path = f.path WHERE f.kind = 'tainted_call' AND files.module IS NOT NULL"""
+        ):
+            resolved = _python_target(target, module, bool(package))
+            entries = summaries.get(resolved or "")
+            if not entries:
+                continue
+            try:
+                call = json.loads(detail)
+            except ValueError:
+                continue
+            for entry in entries:
+                if call.get("arg") != entry.get("param") and not (
+                    call.get("keyword") and call.get("keyword") == entry.get("parameter")
+                ):
+                    continue
+                cross_count += 1
+                kind = entry.get("sink_kind")
+                if kind in KINDS and len(cross[kind]) < MAX_LISTED:
+                    cross[kind].append(
+                        f"{path}:{call.get('line')} `{call.get('source')}` (line {call.get('source_line')}) -> "
+                        f"{resolved}() -> " + (f"{entry['via']} -> " if entry.get("via") else "")
+                        + f"`{entry.get('sink')}` at {entry['path']}:{entry.get('line')}"
+                    )
+    sources = sum(counts["sources"] for counts in totals.values())
+    flows = sum(counts["flows"] for counts in totals.values())
+    truncated = db.execute("SELECT COUNT(*) FROM code_facts WHERE kind = 'dataflow_truncated'").fetchone()[0]
+    value = {
+        "sources": sources, "files": sum(files.values()),
+        "flows": flows, "by_kind": dict(sorted(by_kind.items())), "cross_module_flows": cross_count,
+        "exported_summaries": sum(len(entries) for entries in summaries.values()),
+        "truncated_files": truncated,
+        "by_language": {language: dict(sorted(counts.items())) | {"files": files[language]}
+                        for language, counts in sorted(totals.items())},
+    }
+    findings = []
+    for kind, evidence in sorted(cross.items()):
+        title, severity, impact, recommendation = KINDS[kind]
+        findings.append(Finding(
+            "security", f"{title} across modules",
+            f"{impact} The input enters in one module and reaches the sink inside a function of another "
+            f"module ({len(evidence):,} flow(s) listed).", confidence="INFERRED", analyzer="dataflow",
+            severity=severity, evidence=evidence, recommendation=recommendation,
+        ))
+    if sources or flows:
+        findings.append(Finding(
+            "dataflow", "Data-flow summary",
+            f"{sources:,} untrusted-input source site(s); {flows:,} flow(s) reach a dangerous operation"
+            + (" (" + ", ".join(f"{count:,} {kind}" for kind, count in by_kind.most_common()) + ")" if by_kind else "")
+            + f"; {cross_count:,} cross module boundaries. Python flows are followed through assignments, "
+            "branches, loops and helper functions; other languages within each function.",
+            confidence="INFERRED", analyzer="dataflow",
+        ))
+    if truncated:
+        findings.append(Finding(
+            "analysis_coverage", "Data-flow analysis truncated",
+            f"{truncated:,} file(s) hit the per-function interpretation budget; flows in them may be missing.",
+            confidence="UNKNOWN", analyzer="dataflow", severity="LOW",
+        ))
+    return value, findings
+
+
 QUERY_KINDS = ("symbol", "callers", "callees", "references")
 
 
@@ -756,4 +841,5 @@ _PASSES = (
     ("type_systems", _type_summary),
     ("concurrency", _concurrency_summary),
     ("memory", _memory_summary),
+    ("dataflow", _dataflow),
 )

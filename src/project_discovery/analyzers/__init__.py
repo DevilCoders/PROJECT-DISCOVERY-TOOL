@@ -45,6 +45,7 @@ def builtin_analyzers() -> list[Analyzer]:
     from .configuration_analyzer import ConfigurationAnalyzer
     from .coverage_analyzer import CoverageArtifactAnalyzer
     from .data_exposure_analyzer import DataExposureAnalyzer
+    from .dataflow_analyzer import DataFlowAnalyzer
     from .dependency_manifest_analyzer import DependencyManifestAnalyzer
     from .deployment_analyzer import DeploymentIntelligenceAnalyzer
     from .docs_analyzer import MarkdownAnalyzer
@@ -82,6 +83,7 @@ def builtin_analyzers() -> list[Analyzer]:
         ConcurrencyAnalyzer(),
         ResourceManagementAnalyzer(),
         TypeSystemAnalyzer(),
+        DataFlowAnalyzer(),
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
         DeploymentIntelligenceAnalyzer(),

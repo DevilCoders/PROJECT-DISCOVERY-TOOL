@@ -23,7 +23,19 @@ LONG_FUNCTION_LINES = 300
 NESTED_LOOP_DEPTH = 3
 _RECORDED_COMPLEXITY = 15
 
-_PY_DB_ATTRIBUTES = frozenset({"execute", "executemany", "executescript", "fetchone", "fetchall", "fetchmany"})
+_PY_DB_ATTRIBUTES = frozenset({"execute"})
+# ``Model.objects`` (Django managers); a local variable named ``objects`` is not one.
+_DJANGO_MANAGER = re.compile(r"[\w)]\.objects(?:\.|$)")
+_CONTROL_STATEMENT = re.compile(r"(?i)(?:COMMIT|BEGIN|ROLLBACK|SAVEPOINT|RELEASE|PRAGMA|VACUUM|ANALYZE)\b")
+
+
+def _batch_or_control(node: ast.Call, attribute: str) -> bool:
+    """Transaction control and PRAGMA statements are not per-row queries."""
+    if attribute != "execute" or not node.args:
+        return False
+    first = node.args[0]
+    return isinstance(first, ast.Constant) and isinstance(first.value, str) and bool(
+        _CONTROL_STATEMENT.match(first.value.lstrip()))
 _PY_ORM_ATTRIBUTES = frozenset({
     "get", "filter", "exclude", "all", "count", "create", "update", "delete", "first", "last",
     "exists", "values", "values_list", "aggregate", "annotate", "get_or_create", "update_or_create",
@@ -104,9 +116,23 @@ def _complexity(function: ast.AST) -> int:
     return count
 
 
+def _constant_iterable(node: ast.AST) -> bool:
+    """Loops over literals or module constants run a fixed number of times."""
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(isinstance(element, (ast.Constant, ast.Name, ast.Attribute, ast.Tuple)) for element in node.elts)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {"values", "items", "keys"}:
+        node = node.func.value
+    if isinstance(node, ast.Call) and _dotted(node.func) == "range":
+        return all(isinstance(argument, ast.Constant) for argument in node.args)
+    name = _dotted(node).rsplit(".", 1)[-1]
+    return bool(name) and name.lstrip("_").isupper()
+
+
 class _PythonHotspots(ast.NodeVisitor):
     def __init__(self) -> None:
         self.depth = 0
+        # Enclosing loops whose trip count depends on data (not a literal or constant).
+        self.data_loops = 0
         self.issues: dict[str, list[int]] = defaultdict(list)
         self.functions: list[tuple[str, int, int, int]] = []  # (qualified, line, complexity, length)
         self.scope: list[str] = []
@@ -116,10 +142,12 @@ class _PythonHotspots(ast.NodeVisitor):
         length = (node.end_lineno or node.lineno) - node.lineno + 1
         self.functions.append((qualified, node.lineno, _complexity(node), length))
         saved, self.depth = self.depth, 0  # loops do not carry into a nested function body
+        saved_data, self.data_loops = self.data_loops, 0
         self.scope.append(node.name)
         self.generic_visit(node)
         self.scope.pop()
         self.depth = saved
+        self.data_loops = saved_data
 
     visit_FunctionDef = visit_AsyncFunctionDef = _function
 
@@ -128,17 +156,19 @@ class _PythonHotspots(ast.NodeVisitor):
         self.generic_visit(node)
         self.scope.pop()
 
-    def _loop(self, node, children) -> None:
+    def _loop(self, node, children, data: bool = True) -> None:
         self.depth += 1
-        if self.depth == NESTED_LOOP_DEPTH:
+        self.data_loops += data
+        if data and self.data_loops == NESTED_LOOP_DEPTH:
             self.issues["nested_loops"].append(node.lineno)
         for child in children:
             self.visit(child)
         self.depth -= 1
+        self.data_loops -= data
 
     def visit_For(self, node) -> None:
-        self.visit(node.iter)
-        self._loop(node, [node.target, *node.body, *node.orelse])
+        self.visit(node.iter)  # evaluated once, before the first iteration
+        self._loop(node, [node.target, *node.body, *node.orelse], not _constant_iterable(node.iter))
 
     visit_AsyncFor = visit_For
 
@@ -146,12 +176,24 @@ class _PythonHotspots(ast.NodeVisitor):
         self._loop(node, [node.test, *node.body, *node.orelse])
 
     def _comprehension(self, node) -> None:
-        loops = len(node.generators)
+        generators = node.generators
+        self.visit(generators[0].iter)  # the outermost iterable is evaluated once
+        loops = len(generators)
+        data = sum(1 for generator in generators if not _constant_iterable(generator.iter))
         self.depth += loops
-        if self.depth >= NESTED_LOOP_DEPTH > self.depth - loops:
+        self.data_loops += data
+        if self.data_loops >= NESTED_LOOP_DEPTH > self.data_loops - data:
             self.issues["nested_loops"].append(node.lineno)
-        self.generic_visit(node)
+        for index, generator in enumerate(generators):
+            self.visit(generator.target)
+            if index:
+                self.visit(generator.iter)
+            for condition in generator.ifs:
+                self.visit(condition)
+        for part in ((node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)):
+            self.visit(part)
         self.depth -= loops
+        self.data_loops -= data
 
     visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _comprehension
 
@@ -172,12 +214,12 @@ class _PythonHotspots(ast.NodeVisitor):
             attribute == "apply" and any(k.arg == "axis" and getattr(k.value, "value", None) == 1 for k in node.keywords)
         ):
             self.issues["row_iteration"].append(node.lineno)
-        if self.depth:
-            if (
+        if self.depth and self.data_loops:
+            if not _batch_or_control(node, attribute) and (
                 (attribute in _PY_DB_ATTRIBUTES and (
                     attribute != "execute" or _DATABASE_RECEIVER.search(receiver or "-")
                 ))
-                or (".objects" in f".{receiver}" and attribute in _PY_ORM_ATTRIBUTES)
+                or (_DJANGO_MANAGER.search(receiver) and attribute in _PY_ORM_ATTRIBUTES)
                 or (attribute in _PY_SESSION_ATTRIBUTES and _DATABASE_RECEIVER.search(receiver or "-"))
             ):
                 self.issues["query_in_loop"].append(node.lineno)
@@ -228,12 +270,12 @@ def _lexical_hotspots(model: FileModel) -> tuple[dict[str, list[int]], list[tupl
 
 _MESSAGES = {
     "query_in_loop": (
-        "Database query inside a loop", "MEDIUM",
+        "Database query inside a loop", "LOW",
         "A query issued once per iteration (the N+1 pattern) multiplies round trips with input size.",
         "Fetch the rows in one query (a join, IN list or prefetch) before the loop, or batch the writes.",
     ),
     "http_in_loop": (
-        "HTTP request inside a loop", "MEDIUM",
+        "HTTP request inside a loop", "LOW",
         "One network round trip per iteration makes latency grow with input size.",
         "Batch the requests, use a bulk endpoint, or issue them concurrently with a bounded pool.",
     ),

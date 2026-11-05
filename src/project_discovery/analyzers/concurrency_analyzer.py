@@ -113,27 +113,42 @@ def _python_concurrency(tree: ast.Module) -> tuple[dict[str, list[int]], Counter
 
     walk(tree, False, None)
 
+    def releases(function: ast.AST) -> set[str]:
+        return {
+            _dotted(node.func).rsplit(".", 1)[0] for node in ast.walk(function)
+            if isinstance(node, ast.Call) and _dotted(node.func).endswith(".release")
+        }
+
+    function_nodes = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    released_by = {id(node): releases(node) for node in function_nodes}
+
     def acquires_without_release(function: ast.AST) -> list[int]:
+        if function.name in {"__enter__", "__aenter__"}:
+            return []  # the context-manager protocol releases in __exit__
         acquired: list[tuple[str, int]] = []
-        released: set[str] = set()
-        guarded: set[str] = set()
+        guaranteed: set[str] = set()
         for node in ast.walk(function):
             if isinstance(node, (ast.With, ast.AsyncWith)):
-                guarded.update(_dotted(item.context_expr) for item in node.items)
+                guaranteed.update(_dotted(item.context_expr) for item in node.items)
             elif isinstance(node, ast.Try):
                 for statement in node.finalbody:
                     for inner in ast.walk(statement):
                         if isinstance(inner, ast.Call) and _dotted(inner.func).endswith(".release"):
-                            released.add(_dotted(inner.func).rsplit(".", 1)[0])
+                            guaranteed.add(_dotted(inner.func).rsplit(".", 1)[0])
             elif isinstance(node, ast.Call):
                 name = _dotted(node.func)
                 if name.endswith(".acquire"):
                     acquired.append((name.rsplit(".", 1)[0], node.lineno))
-        return [line for receiver, line in acquired if receiver not in released and receiver not in guarded]
+        here = released_by[id(function)]
+        elsewhere = set().union(*(names for key, names in released_by.items() if key != id(function)))
+        # Released only by another function (lock()/unlock() pairs): a deliberate hand-off.
+        return [
+            line for receiver, line in acquired
+            if receiver not in guaranteed and (receiver in here or receiver not in elsewhere)
+        ]
 
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            issues["lock_without_release"].extend(acquires_without_release(node))
+    for node in function_nodes:
+        issues["lock_without_release"].extend(acquires_without_release(node))
     for name in sorted(thread_targets):
         function = functions.get(name)
         if function is None:
