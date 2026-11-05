@@ -155,7 +155,8 @@ def test_cli_scans_mixed_vcs_url_batch_and_keeps_backend_metadata(
         "hg+https://hg.example.net/team/hg-project\n"
         "svn+https://svn.example.net/repos/svn-project/trunk\n"
         "bzr+https://code.example.net/team/bzr-project\n"
-        "p4+ssl://perforce.example.net:1666/depot/p4-project\n",
+        "p4+ssl://perforce.example.net:1666/depot/p4-project\n"
+        "fossil+https://fossil.example.net/fossil-project\n",
         encoding="utf-8",
     )
     output = tmp_path / "reports"
@@ -190,6 +191,6 @@ def test_cli_scans_mixed_vcs_url_batch_and_keeps_backend_metadata(
 
     assert result.value.code == 0
     scan_calls = [item for item in calls if item[0] == "scan"]
-    assert [item[1] for item in scan_calls] == ["git", "hg", "svn", "bzr", "p4"]
-    assert len({item[2] for item in scan_calls}) == 5
+    assert [item[1] for item in scan_calls] == ["git", "hg", "svn", "bzr", "p4", "fossil"]
+    assert len({item[2] for item in scan_calls}) == 6
     assert all(item[2].parent == output for item in scan_calls)
