@@ -188,9 +188,15 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
             clone_url = raw[len(prefix):]
             break
     if selected_vcs == "auto":
-        selected_vcs = prefixed_backend or "git"
-        if raw.lower().startswith("svn://"):
-            selected_vcs = "svn"
+        scheme_backend = {
+            "svn://": "svn",
+            "bzr://": "bzr",
+            "pserver://": "cvs",
+        }
+        selected_vcs = prefixed_backend or next(
+            (backend for prefix, backend in scheme_backend.items() if raw.lower().startswith(prefix)),
+            "git",
+        )
 
     host = ""
     scp = _SCP_URL.match(clone_url)
