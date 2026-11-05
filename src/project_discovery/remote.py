@@ -88,10 +88,11 @@ def remote_vcs_capabilities() -> dict[str, dict[str, str | bool | list[str] | No
     """Report installed remote VCS clients without making network requests."""
     capabilities: dict[str, dict[str, str | bool | list[str] | None]] = {}
     for backend, executable_names in _REMOTE_CLIENTS.items():
-        resolved = next(
-            (shutil.which(name) for name in executable_names if shutil.which(name)),
-            None,
-        )
+        resolved = None
+        for name in executable_names:
+            resolved = shutil.which(name)
+            if resolved:
+                break
         capabilities[backend] = {
             "available": resolved is not None,
             "executable": resolved,
