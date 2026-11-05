@@ -2,8 +2,9 @@
 
 Git checkouts are created without a working-tree checkout. PDT reads the Git tree
 and blob objects directly, so project smudge filters, checkout hooks and submodule
-commands are never run. Mercurial and Subversion use their native read-only checkout
-commands with non-interactive configuration.
+commands are never run. Other VCS adapters use read-only clone/export/print operations
+and omit repository control metadata from the temporary analysis tree where possible.
+No adapter pushes changes or modifies the remote repository.
 """
 from __future__ import annotations
 
