@@ -455,11 +455,11 @@ def test_bzr_checkout_exports_remote_branch_without_working_copy_metadata(
 
 
 @pytest.mark.parametrize(
-    ("backend", "metadata_directory", "checkout_function", "command_prefix"),
+    ("backend", "metadata_directory", "command_prefix"),
     [
-        ("darcs", "_darcs", "_darcs_checkout", ["darcs", "clone"]),
-        ("jj", ".jj", "_jj_checkout", ["jj", "git", "clone"]),
-        ("pijul", ".pijul", "_pijul_checkout", ["pijul", "clone"]),
+        ("darcs", "_darcs", ["darcs", "clone"]),
+        ("jj", ".jj", ["jj", "git", "clone"]),
+        ("pijul", ".pijul", ["pijul", "clone"]),
     ],
 )
 def test_native_vcs_checkouts_exclude_control_metadata(
