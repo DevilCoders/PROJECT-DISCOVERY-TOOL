@@ -7,14 +7,12 @@ commands with non-interactive configuration.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import posixpath
 import re
-import shutil
 import subprocess
-import tarfile
 import tempfile
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -82,7 +80,7 @@ def _provider(host: str) -> str:
             return name
     if "gitea" in normalized:
         return "Gitea"
-    if "forgejo" in normalized:
+    if "forgejo" in normalized or normalized == "codeberg.org":
         return "Forgejo"
     if "gogs" in normalized:
         return "Gogs"
@@ -101,8 +99,8 @@ def _canonical_git_path(host: str, path: str, provider: str) -> str:
     if provider == "GitHub" and len(parts) >= 2:
         parts = parts[:2]
     elif provider == "GitLab":
-        if "-/" in parts:
-            parts = parts[:parts.index("-/")]
+        if "-" in parts:
+            parts = parts[:parts.index("-")]
         else:
             markers = {"tree", "blob", "raw", "edit", "blame", "commits", "commit",
                        "issues", "merge_requests", "milestones", "pipelines", "jobs",
@@ -129,6 +127,13 @@ def _canonical_git_path(host: str, path: str, provider: str) -> str:
                 if marker in lower_parts[2:]:
                     parts = parts[:2 + lower_parts[2:].index(marker)]
                     break
+    elif provider in {"Gitea", "Forgejo", "Gogs", "Gerrit", "Gitolite"}:
+        markers = {"src", "tree", "blob", "raw", "commit", "commits", "issues",
+                   "pull", "pulls", "merge_requests", "compare", "releases"}
+        for index, item in enumerate(lower_parts[2:], 2):
+            if item in markers:
+                parts = parts[:index]
+                break
     elif provider == "Google Cloud Source Repositories":
         if len(parts) >= 4 and parts[0].lower() == "p" and parts[2].lower() == "r":
             parts = parts[:4]
@@ -185,7 +190,9 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
                 f"Unsupported {selected_vcs} URL scheme {scheme!r}; allowed: "
                 + ", ".join(sorted(allowed))
             )
-        if parsed.username is not None or parsed.password is not None:
+        if parsed.password is not None or (
+            parsed.username is not None and scheme != "ssh"
+        ):
             raise RemoteScanError(
                 "Credentials must not be embedded in repository URLs. Use an SSH agent "
                 "or your configured VCS credential manager."
@@ -224,7 +231,13 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
     path_for_name = path.rstrip("/").split("/")[-1] or host
     repository_name = path_for_name[:-4] if path_for_name.lower().endswith(".git") else path_for_name
     repository_name = repository_name or host
-    safe_identity = clone_url.lower()
+    if scp:
+        safe_identity = f"ssh://{host}/{path.lstrip('/')}"
+    else:
+        normalized = urlsplit(clone_url)
+        safe_identity = urlunsplit((
+            scheme.lower(), (normalized.netloc or "").lower(), normalized.path, "", "",
+        ))
     digest = hashlib.sha256(safe_identity.encode("utf-8")).hexdigest()[:10]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", repository_name).strip("-.")[:48] or "repository"
     safe_url = clone_url
@@ -473,24 +486,26 @@ def _extract_git_tree(
                     output.close()
             if symlink:
                 target = os.fsdecode(captured)
+                normalized_target = posixpath.normpath(posixpath.join(
+                    posixpath.dirname(os.fsdecode(raw_path)), target,
+                ))
                 if (
-                    not captured or len(captured) > MAX_SYMLINK_TARGET_BYTES
+                    destination is None
+                    or not captured or len(captured) > MAX_SYMLINK_TARGET_BYTES
                     or "\\" in target or PurePosixPath(target).is_absolute()
                     or PureWindowsPath(target).is_absolute() or PureWindowsPath(target).drive
-                    or posixpath.normpath(posixpath.join(
-                        posixpath.dirname(os.fsdecode(raw_path)), target
-                    )).startswith("../")
+                    or normalized_target == ".." or normalized_target.startswith("../")
                 ):
                     omitted_symlink_count += 1
                     continue
                 try:
-                    assert destination is not None
                     os.symlink(target, destination)
                     symlink_count += 1
                 except (OSError, NotImplementedError):
                     omitted_symlink_count += 1
                 continue
-            file_count += 1
+            if output is not None:
+                file_count += 1
             if captured.startswith(b"version https://git-lfs.github.com/spec/v1"):
                 lfs_pointer_count += 1
         tree_code = tree.wait(timeout=timeout)
@@ -666,7 +681,6 @@ def remote_checkout(
                     target, checkout, git_dir, temporary, timeout=timeout,
                 )
             elif target.vcs == "hg":
-                _hg_checkout(target, checkout, timeout=timeout)
                 metadata = _hg_checkout(target, checkout, timeout=timeout)
             elif target.vcs == "svn":
                 metadata = _svn_checkout(target, checkout, timeout=timeout)
@@ -679,7 +693,7 @@ def remote_checkout(
             yield RemoteCheckout(checkout, metadata)
         except RemoteScanError:
             raise
-        except (OSError, subprocess.SubprocessError, tarfile.TarError) as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             raise RemoteScanError(
                 f"Remote checkout failed for {target.provider} repository "
                 f"{target.repository_name!r}: {type(exc).__name__}: {exc}"
