@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 from types import SimpleNamespace
 
 import pytest
@@ -315,3 +316,247 @@ def test_git_tree_stream_materializes_files_symlinks_and_submodules_safely(
     assert result["submodule_count"] == 1
     assert result["omitted_tree_path_count"] == 1
     assert len(created) == 2
+
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_vcs", "expected_scheme"),
+    [
+        ("bzr+https://code.example.net/team/project", "bzr", "https"),
+        ("darcs+https://code.example.net/team/project", "darcs", "https"),
+        ("jj+https://github.com/acme/project", "jj", "https"),
+        ("pijul+https://nest.pijul.com/acme/project", "pijul", "https"),
+        (
+            "cvs+pserver://anonymous@cvs.example.net:2401/cvsroot/project",
+            "cvs", "pserver",
+        ),
+        ("cvs+ssh://cvs@cvs.example.net/cvsroot/project", "cvs", "ssh"),
+        ("p4+ssl://perforce.example.net:1666/depot/project", "p4", "ssl"),
+        ("perforce+tcp://perforce.example.net:1666/depot/project", "p4", "tcp"),
+    ],
+)
+def test_remote_target_recognizes_native_vcs_transports(
+    url: str, expected_vcs: str, expected_scheme: str,
+):
+    target = remote.parse_remote_target(url)
+    assert target.vcs == expected_vcs
+    assert urlsplit(target.clone_url).scheme == expected_scheme
+    assert target.repository_name == "project"
+    assert target.output_name
+
+
+def test_remote_target_supports_vcs_aliases_and_forced_backend_with_prefixed_url():
+    bazaar = remote.parse_remote_target("bzr+https://code.example.net/team/project", vcs="bazaar")
+    perforce = remote.parse_remote_target(
+        "p4+ssl://perforce.example.net:1666/depot/project", vcs="perforce",
+    )
+    assert bazaar.vcs == "bzr"
+    assert bazaar.clone_url == "https://code.example.net/team/project"
+    assert perforce.vcs == "p4"
+    assert perforce.clone_url == "ssl://perforce.example.net:1666/depot/project"
+
+
+def test_url_file_supports_mixed_native_vcs_backends(tmp_path: Path):
+    url_file = tmp_path / "mixed-vcs.txt"
+    url_file.write_text(
+        "https://github.com/acme/git-project\n"
+        "hg+https://hg.example.net/team/hg-project\n"
+        "svn+https://svn.example.net/repos/svn-project/trunk\n"
+        "bzr+https://code.example.net/team/bzr-project\n"
+        "darcs+https://code.example.net/team/darcs-project\n"
+        "jj+https://github.com/acme/jj-project\n"
+        "pijul+https://nest.pijul.com/acme/pijul-project\n"
+        "cvs+pserver://cvs.example.net/cvsroot/cvs-project\n"
+        "p4+ssl://perforce.example.net:1666/depot/p4-project\n",
+        encoding="utf-8",
+    )
+    targets = remote.load_remote_targets(url_file)
+    assert [target.vcs for target in targets] == [
+        "git", "hg", "svn", "bzr", "darcs", "jj", "pijul", "cvs", "p4",
+    ]
+
+
+def test_hg_checkout_exports_committed_tree_without_working_copy_update(
+    tmp_path: Path, monkeypatch,
+):
+    target = remote.parse_remote_target("hg+https://hg.example.net/team/project")
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    checkout = temporary / "source"
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if "clone" in command:
+            Path(command[-1]).mkdir()
+        elif "log" in command and "{node}" in command:
+            return SimpleNamespace(stdout=b"revision-123")
+        elif "log" in command and "{branch}" in command:
+            return SimpleNamespace(stdout=b"default")
+        elif "archive" in command:
+            Path(command[-1]).mkdir()
+            (Path(command[-1]) / "main.py").write_text("print('hg')\n", encoding="utf-8")
+        return SimpleNamespace(stdout=b"")
+
+    monkeypatch.setattr(remote, "_run", fake_run)
+    metadata = remote._hg_checkout(target, checkout, temporary, timeout=30)
+
+    assert (checkout / "main.py").is_file()
+    assert metadata["revision"] == "revision-123"
+    assert metadata["branch"] == "default"
+    assert not any("update" in command for command in commands)
+
+
+def test_svn_checkout_uses_export_and_skips_externals(tmp_path: Path, monkeypatch):
+    target = remote.parse_remote_target("svn+https://svn.example.net/repos/project/trunk")
+    checkout = tmp_path / "source"
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if "info" in command:
+            return SimpleNamespace(stdout=b"42")
+        if "export" in command:
+            Path(command[-1]).mkdir()
+            (Path(command[-1]) / "main.py").write_text("print('svn')\n", encoding="utf-8")
+        return SimpleNamespace(stdout=b"")
+
+    monkeypatch.setattr(remote, "_run", fake_run)
+    metadata = remote._svn_checkout(target, checkout, timeout=30)
+
+    assert (checkout / "main.py").is_file()
+    assert metadata["revision"] == "42"
+    assert metadata["externals_fetched"] is False
+    assert any("export" in command and "--ignore-externals" in command for command in commands)
+
+
+def test_bzr_checkout_exports_remote_branch_without_working_copy_metadata(
+    tmp_path: Path, monkeypatch,
+):
+    target = remote.parse_remote_target("bzr+https://code.example.net/team/project")
+    checkout = tmp_path / "source"
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        Path(command[4]).mkdir()
+        (Path(command[4]) / "main.py").write_text("print('bzr')\n", encoding="utf-8")
+        return SimpleNamespace(stdout=b"")
+
+    monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/bin/brz")
+    monkeypatch.setattr(remote, "_run", fake_run)
+    metadata = remote._bzr_checkout(target, checkout, temporary, timeout=30)
+
+    assert (checkout / "main.py").is_file()
+    assert commands[0][1:4] == ["export", "--quiet", "--format=dir"]
+    assert metadata["vcs"] == "bzr"
+
+
+@pytest.mark.parametrize(
+    ("backend", "metadata_directory", "checkout_function", "command_prefix"),
+    [
+        ("darcs", "_darcs", "_darcs_checkout", ["darcs", "clone"]),
+        ("jj", ".jj", "_jj_checkout", ["jj", "git", "clone"]),
+        ("pijul", ".pijul", "_pijul_checkout", ["pijul", "clone"]),
+    ],
+)
+def test_native_vcs_checkouts_exclude_control_metadata(
+    tmp_path: Path, monkeypatch, backend, metadata_directory, checkout_function, command_prefix,
+):
+    target_urls = {
+        "darcs": "darcs+https://code.example.net/team/project",
+        "jj": "jj+https://github.com/acme/project",
+        "pijul": "pijul+https://nest.pijul.com/acme/project",
+    }
+    target = remote.parse_remote_target(target_urls[backend])
+    checkout = tmp_path / "source"
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if backend == "jj" and command[1:3] == ["--repository", str(temporary / "jj-repository")]:
+            return SimpleNamespace(stdout=b"jj-revision")
+        repository = Path(command[-1])
+        repository.mkdir(parents=True, exist_ok=True)
+        (repository / metadata_directory).mkdir()
+        (repository / "main.py").write_text("print('native')\n", encoding="utf-8")
+        return SimpleNamespace(stdout=b"")
+
+    monkeypatch.setattr(remote, "_run", fake_run)
+    if backend == "darcs":
+        metadata = remote._darcs_checkout(target, checkout, temporary, timeout=30)
+    elif backend == "jj":
+        metadata = remote._jj_checkout(target, checkout, temporary, timeout=30)
+    else:
+        metadata = remote._pijul_checkout(target, checkout, temporary, timeout=30)
+
+    assert commands[0][:len(command_prefix)] == command_prefix
+    assert (checkout / "main.py").is_file()
+    assert not (checkout / metadata_directory).exists()
+    assert metadata["vcs"] == backend
+
+
+def test_cvs_checkout_uses_noninteractive_native_checkout_and_strips_CVS_metadata(
+    tmp_path: Path, monkeypatch,
+):
+    target = remote.parse_remote_target(
+        "cvs+pserver://anonymous@cvs.example.net:2401/cvsroot/project"
+    )
+    checkout = tmp_path / "source"
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        repository = Path(command[6])
+        repository.mkdir()
+        (repository / "CVS").mkdir()
+        (repository / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        return SimpleNamespace(stdout=b"")
+
+    monkeypatch.setattr(remote, "_run", fake_run)
+    metadata = remote._cvs_checkout(target, checkout, temporary, timeout=30)
+
+    assert commands[0][2] == ":pserver:anonymous@cvs.example.net:2401:/cvsroot"
+    assert (checkout / "main.c").is_file()
+    assert not (checkout / "CVS").exists()
+    assert metadata["vcs"] == "cvs"
+
+
+def test_p4_checkout_uses_depot_file_listing_and_read_only_print(
+    tmp_path: Path, monkeypatch,
+):
+    target = remote.parse_remote_target(
+        "p4+ssl://perforce.example.net:1666/depot/project"
+    )
+    checkout = tmp_path / "source"
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        assert kwargs["env"]["P4PORT"] == "ssl:perforce.example.net:1666"
+        if "files" in command:
+            return SimpleNamespace(
+                stdout=(
+                    b"... depotFile //depot/project/src/main.py\n"
+                    b"... rev 3\n"
+                    b"... change 17\n"
+                )
+            )
+        if "print" in command:
+            Path(command[4]).write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        return SimpleNamespace(stdout=b"")
+
+    monkeypatch.setattr(remote, "_run", fake_run)
+    metadata = remote._p4_checkout(target, checkout, timeout=30)
+
+    assert (checkout / "src/main.py").is_file()
+    assert metadata["revision"] == "17"
+    assert metadata["tracked_file_count"] == 1
+    assert commands[0][0:3] == ["p4", "-ztag", "files"]
+    assert commands[1][0:3] == ["p4", "print", "-q"]
