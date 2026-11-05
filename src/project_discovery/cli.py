@@ -855,7 +855,7 @@ def main() -> None:
     scan.add_argument("path", nargs="?", type=str, metavar="PATH_OR_URL")
     scan.add_argument(
         "--url", type=Path, default=None, metavar="FILE",
-        help="Read one repository URL per line from a UTF-8 text file; mixed Git hosts are supported",
+        help="Read one repository URL per line from a UTF-8 text file; providers and VCS backends may be mixed",
     )
     scan.add_argument(
         "--vcs", choices=REMOTE_VCS, default="auto",
