@@ -5,8 +5,20 @@ from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..source_utils import SourceBudgetExceeded, read_text_bounded
 _MAX_MARKDOWN_BYTES = 32 * 1024 * 1024
-HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
-LINK = re.compile(r"!?(?:\[[^\]]*\])\(([^)]+)\)")
+# Linear forms: the closing "#" sequence is stripped in Python (a lazy title followed by
+# \s*#*\s*$ was quadratic on long whitespace runs), and link text/targets stop at the
+# next bracket so unclosed "[](" runs are scanned once instead of once per bracket.
+HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+)$")
+LINK = re.compile(r"!?\[[^\]\[]*\]\(([^)\[\]]+)\)")
+
+
+def _heading_title(raw: str) -> str:
+    """Strip an ATX closing sequence, which must follow whitespace ("# C#" keeps its "#")."""
+    title = raw.rstrip()
+    without_closing = title.rstrip("#")
+    if without_closing != title and (not without_closing or without_closing[-1].isspace()):
+        title = without_closing.rstrip()
+    return title
 
 class MarkdownAnalyzer(Analyzer):
     name = "markdown"
@@ -37,10 +49,12 @@ class MarkdownAnalyzer(Analyzer):
                 "documentation", "Markdown read error", str(exc),
                 confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
             )]
-        headings = [m.group(2) for line in text.splitlines() if (m := HEADING.match(line))]
+        headings = [
+            _heading_title(m.group(2)) for line in text.splitlines() if (m := HEADING.match(line))
+        ]
         links = LINK.findall(text)
         words = len(re.findall(r"\b[\w'-]+\b",text))
-        title = headings[0] if headings else Path(record.path).stem
+        title = next((heading for heading in headings if heading), Path(record.path).stem)
         return [Finding("documentation",f"Document: {title}",
             f"{len(headings)} headings; {len(links)} links; approximately {words} words.",
             evidence=[record.path],analyzer=self.name)]

@@ -6,26 +6,47 @@ import re
 from pathlib import Path, PurePosixPath
 
 from .base import Analyzer
-from ..language_catalog import is_textual_path, textual_language_names
+from ..language_catalog import detect_language, is_source_path, is_textual_path, textual_language_names
 from ..models import CodeEvidence, FileRecord, Finding
 from ..native_backend import count_byte as native_count_byte
 from ..secret_patterns import COMPILED_FORMATS, PRIVATE_KEY_ANCHORS, PRIVATE_KEY_MARKER
-from ..source_utils import open_verified_binary, redact_source_excerpt
+from ..source_utils import keyed_identifier, open_verified_binary, redact_source_excerpt
 
 
+_CREDENTIAL_KEY = keyed_identifier(
+    r"api[_-]?key|client[_-]?secret|service[_-]?token|access[_-]?(?:token|key)"
+    r"|auth[_-]?token|refresh[_-]?token|password|passwd|passphrase"
+    r"|secret[_-]?(?:access[_-]?)?key|secret|token|encryption[_-]?key|signing[_-]?key"
+    r"|aws_secret_access_key|database_url"
+)
+# An optional closing key quote ("password": / 'password' =>), an optional type annotation
+# (password: str = / apiKey: string =), then the operator. Separators never cross a line.
+_ASSIGNMENT_OPERATOR = (
+    r"""["']?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\]]*(?:[ \t]*\|[ \t]*[A-Za-z_][\w.\[\]]*)*[ \t]*=(?!=)"""
+    r"""|:=|=>|[:=](?!=))[ \t]*"""
+)
+_QUOTED_VALUE = r""""([^"\r\n]{6,})"|'([^'\r\n]{6,})'"""
+_UNQUOTED_VALUE = r"""([^\s"'#,;]{6,})"""
+# Configuration, environment and shell files hold literal unquoted values (TOKEN=abc123).
+_ASSIGNMENT_ANY = re.compile(
+    rf"(?i){_CREDENTIAL_KEY}{_ASSIGNMENT_OPERATOR}(?:{_QUOTED_VALUE}|{_UNQUOTED_VALUE})"
+)
+# In programming languages an unquoted right-hand side is an expression
+# (secret = load_secret(), token: list[str] = []), so only string literals count.
+_ASSIGNMENT_QUOTED = re.compile(rf"(?i){_CREDENTIAL_KEY}{_ASSIGNMENT_OPERATOR}(?:{_QUOTED_VALUE})")
+# Source-family languages whose assignments are literal key/value data, not expressions.
+_LITERAL_ASSIGNMENT_LANGUAGES = frozenset({
+    "Shell", "Batch", "Unity Scene", "Unity Prefab", "Unity Asset YAML", "Godot Scene",
+    "Godot Resource", "GameMaker Project", "Defold Collection", "Roblox XML Model",
+})
 # (name, pattern, anchors): a pattern only runs on text containing one of its anchors.
-_PATTERNS = (
+_SPECIFIC_PATTERNS = (
     ("private_key", PRIVATE_KEY_MARKER, PRIVATE_KEY_ANCHORS),
     *((item.name, pattern, item.anchors) for item, pattern in COMPILED_FORMATS),
-    ("credential_url", re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"), ("://",)),
-    (
-        "credential_assignment",
-        re.compile(
-            r"""(?ix)\b[A-Za-z0-9_]*(?:api[_-]?key|client[_-]?secret|service[_-]?token|access[_-]?(?:token|key)|auth[_-]?token|refresh[_-]?token|password|passwd|passphrase|secret[_-]?(?:access[_-]?)?key|secret|token|encryption[_-]?key|signing[_-]?key|aws_secret_access_key|database_url)[A-Za-z0-9_]*\b\s*[:=]\s*(?:"([^"\r\n]{6,})"|'([^'\r\n]{6,})'|([^\s"'#,;]{6,}))"""
-        ),
-        (),
-    ),
+    ("credential_url", re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{0,31}://[^\s/:@]+:[^\s/@]+@"), ("://",)),
 )
+_PATTERNS = (*_SPECIFIC_PATTERNS, ("credential_assignment", _ASSIGNMENT_ANY, ()))
+_EXPRESSION_PATTERNS = (*_SPECIFIC_PATTERNS, ("credential_assignment", _ASSIGNMENT_QUOTED, ()))
 _SEVERITY = {
     "private_key": "CRITICAL",
     **{item.name: item.severity for item, _ in COMPILED_FORMATS},
@@ -52,6 +73,7 @@ _LOW_RISK_PATH_PARTS = {
     "doc", "docs", "documentation",
 }
 _DOWNGRADE = {"CRITICAL": "HIGH", "HIGH": "MEDIUM", "MEDIUM": "LOW", "LOW": "LOW"}
+_PLAIN_URL = re.compile(r"[a-z][a-z0-9+.-]{0,31}://")
 _CHUNK_BYTES = 8 * 1024 * 1024
 _MAX_SCAN_BYTES = 64 * 1024 * 1024
 _OVERLAP_CHARS = 4096
@@ -67,6 +89,10 @@ def _is_placeholder(value: str) -> bool:
         or normalized.startswith(("your_", "your-", "replace_me", "placeholder", "example"))
         or (normalized.startswith("<") and normalized.endswith(">"))
         or len(set(normalized)) <= 2  # "xxxxxxxx", "********", "00000000"
+        # token_url: https://auth/token, secret_file: /run/secrets/db name locations, not
+        # secrets; URLs with user info are reported by the credential_url rule instead.
+        or (_PLAIN_URL.match(normalized) is not None and "@" not in normalized)
+        or normalized.startswith(("/", "./", "../", "~/"))
     )
 
 
@@ -81,6 +107,11 @@ def _low_risk_path(relative: str) -> bool:
 
 def _assignment_value(match: re.Match[str]) -> str:
     return next((value for value in match.groups() if value is not None), "")
+
+
+def _expression_language(relative: str) -> bool:
+    """Whether unquoted assignment values in this file are code expressions."""
+    return is_source_path(relative) and detect_language(relative) not in _LITERAL_ASSIGNMENT_LANGUAGES
 
 
 def _credential_impact(pattern_name: str) -> str:
@@ -136,6 +167,7 @@ class SecretPatternAnalyzer(Analyzer):
         tail = ""
         stop_reason: str | None = None
         low_risk = _low_risk_path(record.path)
+        patterns = _EXPRESSION_PATTERNS if _expression_language(record.path) else _PATTERNS
         # An incremental decoder keeps multi-byte characters intact across chunk edges.
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
@@ -152,7 +184,7 @@ class SecretPatternAnalyzer(Analyzer):
                     combined = tail + chunk
                     prefix_length = len(tail)
                     base_line = total_newlines - tail.count("\n")
-                    for pattern_name, pattern, anchors in _PATTERNS:
+                    for pattern_name, pattern, anchors in patterns:
                         if anchors and not any(anchor in combined for anchor in anchors):
                             continue
                         for match in pattern.finditer(combined):

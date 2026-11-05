@@ -6,7 +6,7 @@ PDT inventories a project first, analyzes it with independent evidence-producing
 
 PDT does not assume that a project is Python-based, that one language is its core, or that a repository's README accurately describes its implementation.
 
-> **Status: active engineering / pre-production.** The current feature PR is not a production release. Catalog coverage, grammar mappings, initial pattern analyzers and full semantic support are different capability levels. A catalog entry must never be presented as a completed analyzer.
+> **Status: 0.2.0 — release candidate.** The production-readiness audit ([docs/AUDIT.md](docs/AUDIT.md)) found that 0.1.0 never ran its per-file analyzers and failed CI everywhere; every defect it recorded is fixed and covered by regression tests, and CI passes on Linux, Windows and macOS for CPython 3.11–3.14. Remaining release gates are listed in [AUDIT.md §5](docs/AUDIT.md#5-release-gates-that-remain-open): large-corpus (2 GB–100 GB+) benchmarks, plugin isolation and an independent security review. Catalog coverage, grammar mappings, pattern analyzers and full semantic support are still different capability levels, and a catalog entry is never presented as a completed analyzer. See [CHANGELOG.md](CHANGELOG.md) and the [Operations Guide](docs/OPERATIONS.md).
 
 ## Project identity
 
@@ -88,7 +88,8 @@ The current branch contains first-pass implementations of:
 - Local-only OSV advisory database import and lockfile-based vulnerability matching when an operator supplies `--vuln-db`.
 - JSON/Markdown reports and an offline dark HTML report with search, filters, pagination and collapsible findings.
 - A Rich CLI with an ASCII banner, progress phases, compact summary panels and TTY-aware screen clearing.
-- Bounded concurrent file analysis through a ThreadPoolExecutor (`--jobs 0` auto or `--jobs N`) plus a C-native OpenCL GPU byte-count path for large immutable buffers, with runtime detection and C/SIMD/Python fallback.
+- A multi-process analysis engine (`--executor auto|process|thread`, `--jobs 0` auto or `--jobs N`) with batched tasks, worker-crash isolation, read-once file prefetch and parallel import-graph parsing, plus a C-native OpenCL GPU byte-count path for large immutable buffers with runtime detection and C/SIMD/Python fallback.
+- Interrupted-scan resume (`--resume`), metadata-only scans (`--inventory-only`), CI exit codes (`--fail-on`, `--strict`) and per-phase timing, throughput and peak-RSS telemetry in every report.
 - A bounded-batch SQLite `InventoryStore` integrated into CLI scanner traversal. File, directory, symlink and special-entry records are stored as discovered and exposed through lazy, deterministic, typed sequences. File records preserve private scan-time identity in storage while excluding it from public serialization; directory counters/errors are incrementally persisted in a normalized state table. Scan checkpoints, SQLite integrity checks, explicit cursor closure and private POSIX database permissions are implemented. Findings and scan diagnostics are persisted in SQLite and consumed as lazy sequences; dependency/architecture correlation state, per-file analyzer working sets and report metrics still have in-memory components.
 
 These are initial implementations with varying depth. In store-backed CLI scans, all four inventory record classes are exposed through lazy SQLite-backed sequences; directory counters/errors are updated incrementally and the Python fallback retains only active directory iterators (O(depth)). The Python dependency graph has explicit RAM ceilings (25k modules, 100k edge candidates, 100k unresolved imports and 25k skipped-module details); duplicate module evidence samples at most 8 paths, with every omission/skipped source represented as incomplete `UNKNOWN` evidence. The architecture top-level component detail index is capped at 10k. These graph structures remain in memory within their caps, not SQLite-backed. Per-file analyzer working lists, report metrics/payloads, browser-side embedded JSON and large-project benchmarks remain open. The current memory model is not yet certified for 100GB+ target workloads. Dependency/cache/build directories are traversed by default unless explicitly excluded, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
@@ -144,6 +145,10 @@ pdt scan /path/to/project --exclude-dir node_modules --exclude-dir .cache
 pdt vuln-db import /local/advisories/osv --db ~/.pdt/vulnerability-advisories.sqlite3
 pdt vuln-db status --db ~/.pdt/vulnerability-advisories.sqlite3
 pdt scan /path/to/project --vuln-db ~/.pdt/vulnerability-advisories.sqlite3
+pdt scan /path/to/project --fail-on HIGH --strict --quiet --no-color   # CI gate
+pdt scan /path/to/project --output /reports/project --resume          # continue an interrupted scan
+pdt scan /path/to/project --inventory-only                            # metadata only, no content reads
+pdt capabilities --json
 pdt compare project-a-report/discovery-report.json project-b-report/discovery-report.json
 pdt catalog-add /reports/project-a/discovery-report.json
 pdt catalog-list
@@ -151,6 +156,8 @@ pdt catalog-compare --output /reports/project-comparison
 ```
 
 The output directory must remain outside the analyzed project. PDT never changes target files.
+
+Exit codes: `0` scan completed, `1` a finding at or above `--fail-on`, `2` usage or fatal error, `3` incomplete scan under `--strict`, `130` interrupted. See the [Operations Guide](docs/OPERATIONS.md) for large-scan practice and [Benchmarks](docs/BENCHMARKS.md) for `tools/benchmark.py`.
 
 ### Exclusions and skip accounting
 
@@ -162,7 +169,7 @@ The terminal is an analysis console, not an append-only file dump. On an interac
 
 ## Concurrent execution and GPU acceleration
 
-The scan pipeline now schedules file analysis through a bounded worker pool and exposes `pdt scan --jobs N`; `--jobs 0` selects a bounded automatic worker count based on detected hardware concurrency. Pending tasks are capped at twice the worker count, results are collected in deterministic submission order, and SQLite fingerprint-cache access stays on the coordinator thread. Stateful third-party analyzers can declare `concurrent_safe = False` to serialize their own calls.
+The scan pipeline schedules file analysis through a bounded pool and exposes `pdt scan --jobs N`; `--jobs 0` selects a bounded automatic worker count based on detected hardware concurrency. Because analyzers are CPU-bound Python, `--executor auto` (the default) uses worker processes for inventories of 1,000 files or more and threads below that; `--executor process|thread` forces either. Small files are batched per task, pending batches are capped at twice the worker count, results are collected in deterministic submission order, and every SQLite write stays in the coordinator process. Each file up to 4 MiB is read once through the verified descriptor, hashed from that buffer and served to every analyzer. If a worker process dies, the pool restarts and the affected batch is re-run file by file. Stateful third-party analyzers can declare `concurrent_safe = False` to serialize their own calls in thread mode.
 
 The C extension dynamically discovers OpenCL at runtime; PDT does not require OpenCL headers, an SDK or a GPU to install/build. For buffers of at least 8 MiB, the supported byte-count operation may dispatch to a detected GPU using a bounded reduction kernel. The large-file secret scanner uses this native byte counter. Small buffers, unsupported devices, allocation failures and kernel/dispatch errors fall back to C/SIMD; when the C extension is unavailable, the Python fallback remains functional. The runtime reports device capabilities, dispatches and fallback counts.
 
@@ -170,7 +177,7 @@ This is deliberately capability-scoped: PDT does not claim that every analyzer r
 
 ## Security findings: code, impact and remediation
 
-Security findings now carry exact source line numbers, redacted vulnerable-line excerpts, severity, confidence, conditional attacker-impact explanations and recommended remediation. This includes secure-code patterns, Python AST security, secret/PII/configuration indicators, and credential/email patterns found inside ZIP/TAR members. The interactive CLI prints the highest-severity source lines in red; the HTML report displays source excerpts in red using safe DOM text nodes; JSON and Markdown expose the same finding fields, and Markdown marks vulnerable lines with a red indicator. The HTML/JSON payload schema and JSON report schema are versioned as 1.3.
+Security findings now carry exact source line numbers, redacted vulnerable-line excerpts, severity, confidence, conditional attacker-impact explanations and recommended remediation. This includes secure-code patterns, Python AST security, secret/PII/configuration indicators, and credential/email patterns found inside ZIP/TAR members. The interactive CLI prints the highest-severity source lines in red; the HTML report displays source excerpts in red using safe DOM text nodes; JSON and Markdown expose the same finding fields, and Markdown marks vulnerable lines with a red indicator. The HTML/JSON payload schema and JSON report schema are versioned as 1.4; minor versions are additive, and `compare`/`catalog` accept any 1.x report.
 
 Redaction is applied by the source excerpt helper and again at the `CodeEvidence` model boundary, including for third-party analyzers. It covers common password/token/key assignments, bearer/basic authorization values, credential URLs, provider token formats, JWT-shaped values, email addresses and common identity-field assignments. No heuristic finding is proof of exploitability or runtime exposure: impact text is conditional on reachability and attacker-controlled data, and severity must be reviewed against actual data flow and deployment context.
 
@@ -242,7 +249,7 @@ Native build integration is defined in `setup.py`, `pyproject.toml` and `MANIFES
 
 ## Release policy
 
-The current PR remains unmerged. Production readiness requires all mandatory roadmap gates, a green CI run on the final PR head, representative 2GB/10GB/50GB/100GB+ benchmarks, bounded-memory behavior, adversarial archive and symlink tests, broad language/analyzer conformance, verified redaction, offline/read-only guarantees, usable large HTML reports, reproducible packages and security review. Only the repository owner decides when to merge into `master`.
+The current PR remains unmerged. Production readiness requires all mandatory roadmap gates, a green CI run on the final PR head, representative 2GB/10GB/50GB/100GB+ benchmarks, bounded-memory behavior, adversarial archive and symlink tests, broad language/analyzer conformance, verified redaction, offline/read-only guarantees, usable large HTML reports, reproducible packages and security review. As of 0.2.0, CI is green across the full matrix, the adversarial corpus (archive, YAML/XML bomb, junction-loop, encoding and non-UTF-8 name cases) runs without hangs or crashes, redaction is enforced from one shared credential registry, and reports are bounded; the large-corpus benchmarks, plugin isolation and an independent security review remain open. Only the repository owner decides when to merge into `master`.
 
 ## Production engineering priorities (2026-11-04)
 

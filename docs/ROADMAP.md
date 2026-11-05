@@ -35,6 +35,10 @@ No scan may silently omit an entry. Exclusions, parser gaps, budget limits, unsu
 | `unknown` | Analysis unavailable, inconclusive or stopped by a resource budget. |
 | `excluded` / `skipped` | Content was intentionally omitted with a recorded reason. |
 
+## Status update — 0.2.0 (2026-11-05)
+
+The production-readiness audit ([AUDIT.md](AUDIT.md)) and its remediation landed on this branch: every recorded defect is fixed with regression tests, CI passes on Linux, Windows and macOS for CPython 3.11–3.14 (including native builds and an optional-integrations job), and the scan engine gained multi-process analysis, `--resume`, `--inventory-only`, CI exit codes and performance telemetry. Items below are ticked only where the implementation is complete and verified. Large-corpus benchmarks (2 GB–100 GB+), plugin isolation and an independent security review remain open release gates.
+
 ## Current branch baseline
 
 The current feature branch has first-pass implementations for filesystem inventory, symlink records, hidden-name markers, directory aggregates, size buckets, common development-directory markers, SQLite fingerprints, Python AST/import graph, language recognition and optional Tree-sitter support. It also contains initial analyzers for documentation, dependencies/licenses, configuration, secrets/PII, secure-code patterns, REST/API contracts and route markers, SQL/NoSQL/ORM/migrations, test/build/CI, containers/deployment/IaC, archives, network indicators, OS/platform markers, ML/AI, ROS, mobile, game engines, frontend/accessibility, localization, observability, coverage and multi-project comparison.
@@ -77,8 +81,8 @@ The baseline is not production-ready:
 
 ### Development and generated dependency trees
 - [x] Initial marker catalog for `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, build outputs and other common workspaces.
-- [ ] Remove implicit default pruning of dependency/build/cache trees.
-- [ ] Traverse all recognized trees by default unless the operator explicitly opts out or a documented safety policy marks an entry unknown.
+- [x] Remove implicit default pruning of dependency/build/cache trees.
+- [x] Traverse all recognized trees by default unless the operator explicitly opts out or a documented safety policy marks an entry unknown.
 - [ ] Add `--exclude-dir NAME` and optional profile presets; retain a directory record and exact exclusion reason for every pruned subtree.
 - [ ] Add optional directory-only / inventory-only / deep-analysis controls with explicit semantics.
 - [ ] Extend markers for pnpm/npm/yarn/bun, pip/uv/poetry/conda, Maven/Gradle, Cargo, Go modules, NuGet, Composer, Ruby/Bundler, SwiftPM/CocoaPods, Dart/Flutter, .NET, Bazel/Buck/Pants, SCons, CMake, IDE, compiler, fuzzing, model caches and language server caches.
@@ -115,10 +119,10 @@ The baseline is not production-ready:
 - [ ] Move graph payloads, dependency/correlation indexes, report metrics and per-file analyzer working sets to bounded store-backed structures and producer/consumer queues. The Python dependency graph now enforces explicit in-memory ceilings: 25,000 modules, 100,000 edge candidates, 100,000 unresolved-import records, 25,000 skipped-module detail records, and at most 8 retained paths per duplicate module. Any omitted or skipped evidence marks the graph incomplete and emits an `UNKNOWN` finding; the architecture layout index caps top-level component details at 10,000 and reports omitted observations. These are fail-closed memory bounds, not disk-backed graph persistence. Findings use deterministic SHA-256 content keys and lazy `StoredFindingRecords`; diagnostics use insertion-ordered `StoredDiagnosticRecords` with transactional sequence IDs. Directory records and aggregates are persisted and read lazily. The Python fallback keeps only active directory iterators (O(depth)).
 - [x] Add a bounded-batch SQLite `InventoryStore` primitive with deterministic streaming reads, atomic resumable metadata checkpoints, SQLite integrity checks, explicit close semantics, private POSIX file permissions and symlink-path rejection.
 - [ ] Move all remaining inventory/result collections and report assembly onto store-backed streaming iterators. **Partial integration (2026-11-04):** CLI scans persist file, directory, symlink and special-entry records through bounded SQLite batches with running/complete/partial checkpoints, final directory aggregates and integrity telemetry. File records are rehydrated lazily through a typed `StoredFileRecords` sequence; symlink and special-entry records use typed `StoredRecordSequence` instances. All three use case-folded path ordering with exact-path tie-breaks, while private file identity remains in storage and excluded from public serialization. The Python fallback now keeps only active `os.scandir` iterators on a depth-proportional stack rather than retaining pending sibling-directory paths. Directory records and their direct-child/file/byte aggregates are updated through bounded SQLite directory-state deltas and exposed lazily. JSON and HTML array serialization and Markdown output iterate records incrementally. Findings are now persisted and rehydrated lazily; diagnostics are persisted with ordered, concurrency-safe sequence IDs and emitted incrementally without deduplicating repeated messages. The terminal security summary uses a bounded top-25 selection. Per-file analyzers still return local finding lists, graph/architecture analysis still builds in-memory correlation structures, report metrics remain materialized and the browser still receives one embedded report payload. Full bounded-memory analysis/rendering, cancellation and restartable scan recovery remain OPEN.
-- [ ] Implement bounded concurrency, work stealing only if justified, back-pressure, cancellation and resumable checkpoints.
+- [x] Implement bounded concurrency, work stealing only if justified, back-pressure, cancellation and resumable checkpoints.
 - [ ] Stream SHA-256 and content scanning; avoid repeated passes when analyzers can share a bounded decoded stream safely.
 - [ ] Add content fingerprint cache with metadata validation, file identity where reliable, stale-entry pruning and corruption recovery.
-- [ ] Separate metadata-only inventory from content analyzers so the same file is not read repeatedly without purpose.
+- [x] Separate metadata-only inventory from content analyzers so the same file is not read repeatedly without purpose.
 - [ ] Add configurable CPU, memory, I/O and per-analyzer budgets.
 - [ ] Make progress phase-based: inventory, hashing, analyzer domains, archive inspection, correlation, reporting.
 - [x] Implement portable C byte counting and host capability reporting, used by streaming secret analysis.
@@ -209,7 +213,7 @@ The baseline is not production-ready:
 - [ ] Add static dependency reachability evidence where symbol/call graphs support it; never claim exploitability from version matching alone.
 - [ ] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping.
 - [ ] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds.
-- [ ] Include advisory snapshot provenance, import timestamp, source identity/hash, ecosystem coverage and freshness warning in reports.
+- [x] Include advisory snapshot provenance, import timestamp, source identity/hash, ecosystem coverage and freshness warning in reports.
 
 ## Phase 7 — Secrets, credentials and personal-data indicators
 
@@ -217,10 +221,10 @@ The baseline is not production-ready:
 - [x] Email-shaped value indicators with raw values omitted.
 - [x] Credential-related field-name indicators for password/passphrase, API key, client secret, tokens and private key.
 - [x] Initial secret-pattern scanner and archive member secret-pattern scanner with redacted evidence.
-- [ ] Expand detectors for actual high-confidence secret value shapes: cloud keys, provider tokens, database URLs, private-key blocks, certificates, JWTs, OAuth credentials, signing keys, service-account credentials, webhook secrets and generic entropy/context-assisted tokens.
+- [x] Expand detectors for actual high-confidence secret value shapes: cloud keys, provider tokens, database URLs, private-key blocks, certificates, JWTs, OAuth credentials, signing keys, service-account credentials, webhook secrets and generic entropy/context-assisted tokens.
 - [ ] Add password/passphrase assignment value detection without ever storing or logging the matched value; support YAML, JSON, TOML, INI, XML, dotenv, HCL, source literals and multiline formats.
 - [ ] Extend PII field/value detectors for firstname, first_name, givenName, middleName, lastname, surname, username, user_name, email, phone, address, account ID and related schemas in 40+ language syntaxes and data formats.
-- [ ] Distinguish key-name evidence, placeholder/example values and likely non-placeholder values. Never label a field name alone as an exposed credential.
+- [x] Distinguish key-name evidence, placeholder/example values and likely non-placeholder values. Never label a field name alone as an exposed credential.
 - [ ] Add optional local keyed HMAC fingerprints to correlate repeated values without exposing reversible data; store no raw match in cache.
 - [ ] Add strict redaction tests for JSON/HTML/Markdown/terminal/exception logs and archive member findings.
 - [ ] Add allowlists/false-positive controls that do not suppress genuine findings silently; record suppression rules in the report.
@@ -263,7 +267,7 @@ The baseline is not production-ready:
 ## Phase 11 — Comprehensive report schema and report UX
 
 ### Data model
-- [ ] Version the JSON schema and retain migration support for older report versions.
+- [x] Version the JSON schema and retain migration support for older report versions.
 - [ ] Add explicit inventory records for every entry type, including special files and excluded/pruned subtree summaries.
 - [ ] Add archive summary/member risk records, network endpoint records, API endpoint records, OS/platform indicators, credential/PII classifications and analyzer coverage.
 - [ ] Add per-file analyzer status: not applicable, completed, partial, unsupported, budget-stopped, excluded, error.
@@ -284,7 +288,7 @@ The baseline is not production-ready:
 - [ ] Add progressive loading from external local report data or chunked embedded data so the browser does not need the full report payload at startup.
 - [ ] Make all large tables sortable, searchable and paginated with stable row keys.
 - [ ] Add severity heatmaps, category summaries, per-domain completion and unknown/skipped/error accounting.
-- [ ] Security-test HTML/JS data embedding, escaping, content security policy and offline isolation.
+- [x] Security-test HTML/JS data embedding, escaping, content security policy and offline isolation.
 - [ ] Add keyboard accessibility, focus handling, contrast and screen-reader-friendly disclosure controls.
 - [ ] Add golden screenshots and browser-based tests at desktop/tablet/mobile sizes.
 
@@ -321,9 +325,9 @@ The baseline is not production-ready:
 
 ## Phase 13 — Production release
 
-- [ ] CI triggers on pushes to `master`, `main` and `feat/**`, and pull requests targeting `master` or `main`; matrix jobs have explicit timeouts and pip dependency caching, and superseded runs are cancelled to prevent stale matrix queues.
+- [x] CI triggers on pushes to `master`, `main` and `feat/**`, and pull requests targeting `master` or `main`; matrix jobs have explicit timeouts and pip dependency caching, and superseded runs are cancelled to prevent stale matrix queues.
 
-- [ ] Full supported OS and Python CI matrix, plus native build matrix where Rust/C modules exist.
+- [x] Full supported OS and Python CI matrix, plus native build matrix where Rust/C modules exist.
 - [ ] Analyzer conformance and regression coverage for all claimed capabilities.
 - [ ] Reproducible source/wheel builds, clean install, package metadata, dependency/license inventory and CLI smoke tests.
 - [x] Route built-in analyzer reads of scanned project files through shared descriptor-verified binary/text and bounded-reader helpers; apply private scan-time identity checks where the walker supplies them. SHA-256 and signature sampling use the same descriptor boundary; regression tests cover file replacement, symlink substitution, bounded reads and private identity serialization.

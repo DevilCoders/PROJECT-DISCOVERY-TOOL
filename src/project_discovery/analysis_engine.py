@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import stat
 import threading
 from collections import deque
@@ -133,6 +134,10 @@ _worker_state: dict[str, Any] = {}
 
 def _initialize_worker(vulnerability_db: str | None) -> None:
     """Load this worker process's own analyzer instances (built-ins and plugins)."""
+    # Ctrl-C reaches the whole process group. Only the coordinator handles it and stops
+    # the workers itself, so workers do not die mid-queue printing KeyboardInterrupt
+    # tracebacks or hand interrupts back as task results.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     from .analyzers import load_analyzers
     from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
 
@@ -140,6 +145,20 @@ def _initialize_worker(vulnerability_db: str | None) -> None:
     if vulnerability_db:
         analyzers.append(LocalVulnerabilityAnalyzer(Path(vulnerability_db)))
     _worker_state["analyzers"] = analyzers
+
+
+def _cancel_and_terminate(pool: ProcessPoolExecutor) -> None:
+    """Cancel queued batches and stop every worker process immediately."""
+    terminate = getattr(pool, "terminate_workers", None)  # public since Python 3.14
+    if terminate is not None:
+        terminate()
+        return
+    # shutdown() drops the private process table, so take the workers first.
+    workers = list((getattr(pool, "_processes", None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for process in workers:
+        if process.is_alive():
+            process.terminate()
 
 
 def _parse_imports_batch(root: str, records: list[FileRecord]) -> list[tuple]:
@@ -223,6 +242,10 @@ class AnalysisExecutor:
             yield from drain_one()
 
     def shutdown(self, *, cancel: bool = False) -> None:
+        if cancel and self.mode == "process":
+            # Workers hold no state the coordinator still needs, so a cancelled scan stops
+            # them now instead of waiting for their in-flight batches to finish.
+            _cancel_and_terminate(self._pool)
         self._pool.shutdown(wait=True, cancel_futures=cancel)
 
     def __enter__(self) -> "AnalysisExecutor":

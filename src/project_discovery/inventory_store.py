@@ -298,7 +298,9 @@ class InventoryStore:
                             for path, deltas in directory_pending.items()
                         ],
                     )
-        except Exception:
+        except BaseException:
+            # Includes KeyboardInterrupt: the rolled-back rows stay pending, so close()
+            # can still persist them and no caller sees them as committed.
             self._pending = pending + self._pending
             for path, deltas in directory_pending.items():
                 current = self._directory_pending.get(path, (0, 0, 0, None))

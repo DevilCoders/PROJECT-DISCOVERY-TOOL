@@ -484,3 +484,85 @@ def test_resume_skips_completed_files_and_keeps_stored_findings(tmp_path: Path, 
     assert all(item["sha256"] for item in resumed["files"])
     with InventoryStore(database) as store:
         assert store.get_metadata("root") == str(project.resolve())
+
+
+class _InterruptingAnalyzer:
+    name = "interrupting-test-analyzer"
+    version = "1.0"
+    api_version = 1
+    domains = ("tests",)
+    languages = ("Text",)
+    concurrent_safe = True
+
+    def supports(self, record):
+        return record.path == "m6.env"
+
+    def analyze(self, path, record):
+        raise KeyboardInterrupt  # Ctrl-C arriving while this file is analyzed
+
+
+def _secret_files(root: Path, count: int = 9) -> Path:
+    root.mkdir()
+    for index in range(count):
+        (root / f"m{index}.env").write_text(f"API_TOKEN=ghp_{index}" + "A" * 35 + "\n", encoding="utf-8")
+    return root
+
+
+def test_interrupted_scan_resumes_without_losing_findings(tmp_path: Path, monkeypatch):
+    import project_discovery.cli as cli
+    from project_discovery.analyzers import load_analyzers
+
+    project = _secret_files(tmp_path / "project")
+    scan = {"executor": "thread", "jobs": 1, "quiet": True}
+    assert run_scan(project, tmp_path / "reference", {"json"}, 1, **scan) == 0
+    reference = _json_report(tmp_path / "reference")
+
+    def interrupting():
+        result = load_analyzers()
+        result.analyzers.append(_InterruptingAnalyzer())
+        return result
+
+    # One file per batch and a record commit every two files, so the interrupt at m6
+    # lands after several commits.
+    monkeypatch.setattr(cli, "load_analyzers", interrupting)
+    monkeypatch.setattr(cli, "BATCH_MAX_FILES", 1)
+    monkeypatch.setattr(cli, "RECORD_UPDATE_BATCH", 2)
+    output = tmp_path / "out"
+    with pytest.raises(KeyboardInterrupt):
+        run_scan(project, output, {"json"}, 1, **scan)
+
+    monkeypatch.setattr(cli, "load_analyzers", load_analyzers)
+    assert run_scan(project, output, {"json"}, 1, resume=True, **scan) == 0
+    resumed = _json_report(output)
+    assert resumed["metrics"]["execution"]["resumed_files_skipped"] == 6  # m0-m5
+    assert _finding_keys(resumed) == _finding_keys(reference)
+    assert len(resumed["findings"]) == len(reference["findings"])
+
+
+def test_file_records_are_committed_only_after_their_findings(tmp_path: Path, monkeypatch):
+    # A record with a sha256 is skipped by --resume, so its findings must already be
+    # durable when it is committed; otherwise a crash between the two loses them.
+    import project_discovery.cli as cli
+    from project_discovery.inventory_store import InventoryStore, StoredFileRecords
+
+    finding_stores = set()
+    unflushed_at_commit = []
+    append_finding = InventoryStore.append_finding
+    update_records = StoredFileRecords.update_records
+
+    def tracking_append_finding(self, finding):
+        finding_stores.add(self)
+        append_finding(self, finding)
+
+    def checked_update_records(self, records):
+        unflushed_at_commit.append(
+            sum(len(store._pending) for store in finding_stores if not store._closed)
+        )
+        return update_records(self, records)
+
+    monkeypatch.setattr(InventoryStore, "append_finding", tracking_append_finding)
+    monkeypatch.setattr(StoredFileRecords, "update_records", checked_update_records)
+    monkeypatch.setattr(cli, "RECORD_UPDATE_BATCH", 2)
+    project = _secret_files(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True, executor="thread", jobs=1) == 0
+    assert unflushed_at_commit and set(unflushed_at_commit) == {0}

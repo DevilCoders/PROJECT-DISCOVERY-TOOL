@@ -292,3 +292,45 @@ def test_every_token_format_matches_its_sample_and_anchors_are_sound():
         if item.anchors:
             assert any(anchor in sample for anchor in item.anchors), item.name
         assert "[REDACTED" in redact_source_excerpt(f"value {sample} end"), item.name
+
+
+def _assignment_lines(tmp_path: Path, filename: str, content: str) -> list[int]:
+    findings = _scan(tmp_path, filename, content)
+    return [
+        int(finding.evidence[0].rsplit(":", 1)[1])
+        for finding in findings
+        if finding.title.endswith("credential_assignment")
+    ]
+
+
+def test_code_expressions_and_line_breaks_are_not_credential_values(tmp_path: Path):
+    # Self-scan regressions: each line assigns an expression, not a literal secret.
+    source = (
+        "_SECRET_ASSIGNMENT = re.compile(\n"
+        "secret_field_lines: list[int] = []\n"
+        "secret_excerpts: dict[int, str] = {}\n"
+        "secret_last_line = current_line\n"
+        "TOKEN_FORMATS: tuple[TokenFormat, ...] = (\n"
+        "if secret_field_line_count:\n"
+        "    summary = build_summary()\n"
+        'if token == "abcdef123":\n'
+    )
+    for filename in ("analyzer.py", "analyzer.ts", "analyzer.go", "Analyzer.java"):
+        assert _assignment_lines(tmp_path, filename, source) == [], filename
+
+
+def test_literal_credential_assignments_are_detected_across_syntaxes(tmp_path: Path):
+    python = (
+        'password = "hunter22-lit"\n'
+        'settings = {"password": "hunter22-lit"}\n'
+        'secret_key: str = "dev-secret-123"\n'
+        "token: Optional[str] = 'tok-123456'\n"
+    )
+    assert _assignment_lines(tmp_path, "settings.py", python) == [1, 2, 3, 4]
+    assert _assignment_lines(tmp_path, "main.go", 'password := "hunter22-lit"\n') == [1]
+    assert _assignment_lines(tmp_path, "app.php", "$db = ['password' => 'hunter22-lit'];\n") == [1]
+    assert _assignment_lines(tmp_path, "app.ts", 'const apiKey: string = "abcdef123456";\n') == [1]
+    # Unquoted values stay literal in configuration, environment and shell files.
+    assert _assignment_lines(tmp_path, "deploy.sh", "export API_TOKEN=abc123def456\n") == [1]
+    assert _assignment_lines(tmp_path, "app.yaml", "password: hunter22-lit\n") == [1]
+    assert _assignment_lines(tmp_path, "settings.ini", "password = hunter22-lit\n") == [1]

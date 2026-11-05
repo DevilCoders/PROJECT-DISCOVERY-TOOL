@@ -56,6 +56,9 @@ Status values: **Fixed** (implemented and covered by regression tests) · **Open
 | PDT-109 | Rust walker | `to_string_lossy()` paths made non-UTF-8 names unopenable and allowed collisions. | Fixed |
 | PDT-110 | Native packaging | PyO3 0.23.5 refuses CPython 3.14, so the optional Rust walker silently disappeared on current Python (found on Ubuntu 26.04 / Python 3.14). Upgraded to PyO3 0.30.1; 3.14 added to CI. | Fixed |
 | PDT-225 | Redaction | The detector and redactor used separate token lists: Docker PATs, Stripe restricted keys and Azure AccountKey values were detected but copied verbatim into report excerpts. One shared registry (secret_patterns) now drives both. | Fixed |
+| PDT-226 | Offline guarantee | `tree-sitter-language-pack` 1.23+ downloads grammar bundles from the network inside `get_parser()`, and its `has_parser()` probe does not exist in 1.23.1, so a scan of a polyglot repository silently made network requests. Parsing is now gated on `downloaded_languages()`: grammars that are not already provisioned are reported as `UNKNOWN` and nothing is fetched. | Fixed |
+| PDT-227 | Regex denial of service | *Found in re-audit.* Scanned content is untrusted, yet the redaction patterns applied to every excerpt were cubic: 2,000 characters of `tokentoken…` took 9.3 s, so one crafted line could stall a worker indefinitely. The secret detector, network domain and string-literal scanners, email, archive-member, Nix-assignment and Markdown patterns were quadratic (50–220 ms at 4 KB, minutes to hours on megabyte lines). Each now uses start anchoring, possessive quantifiers, RFC length bounds or a linear scanner, and `tests/test_regex_complexity.py` times every package regex against 60 adversarial 48 KB inputs. | Fixed |
+| PDT-230 | CI supply chain | *Found in re-audit by PDT's own deployment analyzer.* Workflows referenced `actions/checkout@v4`, `actions/setup-python@v5` and `dtolnay/rust-toolchain@stable`, which are mutable tags and branches. They are now pinned to verified commit SHAs, with the version in a comment. | Fixed |
 
 ### P2: correctness, precision and operability
 
@@ -85,6 +88,10 @@ Status values: **Fixed** (implemented and covered by regression tests) · **Open
 | PDT-222 | CI | The lint gate was too narrow, and no end-to-end test asserted that analyzers run inside a real scan. | Fixed |
 | PDT-223 | HTML report | Section kicker numbering was inconsistent. | Fixed |
 | PDT-224 | ZIP | Case- and Unicode-colliding member names were not detected. | Fixed |
+| PDT-228 | Secrets (generic rule) | *Found in re-audit (self-scan).* The generic credential-assignment rule let separators span line breaks and treated unquoted right-hand sides in source code as values (for example a typed empty list or a `re.compile(...)` call assigned to a name containing "secret" or "token"), producing 10 false HIGH findings in PDT's own source. It also missed JSON/PHP keys (`"password": …`, `'password' => …`), Go `:=` and typed defaults (`secret: str = …`). In programming languages only string literals now count; configuration, environment and shell files keep unquoted values, and URL and path values are not reported as secrets. | Fixed |
+| PDT-229 | Privacy indicators | *Found in re-audit (self-scan).* Email-shaped values were reported for domains that cannot receive mail: `pkg@1.0.0`, `logo@2x.png` and reserved `example.*`/`.test` names. That last case contradicted the analyzer's own advice to use reserved example addresses. SCP remotes and URL user info were also reported. Field-name inventories fired on prose documentation and on the bare word "mobile", and the PII name inventory was MEDIUM while the equivalent credential key-name inventory is LOW. Domains are now validated against the bundled IANA list, reserved and URL forms are skipped, prose files contribute values only, and both name inventories are LOW. | Fixed |
+| PDT-231 | Interrupt handling | *Found in re-audit (code review).* A terminal Ctrl-C reaches every process in the group. Idle pool workers died inside `call_queue.get()`, each printing a `KeyboardInterrupt` traceback, and busy workers returned the interrupt as a task result. A SIGINT sent only to the coordinator (for example by a supervisor) waited for every in-flight batch to finish. Workers now ignore SIGINT, and a cancelled scan terminates them immediately. | Fixed |
+| PDT-232 | Resume integrity | *Found in re-audit (live interrupt/resume test).* An analyzed file's record, whose SHA-256 marks it complete for `--resume`, was committed in batches through its own connection, independently of the finding store's 512-row buffer. A `KeyboardInterrupt` during a finding commit also discarded the rolled-back rows. A crash or interrupt in that window left files marked analyzed whose findings were never stored, so `--resume` skipped them and silently lost those findings. Also, an interrupted scan kept none of its uncommitted progress, so resume redid it. Records are now committed only after the finding store has flushed, an interrupted flush keeps its rows, and an interrupted scan saves its completed files. Regression tests check the ordering at every commit and resume an interrupted scan to identical findings. | Fixed |
 
 ## 4. Capability matrix at the baseline
 
@@ -120,11 +127,39 @@ Symbol index across languages, call graph, type systems, performance hotspots, c
 
 These gates cannot be closed by code changes alone and are not claimed as done:
 
-1. **Large-corpus benchmarks.** The 2 GB / 10 GB / 50 GB / 100 GB+ wall-time, throughput and peak-RSS figures in the roadmap require representative corpora and dedicated hardware. A synthetic scale test is included, but it does not certify those targets.
-2. **CI on the final head.** Linux and macOS native builds, plus the x86-64 Assembly path that only builds on Linux, must pass in GitHub Actions on the pushed branch.
+1. **Large-corpus benchmarks.** The 2 GB / 10 GB / 50 GB / 100 GB+ wall-time, throughput and peak-RSS figures in the roadmap require representative corpora and dedicated hardware. The tooling is ready (`tools/benchmark.py`, `--resume`, `--inventory-only` and per-phase telemetry; see [BENCHMARKS.md](BENCHMARKS.md)), and the runs are waiting for operator-provided corpora. Small-scale measurements do not certify those targets.
+2. **CI on the final head.** Linux and macOS native builds, plus the x86-64 Assembly path that only builds on Linux, must pass in GitHub Actions on the pushed branch. `352fe33` passed all 14 jobs; every later push must pass the same matrix before merge.
 3. **Plugin isolation.** Third-party analyzers still run in-process with PDT's permissions, as documented in `docs/PLUGIN_SDK.md`.
 4. **Independent security review** of the parsers and native code.
 
 ## 6. Re-audit
 
 See [§7](#7-re-audit-results), which is filled in after remediation, with the same checks re-run.
+
+## 7. Re-audit results
+
+**Re-audit date:** 2026-11-05 · **Code:** the remediated branch after `352fe33`, plus the fixes for the re-audit's own findings.
+
+The baseline checks were re-run, and four new kinds of check were added. The re-audit found six more defects: PDT-227 (regex denial of service), PDT-228 and PDT-229 (self-scan precision), PDT-230 (CI supply chain), PDT-231 (interrupt handling) and PDT-232 (resume integrity). All are fixed and recorded in §3 above.
+
+| Check | Baseline (`1895455`) | Re-audit |
+|---|---|---|
+| GitHub Actions | 9/9 jobs failed | `352fe33`: 14/14 jobs passed (lint, Ubuntu/Windows/macOS × CPython 3.11–3.14, optional integrations) |
+| Test suite | 59 failed (Windows, Py 3.12) | 562 tests. Windows 10, Py 3.12: 549 passed, 13 skipped (symlink privilege, POSIX modes, FIFO, case-sensitive fixtures). Ubuntu 26.04, Py 3.14, with the C SSE2/POPCNT assembly, C++ and Rust backends online: 559 passed, 3 skipped (no OpenCL GPU, NTFS-only cases). Coverage 84% against an 80% gate. `ruff --select E9,F,B,PLE` clean. |
+| End-to-end scan of this repository | 0 per-file analyzer findings | 164 files analyzed with all 35 analyzers loaded; per-file findings from every applicable analyzer; exit 0 under `--strict` |
+| Adversarial corpus (37 files) | 8 analyzer hangs | Every analyzer on every file under a 15 s watchdog: 0 hangs, 0 crashes, 0 calls over 3 s. End-to-end `--strict` scans exit 0, and the process and thread executors produce identical findings. |
+| Windows junction loop | 800 files / 321 dirs instead of 25 / 10 | Junctions are recorded as links and never followed (regression tests for both walkers) |
+| Regex complexity *(new)* | — | 312 package regexes × 266 adversarial inputs at 16 KB: worst case 16 ms. Before the fix, the redactor took 9.3 s on 2 KB and seven detectors took 50–220 ms on 4 KB. Guarded by `tests/test_regex_complexity.py`. |
+| Self-scan precision *(new)* | — | CRITICAL/HIGH/MEDIUM findings outside `tests/` went from 30 (10 HIGH) to 0. The remaining HIGH/MEDIUM findings are deliberate credential fixtures in `tests/`, lowered one level and labelled as such. |
+| Interrupt and resume *(new)* | — | 10,000-file synthetic corpus (`tools/benchmark.py generate`, seed 7) on a 4-core Ubuntu host, Py 3.14, 4 workers. SIGINT to the process group 20 s into analysis: exit 130 within 0.2 s, no process left running, no traceback. `--resume` skipped the 544 completed files and produced the same 14,045 findings and file hashes as an uninterrupted scan, exiting 0 under `--strict`. Process and thread executors produced identical findings. |
+
+### Capability status after remediation
+
+- **Working end to end.** These items were blocked or broken at the baseline: per-file analysis in `pdt scan` on every platform; verified, identity-pinned reads; magic-byte typing in both walkers; API type classification; Python AST security (one engine); `compare`, `catalog-add` and `catalog-compare` on real reports; report SHA-256 fingerprints; yarn v1/Berry and pnpm v5/v6/v9 vulnerability matching; and CVSS/GHSA-based OSV severity.
+- **Added.** A multi-process engine with worker-crash isolation; `--resume`, `--inventory-only`, `--fail-on` and `--strict`; `pdt capabilities`; per-phase timing, throughput and peak-RSS telemetry; `tools/benchmark.py`; offline OSV ZIP import with provenance; bounded HTML embedding; and a linear-time guarantee for every package regex.
+- **Still partial.** The analyzers listed as Partial in §4 are pattern-based by design. The precision defects this audit found in them are fixed (PDT-207–211, PDT-215, PDT-228, PDT-229), but they remain lexical indicators, not semantic analyses.
+- **Not implemented.** The 13 `planned` domains in §4 are still catalogue entries only: symbol index, call graph, type systems, performance hotspots, concurrency, memory and resource management, data flow and taint, embedded, firmware, hardware description languages, graphics shaders and frontend component graphs.
+
+### Verdict
+
+**0.2.0 is a release candidate, not a production release.** Every defect recorded by the audit and this re-audit is fixed and covered by a regression test, and the same 562-test suite passes on Windows and Linux. The §5 gates remain open: large-corpus benchmarks, which are waiting for operator data; CI on each final head; plugin isolation; and an independent security review.

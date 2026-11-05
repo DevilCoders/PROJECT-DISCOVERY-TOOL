@@ -5,21 +5,30 @@ import re
 from pathlib import Path
 
 from .base import Analyzer
-from ..language_catalog import is_textual_path
+from .network_analyzer import iana_tlds
+from ..language_catalog import is_documentation_path, is_textual_path
 from ..models import CodeEvidence, FileRecord, Finding
 from ..source_utils import open_verified_binary, redact_source_excerpt
 
 
+# The RFC 5321 64-character local-part limit also keeps scanning linear on long
+# dotted runs without an "@" nearby.
 _EMAIL = re.compile(
-    r"(?i)\b[A-Z0-9.!#$%&'*+/=?^_\x60{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+\b"
+    r"(?i)\b[A-Z0-9.!#$%&'*+/=?^_\x60{|}~-]{1,64}@((?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)\b"
 )
+# RFC 2606 / RFC 6761 names can never identify a real mailbox.
+_RESERVED_EMAIL_DOMAINS = ("example.com", "example.net", "example.org")
+_RESERVED_EMAIL_TLDS = frozenset({"example", "test", "invalid", "localhost"})
 _PII_FIELDS = {
     "first_name": re.compile(r"(?i)\b(?:first_?name|given_?name|forename)\b"),
     "middle_name": re.compile(r"(?i)\bmiddle_?name\b"),
     "last_name": re.compile(r"(?i)\b(?:last_?name|surname|family_?name)\b"),
     "username": re.compile(r"(?i)\b(?:user_?name|login_?name|account_?name)\b"),
     "email": re.compile(r"(?i)\b(?:e-?mail|email_?address|mail_?address)\b"),
-    "phone": re.compile(r"(?i)\b(?:phone|telephone|mobile|cell_?number)\b"),
+    # A bare "mobile" names a platform far more often than a phone number.
+    "phone": re.compile(
+        r"(?i)\b(?:phone(?:_?(?:number|no))?|telephone|mobile_?(?:phone|number|no)|cell_?(?:phone|number))\b"
+    ),
     "address": re.compile(r"(?i)\b(?:street_?address|postal_?address|home_?address)\b"),
     "date_of_birth": re.compile(r"(?i)\b(?:date_?of_?birth|birth_?date|dob)\b"),
     "government_id": re.compile(r"(?i)\b(?:ssn|social_?security|passport_?number|national_?id)\b"),
@@ -37,6 +46,28 @@ _MAX_LINE_BYTES = 256 * 1024
 _MAX_DATA_EXPOSURE_FILE_BYTES = 64 * 1024 * 1024
 _MAX_EVIDENCE_LINES = 100
 _MAX_CODE_EXCERPTS = 20
+
+
+def _has_personal_email(line: str) -> bool:
+    """Whether the line holds an address that could reach a real mailbox."""
+    for match in _EMAIL.finditer(line):
+        domain = match.group(1).lower()
+        tld = domain.rsplit(".", 1)[-1]
+        if tld in _RESERVED_EMAIL_TLDS or tld not in iana_tlds():
+            continue  # pkg@1.0.0, icon@2x.png and reserved names are not mailboxes
+        if domain in _RESERVED_EMAIL_DOMAINS or domain.endswith(
+            tuple("." + reserved for reserved in _RESERVED_EMAIL_DOMAINS)
+        ):
+            continue
+        if line.startswith(":", match.end()):
+            continue  # SCP-style remotes such as git@github.com:org/repo.git
+        scheme = line.rfind("://", 0, match.start())
+        if scheme >= 0 and not any(
+            char.isspace() or char in "\"'<>(),;" for char in line[scheme:match.start()]
+        ):
+            continue  # URL user info, as in ssh://git@host/org/repo
+        return True
+    return False
 
 
 class DataExposureAnalyzer(Analyzer):
@@ -81,6 +112,8 @@ class DataExposureAnalyzer(Analyzer):
         bytes_scanned = 0
         budget_reached = False
         line_budget_reached = False
+        # Field names in prose describe data rather than define it; values still count.
+        inventory_field_names = not is_documentation_path(record.path)
         try:
             with open_verified_binary(path, record.analysis_identity) as stream:
                 line_number = 1
@@ -110,7 +143,11 @@ class DataExposureAnalyzer(Analyzer):
                     # Redaction is the costliest step; only redact lines that are kept.
                     excerpt: str | None = None
 
-                    for field_name in {match.lastgroup for match in _PII_ANY.finditer(line)}:
+                    field_names = (
+                        {match.lastgroup for match in _PII_ANY.finditer(line)}
+                        if inventory_field_names else ()
+                    )
+                    for field_name in field_names:
                         if field_last_line.get(field_name) != current_line:
                             field_last_line[field_name] = current_line
                             field_line_counts[field_name] = field_line_counts.get(field_name, 0) + 1
@@ -121,7 +158,7 @@ class DataExposureAnalyzer(Analyzer):
                                 excerpt = excerpt or redact_source_excerpt(line)
                                 field_excerpts[(field_name, current_line)] = excerpt
 
-                    if "@" in line and _EMAIL.search(line) and email_last_line != current_line:
+                    if "@" in line and email_last_line != current_line and _has_personal_email(line):
                         email_last_line = current_line
                         email_line_count += 1
                         if len(email_lines) < _MAX_EVIDENCE_LINES:
@@ -130,7 +167,11 @@ class DataExposureAnalyzer(Analyzer):
                             excerpt = excerpt or redact_source_excerpt(line)
                             email_excerpts[current_line] = excerpt
 
-                    if _SECRET_FIELDS.search(line) and secret_last_line != current_line:
+                    if (
+                        inventory_field_names
+                        and secret_last_line != current_line
+                        and _SECRET_FIELDS.search(line)
+                    ):
                         secret_last_line = current_line
                         secret_field_line_count += 1
                         if len(secret_field_lines) < _MAX_EVIDENCE_LINES:
@@ -174,7 +215,8 @@ class DataExposureAnalyzer(Analyzer):
                 confidence="INFERRED",
                 evidence=evidence[:_MAX_EVIDENCE_LINES],
                 analyzer=self.name,
-                severity="MEDIUM",
+                # A name inventory, like the credential key-name inventory below.
+                severity="LOW",
                 code_evidence=code_evidence,
                 impact=(
                     "If these fields contain real user data, exposing the source or sample "

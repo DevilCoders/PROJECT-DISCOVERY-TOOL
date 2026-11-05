@@ -1,0 +1,98 @@
+# Changelog
+
+All notable changes to PDT. IDs such as PDT-001 refer to the defect register in
+[docs/AUDIT.md](docs/AUDIT.md).
+
+## 0.2.0 — 2026-11-05
+
+The production-readiness release. At 0.1.0 (`1895455`) CI failed on every job and `pdt scan`
+never ran a per-file analyzer. This release fixes every defect in the audit register and adds
+the scale and operability features needed for very large repositories.
+
+### Fixed: core functionality
+- `pdt scan` now runs every per-file analyzer. The analysis guard had compared an
+  `os.stat_result` positionally against a five-field identity, so every file was refused on
+  every platform (PDT-001).
+- Verified, identity-pinned reads work on Windows (`st_ctime` and `DirEntry` semantics),
+  and magic-byte file typing works in the fallback walker (PDT-002, PDT-003).
+- API-style classification no longer crashes on every file (PDT-004).
+- `compare`, `catalog-add` and `catalog-compare` accept real scan reports (schema 1.x), and
+  reports now carry each file's SHA-256 (PDT-005, PDT-006).
+- One Python AST security engine with import-alias resolution, shared by both presentations
+  (PDT-007, PDT-211).
+
+### Fixed: security of PDT itself
+- OpenCL is loaded only from System32 on Windows and from the absolute framework path on macOS;
+  a library planted in a scanned repository can no longer be loaded (PDT-101).
+- YAML alias ("billion laughs") and XML entity bombs are rejected before any traversal; XML is
+  parsed from verified, bounded reads (PDT-102, PDT-105).
+- TAR inspection continues past large members under decompression and wall-time budgets that
+  are enforced inside reads; case- and Unicode-colliding member names are reported
+  (PDT-103, PDT-224).
+- Windows junctions and mount points are recorded, never followed (PDT-104).
+- File names that are not valid Unicode round-trip end to end; the scan no longer crashes on
+  them (PDT-109).
+- HTML reports use single-pass templating and a nonce-based Content-Security-Policy that also
+  blocks all network access; Markdown reports neutralize HTML, links and code-span breakouts
+  (PDT-106, PDT-107).
+- Inventory and cache databases are created private (0600) together with their WAL files
+  (PDT-108).
+- Detection and redaction share one credential registry: Docker PATs, Stripe restricted keys
+  and Azure account keys had been detected but copied verbatim into reports (PDT-225).
+- Tree-sitter grammars are never downloaded: tree-sitter-language-pack 1.23+ fetches grammars
+  inside `get_parser()`, so parsing is gated on grammars already provisioned locally (PDT-226).
+- Regex denial of service: the excerpt redactor was cubic on long identifier runs (9 s for
+  2,000 characters) and nine detector patterns were quadratic. All are now linear, and a
+  regression test times every package regex against adversarial input (PDT-227).
+- CI actions are pinned to commit SHAs instead of mutable tags (PDT-230).
+
+### Fixed: correctness
+- OSV matching: severity from CVSS v2/v3 vectors and GHSA labels, range events sorted per the
+  OSV specification, ecosystem-correct version ordering (SemVer, PEP 440, RubyGems, Composer,
+  NuGet), alias-merged findings, indexed lookups and read-only access during scans
+  (PDT-201, PDT-202, PDT-204, PDT-206).
+- Lockfiles: yarn (v1 and Berry), pnpm (v5, v6 and v9), NuGet and `go.sum` parse correctly;
+  uv, pdm and Dart `pubspec.lock` are new. One parser set serves both lockfile analyzers
+  (PDT-203, PDT-205).
+- Network indicators validate TLDs against the bundled IANA list and require string-literal
+  context in source code; bare `::` is no longer reported as IPv6 (PDT-207, PDT-208).
+- ML heuristics run only in files that import an ML framework, and device tokens match whole
+  name components (PDT-209).
+- The Python import graph resolves absolute imports through package roots (`src/` layouts)
+  (PDT-212).
+- `python-ast` emits one structure finding and one import finding per module instead of one
+  finding per symbol (PDT-213).
+- Secret scanning: incremental UTF-8 decoding, more than 30 provider formats, lower severity in
+  test/fixture/example/docs paths, placeholder recognition and one finding per secret
+  (PDT-215).
+- The generic credential rule no longer spans line breaks or treats code expressions as values,
+  and now covers JSON/PHP keys, Go `:=` and typed defaults (PDT-228).
+- Email indicators require a real, non-reserved domain and skip SCP remotes and URL user info;
+  prose documentation contributes values but not field names; PII field-name inventories are
+  LOW, like credential key-name inventories (PDT-229).
+- `--resume` can no longer lose findings: a file is marked analyzed only after its findings
+  are committed, an interrupted commit keeps its rows, and an interrupted scan saves its
+  completed files (PDT-232).
+
+### Added
+- Multi-process analysis engine (`--executor auto|process|thread`) with batched tasks, worker
+  crash isolation, read-once prefetch, a shared AST memo and parallel import-graph parsing.
+- `pdt scan --resume` continues an interrupted scan; `--inventory-only` inventories without
+  reading file contents.
+- `--fail-on SEVERITY` and `--strict` exit codes for CI, plus `--quiet` and `--no-color`; Ctrl-C
+  exits with status 130, stops worker processes immediately and leaves a resumable inventory
+  (PDT-231).
+- Per-phase timings, throughput and peak RSS in every report's `metrics.performance`.
+- `pdt capabilities [--json]` and `python -m project_discovery`.
+- `tools/benchmark.py` generates synthetic corpora and records performance for any corpus.
+- Offline import of OSV `all.zip` bundles, with import provenance and snapshot age.
+- Severity-first finding order, file locations in the terminal security summary, `UNKNOWN`
+  findings when an analyzer fails, and bounded HTML embedding for very large reports.
+- CPython 3.14 support (PyO3 0.30.1), committed `Cargo.lock`, `.gitattributes` and a CI gate
+  of `ruff --select E9,F,B,PLE` plus an optional-integrations job.
+
+### Changed
+- Report schema 1.4. All changes are additive: `metrics.performance`, executor and resume fields
+  in `metrics.execution`, populated `files[].sha256`, the `analysis_coverage` category and HTML
+  `totals`. Readers of 1.x reports keep working.
+- `packaging` is now a declared dependency.

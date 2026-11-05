@@ -12,7 +12,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, TextIO
 
-from .models import ScanResult
+from .models import REPORT_SCHEMA_VERSION, ScanResult
 
 # The offline HTML report embeds bounded slices so browsers can open reports of very
 # large projects; the JSON report always carries the complete data set.
@@ -308,7 +308,7 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
     def bounded(name: str, values):
         return islice(values, HTML_MAX_EMBEDDED[name])
 
-    stream.write('{"schema_version":"1.3","totals":')
+    stream.write('{"schema_version":' + json.dumps(REPORT_SCHEMA_VERSION) + ',"totals":')
     _write_json_value(stream, totals, script_safe=True)
     stream.write(',"embedded_limits":')
     _write_json_value(stream, HTML_MAX_EMBEDDED, script_safe=True)
@@ -358,7 +358,7 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
 
 
 def _write_json_report(stream: TextIO, result: ScanResult) -> None:
-    stream.write('{"schema_version":"1.3","root":')
+    stream.write('{"schema_version":' + json.dumps(REPORT_SCHEMA_VERSION) + ',"root":')
     _write_json_value(stream, result.root)
     stream.write(',"started_at":')
     _write_json_value(stream, result.started_at)
@@ -439,7 +439,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         "# Project Discovery Report",
         "",
         f"- Root: {_md(result.root)}",
-        "- Schema version: 1.3",
+        f"- Schema version: {REPORT_SCHEMA_VERSION}",
         f"- Completed: {result.finished_at}",
         f"- Files: {len(result.files):,}",
         f"- Directories: {max(0, len(result.directories) - 1):,}",

@@ -238,6 +238,12 @@ def is_source_path(path: str) -> bool:
     return spec is not None and spec.family in _SOURCE_FAMILIES
 
 
+def is_documentation_path(path: str) -> bool:
+    """Whether a path maps to a prose documentation format such as Markdown or plain text."""
+    spec = _spec_for_path(path)
+    return spec is not None and spec.family == "documentation"
+
+
 def is_textual_path(path: str) -> bool:
     """Whether a recognized path is suitable for bounded UTF-8 text scanning."""
     normalized = path.replace("\\", "/")

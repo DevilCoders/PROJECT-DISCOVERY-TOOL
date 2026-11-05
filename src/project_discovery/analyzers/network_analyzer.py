@@ -18,7 +18,6 @@ _URI = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://[^\s<>\"']+", re.I)
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 # Identifier characters on either side mean a scope operator or symbol, not an address.
 _IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:.])")
-_STRING_LITERAL = re.compile(r"""(["'`])((?:\\.|(?!\1)[^\\\r\n])*)\1""")
 # Generic TLDs accepted for bare two-label names; other TLDs need a subdomain or URL.
 _COMMON_TLDS = frozenset({
     "com", "net", "org", "edu", "gov", "mil", "int", "io", "ai", "dev", "app", "cloud",
@@ -34,7 +33,8 @@ _SPECIAL_USE_TLDS = frozenset({"local", "internal", "test", "example", "invalid"
 
 
 @lru_cache(maxsize=1)
-def _iana_tlds() -> frozenset[str]:
+def iana_tlds() -> frozenset[str]:
+    """Lower-cased IANA root-zone TLDs from the bundled snapshot (data/tlds.txt)."""
     text = resource_files("project_discovery").joinpath("data/tlds.txt").read_text(encoding="utf-8")
     return frozenset(
         line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")
@@ -50,7 +50,7 @@ def _extension_labels() -> frozenset[str]:
 def _plausible_hostname(domain: str) -> bool:
     labels = domain.split(".")
     tld = labels[-1]
-    if tld not in _iana_tlds() and tld not in _SPECIAL_USE_TLDS:
+    if tld not in iana_tlds() and tld not in _SPECIAL_USE_TLDS:
         return False
     if tld in _extension_labels():
         return False
@@ -67,8 +67,35 @@ def _plausible_ipv6(candidate: str, line: str, start: int) -> bool:
     return start > 0 and line[start - 1] == "["
 
 
+_QUOTE_CHARS = re.compile(r"""["'`]""")
+_LITERAL_REST = {
+    quote: re.compile(r"(?:\\.|[^\\\r\n" + quote + r"])*+" + quote) for quote in "\"'`"
+}
+
+
 def _literal_spans(line: str) -> list[tuple[int, int]]:
-    return [(match.start(2), match.end(2)) for match in _STRING_LITERAL.finditer(line)]
+    """Body spans of escape-aware quoted literals on one line.
+
+    A single-regex scan restarts at every later quote after an unterminated one, which
+    is quadratic on lines such as ``'\\'\\'\\'...``. Once a quote kind finds no closing
+    quote, every later quote of that kind parses the same remainder and fails too, so
+    the kind is skipped for the rest of the line and the scan stays linear.
+    """
+    spans: list[tuple[int, int]] = []
+    unclosed: set[str] = set()
+    position = 0
+    while (quote := _QUOTE_CHARS.search(line, position)) is not None:
+        kind, start = quote.group(), quote.end()
+        position = start
+        if kind in unclosed:
+            continue
+        rest = _LITERAL_REST[kind].match(line, start)
+        if rest is None:
+            unclosed.add(kind)
+            continue
+        spans.append((start, rest.end() - 1))
+        position = rest.end()
+    return spans
 
 
 def _in_spans(spans: list[tuple[int, int]], start: int, end: int) -> bool:
@@ -82,8 +109,10 @@ _HOST_PORT = re.compile(
     r"""(?i)(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\])\s*:\s*(\d{1,5})\b"""
 )
 _BARE_PORT = re.compile(r"""(?im)^\s*(?:EXPOSE|listen)\s+(\d{1,5})\b""")
+# Matches start only where a dotted name begins (not after "label."), so a long dotted
+# run such as "a.a.a..." is tried once instead of once per label (quadratic).
 _DOMAIN = re.compile(
-    r"(?<![@\w-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\b"
+    r"(?<![@\w-])(?<![A-Za-z0-9]\.)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\b"
 )
 _PROTOCOL_PATTERNS = {
     "REST/HTTP": re.compile(r"\b(?:https?://|HTTP(?:S)?\s+(?:GET|POST|PUT|PATCH|DELETE)|application/json)\b", re.I),

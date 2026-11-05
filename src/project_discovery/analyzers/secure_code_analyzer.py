@@ -111,7 +111,9 @@ _PATTERNS = (
     (
         "insecure_random_for_secret",
         re.compile(
-            r"""(?i)(?:token|secret|session|nonce|api[_-]?key)\w{0,30}.{0,100}(?:Math\.random\s*\(|new\s+Random\s*\(|\brand\s*\()"""
+            # One lazy window keeps the cost per keyword at 130 steps; the former
+            # \w{0,30}.{0,100} pair overlapped and backtracked 31 x 101 times per keyword.
+            r"""(?i)(?:token|secret|session|nonce|api[_-]?key).{0,130}?(?:Math\.random\s*\(|new\s+Random\s*\(|\brand\s*\()"""
         ),
         "Potential non-cryptographic randomness for a secret",
         "A security-sensitive identifier appears to be derived from a non-cryptographic "

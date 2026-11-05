@@ -8,7 +8,7 @@ def test_pii_and_credential_indicators_redact_all_values(tmp_path: Path):
     path = tmp_path / "users.json"
     path.write_text(
         '{ "first_name": "Alice", "last_name": "Example", '
-        '"username": "alice-admin", "email": "alice@example.net", '
+        '"username": "alice-admin", "email": "alice@fixture-mailbox.net", '
         '"password": "very-secret-password" }',
         encoding="utf-8",
     )
@@ -18,7 +18,7 @@ def test_pii_and_credential_indicators_redact_all_values(tmp_path: Path):
     assert any("Email-shaped value" in item.title for item in findings)
     assert any("Credential field-name" in item.title for item in findings)
     serialized = repr([item.to_dict() for item in findings])
-    for raw in ("Alice", "Example", "alice-admin", "alice@example.net", "very-secret-password"):
+    for raw in ("Alice", "Example", "alice-admin", "alice@fixture-mailbox.net", "very-secret-password"):
         assert raw not in serialized
 
 
@@ -32,7 +32,7 @@ def test_unrelated_text_has_no_data_exposure_findings(tmp_path: Path):
 def test_data_exposure_findings_include_redacted_source_and_impact(tmp_path: Path):
     path = tmp_path / "customer.json"
     path.write_text(
-        '{"first_name":"Alice","email":"alice@example.com",'
+        '{"first_name":"Alice","email":"alice@fixture-mailbox.net",'
         '"password":"secret-value-should-not-leak"}',
         encoding="utf-8",
     )
@@ -40,11 +40,11 @@ def test_data_exposure_findings_include_redacted_source_and_impact(tmp_path: Pat
         "customer.json", path.stat().st_size, ".json", "JSON", file_type="text"
     )
     findings = DataExposureAnalyzer().analyze(path, record)
-    assert findings
+    assert len(findings) == 3
     assert all(item.code_evidence for item in findings)
     assert all(item.impact and item.recommendation for item in findings)
     rendered = repr([item.to_dict() for item in findings])
-    for secret in ("Alice", "alice@example.com", "secret-value-should-not-leak"):
+    for secret in ("Alice", "alice@fixture-mailbox.net", "secret-value-should-not-leak"):
         assert secret not in rendered
 
 def test_data_exposure_large_file_returns_unknown(tmp_path: Path, monkeypatch):
@@ -74,7 +74,7 @@ def test_data_exposure_detects_growth_and_reports_partial_budget(tmp_path: Path,
 def test_data_exposure_retains_only_bounded_evidence_samples(tmp_path: Path):
     path = tmp_path / "many-users.jsonl"
     path.write_text(
-        "".join('{"email":"user%d@example.test"}\n' % index for index in range(300)),
+        "".join('{"email":"user%d@fixture-mailbox.net"}\n' % index for index in range(300)),
         encoding="utf-8",
     )
     record = FileRecord(
@@ -85,7 +85,7 @@ def test_data_exposure_retains_only_bounded_evidence_samples(tmp_path: Path):
     assert len(email.evidence) <= 100
     assert len(email.code_evidence) <= 20
     serialized = repr([item.to_dict() for item in findings])
-    assert "user299@example.test" not in serialized
+    assert "user299@fixture-mailbox.net" not in serialized
 
 
 def test_data_exposure_stops_on_overlong_physical_line_as_unknown(tmp_path: Path, monkeypatch):
@@ -100,3 +100,60 @@ def test_data_exposure_stops_on_overlong_physical_line_as_unknown(tmp_path: Path
     assert len(findings) == 1
     assert findings[0].confidence == "UNKNOWN"
     assert "line-length budget" in findings[0].title.lower()
+
+
+def _scan(tmp_path: Path, name: str, content: str):
+    path = tmp_path / name
+    path.write_text(content, encoding="utf-8")
+    record = FileRecord(name, path.stat().st_size, Path(name).suffix, "Source", file_type="text")
+    return DataExposureAnalyzer().analyze(path, record)
+
+
+def test_non_mailbox_email_shapes_are_not_reported(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "notes.js",
+        "// keys look like /@scope/name/1.0.0_peer@1.0.0 and lodash@4.17.21\n"
+        "const icon = 'logo@2x.png';\n"
+        "const docs = 'alice@example.com, bob@mail.example.org, eve@corp.test';\n"
+        "const remote = 'git@github.com:org/repo.git';\n"
+        "const url = 'ssh://git@github.com/org/repo', other = 'https://user:pass@host.com/x';\n",
+    )
+    assert not any("Email-shaped value" in item.title for item in findings)
+
+
+def test_real_mailbox_shapes_are_reported_per_line(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "contacts.js",
+        "const owner = 'alice@fixture-mailbox.net';\n"
+        "const link = 'mailto:bob@fixture-mailbox.co.uk';\n",
+    )
+    email = next(item for item in findings if "Email-shaped value" in item.title)
+    assert email.evidence == [
+        "contacts.js:1 (email value redacted)",
+        "contacts.js:2 (email value redacted)",
+    ]
+    assert email.severity == "MEDIUM"
+
+
+def test_prose_documentation_skips_field_name_inventories_but_not_values(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "GUIDE.md",
+        "Reports never include the email, phone or password of a user.\n"
+        "Contact alice@fixture-mailbox.net for access.\n",
+    )
+    assert [item.title for item in findings] == ["Email-shaped value indicators: GUIDE.md"]
+
+
+def test_field_name_inventory_is_low_severity_and_bare_mobile_is_not_a_phone(tmp_path: Path):
+    findings = _scan(
+        tmp_path, "models.py",
+        '"""Mobile platform inventory."""\n'
+        "phone_number = models.CharField()\n"
+        "mobile_number = models.CharField()\n",
+    )
+    fields = next(item for item in findings if "Personal-data field" in item.title)
+    assert fields.severity == "LOW"
+    assert fields.evidence == [
+        "models.py:2 (field-name indicator: phone)",
+        "models.py:3 (field-name indicator: phone)",
+    ]

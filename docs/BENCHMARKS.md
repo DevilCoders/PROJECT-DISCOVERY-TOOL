@@ -1,0 +1,41 @@
+# Benchmarks
+
+`tools/benchmark.py` measures `pdt scan` on synthetic or real corpora and records the results
+as JSON lines.
+
+```bash
+# Optional: build a deterministic synthetic corpus
+python tools/benchmark.py generate /data/corpus-10g --files 400000 --size-gb 10 --seed 1
+
+# Scan any corpus (synthetic or real) and append the measurements to results.jsonl
+python tools/benchmark.py run /data/corpus-10g --output /reports/corpus-10g \
+    --results results.jsonl --label "10g process" --executor process --jobs 0
+```
+
+Arguments after the known options are passed through to `pdt scan`, for example `--jobs`,
+`--executor`, `--inventory-only` and `--skip --max-file-mb N`. Each result records the host,
+file and byte counts, findings, errors, executor, worker count, wall seconds, per-phase seconds,
+files/s, MB/s, coordinator peak RSS and, on POSIX, the largest process's peak RSS.
+
+## Measured results
+
+These are small-scale engineering measurements on one development workstation (Windows 10,
+Python 3.12, 16 hardware threads, NVIDIA RTX 3060). They are **not** the 2 GB–100 GB+ release
+benchmarks, which remain open until representative corpora are scanned.
+
+| Corpus | Configuration | Wall time | Throughput |
+|---|---|---|---|
+| 3,000 small source/config files, 11 MB | 0.1.0 engine, threads | 112 s | 27 files/s |
+| same | 0.2.0, threads (`--executor thread --jobs 8`) | 98 s | 31 files/s |
+| same | 0.2.0, processes (`--executor process --jobs 16`) | 15 s | 197 files/s |
+| 2,000 mixed files, 115 MB, warm cache | 0.2.0 processes, before analyzer tuning | 64 s | 1.8 MB/s |
+| same | 0.2.0 processes, final | 39 s | 2.9 MB/s |
+
+Findings were identical across executors and before and after tuning.
+
+## Large-corpus release gate (open)
+
+Planned runs at 2 GB, 10 GB, 50 GB and 100 GB+ on operator-provided data should record, for
+each corpus: wall time, files/s, MB/s, peak RSS (coordinator and largest process), report size,
+and errors/UNKNOWN counts. Scan each corpus twice so first-access antivirus costs can be
+separated from PDT's own cost (see [OPERATIONS.md](OPERATIONS.md)).

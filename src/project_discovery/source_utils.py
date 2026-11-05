@@ -73,17 +73,42 @@ def identity_matches(
     )
 
 
+def keyed_identifier(keywords: str) -> str:
+    """Regex source for a whole identifier (letters, digits, ``_``, ``-``) containing a keyword.
+
+    The lookahead finds the keyword and the possessive body consumes the identifier without
+    backtracking, so matching stays linear even on megabyte-long identifier runs. The
+    unbounded ``[A-Za-z0-9_]*(?:keyword)[A-Za-z0-9_]*`` form it replaces was cubic on
+    untrusted input such as ``tokentoken...``.
+    """
+    return rf"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*?(?:{keywords}))[A-Za-z0-9_-]++"
+
+
 _SECRET_ASSIGNMENT = re.compile(
-    r"""(?ix)(["']?[A-Za-z0-9_]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|client[_-]?secret|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|sas[_-]?token|private[_-]?key|database[_-]?url|connection[_-]?string|credential|refresh[_-]?token|aws_secret_access_key)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
+    r"""(?i)(["']?"""
+    + keyed_identifier(
+        r"password|passwd|passphrase|pwd|secret|token|api[_-]?key|client[_-]?secret|access[_-]?key"
+        r"|account[_-]?key|shared[_-]?access[_-]?key|sas[_-]?token|private[_-]?key|database[_-]?url"
+        r"|connection[_-]?string|credential|refresh[_-]?token|aws_secret_access_key"
+    )
+    + r"""["']?\s*+[:=]\s*+)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
 )
 _IDENTITY_ASSIGNMENT = re.compile(
-    r"""(?ix)(["']?[A-Za-z0-9_]*(?:first_?name|given_?name|middle_?name|last_?name|family_?name|surname|user_?name|login_?name|account_?name|email|e_mail|email_?address|phone|telephone|mobile|cell_?number|street_?address|postal_?address|home_?address|date_?of_?birth|birth_?date|dob|ssn|social_?security|passport_?number|national_?id)[A-Za-z0-9_]*["']?\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
+    r"""(?i)(["']?"""
+    + keyed_identifier(
+        r"first_?name|given_?name|middle_?name|last_?name|family_?name|surname|user_?name"
+        r"|login_?name|account_?name|email|e_mail|email_?address|phone|telephone|mobile"
+        r"|cell_?number|street_?address|postal_?address|home_?address|date_?of_?birth"
+        r"|birth_?date|dob|ssn|social_?security|passport_?number|national_?id"
+    )
+    + r"""["']?\s*+[:=]\s*+)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
 )
-_CREDENTIAL_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^:/@\s]+:)[^@\s/]+(@)")
+_CREDENTIAL_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]{0,31}://[^:/@\s]+:)[^@\s/]+(@)")
 _AUTHORIZATION_HEADER = re.compile(
     r"(?i)\bauthorization\s*[:=]\s*(?:(?:bearer|basic)\s+)?[^,\r\n;]+"
 )
-_EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+# RFC 5321 limits: 64-character local part, 253-character domain.
+_EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}\b")
 _TOKEN = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|"
     r"glpat-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|"

@@ -4,6 +4,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Sequence
 
+# Report schema: minor versions are additive, so any 1.x reader can load 1.y reports.
+REPORT_SCHEMA_VERSION = "1.4"
+
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
@@ -172,7 +175,7 @@ class ScanResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "1.3",
+            "schema_version": REPORT_SCHEMA_VERSION,
             "root": self.root,
             "started_at": self.started_at,
             "finished_at": self.finished_at,

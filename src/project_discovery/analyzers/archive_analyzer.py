@@ -127,8 +127,10 @@ _CONTENT_RULES = (
     (
         "credential-like assignment",
         re.compile(
+            # Possessive, same-line separators: two adjacent \s* runs backtracked
+            # quadratically on long whitespace after a keyword.
             r"""(?im)\b(?:password|passwd|passphrase|api[_-]?key|client[_-]?secret|"""
-            r"""access[_-]?token|refresh[_-]?token|secret)\b\s*["']?\s*[:=]\s*["']?"""
+            r"""access[_-]?token|refresh[_-]?token|secret)\b[ \t]*+["']?[ \t]*+[:=][ \t]*+["']?"""
             r"""[^\s,"']{4,}"""
         ),
         "secrets",
@@ -139,7 +141,7 @@ _CONTENT_RULES = (
     (
         "email-shaped value",
         re.compile(
-            r"(?i)\b[A-Z0-9.!#$%&'*+/=?^_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?"
+            r"(?i)\b[A-Z0-9.!#$%&'*+/=?^_{|}~-]{1,64}@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?"
             r"(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+\b"
         ),
         "privacy",

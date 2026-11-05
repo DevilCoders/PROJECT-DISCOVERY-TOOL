@@ -120,7 +120,9 @@ _RISK_IMPACTS = {
     ),
 }
 
-_NIX_ASSIGNMENT = re.compile(r"(?m)\b([A-Za-z_][A-Za-z0-9_.-]*)\s*=")
+# Starts only where an attribute path begins; \b also matched after every "-" and ".",
+# rescanning the same path once per segment (quadratic on "a-a-a-...").
+_NIX_ASSIGNMENT = re.compile(r"(?m)(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]*+)\s*+=")
 
 
 def _flatten(data: Any, prefix: str = "", keys: list[str] | None = None) -> list[str]:

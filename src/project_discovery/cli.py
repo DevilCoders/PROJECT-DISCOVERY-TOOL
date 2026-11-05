@@ -112,6 +112,9 @@ EXIT_USAGE = 2
 EXIT_INCOMPLETE = 3
 EXIT_INTERRUPTED = 130
 
+# Analyzed file records are written back in batches of this size.
+RECORD_UPDATE_BATCH = 512
+
 
 def _print_security_findings(console: Console, findings, *, limit: int = 25) -> None:
     """Print top redacted security findings without materializing the full result set."""
@@ -270,12 +273,18 @@ def run_scan(
     worker_count = jobs or max(1, min(8, hardware_threads * 2))
     record_updates = []
 
+    def commit_record_updates():
+        # Findings first: a record with a sha256 counts as analyzed, so committing it before
+        # its findings would let --resume after a crash skip the file and lose them.
+        finding_store.flush()
+        records.update_records(record_updates)
+        record_updates.clear()
+
     def persist_record(record):
         if isinstance(records, StoredFileRecords):
             record_updates.append(record)
-            if len(record_updates) >= 512:
-                records.update_records(record_updates)
-                record_updates.clear()
+            if len(record_updates) >= RECORD_UPDATE_BATCH:
+                commit_record_updates()
 
     progress_columns = (
         SpinnerColumn(),
@@ -368,48 +377,50 @@ def run_scan(
                         persist_record(record)
                         progress.advance(task)
 
-                for record in records:
-                    counts[record.language] += 1
-                    if record.error or record.content_skipped_reason or inventory_only:
-                        progress.advance(task)
-                        continue
-                    if resumed and record.sha256:
-                        resumed_skipped += 1
-                        progress.advance(task)
-                        continue
-                    path = root / record.path
-                    try:
-                        file_stat = _verified_regular_file_stat(path, record.analysis_identity)
-                        if (
-                            file_stat.st_size != record.size_bytes
-                            or (record.mtime_ns is not None and file_stat.st_mtime_ns != record.mtime_ns)
-                        ):
-                            raise OSError(f"file changed after inventory; refusing analysis: {record.path}")
-                        cached = cache.get(str(root), record.path)
-                        cache_hit = bool(
-                            cached
-                            and cached[0] == file_stat.st_size
-                            and cached[1] == file_stat.st_mtime_ns
-                            and cached[2] == file_stat.st_ctime_ns
-                            and cached[3] == file_stat.st_ino
-                        )
-                        digest_hint = cached[4] if cache_hit else None
-                    except OSError as exc:
-                        record.error = str(exc)
-                        finding_store.append_diagnostic(record.path + ": " + str(exc))
-                        persist_record(record)
-                        progress.advance(task)
-                        continue
-                    batch.append(FileTask(record, str(path), digest_hint, file_stat))
-                    batch_bytes += record.size_bytes
-                    if len(batch) >= BATCH_MAX_FILES or batch_bytes >= BATCH_MAX_BYTES:
-                        flush_batch()
-                flush_batch()
-                while pending:
-                    collect_one()
-                if record_updates:
-                    records.update_records(record_updates)
-                    record_updates.clear()
+                try:
+                    for record in records:
+                        counts[record.language] += 1
+                        if record.error or record.content_skipped_reason or inventory_only:
+                            progress.advance(task)
+                            continue
+                        if resumed and record.sha256:
+                            resumed_skipped += 1
+                            progress.advance(task)
+                            continue
+                        path = root / record.path
+                        try:
+                            file_stat = _verified_regular_file_stat(path, record.analysis_identity)
+                            if (
+                                file_stat.st_size != record.size_bytes
+                                or (record.mtime_ns is not None and file_stat.st_mtime_ns != record.mtime_ns)
+                            ):
+                                raise OSError(f"file changed after inventory; refusing analysis: {record.path}")
+                            cached = cache.get(str(root), record.path)
+                            cache_hit = bool(
+                                cached
+                                and cached[0] == file_stat.st_size
+                                and cached[1] == file_stat.st_mtime_ns
+                                and cached[2] == file_stat.st_ctime_ns
+                                and cached[3] == file_stat.st_ino
+                            )
+                            digest_hint = cached[4] if cache_hit else None
+                        except OSError as exc:
+                            record.error = str(exc)
+                            finding_store.append_diagnostic(record.path + ": " + str(exc))
+                            persist_record(record)
+                            progress.advance(task)
+                            continue
+                        batch.append(FileTask(record, str(path), digest_hint, file_stat))
+                        batch_bytes += record.size_bytes
+                        if len(batch) >= BATCH_MAX_FILES or batch_bytes >= BATCH_MAX_BYTES:
+                            flush_batch()
+                    flush_batch()
+                    while pending:
+                        collect_one()
+                finally:
+                    # Also on Ctrl-C: keep completed files for --resume (findings first).
+                    if record_updates:
+                        commit_record_updates()
 
             timer.lap("analysis")
             if walk_stats.get("walk_errors", 0) == 0:
