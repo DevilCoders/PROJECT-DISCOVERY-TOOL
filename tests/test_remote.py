@@ -204,7 +204,10 @@ def test_git_tree_path_validation_and_parent_creation_are_safe(tmp_path: Path):
 
     outside = tmp_path / "outside"
     outside.mkdir()
-    (tmp_path / "linked").symlink_to(outside, target_is_directory=True)
+    try:
+        (tmp_path / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
     with pytest.raises(RemoteScanError, match="non-directory ancestor"):
         remote._ensure_safe_parent(tmp_path, tmp_path / "linked" / "child")
 
@@ -342,12 +345,19 @@ def test_git_tree_stream_materializes_files_symlinks_and_submodules_safely(
     result = remote._extract_git_tree(checkout, {}, timeout=10)
 
     assert (checkout / "src" / "main.py").read_text(encoding="utf-8") == "print('ok')"
-    assert (checkout / "src" / "entry.py").is_symlink()
-    assert (checkout / "src" / "entry.py").readlink() == Path("main.py")
+    if _symlinks_supported(tmp_path):
+        assert (checkout / "src" / "entry.py").is_symlink()
+        assert (checkout / "src" / "entry.py").readlink() == Path("main.py")
+        assert result["materialized_symlink_count"] == 1
+    else:
+        # Without symlink privilege (Windows without Developer Mode) the link is counted as
+        # omitted, never replaced by a regular file.
+        assert not (checkout / "src" / "entry.py").exists()
+        assert result["materialized_symlink_count"] == 0
+        assert result["omitted_symlink_count"] == 1
     assert (checkout / "vendor" / "lib").is_dir()
     assert not (tmp_path / "outside.py").exists()
     assert result["tracked_file_count"] == 1
-    assert result["materialized_symlink_count"] == 1
     assert result["submodule_count"] == 1
     assert result["omitted_tree_path_count"] == 1
     assert len(created) == 2
@@ -669,3 +679,13 @@ def test_remote_vcs_capabilities_reports_installed_native_clients(monkeypatch):
     assert capabilities["bzr"]["executable"] == "/usr/bin/bzr"
     assert capabilities["fossil"]["available"] is True
     assert capabilities["pijul"]["available"] is False
+
+
+def _symlinks_supported(directory: Path) -> bool:
+    probe = directory / ".symlink-probe"
+    try:
+        probe.symlink_to("target")
+    except (OSError, NotImplementedError):
+        return False
+    probe.unlink()
+    return True
