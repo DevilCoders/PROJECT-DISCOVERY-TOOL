@@ -580,6 +580,10 @@ def test_capabilities_report_includes_remote_vcs_client_status(monkeypatch):
     monkeypatch.setattr(cli, "probe_sandbox", lambda: {})
     monkeypatch.setattr(cli, "recognized_language_count", lambda: 0)
     monkeypatch.setattr(
+        cli.importlib, "import_module",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("optional package absent")),
+    )
+    monkeypatch.setattr(
         cli,
         "remote_vcs_capabilities",
         lambda: {
