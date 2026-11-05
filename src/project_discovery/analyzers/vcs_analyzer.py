@@ -193,8 +193,9 @@ class VCSHostingAnalyzer(Analyzer):
                     confidence="CONFIRMED", evidence=[record.path, "gitdir pointer present"],
                     analyzer=self.name,
                 )]
+            marker_label = _VCS_ROOTS.get(Path(record.path).name, name)
             return [Finding(
-                "vcs", f"{name} metadata marker: {record.path}",
+                "vcs", f"{marker_label} metadata marker: {record.path}",
                 "A version-control metadata marker file is present.",
                 confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
             )]
