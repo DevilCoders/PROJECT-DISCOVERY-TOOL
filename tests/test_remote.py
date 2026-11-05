@@ -234,3 +234,76 @@ def test_remote_checkout_cleans_temporary_source_after_context_exit(tmp_path: Pa
         assert result.path.is_dir()
         assert (result.path / "main.py").is_file()
     assert not captured["path"].exists()
+
+
+
+def test_git_tree_stream_materializes_files_symlinks_and_submodules_safely(
+    tmp_path: Path, monkeypatch,
+):
+    import io
+
+    file_oid = b"a" * 40
+    symlink_oid = b"b" * 40
+    invalid_oid = b"c" * 40
+    submodule_oid = b"d" * 40
+    tree_bytes = b"".join(
+        [
+            b"100644 blob " + file_oid + b"\tsrc/main.py\0",
+            b"120000 blob " + symlink_oid + b"\tsrc/entry.py\0",
+            b"160000 commit " + submodule_oid + b"\tvendor/lib\0",
+            b"100644 blob " + invalid_oid + b"\t../../outside.py\0",
+        ]
+    )
+    blob_bytes = b"".join(
+        [
+            file_oid + b" blob 11\nprint('ok')\n",
+            symlink_oid + b" blob 7\nmain.py\n",
+            invalid_oid + b" blob 8\nmalicious\n",
+        ]
+    )
+
+    class FakeProcess:
+        def __init__(self, *, stdout: bytes):
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO(stdout)
+            self.stderr = io.BytesIO()
+            self.returncode = None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    created = []
+
+    def fake_popen(command, **kwargs):
+        if "ls-tree" in command:
+            process = FakeProcess(stdout=tree_bytes)
+        elif "cat-file" in command:
+            process = FakeProcess(stdout=blob_bytes)
+        else:
+            raise AssertionError(f"unexpected Git subprocess: {command!r}")
+        created.append(process)
+        return process
+
+    monkeypatch.setattr(remote.subprocess, "Popen", fake_popen)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    result = remote._extract_git_tree(checkout, {}, timeout=10)
+
+    assert (checkout / "src" / "main.py").read_text(encoding="utf-8") == "print('ok')"
+    assert (checkout / "src" / "entry.py").is_symlink()
+    assert (checkout / "src" / "entry.py").readlink() == Path("main.py")
+    assert (checkout / "vendor" / "lib").is_dir()
+    assert not (tmp_path / "outside.py").exists()
+    assert result["tracked_file_count"] == 1
+    assert result["materialized_symlink_count"] == 1
+    assert result["submodule_count"] == 1
+    assert result["omitted_tree_path_count"] == 1
+    assert len(created) == 2
