@@ -970,9 +970,21 @@ def remote_checkout(
                     target, checkout, git_dir, temporary, timeout=timeout,
                 )
             elif target.vcs == "hg":
-                metadata = _hg_checkout(target, checkout, timeout=timeout)
+                metadata = _hg_checkout(target, checkout, temporary, timeout=timeout)
             elif target.vcs == "svn":
                 metadata = _svn_checkout(target, checkout, timeout=timeout)
+            elif target.vcs == "bzr":
+                metadata = _bzr_checkout(target, checkout, temporary, timeout=timeout)
+            elif target.vcs == "darcs":
+                metadata = _darcs_checkout(target, checkout, temporary, timeout=timeout)
+            elif target.vcs == "jj":
+                metadata = _jj_checkout(target, checkout, temporary, timeout=timeout)
+            elif target.vcs == "pijul":
+                metadata = _pijul_checkout(target, checkout, temporary, timeout=timeout)
+            elif target.vcs == "cvs":
+                metadata = _cvs_checkout(target, checkout, temporary, timeout=timeout)
+            elif target.vcs == "p4":
+                metadata = _p4_checkout(target, checkout, timeout=timeout)
             else:
                 raise RemoteScanError(f"Unsupported remote VCS backend: {target.vcs}")
             if target.insecure_transport:
