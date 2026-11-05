@@ -12,6 +12,7 @@ import os
 import posixpath
 import re
 import subprocess
+import stat
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -586,6 +587,27 @@ def _git_checkout(
         timeout=timeout, env=environment, label="Git branch lookup", check=False,
     ).stdout.decode("utf-8", errors="replace").strip() or None
     counts = _extract_git_tree(checkout, environment, timeout=timeout)
+
+    # Git created this pointer because metadata lives outside the project root.
+    # Remove it before PDT scans the source tree: otherwise reports would expose
+    # the ephemeral checkout path and misclassify a remote scan as a local clone.
+    git_pointer = checkout / ".git"
+    try:
+        pointer_info = git_pointer.lstat()
+    except FileNotFoundError as exc:
+        raise RemoteScanError("Git clone did not create its separate-metadata pointer.") from exc
+    if not stat.S_ISREG(pointer_info.st_mode):
+        raise RemoteScanError("Git separate-metadata pointer is not a regular file.")
+    pointer_text = git_pointer.read_text(encoding="utf-8", errors="strict").strip()
+    if not pointer_text.startswith("gitdir: "):
+        raise RemoteScanError("Git separate-metadata pointer has an invalid format.")
+    pointed_git_dir = Path(pointer_text[8:].strip())
+    if not pointed_git_dir.is_absolute():
+        pointed_git_dir = checkout / pointed_git_dir
+    if pointed_git_dir.resolve() != git_dir.resolve():
+        raise RemoteScanError("Git separate-metadata pointer does not match the isolated metadata path.")
+    git_pointer.unlink()
+
     warnings = []
     if counts["submodule_count"]:
         warnings.append(
