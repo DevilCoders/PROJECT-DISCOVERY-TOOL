@@ -181,6 +181,13 @@ def test_git_checkout_uses_no_checkout_and_separate_git_metadata(tmp_path: Path,
 
     def fake_run(command, **kwargs):
         commands.append(command)
+        if "clone" in command:
+            checkout_path = Path(command[-1])
+            checkout_path.mkdir()
+            git_dir_path = Path(command[command.index("--separate-git-dir") + 1])
+            (checkout_path / ".git").write_text(
+                f"gitdir: {git_dir_path}\\n", encoding="utf-8",
+            )
         if "rev-parse" in command:
             return SimpleNamespace(stdout=b"abc123\n")
         if "symbolic-ref" in command:
@@ -217,6 +224,7 @@ def test_git_checkout_uses_no_checkout_and_separate_git_metadata(tmp_path: Path,
     assert metadata["submodules_fetched"] is False
     assert metadata["git_lfs_objects_fetched"] is False
     assert len(metadata["warnings"]) == 2
+    assert not (checkout / ".git").exists()
 
 
 def test_remote_checkout_cleans_temporary_source_after_context_exit(tmp_path: Path, monkeypatch):
