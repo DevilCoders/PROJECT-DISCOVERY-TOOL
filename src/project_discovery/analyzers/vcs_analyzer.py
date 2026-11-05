@@ -15,7 +15,7 @@ from ..models import FileRecord, Finding
 _VCS_ROOTS = {
     ".git": "Git", ".hg": "Mercurial", ".svn": "Subversion",
     ".bzr": "Bazaar", "_darcs": "Darcs", ".jj": "Jujutsu",
-    ".pijul": "Pijul", "CVS": "CVS",
+    ".pijul": "Pijul", "CVS": "CVS", "_FOSSIL_": "Fossil",
 }
 _PROVIDER_RULES = (
     ("GitHub", re.compile(r"(^|\.)github\.com$", re.I)),
@@ -148,7 +148,7 @@ class VCSHostingAnalyzer(Analyzer):
         relative_lower = relative.casefold()
         name = Path(relative).name.lower()
         parts = [part.lower() for part in relative.split("/")]
-        if name in {".git", ".hg", ".svn"} or relative == "HEAD":
+        if name in {".git", ".hg", ".svn", "_fossil_"} or relative == "HEAD":
             return True
         if _vcs_root(relative) or any(
             part in {".git", ".hg", ".svn", ".bzr", "_darcs", ".jj", ".pijul", "cvs"}
@@ -181,7 +181,7 @@ class VCSHostingAnalyzer(Analyzer):
                 evidence=["HEAD", "objects/", "config"],
                 analyzer=self.name,
             )]
-        if name in {".git", ".hg", ".svn"}:
+        if name in {".git", ".hg", ".svn", "_fossil_"}:
             content, error = _read_text(path, record.analysis_identity)
             if error:
                 return [self._unknown(record, error)]
