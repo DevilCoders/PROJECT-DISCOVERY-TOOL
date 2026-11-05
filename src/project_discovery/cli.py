@@ -859,7 +859,7 @@ def main() -> None:
     )
     scan.add_argument(
         "--vcs", choices=REMOTE_VCS, default="auto",
-        help="Remote VCS backend: auto, git, hg (Mercurial) or svn (Subversion)",
+        help="Remote VCS backend: auto, git, hg, svn, bzr/bazaar, darcs, jj, pijul, cvs or p4/perforce",
     )
     scan.add_argument(
         "--remote-timeout", type=int, default=DEFAULT_REMOTE_TIMEOUT, metavar="SECONDS",
