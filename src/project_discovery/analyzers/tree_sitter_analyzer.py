@@ -1,6 +1,6 @@
 """Offline-first generic syntax analysis through optional Tree-sitter grammars.
 
-The analyzer never downloads grammars. It checks has_parser() before constructing
+The analyzer never downloads grammars. It checks local provisioning before constructing
 a parser; users must provision grammar libraries separately before scanning.
 """
 from __future__ import annotations
@@ -237,6 +237,21 @@ def _walk_tree(root_node):
     return node_count, max_depth, errors, top_level
 
 
+def _grammar_provisioned(pack, grammar: str) -> bool:
+    """True only when the grammar is already on disk; this check never downloads.
+
+    tree-sitter-language-pack 1.23+ downloads grammars on demand inside get_parser(),
+    and has_language() reports manifest membership rather than local availability, so
+    downloaded_languages() is the only offline-safe check there. Older packs that bundle
+    their grammars expose has_parser().
+    """
+    if hasattr(pack, "downloaded_languages"):
+        return grammar in set(pack.downloaded_languages())
+    if hasattr(pack, "has_parser"):
+        return bool(pack.has_parser(grammar))
+    return False
+
+
 def parser_capabilities(languages: set[str] | None = None) -> dict[str, str]:
     """Report local parser availability without downloading grammars."""
     requested = set(GRAMMARS) if languages is None else set(languages) & set(GRAMMARS)
@@ -252,7 +267,7 @@ def parser_capabilities(languages: set[str] | None = None) -> dict[str, str]:
             for name in sorted(pending):
                 try:
                     _CAPABILITY_CACHE[name] = (
-                        "available" if pack.has_parser(GRAMMARS[name])
+                        "available" if _grammar_provisioned(pack, GRAMMARS[name])
                         else "grammar_not_provisioned"
                     )
                 except Exception:
@@ -316,12 +331,14 @@ class TreeSitterAnalyzer(Analyzer):
             )]
 
         try:
-            if not pack.has_parser(grammar):
+            # Never call get_parser() for an unprovisioned grammar: it would download one.
+            if not _grammar_provisioned(pack, grammar):
                 return [Finding(
                     "code",
                     f"Grammar not provisioned offline: {record.language}",
                     f"Tree-sitter recognizes grammar '{grammar}', but it is not available "
-                    "in the local parser cache. No network download was attempted.",
+                    "in the local parser cache. No network download was attempted; "
+                    "provision grammars explicitly before scanning.",
                     confidence="UNKNOWN",
                     evidence=[record.path],
                     analyzer=self.name,

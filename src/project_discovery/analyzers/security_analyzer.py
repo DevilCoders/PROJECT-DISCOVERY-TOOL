@@ -9,19 +9,21 @@ from .base import Analyzer
 from ..language_catalog import is_textual_path, textual_language_names
 from ..models import CodeEvidence, FileRecord, Finding
 from ..native_backend import count_byte as native_count_byte
-from ..secret_patterns import COMPILED_FORMATS, PRIVATE_KEY_MARKER
+from ..secret_patterns import COMPILED_FORMATS, PRIVATE_KEY_ANCHORS, PRIVATE_KEY_MARKER
 from ..source_utils import open_verified_binary, redact_source_excerpt
 
 
+# (name, pattern, anchors): a pattern only runs on text containing one of its anchors.
 _PATTERNS = (
-    ("private_key", PRIVATE_KEY_MARKER),
-    *((item.name, pattern) for item, pattern in COMPILED_FORMATS),
-    ("credential_url", re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/:@]+:[^\s/@]+@")),
+    ("private_key", PRIVATE_KEY_MARKER, PRIVATE_KEY_ANCHORS),
+    *((item.name, pattern, item.anchors) for item, pattern in COMPILED_FORMATS),
+    ("credential_url", re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"), ("://",)),
     (
         "credential_assignment",
         re.compile(
             r"""(?ix)\b[A-Za-z0-9_]*(?:api[_-]?key|client[_-]?secret|service[_-]?token|access[_-]?(?:token|key)|auth[_-]?token|refresh[_-]?token|password|passwd|passphrase|secret[_-]?(?:access[_-]?)?key|secret|token|encryption[_-]?key|signing[_-]?key|aws_secret_access_key|database_url)[A-Za-z0-9_]*\b\s*[:=]\s*(?:"([^"\r\n]{6,})"|'([^'\r\n]{6,})'|([^\s"'#,;]{6,}))"""
         ),
+        (),
     ),
 )
 _SEVERITY = {
@@ -150,7 +152,9 @@ class SecretPatternAnalyzer(Analyzer):
                     combined = tail + chunk
                     prefix_length = len(tail)
                     base_line = total_newlines - tail.count("\n")
-                    for pattern_name, pattern in _PATTERNS:
+                    for pattern_name, pattern, anchors in _PATTERNS:
+                        if anchors and not any(anchor in combined for anchor in anchors):
+                            continue
                         for match in pattern.finditer(combined):
                             if match.end() <= prefix_length:
                                 continue

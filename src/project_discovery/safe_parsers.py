@@ -78,7 +78,11 @@ def safe_yaml_load_all(
     import yaml
     from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
-    class Loader(yaml.SafeLoader):
+    # libyaml's C parser is roughly ten times faster than the pure-Python one; both
+    # compose the same node classes, so the expansion budget applies identically.
+    base = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+    class Loader(base):
         pass
 
     if allow_unknown_tags:

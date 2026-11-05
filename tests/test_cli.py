@@ -415,3 +415,72 @@ def test_security_summary_names_the_file_location(tmp_path: Path, capsys):
     output = capsys.readouterr().err
     assert "at settings.env:1" in output
     assert "\x1b[" not in output
+
+
+def _finding_keys(report: dict) -> set[tuple]:
+    return {(item["analyzer"], item["title"], tuple(item["evidence"])) for item in report["findings"]}
+
+
+def test_process_and_thread_executors_produce_identical_results(tmp_path: Path):
+    project = _sample_project(tmp_path / "project")
+    (project / "pkg").mkdir()
+    for index in range(12):
+        (project / "pkg" / f"mod{index}.py").write_text(
+            f"import os\nfrom pkg import mod{(index + 1) % 12}\nos.system('echo {index}')\n",
+            encoding="utf-8",
+        )
+    (project / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    reports = {}
+    for mode in ("thread", "process"):
+        assert run_scan(project, tmp_path / mode, {"json"}, 1, quiet=True, executor=mode, jobs=2) == 0
+        reports[mode] = _json_report(tmp_path / mode)
+        assert reports[mode]["metrics"]["execution"]["executor"] == mode
+    assert _finding_keys(reports["thread"]) == _finding_keys(reports["process"])
+    assert reports["thread"]["errors"] == reports["process"]["errors"] == []
+    graph = reports["process"]["metrics"]["python_dependency_graph"]["summary"]
+    # "from pkg import modN" links each module to both pkg and pkg.modN.
+    assert graph["edge_count"] == 24 and graph["cycle_count"] == 1
+
+
+def test_inventory_only_scan_reads_no_contents(tmp_path: Path, monkeypatch):
+    import project_discovery.analysis_engine as engine
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("inventory-only scans must not analyze file contents")
+
+    monkeypatch.setattr(engine, "analyze_file", forbidden)
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True, inventory_only=True) == 0
+    report = _json_report(tmp_path / "out")
+    assert len(report["files"]) == 3
+    assert all(item["sha256"] is None and not item["analyzed"] for item in report["files"])
+    # Only path-based correlation may contribute findings; no content analyzer runs.
+    assert {item["analyzer"] for item in report["findings"]} <= {"architecture-layout"}
+    assert report["metrics"]["execution"]["analysis_mode"] == "inventory-only"
+
+
+def test_resume_skips_completed_files_and_keeps_stored_findings(tmp_path: Path, capsys):
+    from project_discovery.inventory_store import InventoryStore, StoredFileRecords
+
+    project = _sample_project(tmp_path / "project")
+    output = tmp_path / "out"
+    # Not quiet: --quiet deliberately suppresses this warning as well.
+    assert run_scan(project, output, {"json"}, 1, no_color=True, resume=True) == 0
+    # Rich wraps console text to the terminal width.
+    assert "starting a fresh scan" in " ".join(capsys.readouterr().err.split())
+    first = _json_report(output)
+    assert first["metrics"]["execution"]["resumed"] is False
+    # Simulate an interruption after every file except app.py had completed.
+    database = output / ".pdt-cache" / "inventory.sqlite3"
+    records = StoredFileRecords(database)
+    pending = next(record for record in records if record.path == "app.py")
+    pending.sha256 = None
+    records.update_records([pending])
+    assert run_scan(project, output, {"json"}, 1, quiet=True, resume=True) == 0
+    resumed = _json_report(output)
+    execution = resumed["metrics"]["execution"]
+    assert execution["resumed"] is True and execution["resumed_files_skipped"] == 2
+    assert _finding_keys(resumed) == _finding_keys(first)
+    assert all(item["sha256"] for item in resumed["files"])
+    with InventoryStore(database) as store:
+        assert store.get_metadata("root") == str(project.resolve())

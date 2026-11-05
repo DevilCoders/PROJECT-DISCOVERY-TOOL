@@ -97,6 +97,12 @@ _PROTOCOL_PATTERNS = {
     "SSH": re.compile(r"\b(?:ssh|sftp|scp)\b", re.I),
     "DNS": re.compile(r"\b(?:dns|nameserver|resolve\(\))\b", re.I),
 }
+# One pass per line over all protocol markers; group names map back to labels.
+_PROTOCOL_LABELS = {f"p{index}": label for index, label in enumerate(_PROTOCOL_PATTERNS)}
+_PROTOCOL_ANY = re.compile(
+    "|".join(f"(?P<p{index}>{pattern.pattern})" for index, pattern in enumerate(_PROTOCOL_PATTERNS.values())),
+    re.IGNORECASE,
+)
 _MAX_NETWORK_FILE_BYTES = 64 * 1024 * 1024
 _MAX_NETWORK_LINE_BYTES = 256 * 1024
 _MAX_NETWORK_INDICATORS = 25_000
@@ -134,6 +140,30 @@ def _safe_uri(value: str) -> str | None:
         return f"{parsed.scheme.lower()}://{host_text}{suffix}/<redacted-path>"
     except ValueError:
         return None
+
+
+@lru_cache(maxsize=8192)
+def _parse_uri(raw_uri: str) -> tuple[str | None, str | None, int | None]:
+    """Return (redacted URI, non-IP host, port); memoized because URLs repeat heavily."""
+    safe = _safe_uri(raw_uri)
+    if not safe:
+        return None, None, None
+    try:
+        parts = urlsplit(raw_uri)
+        host = parts.hostname
+    except ValueError:
+        return safe, None, None
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if host:
+        try:
+            ipaddress.ip_address(host)
+            host = None  # IP literals are reported as addresses, not hostnames
+        except ValueError:
+            host = host.lower().rstrip(".")
+    return safe, host, port
 
 
 class NetworkIndicatorAnalyzer(Analyzer):
@@ -243,8 +273,13 @@ class NetworkIndicatorAnalyzer(Analyzer):
                             continue
                     bytes_scanned += len(raw_line)
                     line = raw_line.decode("utf-8", errors="replace")
+                    # Cheap substring gates skip regex families that cannot match.
+                    has_dot = "." in line
+                    colons = line.count(":")
+                    lower = line.lower()
+                    port_words = "port" in lower or "listen" in lower or "expose" in lower
 
-                    for candidate in _CIDR.findall(line):
+                    for candidate in (_CIDR.findall(line) if "/" in line else ()):
                         try:
                             network = ipaddress.ip_network(candidate, strict=False)
                             if not retain(cidrs, (str(network), line_number)):
@@ -254,7 +289,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     if budget_reason:
                         break
 
-                    for candidate in _IPV4.findall(line):
+                    for candidate in (_IPV4.findall(line) if has_dot else ()):
                         try:
                             parsed = ipaddress.ip_address(candidate)
                             if not retain(addresses["IPv4"], (str(parsed), line_number)):
@@ -266,8 +301,8 @@ class NetworkIndicatorAnalyzer(Analyzer):
 
                     # In source code, bare hosts and IPv6 forms only count inside string
                     # literals; elsewhere "a.b" and "x::y" are member access and scopes.
-                    spans = _literal_spans(line) if source_code else None
-                    for pattern in (_IPV6, _IPV6_MAPPED):
+                    spans = _literal_spans(line) if source_code and (has_dot or colons) else None
+                    for pattern in ((_IPV6, _IPV6_MAPPED) if colons >= 2 else ()):
                         for match in pattern.finditer(line):
                             candidate = match.group(0)
                             if spans is not None and not _in_spans(spans, match.start(), match.end()):
@@ -290,13 +325,15 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     if budget_reason:
                         break
 
-                    for match in _PORT_KEY.finditer(line):
+                    for match in (_PORT_KEY.finditer(line) if port_words else ()):
                         value = int(match.group(1))
                         if 1 <= value <= 65535 and not retain(ports, (value, line_number)):
                             break
                     if budget_reason:
                         break
-                    for pattern in (_HOST_PORT, _BARE_PORT):
+                    for pattern in (
+                        ((_HOST_PORT,) if colons else ()) + ((_BARE_PORT,) if port_words else ())
+                    ):
                         for match in pattern.finditer(line):
                             value = int(match.group(1))
                             if 1 <= value <= 65535 and not retain(ports, (value, line_number)):
@@ -306,26 +343,13 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     if budget_reason:
                         break
 
-                    for match in _URI.finditer(line):
-                        raw_uri = match.group(0).rstrip(".,;:)]}")
-                        safe = _safe_uri(raw_uri)
+                    for match in (_URI.finditer(line) if "://" in line else ()):
+                        safe, host, uri_port = _parse_uri(match.group(0).rstrip(".,;:)]}"))
                         if safe:
                             if not retain(uris, (safe, line_number)):
                                 break
-                            try:
-                                host = urlsplit(raw_uri).hostname
-                            except ValueError:
-                                host = None
-                            if host:
-                                try:
-                                    ipaddress.ip_address(host)
-                                except ValueError:
-                                    if not retain(domains, (host.lower().rstrip("."), line_number)):
-                                        break
-                            try:
-                                uri_port = urlsplit(raw_uri).port
-                            except ValueError:
-                                uri_port = None
+                            if host and not retain(domains, (host, line_number)):
+                                break
                             if uri_port is not None and 1 <= uri_port <= 65535:
                                 if not retain(ports, (uri_port, line_number)):
                                     break
@@ -334,7 +358,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     if budget_reason:
                         break
 
-                    for match in _DOMAIN.finditer(line):
+                    for match in (_DOMAIN.finditer(line) if has_dot else ()):
                         domain = match.group(0).lower().rstrip(".")
                         if domain in {
                             "example.com", "example.org", "example.net",
@@ -348,9 +372,8 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     if budget_reason:
                         break
 
-                    for label, pattern in _PROTOCOL_PATTERNS.items():
-                        if pattern.search(line):
-                            retain_protocol(label, line_number)
+                    for label in {_PROTOCOL_LABELS[m.lastgroup] for m in _PROTOCOL_ANY.finditer(line)}:
+                        retain_protocol(label, line_number)
 
                     if raw_line.endswith((b"\n", b"\r")):
                         line_number += 1

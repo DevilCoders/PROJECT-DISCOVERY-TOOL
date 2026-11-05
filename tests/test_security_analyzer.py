@@ -238,3 +238,57 @@ def test_multibyte_characters_split_across_chunks_do_not_hide_tokens(tmp_path: P
     record = FileRecord("notes.txt", path.stat().st_size, ".txt", "Text", file_type="text")
     findings = module.SecretPatternAnalyzer().analyze(path, record)
     assert [finding.evidence for finding in findings] == [["notes.txt:1"]]
+
+
+_FORMAT_SAMPLES = {
+    "github_token": "ghp_" + "A" * 36,
+    "github_fine_grained_token": "github_pat_" + "a" * 82,
+    "gitlab_token": "glpat-" + "x" * 20,
+    "aws_access_key_id": "AKIAABCDEFGHIJKLMNOP",
+    "google_api_key": "AIza" + "B" * 35,
+    "google_oauth_client_secret": "GOCSPX-" + "c" * 28,
+    "slack_token": "xoxb-" + "1" * 20,
+    "slack_webhook_url": "https://hooks.slack.com/services/T0ABCDEF1/B0ABCDEF1/" + "x" * 24,
+    "stripe_secret_key": "sk_live_" + "a" * 24,
+    "sendgrid_api_key": "SG." + "a" * 22 + "." + "b" * 43,
+    "anthropic_api_key": "sk-ant-api03-" + "a" * 40,
+    "openai_api_key": "sk-proj-" + "a" * 40,
+    "huggingface_token": "hf_" + "a" * 34,
+    "npm_token": "npm_" + "a" * 36,
+    "pypi_token": "pypi-" + "a" * 50,
+    "docker_pat": "dckr_pat_" + "a" * 27,
+    "digitalocean_token": "dop_v1_" + "a" * 64,
+    "shopify_token": "shpat_" + "a" * 32,
+    "twilio_api_key": "SK" + "a" * 32,
+    "square_token": "sq0atp-" + "a" * 22,
+    "telegram_bot_token": "123456789:AA" + "a" * 33,
+    "discord_bot_token": "M" + "a" * 23 + "." + "b" * 6 + "." + "c" * 27,
+    "databricks_token": "dapi" + "a" * 32,
+    "atlassian_api_token": "ATATT3" + "a" * 160,
+    "linear_api_key": "lin_api_" + "a" * 40,
+    "postman_api_key": "PMAK-" + "a" * 24 + "-" + "b" * 34,
+    "grafana_token": "glsa_" + "a" * 32 + "_abcdef12",
+    "new_relic_key": "NRAK-" + "A" * 27,
+    "hashicorp_vault_token": "hvs." + "a" * 24,
+    "doppler_token": "dp.pt." + "a" * 43,
+    "age_secret_key": "AGE-SECRET-KEY-1" + "Q" * 58,
+    "jwt": "eyJ" + "a" * 10 + "." + "b" * 10 + "." + "c" * 10,
+    "azure_storage_account_key": "AccountKey=" + "A" * 86 + "==",
+    "azure_shared_access_key": "SharedAccessKey=" + "A" * 43 + "=",
+    "azure_sas_signature": "?sv=2020-08-04&sig=" + "a" * 30,
+}
+
+
+def test_every_token_format_matches_its_sample_and_anchors_are_sound():
+    # Anchors let the scanner skip regexes; a wrong anchor would silently hide secrets.
+    from project_discovery.secret_patterns import ANY_TOKEN, COMPILED_FORMATS
+    from project_discovery.source_utils import redact_source_excerpt
+
+    assert set(_FORMAT_SAMPLES) == {item.name for item, _ in COMPILED_FORMATS}
+    for item, pattern in COMPILED_FORMATS:
+        sample = _FORMAT_SAMPLES[item.name]
+        assert pattern.search(sample), item.name
+        assert ANY_TOKEN.search(sample), item.name
+        if item.anchors:
+            assert any(anchor in sample for anchor in item.anchors), item.name
+        assert "[REDACTED" in redact_source_excerpt(f"value {sample} end"), item.name

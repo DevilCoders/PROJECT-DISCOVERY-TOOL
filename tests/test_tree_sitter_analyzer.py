@@ -21,7 +21,8 @@ def test_polyglot_adapter_maps_more_than_forty_languages():
 
 
 def test_analyzer_reports_missing_optional_dependency(tmp_path: Path, monkeypatch):
-    import builtins
+    import sys
+
     import project_discovery.analyzers.tree_sitter_analyzer as module
 
     module._CAPABILITY_CACHE.clear()
@@ -30,14 +31,9 @@ def test_analyzer_reports_missing_optional_dependency(tmp_path: Path, monkeypatc
     record = _record("Rust")
     record.path = "sample.rs"
     analyzer = TreeSitterAnalyzer()
-    original_import = builtins.__import__
-
-    def blocked(name, *args, **kwargs):
-        if name == "tree_sitter_language_pack":
-            raise ImportError("not installed")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", blocked)
+    # A None entry makes every import of the module raise ImportError, even when the
+    # optional extra is installed (patching builtins.__import__ misses importlib).
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", None)
     assert analyzer.supports(record) is False
     findings = analyzer.analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
@@ -238,3 +234,29 @@ def test_tree_sitter_reports_oversized_and_growing_source_as_unknown(tmp_path: P
     findings = TreeSitterAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "grew beyond" in findings[0].detail
+
+
+def test_unprovisioned_grammars_are_never_loaded_or_downloaded(tmp_path: Path, monkeypatch):
+    # Regression: tree-sitter-language-pack 1.23 downloads grammars inside get_parser(),
+    # and has_language() is True for every manifest entry, so neither may gate parsing.
+    import sys
+    import types
+
+    import project_discovery.analyzers.tree_sitter_analyzer as module
+
+    calls = []
+    fake = types.ModuleType("tree_sitter_language_pack")
+    fake.downloaded_languages = lambda: []
+    fake.has_language = lambda name: True
+    fake.get_parser = lambda name: calls.append(name)
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
+    module._CAPABILITY_CACHE.clear()
+    path = tmp_path / "sample.rs"
+    path.write_text("fn main() {}", encoding="utf-8")
+    record = _record("Rust")
+    record.path = "sample.rs"
+    findings = TreeSitterAnalyzer().analyze(path, record)
+    assert calls == []
+    assert findings[0].title.startswith("Grammar not provisioned offline")
+    assert module.parser_capabilities({"Rust"}) == {"Rust": "grammar_not_provisioned"}
+    module._CAPABILITY_CACHE.clear()

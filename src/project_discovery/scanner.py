@@ -757,6 +757,8 @@ def discover_inventory(
         stats["inventory_store_record_count"] = sum(store.counts().values())
         stats["inventory_store_integrity_ok"] = int(store.integrity_check() == "ok")
         stats["inventory_store_partial"] = int(bool(walk_errors or entry_errors))
+        # Persisted so `pdt scan --resume` can report the original traversal statistics.
+        store.set_metadata("walk_stats", dict(stats))
 
     # With a store, file records are read lazily from SQLite in deterministic
     # case-folded path order. The in-memory fallback retains its compatibility sort.

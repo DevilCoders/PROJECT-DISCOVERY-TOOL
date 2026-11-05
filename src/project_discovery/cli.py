@@ -1,6 +1,8 @@
 """PDT command line."""
 import argparse
 import heapq
+import importlib
+import json
 import os
 import platform
 import sqlite3
@@ -33,11 +35,12 @@ from .analyzers.tree_sitter_analyzer import parser_capabilities
 from .cache import ScanCache
 from .inventory_store import (
     InventoryStore, StoredDiagnosticRecords, StoredFileRecords, StoredFindingRecords,
+    StoredRecordSequence,
 )
 from .comparison import compare_many_reports, load_report, write_comparison
 from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
-from .models import ScanResult
+from .models import DirectoryRecord, ScanResult, SpecialEntryRecord, SymlinkRecord
 from .python_graph import analyze_python_dependencies
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
@@ -165,12 +168,28 @@ def _print_security_findings(console: Console, findings, *, limit: int = 25) -> 
         )
 
 
+def _resumable_walk_stats(inventory_path: Path, root: Path) -> dict | None:
+    """Return the stored walk statistics when an inventory for ``root`` can be resumed."""
+    if not inventory_path.is_file():
+        return None
+    with InventoryStore(inventory_path) as store:
+        if (
+            store.get_metadata("root") != str(root)
+            or not store.get_metadata("traversal_finished", False)
+            or store.get_metadata("inventory_status") not in {"complete", "partial"}
+        ):
+            return None
+        stats = store.get_metadata("walk_stats")
+    return stats if isinstance(stats, dict) else None
+
+
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
     *, skip_oversized: bool = False, ignores: set[str] | None = None,
     vulnerability_db: Path | None = None, jobs: int = 0,
     fail_on: str | None = None, strict: bool = False,
     quiet: bool = False, no_color: bool = False, executor: str = "auto",
+    resume: bool = False, inventory_only: bool = False,
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -213,17 +232,34 @@ def run_scan(
     started = now()
     timer = PhaseTimer()
     inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
-    with InventoryStore(inventory_path) as inventory_store, console.status(
-        "Inventorying filesystem entries…", spinner="dots",
-    ):
-        records, directories, symlinks, special_entries, walk_stats = discover_inventory(
-            root,
-            max_file_bytes=max_file_mb * 1024 * 1024,
-            skip_oversized=skip_oversized,
-            ignores=ignores,
-            store=inventory_store,
+    walk_stats = _resumable_walk_stats(inventory_path, root) if resume else None
+    resumed = walk_stats is not None
+    if resume and not resumed:
+        _status(
+            console, "WARNING",
+            "No completed inventory of this root to resume; starting a fresh scan.", "yellow",
         )
+    if resumed:
+        # Continue the interrupted scan: reuse its inventory and stored findings, and skip
+        # files whose analysis already completed. New or removed files are not picked up.
+        _status(console, "INFO", "Resuming from the stored inventory: " + str(inventory_path), "cyan")
+        records = StoredFileRecords(inventory_path)
+        directories = StoredRecordSequence(inventory_path, "directory", DirectoryRecord)
+        symlinks = StoredRecordSequence(inventory_path, "symlink", SymlinkRecord)
+        special_entries = StoredRecordSequence(inventory_path, "special", SpecialEntryRecord)
+    else:
+        with InventoryStore(inventory_path) as inventory_store, console.status(
+            "Inventorying filesystem entries…", spinner="dots",
+        ):
+            records, directories, symlinks, special_entries, walk_stats = discover_inventory(
+                root,
+                max_file_bytes=max_file_mb * 1024 * 1024,
+                skip_oversized=skip_oversized,
+                ignores=ignores,
+                store=inventory_store,
+            )
     timer.lap("inventory")
+    resumed_skipped = 0
     analyzer_load = load_analyzers()
     analyzers = analyzer_load.analyzers
     if vulnerability_db is not None:
@@ -334,7 +370,11 @@ def run_scan(
 
                 for record in records:
                     counts[record.language] += 1
-                    if record.error or record.content_skipped_reason:
+                    if record.error or record.content_skipped_reason or inventory_only:
+                        progress.advance(task)
+                        continue
+                    if resumed and record.sha256:
+                        resumed_skipped += 1
                         progress.advance(task)
                         continue
                     path = root / record.path
@@ -377,10 +417,14 @@ def run_scan(
             timer.lap("cache_maintenance")
 
         with InventoryStore(inventory_path) as finding_store:
-            python_graph, graph_findings = analyze_python_dependencies(
-                root, records, finding_sink=finding_store.append_finding,
-                import_parser=lambda items: engine.map_python_imports(root, items),
-            )
+            if inventory_only:
+                python_graph = {"summary": {"skipped": "inventory-only scan"}}
+                graph_findings = []
+            else:
+                python_graph, graph_findings = analyze_python_dependencies(
+                    root, records, finding_sink=finding_store.append_finding,
+                    import_parser=lambda items: engine.map_python_imports(root, items),
+                )
             timer.lap("python_graph")
             architecture_layout, architecture_findings = analyze_project_architecture(records)
             finding_store.extend_findings(graph_findings)
@@ -410,6 +454,9 @@ def run_scan(
             "max_pending_tasks": max_pending,
             "batch_max_files": BATCH_MAX_FILES,
             "ordering": "deterministic-submission-order",
+            "analysis_mode": "inventory-only" if inventory_only else "full",
+            "resumed": resumed,
+            "resumed_files_skipped": resumed_skipped,
         },
         "vulnerability_intelligence": vulnerability_db_status,
         "finding_persistence": {
@@ -594,6 +641,48 @@ def run_scan(
     return exit_code
 
 
+def capabilities_report() -> dict:
+    """Describe this installation: native backends, optional parsers and analyzers."""
+    from importlib import metadata
+
+    def version_of(distribution: str) -> str | None:
+        try:
+            return metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            return None
+
+    grammars: list[str] | None = None
+    try:
+        pack = importlib.import_module("tree_sitter_language_pack")
+        # downloaded_languages() only reads the local cache; it never downloads.
+        if hasattr(pack, "downloaded_languages"):
+            grammars = sorted(pack.downloaded_languages())
+    except ImportError:
+        pass
+    loaded = load_analyzers()
+    domains = analyzer_domain_catalog()
+    return {
+        "pdt_version": __version__,
+        "python": platform.python_version(),
+        "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
+        "native_backend": native_capabilities(),
+        "optional_integrations": {
+            "tree-sitter-language-pack": version_of("tree-sitter-language-pack"),
+            "provisioned_grammars": grammars,
+            "pypdf": version_of("pypdf"),
+            "python-docx": version_of("python-docx"),
+            "PyYAML": version_of("PyYAML"),
+        },
+        "analyzers": [
+            {"name": analyzer.name, "version": analyzer.version, "domains": list(analyzer.domains)}
+            for analyzer in loaded.analyzers
+        ],
+        "plugin_diagnostics": loaded.diagnostics,
+        "domain_status_counts": dict(Counter(item["status"] for item in domains)),
+        "recognized_language_count": recognized_language_count(),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="pdt", description="Local-first project intelligence analyzer"
@@ -640,11 +729,25 @@ def main() -> None:
         help="Analysis executor: worker processes (parallel CPU), threads, or auto "
              "(processes for large inventories; default: auto)",
     )
+    scan.add_argument(
+        "--resume", action="store_true",
+        help="Continue an interrupted scan of the same root into the same --output: reuse its "
+             "inventory and stored findings and analyze only files not yet processed",
+    )
+    scan.add_argument(
+        "--inventory-only", action="store_true",
+        help="Inventory files, directories and links without reading file contents "
+             "(no hashing or content analyzers)",
+    )
     scan.add_argument("--quiet", action="store_true", help="Suppress console output except errors")
     scan.add_argument(
         "--no-color", action="store_true",
         help="Disable colored console output (the NO_COLOR environment variable is also honored)",
     )
+    capabilities = sub.add_parser(
+        "capabilities", help="Show native backends, optional parsers and analyzers available here",
+    )
+    capabilities.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     compare = sub.add_parser("compare", help="Compare two or more independent PDT JSON reports")
     compare.add_argument("reports", type=Path, nargs="+")
     compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
@@ -702,6 +805,32 @@ def main() -> None:
             for ecosystem, count in status["ecosystems"].items():
                 print(f"[ ECOSYSTEM ] {ecosystem}: {count}")
             raise SystemExit(0)
+        if args.command == "capabilities":
+            report = capabilities_report()
+            if args.json:
+                print(json.dumps(report, indent=2, sort_keys=True))
+                raise SystemExit(0)
+            console = Console()
+            native = report["native_backend"]
+            table = Table(title=f"PDT {report['pdt_version']} capabilities", header_style="bold cyan")
+            table.add_column("Component")
+            table.add_column("Status")
+            table.add_row("Python / platform", f"{report['python']} / {report['platform']}")
+            table.add_row("C byte counter", f"{native.get('backend')} (assembly: {native.get('assembly_compiled')})")
+            table.add_row("GPU (OpenCL)", f"{native.get('gpu_status')} {native.get('gpu_name') or ''}".strip())
+            table.add_row("C++ signature classifier", "online" if native.get("cpp_signature_classifier") else "fallback")
+            table.add_row("Rust filesystem walker", "online" if native.get("rust_filesystem_walker") else "fallback")
+            for name, value in report["optional_integrations"].items():
+                if name == "provisioned_grammars":
+                    value = "n/a" if value is None else f"{len(value)} grammar(s) provisioned locally"
+                table.add_row(name, str(value) if value else "not installed")
+            table.add_row("Analyzers", f"{len(report['analyzers'])} loaded")
+            table.add_row("Analyzer domains", ", ".join(f"{k}: {v}" for k, v in sorted(report["domain_status_counts"].items())))
+            table.add_row("Recognized languages/formats", str(report["recognized_language_count"]))
+            console.print(table)
+            for diagnostic in report["plugin_diagnostics"]:
+                console.print("[ WARNING ] " + diagnostic)
+            raise SystemExit(0)
         if args.command == "catalog-add":
             with ProjectCatalog(args.db) as catalog:
                 item = catalog.add_report(args.report)
@@ -742,6 +871,7 @@ def main() -> None:
                 vulnerability_db=args.vuln_db, jobs=args.jobs,
                 fail_on=args.fail_on, strict=args.strict,
                 quiet=args.quiet, no_color=args.no_color, executor=args.executor,
+                resume=args.resume, inventory_only=args.inventory_only,
             ))
 
         if not formats or formats - {"json", "markdown"}:
