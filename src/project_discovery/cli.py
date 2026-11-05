@@ -44,6 +44,7 @@ from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
 from .models import DirectoryRecord, ScanResult, SpecialEntryRecord, SymlinkRecord
 from .python_graph import analyze_python_dependencies
+from .code_index import QUERY_KINDS, analyze_code_index, query_code_index
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
 from .runtime_metrics import PhaseTimer, peak_rss_bytes
@@ -392,6 +393,8 @@ def run_scan(
                     try:
                         record.analyzed = outcome.analyzed
                         finding_store.extend_findings(outcome.findings)
+                        if outcome.facts:
+                            finding_store.extend_code_facts(record.path, outcome.facts)
                         finding_store.extend_diagnostics(outcome.errors)
                         digest = outcome.digest
                         if outcome.file_error:
@@ -488,6 +491,13 @@ def run_scan(
             architecture_layout, architecture_findings = analyze_project_architecture(records)
             finding_store.extend_findings(graph_findings)
             finding_store.extend_findings(architecture_findings)
+            if inventory_only:
+                code_index = {"skipped": "inventory-only scan"}
+            else:
+                # Symbol index, call graph, module graph and other cross-file passes.
+                code_index, index_findings = analyze_code_index(inventory_path, records)
+                finding_store.extend_findings(index_findings)
+            timer.lap("code_index")
     except BaseException:
         engine.shutdown(cancel=True)  # also stops plugin hosts
         shutil.rmtree(plugin_work_dir, ignore_errors=True)
@@ -607,6 +617,7 @@ def run_scan(
             item["id"] for item in domain_catalog if item["status"] == "partial"
         ],
         "python_dependency_graph": python_graph,
+        "code_index": code_index,
         "performance": {
             "phase_seconds": dict(timer.phases),
             "elapsed_seconds_before_reporting": timer.elapsed(),
@@ -853,6 +864,17 @@ def main() -> None:
         "capabilities", help="Show native backends, optional parsers and analyzers available here",
     )
     capabilities.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    query = sub.add_parser(
+        "query", help="Look up symbols, callers, callees or references in a scan's code index",
+    )
+    query.add_argument("scan_output", type=Path, help="The --output directory of a completed scan")
+    lookup = query.add_mutually_exclusive_group(required=True)
+    lookup.add_argument("--symbol", metavar="NAME", help="Definitions named NAME (or Qualified.NAME)")
+    lookup.add_argument("--callers", metavar="NAME", help="Call sites that call NAME")
+    lookup.add_argument("--callees", metavar="NAME", help="Calls made inside the function NAME")
+    lookup.add_argument("--references", metavar="NAME", help="Files that reference the identifier NAME")
+    query.add_argument("--limit", type=int, default=200, help="Maximum rows (default: 200)")
+    query.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     compare = sub.add_parser("compare", help="Compare two or more independent PDT JSON reports")
     compare.add_argument("reports", type=Path, nargs="+")
     compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
@@ -909,6 +931,29 @@ def main() -> None:
             print(f"[ INFO ] Last import: {status.get('last_imported_at', 'never')}")
             for ecosystem, count in status["ecosystems"].items():
                 print(f"[ ECOSYSTEM ] {ecosystem}: {count}")
+            raise SystemExit(0)
+        if args.command == "query":
+            kind, name = next(
+                (kind, getattr(args, kind)) for kind in QUERY_KINDS if getattr(args, kind) is not None
+            )
+            if not 1 <= args.limit <= 100_000:
+                parser.error("--limit must be between 1 and 100000")
+            rows = query_code_index(
+                args.scan_output.expanduser() / ".pdt-cache" / "inventory.sqlite3", kind, name, args.limit,
+            )
+            if args.json:
+                print(json.dumps(rows, indent=2, ensure_ascii=False))
+                raise SystemExit(0)
+            for row in rows:
+                location = f"{row['path']}:{row['line']}" if "line" in row else row["path"]
+                detail = {
+                    "symbol": lambda r: f"{r['kind']} {r['qualified']} ({r['language']}, lines {r['line']}-{r['end_line']})",
+                    "callers": lambda r: f"{r['caller']} calls {name}" + (f" -> {r['target']}" if r["target"] else ""),
+                    "callees": lambda r: f"{r['caller']} calls {r['callee']}" + (f" -> {r['target']}" if r["target"] else ""),
+                    "references": lambda r: "",
+                }[kind](row)
+                print(f"{location}  {detail}".rstrip())
+            print(f"[ INFO ] {len(rows)} result(s)" + (" (limit reached)" if len(rows) == args.limit else ""))
             raise SystemExit(0)
         if args.command == "capabilities":
             report = capabilities_report()

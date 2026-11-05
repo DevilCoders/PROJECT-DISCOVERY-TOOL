@@ -23,6 +23,10 @@ MATCH_ONLY = {
     "project_discovery.analyzers.network_analyzer._LITERAL_REST": (
         "matched once per quote kind by _literal_spans"
     ),
+    # clean_source matches these at each opener; an unterminated quote marks its kind
+    # failed for the rest of the line, and an unterminated verbatim string ends the scan.
+    "project_discovery.code_model.lexical._QUOTED": "matched at quote openers by clean_source",
+    "project_discovery.code_model.lexical._VERBATIM": "matched after @\" openers by clean_source",
 }
 
 

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from .code_facts import FileFacts, collecting_facts
 from .models import FileRecord, Finding
 from .scanner import sha256_file
 from .source_utils import (
@@ -46,6 +47,8 @@ class FileOutcome:
     errors: list[str] = field(default_factory=list)
     file_error: str | None = None
     analyzed: bool = False
+    # Cross-file code facts emitted by built-in analyzers (symbols, calls, ...).
+    facts: FileFacts | None = None
 
 
 @dataclass(slots=True)
@@ -115,13 +118,15 @@ def analyze_file(analyzers, locks, task: FileTask) -> FileOutcome:
     with (
         prefetched_content(path, content, stat_identity(task.expected_stat))
         if content is not None else nullcontext()
-    ):
+    ), collecting_facts() as facts:
         _run_analyzers(analyzers, locks, record, path, outcome)
+    outcome.facts = facts or None
     try:
         verified_regular_file_stat(path, task.expected_stat)
     except OSError as exc:
         # Findings produced while the path changed are not trustworthy.
         outcome.findings.clear()
+        outcome.facts = None
         outcome.analyzed = False
         outcome.digest = None
         outcome.file_error = f"{record.path}: {type(exc).__name__}: {exc}"

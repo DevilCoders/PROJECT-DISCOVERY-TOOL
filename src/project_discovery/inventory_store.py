@@ -18,6 +18,50 @@ if TYPE_CHECKING:  # string annotations only; models imports this module lazily
     from .models import FileRecord, Finding
 
 _RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding", "diagnostic"})
+# Cross-file code facts (see code_facts). Rows are idempotent, so re-analysing a file
+# after --resume cannot duplicate them. Each table stops growing at its ceiling.
+_CODE_TABLES = {
+    "code_symbols": (
+        """CREATE TABLE IF NOT EXISTS code_symbols (
+            path TEXT NOT NULL, qualified TEXT NOT NULL, line INTEGER NOT NULL,
+            language TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
+            end_line INTEGER NOT NULL, exported INTEGER NOT NULL,
+            PRIMARY KEY(path, qualified, line)
+        ) WITHOUT ROWID""",
+        "INSERT OR IGNORE INTO code_symbols(language, kind, name, qualified, line, end_line, exported, path) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "CREATE INDEX IF NOT EXISTS code_symbols_name ON code_symbols(name)",
+        5_000_000,
+    ),
+    "code_calls": (
+        """CREATE TABLE IF NOT EXISTS code_calls (
+            path TEXT NOT NULL, line INTEGER NOT NULL, caller TEXT NOT NULL,
+            callee TEXT NOT NULL, target TEXT NOT NULL,
+            PRIMARY KEY(path, line, caller, callee, target)
+        ) WITHOUT ROWID""",
+        "INSERT OR IGNORE INTO code_calls(caller, callee, target, line, path) VALUES (?, ?, ?, ?, ?)",
+        "CREATE INDEX IF NOT EXISTS code_calls_callee ON code_calls(callee)",
+        10_000_000,
+    ),
+    "code_references": (
+        """CREATE TABLE IF NOT EXISTS code_references (
+            name TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(name, path)
+        ) WITHOUT ROWID""",
+        "INSERT OR IGNORE INTO code_references(name, path) VALUES (?, ?)",
+        None,
+        20_000_000,
+    ),
+    "code_facts": (
+        """CREATE TABLE IF NOT EXISTS code_facts (
+            kind TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, detail TEXT NOT NULL,
+            PRIMARY KEY(kind, name, path, detail)
+        ) WITHOUT ROWID""",
+        "INSERT OR IGNORE INTO code_facts(kind, name, detail, path) VALUES (?, ?, ?, ?)",
+        "CREATE INDEX IF NOT EXISTS code_facts_path ON code_facts(kind, path)",
+        5_000_000,
+    ),
+}
+_CODE_BATCH_ROWS = 8192
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 _CONFIDENCE_ORDER = {"CONFIRMED": 0, "INFERRED": 1, "UNKNOWN": 2}
 # Prefix for keys of names that are not valid Unicode; U+FFFF is a noncharacter.
@@ -160,6 +204,22 @@ class InventoryStore:
                 value INTEGER NOT NULL CHECK(value >= 0)
             ) WITHOUT ROWID"""
         )
+        for create_table, _insert, create_index, _ceiling in _CODE_TABLES.values():
+            self.db.execute(create_table)
+            if create_index:
+                self.db.execute(create_index)
+        self.db.commit()
+        self._code_pending: dict[str, list[tuple]] = {table: [] for table in _CODE_TABLES}
+        self._code_truncated: set[str] = set()
+        self._code_file_truncations: list[tuple[str, list[str]]] = []
+        self._code_rows = {
+            table: int(row[0]) for table, row in (
+                (table, self.db.execute(
+                    "SELECT value FROM inventory_sequences WHERE name=?", (table,),
+                ).fetchone() or (0,))
+                for table in _CODE_TABLES
+            )
+        }
         row = self.db.execute(
             "SELECT MAX(CAST(path AS INTEGER)) FROM inventory_records WHERE kind='diagnostic'"
         ).fetchone()
@@ -246,16 +306,70 @@ class InventoryStore:
             count += 1
         return count
 
+    def extend_code_facts(self, path: str, facts: Any) -> None:
+        """Queue one file's code facts (a ``code_facts.FileFacts``) for the next flush.
+
+        They are committed in the same transaction as pending findings, so a file record
+        committed after a flush never lacks its facts. Rows beyond a table's ceiling are
+        dropped and the table is recorded in the ``code_index_truncated`` metadata.
+        """
+        if self._closed:
+            raise RuntimeError("inventory store is closed")
+        key = sqlite_text(path)
+        rows = {
+            "code_symbols": [(*item, key) for item in facts.symbols],
+            "code_calls": [(*item, key) for item in facts.calls],
+            "code_references": [(name, key) for name in sorted(facts.references)],
+            "code_facts": [(*item, key) for item in facts.facts],
+        }
+        for table, new_rows in rows.items():
+            if not new_rows:
+                continue
+            ceiling = _CODE_TABLES[table][3]
+            room = ceiling - self._code_rows[table] - len(self._code_pending[table])
+            if room < len(new_rows):
+                new_rows = new_rows[:max(0, room)]
+                self._code_truncated.add(table)
+            self._code_pending[table].extend(new_rows)
+        if facts.truncated:
+            self._code_file_truncations.append((key, sorted(facts.truncated)))
+        if sum(map(len, self._code_pending.values())) >= _CODE_BATCH_ROWS:
+            self.flush()
+
     def flush(self) -> int:
         """Atomically persist the pending bounded batch and return its row count."""
         if self._closed:
             raise RuntimeError("inventory store is closed")
-        if not self._pending and not self._directory_pending:
+        code_rows = sum(map(len, self._code_pending.values()))
+        if not self._pending and not self._directory_pending and not code_rows and not self._code_file_truncations:
             return 0
         pending, self._pending = self._pending, []
         directory_pending, self._directory_pending = self._directory_pending, {}
+        code_pending = self._code_pending
+        self._code_pending = {table: [] for table in _CODE_TABLES}
+        file_truncations, self._code_file_truncations = self._code_file_truncations, []
         try:
             with self.db:
+                for table, rows in code_pending.items():
+                    if rows:
+                        self.db.executemany(_CODE_TABLES[table][1], rows)
+                        self.db.execute(
+                            """INSERT INTO inventory_sequences(name, value) VALUES (?, ?)
+                               ON CONFLICT(name) DO UPDATE SET value=value+excluded.value""",
+                            (table, len(rows)),
+                        )
+                if self._code_truncated or file_truncations:
+                    previous = self.db.execute(
+                        "SELECT value FROM inventory_metadata WHERE key='code_index_truncated'"
+                    ).fetchone()
+                    state = json.loads(previous[0]) if previous else {"tables": [], "files": 0}
+                    state["tables"] = sorted(set(state["tables"]) | self._code_truncated)
+                    state["files"] += len(file_truncations)
+                    self.db.execute(
+                        """INSERT INTO inventory_metadata(key, value) VALUES ('code_index_truncated', ?)
+                           ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                        (json.dumps(state, sort_keys=True),),
+                    )
                 if pending:
                     self.db.executemany(
                         """INSERT INTO inventory_records(kind, path, sort_key, payload)
@@ -301,6 +415,9 @@ class InventoryStore:
         except BaseException:
             # Includes KeyboardInterrupt: the rolled-back rows stay pending, so close()
             # can still persist them and no caller sees them as committed.
+            for table, rows in code_pending.items():
+                self._code_pending[table] = rows + self._code_pending[table]
+            self._code_file_truncations = file_truncations + self._code_file_truncations
             self._pending = pending + self._pending
             for path, deltas in directory_pending.items():
                 current = self._directory_pending.get(path, (0, 0, 0, None))
@@ -311,7 +428,9 @@ class InventoryStore:
                     deltas[3] if deltas[3] is not None else current[3],
                 )
             raise
-        return len(pending) + len(directory_pending)
+        for table, rows in code_pending.items():
+            self._code_rows[table] += len(rows)
+        return len(pending) + len(directory_pending) + code_rows
 
     def count(self, kind: str | None = None) -> int:
         self.flush()
@@ -500,11 +619,17 @@ class InventoryStore:
             raise RuntimeError("inventory store is closed")
         self._pending.clear()
         self._directory_pending.clear()
+        self._code_pending = {table: [] for table in _CODE_TABLES}
+        self._code_truncated.clear()
+        self._code_file_truncations.clear()
+        self._code_rows = dict.fromkeys(_CODE_TABLES, 0)
         with self.db:
             self.db.execute("DELETE FROM inventory_records")
             self.db.execute("DELETE FROM inventory_metadata")
             self.db.execute("DELETE FROM inventory_directory_state")
             self.db.execute("DELETE FROM inventory_sequences")
+            for table in _CODE_TABLES:
+                self.db.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed table names
 
     def checkpoint(self, metadata: Mapping[str, Any]) -> None:
         """Flush inventory rows, then atomically persist a resumable scan checkpoint.

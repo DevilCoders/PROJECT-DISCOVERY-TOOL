@@ -40,6 +40,7 @@ def builtin_analyzers() -> list[Analyzer]:
     from .api_type_analyzer import APITypeAnalyzer
     from .archive_analyzer import ArchiveIntelligenceAnalyzer
     from .build_analyzer import BuildManifestAnalyzer
+    from .code_index_analyzer import CodeIndexAnalyzer
     from .configuration_analyzer import ConfigurationAnalyzer
     from .coverage_analyzer import CoverageArtifactAnalyzer
     from .data_exposure_analyzer import DataExposureAnalyzer
@@ -60,6 +61,7 @@ def builtin_analyzers() -> list[Analyzer]:
     from .nosql_analyzer import NoSQLIntelligenceAnalyzer
     from .observability_analyzer import ObservabilityAnalyzer
     from .os_analyzer import OperatingSystemAnalyzer
+    from .performance_analyzer import PerformanceHotspotAnalyzer
     from .prisma_analyzer import PrismaSchemaAnalyzer
     from .python_analyzer import PythonAnalyzer
     from .ros_analyzer import ROSIntelligenceAnalyzer
@@ -72,6 +74,8 @@ def builtin_analyzers() -> list[Analyzer]:
 
     return [
         PythonAnalyzer(),
+        CodeIndexAnalyzer(),
+        PerformanceHotspotAnalyzer(),
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
         DeploymentIntelligenceAnalyzer(),

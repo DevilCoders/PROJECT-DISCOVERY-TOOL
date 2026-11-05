@@ -82,6 +82,22 @@ _TEST_FILENAMES = (
 )
 
 
+def is_test_path(path: str) -> bool:
+    """Whether a project-relative path follows a test directory or file naming convention."""
+    normalized = path.replace("\\", "/")
+    parts = {part.lower() for part in Path(normalized).parts[:-1]}
+    stem = Path(Path(normalized).name.lower()).stem
+    generic_test_name = (
+        stem.startswith(("test_", "test-"))
+        or stem.endswith(("_test", "_tests", "_spec", "_specs", ".test", ".spec"))
+    )
+    return (
+        bool(parts & _TEST_DIRS)
+        or generic_test_name
+        or any(pattern.search(normalized) for pattern in _TEST_FILENAMES)
+    )
+
+
 class TestDiscoveryAnalyzer(Analyzer):
     """Find test files and recognizable test declarations across language ecosystems."""
 
@@ -92,19 +108,7 @@ class TestDiscoveryAnalyzer(Analyzer):
     def supports(self, record: FileRecord) -> bool:
         if record.error or (record.extension not in _SUPPORTED_EXTENSIONS and not is_source_path(record.path)):
             return False
-        normalized = record.path.replace("\\", "/")
-        parts = {part.lower() for part in Path(normalized).parts[:-1]}
-        filename = Path(normalized).name.lower()
-        stem = Path(filename).stem
-        generic_test_name = (
-            stem.startswith(("test_", "test-"))
-            or stem.endswith(("_test", "_tests", "_spec", "_specs", ".test", ".spec"))
-        )
-        return (
-            bool(parts & _TEST_DIRS)
-            or generic_test_name
-            or any(pattern.search(normalized) for pattern in _TEST_FILENAMES)
-        )
+        return is_test_path(record.path)
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         pattern = _PATTERNS.get(record.extension)
