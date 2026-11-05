@@ -29,6 +29,7 @@ _DJANGO_MANAGER = re.compile(r"[\w)]\.objects(?:\.|$)")
 _CONTROL_STATEMENT = re.compile(r"(?i)(?:COMMIT|BEGIN|ROLLBACK|SAVEPOINT|RELEASE|PRAGMA|VACUUM|ANALYZE)\b")
 
 
+
 def _batch_or_control(node: ast.Call, attribute: str) -> bool:
     """Transaction control and PRAGMA statements are not per-row queries."""
     if attribute != "execute" or not node.args:
@@ -36,12 +37,18 @@ def _batch_or_control(node: ast.Call, attribute: str) -> bool:
     first = node.args[0]
     return isinstance(first, ast.Constant) and isinstance(first.value, str) and bool(
         _CONTROL_STATEMENT.match(first.value.lstrip()))
+
+
 _PY_ORM_ATTRIBUTES = frozenset({
     "get", "filter", "exclude", "all", "count", "create", "update", "delete", "first", "last",
     "exists", "values", "values_list", "aggregate", "annotate", "get_or_create", "update_or_create",
 })
 _PY_SESSION_ATTRIBUTES = frozenset({"query", "execute", "get", "scalar", "scalars", "add", "merge", "refresh"})
 _HTTP_VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "request", "urlopen", "fetch"})
+# Call names worth a closer look inside data-dependent loops.
+_LOOP_ATTRIBUTES = _PY_DB_ATTRIBUTES | _PY_ORM_ATTRIBUTES | _PY_SESSION_ATTRIBUTES | _HTTP_VERBS | {
+    "sleep", "deepcopy", "insert", "pop", "urlopen",
+}
 _DATABASE_RECEIVER = re.compile(
     r"(?i)(?:^|[._])(?:db|database|conn|connection|cur|cursor|stmt|statement|session|repo|repository|"
     r"knex|prisma|pool|tx|txn|query|orm|dao)(?:$|[._])"
@@ -207,14 +214,15 @@ class _PythonHotspots(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        name = _dotted(node.func)
-        attribute = name.rsplit(".", 1)[-1]
-        receiver = name.rpartition(".")[0]
+        func = node.func
+        attribute = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
         if attribute in {"iterrows", "itertuples"} or (
             attribute == "apply" and any(k.arg == "axis" and getattr(k.value, "value", None) == 1 for k in node.keywords)
         ):
             self.issues["row_iteration"].append(node.lineno)
-        if self.depth and self.data_loops:
+        if self.depth and self.data_loops and attribute in _LOOP_ATTRIBUTES:
+            name = _dotted(func)
+            receiver = name.rpartition(".")[0]
             if not _batch_or_control(node, attribute) and (
                 (attribute in _PY_DB_ATTRIBUTES and (
                     attribute != "execute" or _DATABASE_RECEIVER.search(receiver or "-")

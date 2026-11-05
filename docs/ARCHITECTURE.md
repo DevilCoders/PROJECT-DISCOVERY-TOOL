@@ -23,9 +23,9 @@ Each language component must serve a production execution path. Merely listing a
 2. Python inventory records files, directories, symlinks and special entries; traversal does not follow symlinks and does not silently prune development/dependency trees.
 3. C provides native byte-counting and host capability reporting. Linux x86-64 may dispatch CPU byte counting to Assembly after runtime feature checks; large immutable byte buffers may use a dynamically loaded OpenCL reduction kernel when a supported GPU is available.
 4. Python coordinates analyzers and per-domain resource policies without importing or executing target modules. Third-party plugins run in sandboxed host processes and receive private copies of the files they analyze (see [PLUGIN_SDK.md](PLUGIN_SDK.md)).
-5. Polyglot analyzers parse source/configuration/contracts and use locally provisioned optional parsers with explicit capability states.
+5. Polyglot analyzers parse source/configuration/contracts and use locally provisioned optional parsers with explicit capability states. Source analyzers share one structural code model per file (`code_model`: the Python syntax tree, or a linear-time structural lexer for about 25 brace languages) and record code facts (`code_facts`) next to their findings.
 6. Local vulnerability intelligence optionally matches resolved lockfile coordinates against an operator-imported OSV SQLite snapshot. No scan-time network fallback exists.
-7. Correlation links symbols, endpoints, VCS remotes, dependencies, configuration and docs with evidence spans.
+7. Correlation links symbols, endpoints, VCS remotes, dependencies, configuration and docs with evidence spans. The code index (`code_index`) reads the stored facts through a read-only connection and temporary tables: symbol index, call graph, module graph, cross-module taint flows, domain summaries and integration points (see [CODE_INTELLIGENCE.md](CODE_INTELLIGENCE.md)).
 8. JSON/Markdown are generated locally; the offline JavaScript/TypeScript report application renders paginated/lazy views without remote assets.
 
 ## Native ABI and safety

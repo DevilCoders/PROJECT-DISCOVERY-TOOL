@@ -39,6 +39,12 @@ No scan may silently omit an entry. Exclusions, parser gaps, budget limits, unsu
 
 The production-readiness audit ([AUDIT.md](AUDIT.md)) and its remediation landed on this branch: every recorded defect is fixed with regression tests, CI passes on Linux, Windows and macOS for CPython 3.11–3.14 (including native builds and an optional-integrations job), and the scan engine gained multi-process analysis, `--resume`, `--inventory-only`, CI exit codes and performance telemetry. Items below are ticked only where the implementation is complete and verified. Third-party plugins now run in a verified operating-system sandbox (complete on Linux and macOS, partial on Windows; see [PLUGIN_SDK.md](PLUGIN_SDK.md)). Large-corpus benchmarks (2 GB–100 GB+) and an independent security review remain open release gates.
 
+## Status update — code intelligence (2026-11-06, unreleased)
+
+A shared code model (Python syntax tree; a structural lexer for about 25 brace languages), stored code facts and a cross-file code index now exist, with `pdt query`. Every domain that 0.2.0 only catalogued has a built-in analyzer and is `partial`: symbol index, call graph, type systems, performance, concurrency, memory and resources, data flow and taint (Python inter-procedural and cross-module), embedded, firmware, HDL, graphics shaders, frontend component graphs, and multi-project integration maps. See [CODE_INTELLIGENCE.md](CODE_INTELLIGENCE.md) and [AUDIT.md §8](AUDIT.md#8-code-intelligence-and-the-formerly-planned-domains).
+
+Next steps for these domains: type inference for dynamically typed code, inter-procedural taint for the lexical languages, cross-file taint beyond Python, Tree-sitter-backed models where grammars are provisioned, HDL elaboration of `generate` blocks and parameters, and measured index cost on the 100 GB+ corpora.
+
 ## Current branch baseline
 
 The current feature branch has first-pass implementations for filesystem inventory, symlink records, hidden-name markers, directory aggregates, size buckets, common development-directory markers, SQLite fingerprints, Python AST/import graph, language recognition and optional Tree-sitter support. It also contains initial analyzers for documentation, dependencies/licenses, configuration, secrets/PII, secure-code patterns, REST/API contracts and route markers, SQL/NoSQL/ORM/migrations, test/build/CI, containers/deployment/IaC, archives, network indicators, OS/platform markers, ML/AI, ROS, mobile, game engines, frontend/accessibility, localization, observability, coverage and multi-project comparison.
@@ -51,7 +57,7 @@ The baseline is not production-ready:
 - Windows hidden attributes are captured by the native walker and Python fallback, but system attributes, ACLs and ownership metadata still need cross-platform validation;
 - archive index inspection is substantive only for ZIP/TAR; other recognized formats are detection-only;
 - ZIP central-directory preflight, archive entry-count/member-byte caps and cooperative ZIP/TAR wall-time budgets now exist; nested-depth, configurable budget policies, comprehensive metadata bounds and adversarial testing remain;
-- some domain analyzers are lexical/heuristic and do not yet resolve symbols, types, dataflow or framework semantics;
+- some domain analyzers are lexical/heuristic; symbols, calls and data flow are now resolved semantically for Python and structurally for the lexically modelled languages, but types are not inferred and framework semantics are pattern-based;
 - report and CLI have a working first-pass command-center design, but still need completeness, scale, accessibility and usability gates.
 
 ## Phase 0 — Documentation and capability governance

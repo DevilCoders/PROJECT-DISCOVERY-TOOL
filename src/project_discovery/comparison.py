@@ -209,7 +209,7 @@ def compare_reports(
         for package in sorted(set(left_resolved) & set(right_resolved))
     ]
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "comparison_type": "independent_project_reports",
         "projects": [
             {"root": left.get("root"), "file_count": len(left.get("files", []))},
@@ -323,7 +323,7 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             })
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "comparison_type": "independent_project_reports",
         "projects": projects,
         "all_projects_shared": {

@@ -62,70 +62,94 @@ def _direct_names(value: ast.AST) -> set[str]:
     return set()
 
 
+_KINDS = {name: kind for kind, names in _PY_RESOURCES.items() for name in names}
+
+
+def _unbounded_cache(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    arguments = function.args.posonlyargs + function.args.args
+    if not arguments or arguments[0].arg not in {"self", "cls"}:
+        return False
+    for decorator in function.decorator_list:
+        name = _dotted(decorator.func if isinstance(decorator, ast.Call) else decorator)
+        if name in {"functools.cache", "cache"} or (
+            name in {"functools.lru_cache", "lru_cache"} and isinstance(decorator, ast.Call)
+            and any(k.arg == "maxsize" and isinstance(k.value, ast.Constant) and k.value.value is None
+                    for k in decorator.keywords)
+        ):
+            return True
+    return False
+
+
 def _python_resources(tree: ast.Module) -> dict[str, list[int]]:
+    """One walk over the tree; each function body is its own scope (nested bodies excluded)."""
     issues: dict[str, list[int]] = defaultdict(list)
-    kinds = {name: kind for kind, names in _PY_RESOURCES.items() for name in names}
-    for function in ast.walk(tree):
-        if isinstance(function, ast.Call) and _dotted(function.func) == "tempfile.mktemp":
-            issues["insecure_temporary_name"].append(function.lineno)
-        # Module-level handles usually live for the whole program, so only functions count.
-        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        arguments = function.args.posonlyargs + function.args.args
-        if arguments and arguments[0].arg in {"self", "cls"}:
-            for decorator in function.decorator_list:
-                name = _dotted(decorator.func if isinstance(decorator, ast.Call) else decorator)
-                unbounded = name in {"functools.cache", "cache"} or (
-                    name in {"functools.lru_cache", "lru_cache"} and isinstance(decorator, ast.Call)
-                    and any(k.arg == "maxsize" and isinstance(k.value, ast.Constant) and k.value.value is None
-                            for k in decorator.keywords)
-                )
-                if unbounded:
-                    issues["unbounded_method_cache"].append(function.lineno)
+
+    def scope(body: list, in_function: bool) -> None:
         acquired: list[tuple[str, str, int]] = []
         handled: set[str] = set()
         released: dict[str, set[str]] = defaultdict(set)
-        body = function.body
-        nodes = [inner for statement in body for inner in ast.walk(statement)]
-        nested = {
-            id(inner) for statement in body for candidate in ast.walk(statement)
-            if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
-            for inner in ast.walk(candidate)
-        }
-        for node in nodes:
-            if id(node) in nested:
+        calls: list[ast.Call] = []
+        stack = list(body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if _unbounded_cache(node):
+                    issues["unbounded_method_cache"].append(node.lineno)
+                scope(node.body, True)
+                stack.extend(node.decorator_list)
+                stack.extend(default for default in (*node.args.defaults, *node.args.kw_defaults) if default)
                 continue
-            if isinstance(node, (ast.With, ast.AsyncWith)):
-                for item in node.items:
-                    handled.add(_dotted(item.context_expr))
-                    if isinstance(item.context_expr, ast.Call):
-                        handled.add(_dotted(item.context_expr.func) + "()")
-            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and len(node.targets) == 1 \
-                    and isinstance(node.targets[0], ast.Name):
-                kind = kinds.get(_dotted(node.value.func))
-                if kind:
-                    acquired.append((node.targets[0].id, kind, node.lineno))
-            elif isinstance(node, ast.Call):
-                name = _dotted(node.func)
-                receiver, _, method = name.rpartition(".")
-                if receiver:
-                    released[receiver].add(method)
-                if _TAKES_OWNERSHIP.search(method or name or "-"):
-                    for argument in [*node.args, *(k.value for k in node.keywords)]:
-                        if isinstance(argument, ast.Name):
-                            handled.add(argument.id)
-            elif isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)) and node.value is not None:
-                # Returning the resource itself hands it to the caller; ``return
-                # json.load(f)`` only uses it.
-                handled.update(_direct_names(node.value))
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if any(not isinstance(target, ast.Name) for target in targets):
-                    handled.update(_direct_names(node.value))  # self.handle = f
+            if isinstance(node, ast.ClassDef):
+                # Module-level handles usually live for the whole program: only functions count.
+                scope(node.body, False)
+                stack.extend(node.decorator_list)
+                continue
+            if isinstance(node, ast.Lambda):
+                continue
+            if isinstance(node, ast.Call):
+                if _dotted(node.func) == "tempfile.mktemp":
+                    issues["insecure_temporary_name"].append(node.lineno)
+                if in_function:
+                    calls.append(node)
+            if in_function:
+                if isinstance(node, (ast.With, ast.AsyncWith)):
+                    for item in node.items:
+                        handled.add(_dotted(item.context_expr))
+                        if isinstance(item.context_expr, ast.Call):
+                            handled.add(_dotted(item.context_expr.func) + "()")
+                elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and len(node.targets) == 1 \
+                        and isinstance(node.targets[0], ast.Name):
+                    kind = _KINDS.get(_dotted(node.value.func))
+                    if kind:
+                        acquired.append((node.targets[0].id, kind, node.lineno))
+                elif isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)) and node.value is not None:
+                    # Returning the resource itself hands it to the caller; ``return
+                    # json.load(f)`` only uses it.
+                    handled.update(_direct_names(node.value))
+                if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    if any(not isinstance(target, ast.Name) for target in targets):
+                        handled.update(_direct_names(node.value))  # self.handle = f
+            stack.extend(ast.iter_child_nodes(node))
+        if not acquired:
+            return  # nothing acquired: the call bookkeeping is not needed
+        for call in calls:
+            name = _dotted(call.func)
+            receiver, _, method = name.rpartition(".")
+            if receiver:
+                released[receiver].add(method)
+            if _TAKES_OWNERSHIP.search(method or name or "-"):
+                for argument in [*call.args, *(k.value for k in call.keywords)]:
+                    if isinstance(argument, ast.Name):
+                        handled.add(argument.id)
         for name, kind, line in acquired:
             if name in handled or released[name] & _PY_RELEASES[kind]:
                 continue
             issues[f"unreleased_{kind}"].append(line)
+
+    scope(tree.body, False)
+    for values in issues.values():
+        values.sort()
     return issues
 
 

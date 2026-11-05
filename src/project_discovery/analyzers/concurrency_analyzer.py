@@ -54,7 +54,7 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
-def _python_concurrency(tree: ast.Module) -> tuple[dict[str, list[int]], Counter]:
+def _python_concurrency(tree: ast.Module, text: str = "") -> tuple[dict[str, list[int]], Counter]:
     issues: dict[str, list[int]] = defaultdict(list)
     inventory: Counter = Counter()
     async_names: set[str] = set()
@@ -119,7 +119,10 @@ def _python_concurrency(tree: ast.Module) -> tuple[dict[str, list[int]], Counter
             if isinstance(node, ast.Call) and _dotted(node.func).endswith(".release")
         }
 
-    function_nodes = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    # Lock bookkeeping walks every function; most modules never call acquire().
+    function_nodes = [] if text and ".acquire(" not in text else [
+        node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
     released_by = {id(node): releases(node) for node in function_nodes}
 
     def acquires_without_release(function: ast.AST) -> list[int]:
@@ -395,7 +398,7 @@ class ConcurrencyAnalyzer(Analyzer):
         if model is None:
             return []
         if model.tree is not None:
-            issues, inventory = _python_concurrency(model.tree)
+            issues, inventory = _python_concurrency(model.tree, model.text)
         else:
             issues, inventory = _lexical_concurrency(model)
         if inventory:

@@ -1,0 +1,219 @@
+# Code Intelligence and Domain Analyzers
+
+This document describes the shared code model, the cross-file code index and the analyzers
+built on them: performance, concurrency, resource management, type systems, data flow and
+taint, embedded systems, firmware, hardware description languages, graphics shaders,
+frontend applications and cross-project integration. For each one it states the method,
+what is reported, and the limits that keep results honest.
+
+Every result is static: PDT never executes, imports or builds the scanned code. Results
+that depend on heuristics are reported as `INFERRED`, never `CONFIRMED`.
+
+## 1. Shared code model
+
+`project_discovery.code_model.model_for(path, record)` builds one structural model per file
+and analysis thread, and every analyzer of that file reuses it (one entry per thread, keyed by
+path, size and modification time). Files larger than 4 MiB are not modelled; they are almost
+always generated or minified, and the code-index analyzer reports them as `UNKNOWN`.
+
+| Backend | Languages | Method |
+|---|---|---|
+| Syntax tree | Python | Standard-library `ast`. Symbols carry qualified names (`Class.method`), decorators, parameters and async markers. Call targets are resolved through `import`/`from ... import` aliases (including relative imports), `self`/`cls` and module-level definitions. |
+| Structural lexer | C, C++, C/C++ headers, Objective-C/C++, CUDA, OpenCL, GLSL, HLSL, Metal, WGSL, Java, Kotlin, Scala, Groovy, C#, Swift, Dart, JavaScript, TypeScript, Vue, Svelte, Go, Rust, PHP, Solidity, Zig, Arduino | A linear-time cleaner blanks comments and string contents while keeping every offset, so braces and parentheses are paired exactly. Definitions come from type keywords, function keywords and C-style typed signatures, nested by brace containment; calls carry their receiver; imports are read per family. |
+
+The lexer is an approximation: it does not expand macros, resolve overloads or understand
+templates and generics. Hostile inputs (unterminated strings and comments, deep nesting) are
+covered by tests that bound the time per file.
+
+## 2. Code facts and the code index
+
+During analysis, analyzers record **facts** next to their findings: symbols, call sites,
+referenced identifiers, imports and domain facts (complexity, type usage, taint summaries,
+ISRs, memory regions, HDL instances, shader bindings, components, routes, HTTP calls,
+message topics and more). Facts are written to the scan's private SQLite inventory in the
+same transaction as the file's findings, so `--resume` stays consistent. Writes are
+idempotent and bounded per file (5,000 symbols, 20,000 calls, 10,000 references and 5,000
+domain facts) and per table (5–20 million rows); a ceiling that is reached is reported as an
+`UNKNOWN` "Code index truncated" finding.
+
+After analysis, `code_index.analyze_code_index` runs these passes over a read-only
+connection using temporary tables (memory does not grow with repository size):
+
+| Pass | Result |
+|---|---|
+| Symbols | Definitions by language and kind. |
+| Call graph | Python calls resolved to module-qualified definitions; lexical calls resolved by name within a language group (same file, unique, ambiguous or external); recursion cycles from strongly connected components (Kosaraju, capped at 500,000 edges). |
+| Unreferenced private functions | Private definitions whose name appears nowhere in the scan: dead-code candidates. Reflection and string dispatch are not visible. |
+| Test links | Public functions referenced from test files. |
+| Module graph | JavaScript/TypeScript, C/C++, JVM, Go, Rust, PHP and Dart imports resolved to files, external packages and dependency cycles (Python has its own module graph). |
+| Complexity, type usage, concurrency model, memory | Project totals of the per-file facts. |
+| Data flow | Totals of taint flows and Python flows that cross module boundaries (see §4). |
+| Embedded, firmware, HDL, shaders, frontend | Domain summaries (targets, binary hardening, design hierarchy, shader inventory, component graph and routes). |
+| Integration | What the project serves and calls (endpoints, HTTP calls, topics, gRPC, package names), used by `pdt compare` (see §6). |
+
+Each pass that fails is isolated: it produces an `UNKNOWN` finding and the other passes
+still run. Results are in the report under `metrics.code_index`.
+
+### Querying the index
+
+```bash
+pdt query OUTPUT --symbol Engine.run
+pdt query OUTPUT --callers helper --json
+pdt query OUTPUT --callees run --limit 50
+pdt query OUTPUT --references parse_config
+```
+
+`OUTPUT` is the scan's output directory (the index is `OUTPUT/.pdt-cache/inventory.sqlite3`).
+Names may be bare (`run`) or qualified (`Engine.run`).
+
+## 3. Quality analyzers
+
+| Analyzer | Python (syntax tree) | Other languages (lexer) |
+|---|---|---|
+| `performance-hotspots` | McCabe complexity (25 or more is LOW), functions over 300 lines, queries/HTTP calls/sleeps/deep copies/`list.insert(0)` in loops whose trip count depends on data, three or more nested data loops, string `+=` in loops, row-wise DataFrame iteration. A loop's (or comprehension's) iterable runs once and is not "in the loop"; loops over literals or module constants, `executemany`, transaction control statements and `fetchmany` paging are not N+1. | Decision-point complexity, queries and HTTP calls in loop bodies, nested loops, sleeps. Profiling artifacts (pprof, cpuprofile, heap and core dumps) are inventoried. |
+| `concurrency` | Blocking calls in coroutines, un-awaited coroutines, `acquire()` without `with`/`finally` (acquire/release pairs split across methods and `__enter__` are deliberate and not reported), thread targets that write globals without a lock. | Go locks without `defer Unlock`, `WaitGroup.Add` inside the goroutine; Java/Kotlin double-checked locking without `volatile`, executors never shut down, sleeping while synchronized, `runBlocking`, `GlobalScope`; C# `async void` (except event handlers), `.Result`/`.Wait()` in async code, `lock(this)`; Rust manual `Send`/`Sync`, `static mut`, blocking sleep in async; JavaScript un-awaited promises, sequential `await` in loops; C `pthread_mutex_lock` without unlock. |
+| `resource-management` | Files, sockets, database connections and processes opened in a function and neither closed, returned, stored nor handed to an owner; `tempfile.mktemp`; unbounded `lru_cache` on methods. | C/C++ allocations without `free`, `p = realloc(p, n)`, `new[]` with `delete`, `alloca`, `fopen` without `fclose`; Go response bodies and query rows not closed; JVM and C# resources outside try-with-resources/`using`, `HttpClient` per call; React effects that subscribe without cleanup, intervals never cleared; unsafe Rust inventory. |
+| `type-systems` | Annotation coverage (functions, parameters, returns), `Any`, `cast`, `# type: ignore`, module-level ignore comments. | TypeScript `any`, `@ts-ignore`/`@ts-expect-error`/`@ts-nocheck`, non-null assertions; JavaScript `// @ts-check`/`@flow`; Kotlin `!!`; Swift `as!`/`try!`; C# `dynamic` and `#nullable disable`; Java unchecked suppressions; Go `interface{}`. Configuration: tsconfig/jsconfig (comments and trailing commas allowed), mypy (`mypy.ini`, `setup.cfg`, `pyproject.toml`, per-module `ignore_errors`), pyright, Flow (`[untyped]`, `[declarations]`) and MSBuild `<Nullable>`. |
+
+## 4. Data flow and taint (`dataflow`)
+
+**Sources:** web request data (Flask, Django, FastAPI, Starlette, aiohttp, Tornado, Pyramid,
+Bottle; Express, Koa, Next.js, NestJS; PHP superglobals, Laravel, Symfony; Servlet, Spring,
+JAX-RS; net/http, gorilla/mux, Gin, Echo; ASP.NET; actix-web, axum), route-handler parameters
+(except those validated by type, such as `int` or `<int:id>`), WebSocket and socket reads, DOM
+sources (`location`, `document.URL`, `document.referrer`) and, for C, `recv`, `fgets`, `scanf`,
+`getenv` and `argv`.
+
+**Sinks and severity:** SQL, command, code, deserialization, template and format-string
+injection (HIGH); path traversal, server-side request forgery, cross-site scripting and
+unbounded copies (MEDIUM); open redirects (LOW). Parameterized queries, list-form process
+arguments without a shell and safe YAML loaders are not sinks.
+
+**Python engine.** Values carry labels naming where input entered. Each function is
+interpreted in statement order: assignments propagate labels and re-assignment replaces them,
+branches merge, and loops run until labels stop growing. Sanitizers clear labels for the sink
+kinds they defend (`shlex.quote` for commands, `os.path.basename`/`secure_filename` for paths,
+`html.escape` for HTML, `int()` for all). Functions of the same module get summaries (which
+parameters reach a sink or the return value), iterated to a fixed point, so input that passes
+through local helpers is followed. Only functions that touch a source or sink, and their
+callers and callees, are interpreted, so files without either cost a single tree walk.
+
+**Cross-module flows (Python).** Calls that pass tainted values into imported functions are
+recorded, as are module-level functions whose parameters reach a sink; the code index joins
+the two (resolving relative imports) and reports "… across modules" findings with the full
+path, for example `views.py:4 request.args -> shop.db.find() -> run_query() -> execute`.
+
+**Lexical engine** (JavaScript/TypeScript, PHP, Java/Kotlin/Scala/Groovy, Go, C#, Rust, C/C++).
+Within each function and the top-level code, assignments and sinks are visited in source
+order; string interpolation (template literals, PHP and Kotlin `"$x"`, C# `$"{x}"`), out
+parameters (`recv`, `sprintf`), builder methods (`append`, `push`) and destructuring are
+followed. Re-assigning a variable from clean input in the same block clears it. This engine
+does not follow calls between functions and does not reason about branches.
+
+Every flow names its source, sink and lines. Static analysis cannot see run-time validation,
+authorization or framework escaping, so flows are `INFERRED` and need review.
+
+## 5. Domain analyzers
+
+### Embedded systems (`embedded`)
+
+PlatformIO environments; ESP-IDF `sdkconfig` (target, flash size, secure boot and flash
+encryption, reported LOW when off outside `sdkconfig.defaults`); Zephyr `prj.conf`, board
+`.conf` and `west.yml`; STM32CubeMX `.ioc` (MCU, peripherals, pins, toolchain); Rust
+`.cargo/config.toml` bare-metal targets; `FreeRTOSConfig.h` (stack-overflow checking off is
+LOW); linker memory maps (GNU ld `MEMORY`, IAR `.icf`, Keil scatter), with overlapping regions;
+device trees (model, `compatible` strings, enabled nodes). In C, C++, Arduino and Rust sources:
+interrupt handlers (CMSIS vector names, `*_isr`, STM32 HAL callbacks, AVR `ISR()`,
+`__attribute__((interrupt))`, `IRAM_ATTR`, `#[interrupt]`), RTOS and HAL usage, direct register
+access, and inside handlers: blocking delays, heap allocation and task-context FreeRTOS calls
+that have a `...FromISR` variant (MEDIUM), and console output (LOW).
+
+### Firmware and binaries (`firmware`)
+
+Headers are parsed from bounded, verified reads (at most a few MiB per file):
+
+* **ELF:** class, byte order, machine, type, entry, load segments, stripped/debug state, build
+  ID and compiler notes. Linux binaries get hardening facts (NX stack, PIE, full RELRO, stack
+  protector, FORTIFY, RPATH); writable-and-executable segments and executable stacks are
+  MEDIUM. **PE:** architecture, subsystem, ASLR/NX/CFG flags; UEFI images are reported.
+* **Intel HEX, Motorola S-record** (checksums, address ranges, entry point, truncation),
+  **UF2** (family IDs such as RP2040, nRF52840, SAMD, STM32 and ESP32 variants).
+* **Device tree blobs and FIT images, U-Boot uImage, Android boot images, ESP32 application
+  images** (with the embedded app descriptor), SquashFS, UBI, JFFS2, cramfs, ext2/3/4, TRX and
+  compressed blobs; raw `.bin`/`.img` files are checked for a Cortex-M vector table and their
+  entropy is measured. Version strings of U-Boot, Linux, BusyBox, OpenSSL, FreeRTOS, Zephyr,
+  ESP-IDF, Dropbear, mbed TLS and lwIP are listed.
+* **Build inputs:** Yocto recipes (unencrypted fetches, `${AUTOREV}`) and configuration
+  (`debug-tweaks` and empty-password image features are MEDIUM), Buildroot defconfigs (an empty
+  root password with root login enabled is MEDIUM), OpenWrt feeds and ESP-IDF partition tables
+  (a single OTA slot is LOW).
+
+### Hardware description languages (`hdl`)
+
+Verilog and SystemVerilog modules, interfaces and packages; VHDL entities, architectures and
+packages. Comments, strings and attributes are blanked in linear time. Per unit: ports and
+directions (ANSI and non-ANSI), parameters, child instances (gate primitives are counted
+separately), clock and asynchronous-reset edges, and testbench markers. Lint: blocking
+assignments in clocked blocks and non-blocking assignments in combinational blocks (LOW),
+several clocks in one unit (INFO) and `std_logic_arith`/`std_logic_unsigned` (LOW).
+Constraints: XDC/SDC clocks, pins, I/O standards and timing exceptions (placed pins without an
+I/O standard are LOW), UCF, Quartus QSF (device, family, top level), PCF, LPF and CST. Projects:
+Vivado `.xpr`, ISE `.xise`, Lattice Diamond `.ldf`, Quartus `.qpf`, FuseSoC `.core` and apio,
+with the device family. The code index builds the **design hierarchy**: top-level units,
+depth, instance counts, unresolved types (vendor primitives or IP outside the scan) and
+recursive instantiation.
+
+### Graphics and shaders (`shaders`)
+
+GLSL (stage from the extension, including mesh, task and ray-tracing stages, or
+`#pragma shader_stage`), HLSL (registers and spaces, cbuffers, `[numthreads]`, DXR
+`[shader(...)]`, Unity/Unreal `#pragma` entry points), WGSL, Metal, Godot shaders and Unity
+ShaderLab (properties, sub-shaders, passes, render pipeline). Findings: different resources on
+the same binding slot, GLSL without `#version`, GLSL ES fragment shaders without a default
+float precision, and workgroups over 1,024 invocations (LOW). Compiled SPIR-V (version,
+generator, entry points with execution models, bindings), DXBC/DXIL (shader kind and model)
+and metallib files are identified from their headers.
+
+### Frontend applications (`frontend`)
+
+React function and class components and `memo`/`forwardRef` wrappers, with the components they
+render, props and hooks; Vue single-file components (template children, `defineProps`), Svelte
+components (`export let`, `$props`) and Angular `@Component` classes (selectors, templates).
+Findings: hooks called inside conditions, loops or callbacks, or after an early return
+(MEDIUM); list items rendered from `.map()` without `key` (LOW); effects without a dependency
+array (INFO); `ignoreBuildErrors`/`ignoreDuringBuilds` and production `eval` source maps (LOW).
+Routes: React Router, Vue Router, Angular `Routes` and file-system routing (Next.js pages and
+app routers, Nuxt, SvelteKit, Remix, Astro; reported only when the framework is detected).
+Imports name framework, state, data-fetching, routing, UI, styling, form and testing
+libraries; webpack, Rspack, Vite, Rollup, esbuild, Next.js, Nuxt, SvelteKit, Angular, Parcel,
+Turborepo and Nx configuration is summarized. The code index builds the **component graph**
+(roots, most reused components, components never rendered).
+
+## 6. Integration points and the integration map (`integration-points`)
+
+Per scan: outbound HTTP calls with literal URLs (requests/httpx/aiohttp/urllib, fetch/axios/
+Angular HttpClient/ky/got, RestTemplate/WebClient/OkHttp, net/http, .NET HttpClient), message
+topics produced and consumed (Kafka, RabbitMQ, NATS, MQTT, SQS, Google Pub/Sub, Redis, Celery,
+Socket.IO, Spring listeners), gRPC services, servers and client stubs, and package identity
+from manifests. Served endpoints come from the API endpoint analyzer. Interpolated URL parts,
+numbers and UUIDs become `{}`.
+
+`pdt compare` joins the summaries of several scans into `integration_map` edges:
+
+| Edge | Evidence | Confidence |
+|---|---|---|
+| `package_dependency` | A declares a dependency on B's package name (normalized) | CONFIRMED |
+| `http_api` | A calls a path that B serves, exactly or below a gateway/mount prefix; a served literal segment needs the same literal | INFERRED |
+| `messaging` | A publishes a topic that B consumes | INFERRED |
+| `grpc` | A uses a client stub for a service B defines or serves | INFERRED |
+
+Reports from older scans fall back to the endpoint evidence in their API findings.
+
+## 7. Precision checks
+
+* Every package regex is timed against adversarial inputs by `tests/test_regex_complexity.py`.
+* Self-scan of PDT: the new analyzers report no CRITICAL, HIGH or MEDIUM finding on PDT's own
+  source (performance characterizations remain at LOW).
+* Each analyzer has tests that pin both detections and the cases that must not be reported
+  (parameterized queries, sanitizers, validated parameters, deliberate lock hand-offs,
+  constant-trip loops, comments).

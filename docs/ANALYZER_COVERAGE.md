@@ -12,6 +12,11 @@ Catalog status is explicit:
 A domain being catalogued is not evidence that its analyzer is complete. The roadmap is expanded as actual parsers, analyzers, tests, and evidence models are delivered.
 
 
+## Code intelligence and the formerly planned domains
+
+The symbol index, call graph, type systems, performance, concurrency, memory and resource management, data flow and taint, embedded, firmware, hardware description, graphics shader, frontend and multi-project domains now have built-in analyzers on a shared code model and a cross-file code index, and are catalogued as `partial`. Their methods, findings and limits are documented in [CODE_INTELLIGENCE.md](CODE_INTELLIGENCE.md).
+
+
 ## Implemented logging and observability slice
 
 The built-in observability analyzer inventories static logging, metrics, tracing, health-check and telemetry configuration markers across recognized source languages. It records file and line evidence only and does not expose configuration values. Static presence is not proof of runtime initialization, active exporters, deployed collectors or operational telemetry.

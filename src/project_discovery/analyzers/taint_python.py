@@ -148,8 +148,9 @@ _SHELL_FUNCTIONS = frozenset({
     "subprocess.Popen",
 })
 _SQL_METHODS = frozenset({"execute", "executemany", "executescript", "exec_driver_sql", "mogrify"})
+# Receivers that hold a database connection; ``connect`` is the result of ``sqlite3.connect(...)``.
 _DATABASE_RECEIVER = re.compile(
-    r"(?i)(?:^|[._])(?:db|database|conn|connection|cur|cursor|session|engine|txn?|transaction|"
+    r"(?i)(?:^|[._])(?:db|database|conn|connection|connect|cur|cursor|session|engine|txn?|transaction|"
     r"connections?)(?:$|[._])"
 )
 

@@ -161,9 +161,40 @@ The baseline checks were re-run, and new kinds of check were added. The re-audit
 
 - **Working end to end.** These items were blocked or broken at the baseline: per-file analysis in `pdt scan` on every platform; verified, identity-pinned reads; magic-byte typing in both walkers; API type classification; Python AST security (one engine); `compare`, `catalog-add` and `catalog-compare` on real reports; report SHA-256 fingerprints; yarn v1/Berry and pnpm v5/v6/v9 vulnerability matching; and CVSS/GHSA-based OSV severity.
 - **Added.** A multi-process engine with worker-crash isolation; `--resume`, `--inventory-only`, `--fail-on` and `--strict`; `pdt capabilities`; per-phase timing, throughput and peak-RSS telemetry; `tools/benchmark.py`; offline OSV ZIP import with provenance; bounded HTML embedding; a linear-time guarantee for every package regex; and sandboxed, verified plugin isolation (`--plugin-isolation`).
-- **Still partial.** The analyzers listed as Partial in §4 are pattern-based by design. The precision defects this audit found in them are fixed (PDT-207–211, PDT-215, PDT-228, PDT-229), but they remain lexical indicators, not semantic analyses.
-- **Not implemented.** The 13 `planned` domains in §4 are still catalogue entries only: symbol index, call graph, type systems, performance hotspots, concurrency, memory and resource management, data flow and taint, embedded, firmware, hardware description languages, graphics shaders and frontend component graphs.
+- **Still partial.** The analyzers listed as Partial in §4 are pattern-based by design. The precision defects this audit found in them are fixed (PDT-207–211, PDT-215, PDT-228, PDT-229), but they remain lexical indicators, not semantic analyses. §8 adds a shared code model under them; imports, REST endpoints (client calls), RPC (gRPC services and stubs) and messaging (topic names) gained structural depth from it.
+- **Not implemented at 0.2.0, implemented since.** The 13 domains that were `planned` (symbol index, call graph, type systems, performance hotspots, concurrency, memory and resource management, data flow and taint, embedded, firmware, hardware description languages, graphics shaders, frontend component graphs and multi-project integration) now have shipped analyzers and are catalogued as `partial`. See §8.
 
 ### Verdict
 
 **0.2.0 is a release candidate, not a production release.** Every defect recorded by the audit and this re-audit is fixed and covered by a regression test, and the same 589-test suite passes on Windows and Linux. Plugin isolation (gate 3) is closed on Linux and macOS and partial on Windows, as described in §5. These gates remain open: large-corpus benchmarks, which are waiting for operator data; CI on each final head; and an independent security review, which should now include the plugin sandbox.
+
+## 8. Code intelligence and the formerly planned domains
+
+**Date:** 2026-11-06 · **Scope:** the work after `3261602` (see the Unreleased section of the [changelog](../CHANGELOG.md)). Methods and limits per analyzer are in [CODE_INTELLIGENCE.md](CODE_INTELLIGENCE.md).
+
+### What was added
+
+- **A shared code model.** Python comes from the syntax tree; about 25 brace languages come from a linear-time structural lexer that blanks comments and strings while keeping offsets. Each file is modelled once per worker and reused by every analyzer.
+- **Code facts and a cross-file index.** Facts are stored with each file's findings in the same transaction, so `--resume` stays consistent, and are bounded per file and per table. After analysis, read-only passes build the symbol index, call graph (with recursion cycles), unreferenced private functions, test links, a polyglot module graph and the domain summaries. `pdt query` reads the index.
+- **Twelve analyzers** for the formerly planned domains, plus the integration map in `pdt compare`. Python data flow is semantic: labels are propagated through assignments, branches, loops and same-module helper summaries iterated to a fixed point, and flows are joined across modules in the index. The other languages are analysed structurally, and every heuristic result is `INFERRED`.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Test suite | 633 tests. Windows 10, Py 3.12: 620 passed, 13 skipped. Ubuntu 26.04, Py 3.14, native backends online: 630 passed, 3 skipped. 44 new tests cover the code model (including hostile input timing), the index and `pdt query`, every new analyzer, the integration map and the catalog contract. |
+| Regex complexity | Every new module-level pattern runs under `tests/test_regex_complexity.py`. Patterns that are only ever anchored with `.match()` at a fixed offset are allowlisted with the reason. |
+| Self-scan precision | Scanning this repository, the new analyzers report no CRITICAL, HIGH or MEDIUM finding. The data-flow analyzer reports nothing, as PDT has no untrusted-input sources. Building this check found, and fixed, false N+1 reports on batched SQLite writes and comprehensions over query results, and false lock-release reports on deliberate acquire/release hand-offs. |
+| Analysis cost | On 4,683 real third-party files (65 MB, mostly Python): the new analyzers took 21.7 s next to 113.4 s for the existing ones (about +19% analysis time). The costliest are the code index (2.1 ms per file, including model building), performance hotspots (2.0 ms) and data flow (1.8 ms). |
+| End to end | Scans of polyglot sample projects produce every new summary with no analyzer or index-pass failures. `pdt compare` across four sample services found all six expected links: package dependency, HTTP calls with exact and prefixed paths, a Kafka topic and a gRPC service. |
+
+Defects found while building this work were fixed before it was committed to the branch, and none affected 0.2.0. They included possessive quantifiers that could never match (`\w{1,120}+Client`), section headers in CRLF manifests, a lexer that took `const x = (expr)` for an arrow function, and a keyword collision when recording facts.
+
+### Limits
+
+- The lexer does not expand macros, resolve overloads or instantiate templates and generics. Lexical call resolution is by name within a language group, and ambiguous names are reported as ambiguous rather than guessed.
+- Taint analysis outside Python is intra-procedural and does not reason about branches. Cross-module flows are joined for Python only. No language has type inference, so a sink reached through a dynamically dispatched call can be missed.
+- Static analysis cannot see run-time validation, authorization, framework escaping or deployment. Data-flow, concurrency, resource, HDL lint, rules-of-hooks and integration-map results need review before they are treated as defects.
+- Very large repositories reach the index ceilings (5–20 million rows per table). This is reported as an `UNKNOWN` finding, and the index-based results are then incomplete.
+
+The release gates in §5 are unchanged. The large-corpus benchmarks now also measure the code index, using the per-phase timings (`code_index`) in each report.

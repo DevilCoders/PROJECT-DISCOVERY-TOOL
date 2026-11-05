@@ -133,7 +133,9 @@ def route_matches(call: str, endpoint: str) -> str:
     if not served or all(segment == "{}" for segment in served) or len(caller) < len(served):
         return ""
     tail = caller[len(caller) - len(served):]
-    if not all(left == right or left == "{}" or right == "{}" for left, right in zip(tail, served, strict=True)):
+    # A served parameter accepts any caller segment; a served literal needs the same literal
+    # (an interpolated caller segment is unknown, so it does not prove a match).
+    if not all(right == "{}" or left == right for left, right in zip(tail, served, strict=True)):
         return ""
     return "exact" if len(caller) == len(served) else "prefixed"
 
@@ -152,7 +154,8 @@ class EndpointIndex:
         """(served method, served route, 'exact'|'prefixed') of the first match, or None."""
         for segment in dict.fromkeys(route_segments(route)):
             for served_method, served in self.by_segment.get(segment, ()):
-                if method and served_method and method != served_method and "?" not in (method, served_method):
+                wildcard = {"?", "ANY", "ALL", "*"}
+                if method and served_method and method != served_method and not wildcard & {method, served_method}:
                     continue
                 kind = route_matches(route, served)
                 if kind:
@@ -353,6 +356,7 @@ class IntegrationAnalyzer(Analyzer):
 
     @staticmethod
     def _manifest(name: str, path: str, text: str) -> None:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")  # section anchors expect LF line ends
         found: list[tuple[str, str]] = []
         if name == "pyproject.toml":
             section = re.search(r"(?ms)^\[(?:project|tool\.poetry)\][ \t]*+$(.*?)(?=^\[|\Z)", text)

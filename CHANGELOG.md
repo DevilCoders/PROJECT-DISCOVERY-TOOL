@@ -3,6 +3,55 @@
 All notable changes to PDT. IDs such as PDT-001 refer to the defect register in
 [docs/AUDIT.md](docs/AUDIT.md).
 
+## Unreleased
+
+Semantic code intelligence and the thirteen domains that 0.2.0 only catalogued. Details,
+methods and limits are in [docs/CODE_INTELLIGENCE.md](docs/CODE_INTELLIGENCE.md).
+
+### Added: code intelligence
+- A shared per-file code model: Python from the syntax tree (qualified symbols, calls resolved
+  through imports, `self`/`cls` and module scope) and about 25 brace languages from a
+  linear-time structural lexer. Every analyzer of a file reuses one model.
+- Code facts stored with each file's findings in the scan's private SQLite inventory (bounded
+  per file and per table, consistent with `--resume`), and a cross-file code index: symbol
+  index, call graph with recursion cycles, unreferenced private functions, test-to-code links
+  and a polyglot module graph (JavaScript/TypeScript, C/C++, JVM, Go, Rust, PHP, Dart).
+- `pdt query OUTPUT --symbol|--callers|--callees|--references NAME [--json]`.
+
+### Added: analyzers
+- `performance-hotspots`, `concurrency`, `resource-management` and `type-systems`.
+- `dataflow`: taint from web requests, sockets and stdin to SQL, command, code,
+  deserialization, template, path, SSRF, XSS, redirect, format-string and buffer sinks. Python
+  is analysed inter-procedurally (helper summaries iterated to a fixed point) and across
+  modules; JavaScript/TypeScript, PHP, Java/Kotlin/Scala/Groovy, Go, C#, Rust and C/C++ within
+  functions.
+- `embedded` (PlatformIO, ESP-IDF, Zephyr, STM32CubeMX, Rust targets, FreeRTOS, linker memory
+  maps, device trees, interrupt-handler safety), `firmware` (ELF/PE metadata and hardening,
+  HEX, S-record, UF2, DTB/FIT, uImage, Android boot, ESP32 images, filesystems, Cortex-M vector
+  tables, component versions; Yocto, Buildroot, OpenWrt, ESP-IDF partitions), `hdl`
+  (Verilog/SystemVerilog/VHDL, RTL lint, FPGA constraints and projects, design hierarchy),
+  `shaders` (GLSL/HLSL/WGSL/Metal/Godot/ShaderLab, SPIR-V, DXBC/DXIL, metallib) and `frontend`
+  (React/Vue/Svelte/Angular components and children, rules of hooks, list keys, routes
+  including file-system routing, libraries, bundler configuration, component graph).
+- `integration-points` (outbound HTTP calls, message topics, gRPC services and clients,
+  package identity) and an `integration_map` in `pdt compare` linking projects by package
+  dependencies, HTTP endpoints, topics and gRPC services.
+
+### Changed
+- The thirteen catalog domains that were `planned` are now `partial`, each claimed by a
+  shipped analyzer; a test keeps `planned` domains and shipped analyzers disjoint. Lexically
+  modelled languages report `analysis_status: lexical_structure` and a new `structural_model`.
+- The language catalog recognizes more shader stages (compute, mesh, task, ray tracing), HLSL
+  includes, ShaderLab, SPIR-V, Arduino sketches, linker scripts, device trees and blobs, Intel
+  HEX, S-record, UF2, ELF, STM32CubeMX projects, Kconfig files, FPGA constraints and projects,
+  and BitBake recipes.
+- Report schema 1.6 (`metrics.code_index`); comparison schema 1.1 (`integration_map`).
+
+### Performance
+- On 4,683 real third-party files (65 MB), the new analyzers add 21.7 s to 113.4 s of existing
+  analysis time (about +19%), at most about 2.1 ms per file each. Files without taint sources
+  or sinks cost the data-flow analyzer a single syntax-tree walk.
+
 ## 0.2.0 — 2026-11-05
 
 The production-readiness release. At 0.1.0 (`1895455`) CI failed on every job and `pdt scan`

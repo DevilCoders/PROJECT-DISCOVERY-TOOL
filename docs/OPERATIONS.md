@@ -10,7 +10,8 @@ read its exit codes and performance data.
    output with your scan records.
 2. **Place the output outside the target.** PDT refuses an output directory inside the scanned
    tree. Use a fast local disk with free space of roughly 1–2% of the scanned size for the
-   inventory database and reports.
+   inventory database and reports, plus up to about 5 GB for the code index of a very large
+   source tree (see [Code index and `pdt query`](#code-index-and-pdt-query)).
 3. **Antivirus on Windows.** Microsoft Defender scans each file the first time it is opened.
    On a freshly copied corpus the inventory phase was measured 18× slower on the first run
    than on the second (23 s vs 1.3 s for 2,000 files). Consider a Defender exclusion for the
@@ -55,6 +56,41 @@ skipped; the rest are analyzed, then the import graph, architecture layout and r
 rebuilt. Files added or removed after the original traversal are not picked up: run a fresh
 scan for a current view. When no resumable inventory exists, PDT warns and starts a fresh scan.
 
+## Code index and `pdt query`
+
+During analysis, PDT stores code facts (symbols, call sites, referenced names, imports and
+domain facts) in `OUTPUT/.pdt-cache/inventory.sqlite3`, in the same transaction as each
+file's findings, so `--resume` keeps them consistent. After analysis, the `code_index` phase
+builds the call graph, module graph and domain summaries from them
+(`metrics.code_index` in the JSON report). `--inventory-only` scans skip it.
+
+Storage is bounded so a 100 GB+ repository cannot exhaust the disk or the index phase:
+
+| Bound | Limit |
+|---|---|
+| Per file | 5,000 symbols, 20,000 call sites, 10,000 referenced names, 5,000 domain facts |
+| Per table | 5 million symbols, 10 million call sites, 20 million references, 5 million facts |
+| Call graph | 500,000 resolved edges for cycle detection |
+| Modelled file size | 4 MiB (larger files are reported as `UNKNOWN`) |
+
+A bound that is reached produces an `UNKNOWN` "Code index truncated" finding. Results that
+depend on the index (call graph, unreferenced functions, test links) are then incomplete,
+while per-file findings are unaffected.
+
+Measured on 4,684 real third-party files (2,061 modelled sources, 65 MB): the index held
+293,632 rows in 41.6 MB, about 20 KiB per modelled source file, and the `code_index` phase
+took 1.0 s of a 30 s scan. At the table ceilings the index stops growing at roughly 5 GB, so
+reserve that much on top of the inventory for very large source trees.
+
+Look up the index of a finished scan:
+
+```bash
+pdt query /reports/src --symbol Engine.run          # definitions
+pdt query /reports/src --callers parse_config       # call sites of a function
+pdt query /reports/src --callees Engine.run --limit 50
+pdt query /reports/src --references TOKEN_TTL --json
+```
+
 ## Third-party plugins
 
 Installed analyzer plugins run in sandboxed host processes (`--plugin-isolation sandbox`, the
@@ -96,7 +132,8 @@ They never trigger `--fail-on`; use `--strict` to gate on completeness.
 
 Every JSON report contains `metrics.performance`:
 
-- `phase_seconds`: inventory, analysis, cache maintenance, python_graph and architecture.
+- `phase_seconds`: inventory, analysis, cache maintenance, python_graph, code_index and
+  architecture.
 - `files_per_second` and `bytes_per_second` up to report writing.
 - `peak_rss_bytes`: the coordinator process's peak resident memory. Worker processes are
   separate; see `tools/benchmark.py` for the largest-process figure on POSIX.
