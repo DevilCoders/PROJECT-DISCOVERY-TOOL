@@ -67,6 +67,12 @@ from project_discovery.remote import RemoteScanError
             "https://svn.example.net/repos/project/trunk",
             "svn",
         ),
+        (
+            "fossil+https://fossil.example.net/project",
+            "Fossil server",
+            "https://fossil.example.net/project",
+            "fossil",
+        ),
     ],
 )
 def test_remote_target_detects_provider_and_normalizes_browser_urls(
@@ -405,12 +411,13 @@ def test_url_file_supports_mixed_native_vcs_backends(tmp_path: Path):
         "jj+https://github.com/acme/jj-project\n"
         "pijul+https://nest.pijul.com/acme/pijul-project\n"
         "cvs+pserver://cvs.example.net/cvsroot/cvs-project\n"
-        "p4+ssl://perforce.example.net:1666/depot/p4-project\n",
+        "p4+ssl://perforce.example.net:1666/depot/p4-project\n"
+        "fossil+https://fossil.example.net/fossil-project\n",
         encoding="utf-8",
     )
     targets = remote.load_remote_targets(url_file)
     assert [target.vcs for target in targets] == [
-        "git", "hg", "svn", "bzr", "darcs", "jj", "pijul", "cvs", "p4",
+        "git", "hg", "svn", "bzr", "darcs", "jj", "pijul", "cvs", "p4", "fossil",
     ]
 
 
@@ -600,3 +607,65 @@ def test_p4_checkout_uses_depot_file_listing_and_read_only_print(
     assert metadata["tracked_file_count"] == 1
     assert commands[0][0:3] == ["p4", "-ztag", "files"]
     assert commands[1][0:3] == ["p4", "print", "-q"]
+
+
+
+def test_fossil_checkout_clones_opens_without_sync_and_removes_checkout_metadata(
+    tmp_path: Path, monkeypatch,
+):
+    target = remote.parse_remote_target("fossil+https://fossil.example.net/project")
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    checkout = temporary / "source"
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        if command[1] == "clone":
+            Path(command[-1]).write_bytes(b"fossil repository database")
+        elif command[1] == "open":
+            workdir = Path(command[command.index("--workdir") + 1])
+            workdir.mkdir()
+            (workdir / "_FOSSIL_").write_text("local metadata", encoding="utf-8")
+            (workdir / "README.md").write_text("project source", encoding="utf-8")
+        elif command[1] == "info":
+            return SimpleNamespace(stdout=(
+                b"project-name: project\n"
+                b"checkout: 0123456789abcdef0123456789abcdef01234567 2026-11-05\n"
+            ))
+        elif command[1:3] == ["branch", "current"]:
+            return SimpleNamespace(stdout=b"trunk\n")
+        return SimpleNamespace(stdout=b"")
+
+    monkeypatch.setattr(remote, "_run", fake_run)
+    metadata = remote._fossil_checkout(target, checkout, temporary, timeout=30)
+
+    clone = next(command for command, _ in commands if command[1] == "clone")
+    opened = next(command for command, _ in commands if command[1] == "open")
+    assert clone[2] == "--once"
+    assert opened[2] == "--nosync"
+    assert (checkout / "README.md").read_text(encoding="utf-8") == "project source"
+    assert not (checkout / "_FOSSIL_").exists()
+    assert metadata["vcs"] == "fossil"
+    assert metadata["revision"] == "0123456789abcdef0123456789abcdef01234567"
+    assert metadata["branch"] == "trunk"
+    assert metadata["history_complete"] is False
+    assert all(kwargs.get("cwd") is None or kwargs["cwd"] == checkout for _, kwargs in commands)
+
+
+def test_remote_vcs_capabilities_reports_installed_native_clients(monkeypatch):
+    installed = {
+        "git": "/usr/bin/git",
+        "brz": None,
+        "bzr": "/usr/bin/bzr",
+        "fossil": "/usr/bin/fossil",
+    }
+    monkeypatch.setattr(remote.shutil, "which", lambda name: installed.get(name))
+
+    capabilities = remote.remote_vcs_capabilities()
+
+    assert capabilities["git"]["available"] is True
+    assert capabilities["bzr"]["available"] is True
+    assert capabilities["bzr"]["executable"] == "/usr/bin/bzr"
+    assert capabilities["fossil"]["available"] is True
+    assert capabilities["pijul"]["available"] is False
