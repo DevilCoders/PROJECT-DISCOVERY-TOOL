@@ -258,7 +258,7 @@ def test_git_tree_stream_materializes_files_symlinks_and_submodules_safely(
         [
             file_oid + b" blob 11\nprint('ok')\n",
             symlink_oid + b" blob 7\nmain.py\n",
-            invalid_oid + b" blob 8\nmalicious\n",
+            invalid_oid + b" blob 9\nmalicious\n",
         ]
     )
 
