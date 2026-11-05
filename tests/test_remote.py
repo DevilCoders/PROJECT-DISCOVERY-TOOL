@@ -643,7 +643,7 @@ def test_fossil_checkout_clones_opens_without_sync_and_removes_checkout_metadata
     clone = next(command for command, _ in commands if command[1] == "clone")
     opened = next(command for command, _ in commands if command[1] == "open")
     assert clone[2] == "--once"
-    assert opened[2] == "--nosync"
+    assert "--nosync" in opened
     assert (checkout / "README.md").read_text(encoding="utf-8") == "project source"
     assert not (checkout / "_FOSSIL_").exists()
     assert metadata["vcs"] == "fossil"
