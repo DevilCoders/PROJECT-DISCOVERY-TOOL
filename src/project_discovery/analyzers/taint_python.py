@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import ast
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
 MAX_LABELS = 6
@@ -346,12 +346,12 @@ class PythonTaintEngine:
         self.functions: dict[str, _Function] = {}
         self.source_sites: set[tuple[int, str]] = set()
         self.truncated = False
-        nested: list = []
+        nested: deque = deque()
         self._collect(tree.body, owner=None, prefix="", top_level=True, nested=nested)
         # Nested functions are callable by their bare name unless a module-level or class
         # definition already uses it.
         while nested:
-            body = nested.pop(0)
+            body = nested.popleft()
             self._collect(body, owner=None, prefix="", top_level=False, nested=nested)
         self.summaries = {key: Summary(function.params) for key, function in self.functions.items()}
         module_body = [node for node in tree.body
@@ -405,7 +405,7 @@ class PythonTaintEngine:
         return [key for key in [*self.functions, "<module>"] if key in relevant], has_sources
 
     # -- discovery -------------------------------------------------------------
-    def _collect(self, body: list, owner: str | None, prefix: str, top_level: bool, nested: list) -> None:
+    def _collect(self, body: list, owner: str | None, prefix: str, top_level: bool, nested: deque) -> None:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 key = f"{prefix}{node.name}"

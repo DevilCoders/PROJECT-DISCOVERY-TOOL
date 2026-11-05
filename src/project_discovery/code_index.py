@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import posixpath
+import re
 import sqlite3
 from collections import Counter, defaultdict
 from importlib.util import resolve_name
@@ -40,7 +41,7 @@ _CALLABLE_KINDS = _FUNCTION_KINDS + ("class", "struct", "record", "object", "typ
 # Languages whose definitions can call each other, for lexical name resolution.
 _LANGUAGE_GROUPS = {
     "C": "c-family", "C++": "c-family", "C/C++ Header": "c-family", "Objective-C": "c-family",
-    "Objective-C++": "c-family", "CUDA": "c-family", "OpenCL": "c-family",
+    "Objective-C++": "c-family", "CUDA": "c-family", "OpenCL": "c-family", "Arduino Sketch": "c-family",
     "JavaScript": "javascript", "TypeScript": "javascript", "Vue": "javascript", "Svelte": "javascript",
     "Java": "jvm", "Kotlin": "jvm", "Scala": "jvm", "Groovy": "jvm",
     "GLSL": "shaders", "HLSL": "shaders", "WGSL": "shaders", "Metal Shading Language": "shaders",
@@ -785,6 +786,383 @@ def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
     return value, findings
 
 
+# --------------------------------------------------------------------------- domain summaries
+
+def _fact_rows(db: sqlite3.Connection, kind: str):
+    """(name, path, detail dict) rows of one fact kind."""
+    for name, path, detail in db.execute("SELECT name, path, detail FROM code_facts WHERE kind = ?", (kind,)):
+        try:
+            values = json.loads(detail)
+        except ValueError:
+            continue
+        if isinstance(values, dict):
+            yield name, path, values
+
+
+def _bytes(value: int) -> str:
+    for unit, scale in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if value >= scale:
+            return f"{value / scale:.4g} {unit}"
+    return f"{value} B"
+
+
+def _embedded_summary(context: _Context) -> tuple[dict, list[Finding]]:
+    db = context.db
+    targets: dict[str, set[str]] = defaultdict(set)
+    for name, _, values in _fact_rows(db, "embedded_target"):
+        targets[str(values.get("source", "other"))].add(name)
+    stats: Counter = Counter()
+    files = 0
+    for _, _, values in _fact_rows(db, "embedded_stats"):
+        files += 1
+        stats.update({key: value for key, value in values.items() if isinstance(value, int)})
+    regions = Counter()
+    for name, _, values in _fact_rows(db, "memory_region"):
+        length = values.get("length")
+        if isinstance(length, int):
+            kind = "flash" if "x" in str(values.get("attributes", "")).lower() and "w" not in str(
+                values.get("attributes", "")).lower() or re.search(r"(?i)flash|rom|text|code", name) else "ram"
+            regions[kind] += length
+    compatibles = Counter()
+    for name, _, values in _fact_rows(db, "device_tree_compatible"):
+        compatibles[name] += int(values.get("count", 1) or 1)
+    value = {
+        "targets": {source: sorted(names)[:50] for source, names in sorted(targets.items())},
+        "rtos": {key[5:]: count for key, count in stats.items() if key.startswith("rtos:")},
+        "frameworks": {key[10:]: count for key, count in stats.items() if key.startswith("framework:")},
+        "interrupt_handlers": stats["interrupt_handlers"], "register_accesses": stats["register_accesses"],
+        "memory_bytes": dict(regions), "files": files,
+        "device_tree_compatibles": dict(compatibles.most_common(30)),
+    }
+    if not (targets or files or regions):
+        return value, []
+    parts = []
+    if targets:
+        parts.append("targets " + "; ".join(f"{source}: {', '.join(sorted(names)[:8])}" for source, names in sorted(targets.items())))
+    if value["rtos"]:
+        parts.append("RTOS " + ", ".join(f"{name} ({count:,} calls)" for name, count in sorted(value["rtos"].items())))
+    if value["frameworks"]:
+        parts.append("frameworks " + ", ".join(f"{name} ({count:,})" for name, count in sorted(value["frameworks"].items())))
+    if stats["interrupt_handlers"]:
+        parts.append(f"{stats['interrupt_handlers']:,} interrupt handler(s)")
+    if stats["register_accesses"]:
+        parts.append(f"{stats['register_accesses']:,} direct register access(es)")
+    if regions:
+        parts.append("linker memory " + ", ".join(f"{kind} {_bytes(size)}" for kind, size in sorted(regions.items())))
+    return value, [Finding("embedded", "Embedded systems summary", "; ".join(parts) + ".",
+                           confidence="INFERRED", analyzer="code-index")]
+
+
+def _firmware_summary(context: _Context) -> tuple[dict, list[Finding]]:
+    db = context.db
+    elf: Counter = Counter()
+    hardening: dict[str, Counter] = defaultdict(Counter)
+    for machine, _, values in _fact_rows(db, "elf_binary"):
+        role = str(values.get("role", "binary"))
+        elf[f"{machine} {role}"] += 1
+        if role in {"Linux executable", "Linux shared object"}:
+            counts = hardening[role]
+            counts["total"] += 1
+            for key in ("nx", "pie", "full_relro", "relro", "canary", "fortify", "rpath"):
+                counts[key] += int(values.get(key, 0) or 0)
+    pe: Counter = Counter()
+    pe_hardening: Counter = Counter()
+    for architecture, _, values in _fact_rows(db, "pe_binary"):
+        pe[f"{architecture} {values.get('role', 'binary')}"] += 1
+        pe_hardening["total"] += 1
+        for key in ("aslr", "nx", "cfg"):
+            pe_hardening[key] += int(values.get(key, 0) or 0)
+    images = Counter(name for name, _, _ in _fact_rows(db, "firmware_image"))
+    components = sorted({(name, str(values.get("version", ""))) for name, _, values in _fact_rows(db, "firmware_component")})
+    recipes = sum(1 for _ in _fact_rows(db, "yocto_recipe"))
+    value = {
+        "elf": dict(elf.most_common(40)), "elf_hardening": {role: dict(counts) for role, counts in hardening.items()},
+        "pe": dict(pe.most_common(20)), "pe_hardening": dict(pe_hardening), "images": dict(images.most_common()),
+        "components": [{"name": name, "version": version} for name, version in components[:100]],
+        "yocto_recipes": recipes,
+    }
+    if not (elf or pe or images or components or recipes):
+        return value, []
+    parts = []
+    if elf:
+        parts.append(f"{sum(elf.values()):,} ELF file(s): " + ", ".join(f"{count:,} {kind}" for kind, count in elf.most_common(8)))
+    for role, counts in sorted(hardening.items()):
+        total = counts["total"]
+        protections = [f"NX {counts['nx']}/{total}", f"full RELRO {counts['full_relro']}/{total}",
+                       f"stack protector {counts['canary']}/{total}", f"FORTIFY {counts['fortify']}/{total}"]
+        if role == "Linux executable":
+            protections.insert(1, f"PIE {counts['pie']}/{total}")
+        parts.append(f"{role}s hardening: " + ", ".join(protections))
+    if pe:
+        total = pe_hardening["total"]
+        parts.append(f"{total:,} PE file(s) (ASLR {pe_hardening['aslr']}/{total}, NX {pe_hardening['nx']}/{total}, "
+                     f"CFG {pe_hardening['cfg']}/{total})")
+    if images:
+        parts.append("firmware images " + ", ".join(f"{count:,} {name}" for name, count in images.most_common(10)))
+    if components:
+        parts.append("embedded components " + ", ".join(f"{name} {version}" for name, version in components[:15]))
+    if recipes:
+        parts.append(f"{recipes:,} Yocto recipe(s)")
+    return value, [Finding("firmware", "Binary and firmware inventory", "; ".join(parts) + ".",
+                           confidence="CONFIRMED", analyzer="code-index")]
+
+
+def _hdl_hierarchy(context: _Context) -> tuple[dict, list[Finding]]:
+    db = context.db
+    modules: dict[str, tuple[str, str, bool, str]] = {}
+    for name, path, values in _fact_rows(db, "hdl_module"):
+        modules.setdefault(name.lower(), (name, path, bool(values.get("testbench")), str(values.get("kind", ""))))
+    if not modules:
+        return {}, []
+    edges: dict[str, Counter] = defaultdict(Counter)
+    unresolved: Counter = Counter()
+    for child, _, values in _fact_rows(db, "hdl_instance"):
+        parent = str(values.get("parent", "")).lower()
+        count = int(values.get("count", 1) or 1)
+        if child.lower() in modules:
+            edges[parent][child.lower()] += count
+        else:
+            unresolved[child] += count
+    instantiated = {child for children in edges.values() for child in children}
+    design = {key for key, (_, _, testbench, kind) in modules.items() if not testbench and kind in {"module", "entity"}}
+    tops = sorted(key for key in design if key not in instantiated)
+    cycles = [component for component in _strongly_connected_components(
+        sorted(modules), {key: set(children) for key, children in edges.items()}) if len(component) > 1]
+    cyclic = {node for component in cycles for node in component}
+    memo: dict[str, tuple[int, int]] = {}
+
+    def measure(node: str, trail: frozenset) -> tuple[int, int]:
+        """(depth, total instances below) without re-entering cycles."""
+        if node in memo:
+            return memo[node]
+        depth, total = 1, 0
+        for child, count in edges.get(node, {}).items():
+            if child in trail or child in cyclic:
+                continue
+            child_depth, child_total = measure(child, trail | {child})
+            depth = max(depth, child_depth + 1)
+            total += count * (1 + child_total)
+        memo[node] = (depth, min(total, 10 ** 12))
+        return memo[node]
+
+    top_details = []
+    for key in tops[:MAX_LISTED]:
+        depth, total = measure(key, frozenset({key}))
+        top_details.append((modules[key][0], modules[key][1], depth, total))
+    top_details.sort(key=lambda item: (-item[3], item[0]))
+    clocks = sum(1 for _ in _fact_rows(db, "hdl_clock_constraint"))
+    parts = sorted({(name, str(values.get("family", ""))) for name, _, values in _fact_rows(db, "fpga_part")})
+    testbenches = sum(1 for _, _, testbench, _ in modules.values() if testbench)
+    value = {
+        "units": len(modules), "testbenches": testbenches,
+        "tops": [{"name": name, "path": path, "depth": depth, "instances": total} for name, path, depth, total in top_details],
+        "unresolved_types": dict(unresolved.most_common(50)), "cycles": [component[:10] for component in cycles[:10]],
+        "clock_constraints": clocks, "fpga_parts": [{"part": part, "family": family} for part, family in parts],
+    }
+    detail = (f"{len(modules):,} design unit(s) ({testbenches:,} testbench(es)); {len(tops):,} top-level unit(s): "
+              + ", ".join(f"{name} (depth {depth}, {total:,} instances)" for name, _, depth, total in top_details[:10])
+              + "." + (" Unresolved instance types (vendor primitives or IP not in the scan): "
+                       + ", ".join(f"{name} ({count})" for name, count in unresolved.most_common(15)) + "."
+                       if unresolved else "")
+              + (" Targets: " + ", ".join(f"{part} ({family})" if family else part for part, family in parts[:8]) + "."
+                 if parts else ""))
+    findings = [Finding("hardware_description", "HDL design hierarchy", detail, confidence="INFERRED",
+                        analyzer="code-index", evidence=[f"{path}: {name}" for name, path, _, _ in top_details[:15]])]
+    if cycles:
+        findings.append(Finding(
+            "hardware_description", "Recursive module instantiation",
+            f"{len(cycles)} group(s) of design units instantiate each other; synthesis rejects recursion that is not "
+            "bounded by a generate condition.", confidence="INFERRED", analyzer="code-index", severity="LOW",
+            evidence=[" -> ".join(modules[node][0] for node in component[:8]) for component in cycles[:10]],
+        ))
+    return value, findings
+
+
+def _shader_inventory(context: _Context) -> tuple[dict, list[Finding]]:
+    languages: Counter = Counter()
+    stages: Counter = Counter()
+    entries = bindings = 0
+    for language, _, values in _fact_rows(context.db, "shader"):
+        languages[language] += 1
+        for stage in str(values.get("stage", "")).split(","):
+            if stage:
+                stages[stage] += 1
+        entries += int(values.get("entries", 0) or 0)
+        bindings += int(values.get("bindings", 0) or 0)
+    if not languages:
+        return {}, []
+    value = {"files": dict(languages.most_common()), "stages": dict(stages.most_common()), "entry_points": entries,
+             "bindings": bindings}
+    return value, [Finding(
+        "graphics_shaders", "Shader inventory",
+        f"{sum(languages.values()):,} shader file(s): " + ", ".join(f"{count:,} {name}" for name, count in languages.most_common())
+        + "; stages " + ", ".join(f"{name} {count:,}" for name, count in stages.most_common(12))
+        + f"; {entries:,} entry point(s), {bindings:,} resource binding(s).",
+        confidence="CONFIRMED", analyzer="code-index",
+    )]
+
+
+_ROOT_COMPONENTS = frozenset({"App", "Root", "Layout", "RootLayout", "Page", "Document", "Error", "NotFound",
+                              "Main", "AppComponent", "Home", "Index"})
+_FILE_ROUTERS = {"Next.js": "Next.js", "Next.js API": "Next.js", "Nuxt": "Nuxt", "SvelteKit": "SvelteKit",
+                 "SvelteKit API": "SvelteKit", "Remix": "Remix", "Astro": "Astro"}
+
+
+def _component_graph(context: _Context) -> tuple[dict, list[Finding]]:
+    db = context.db
+    components: dict[str, tuple[str, str, str]] = {}
+    for name, path, values in _fact_rows(db, "component"):
+        components.setdefault(name, (str(values.get("framework", "")), path, str(values.get("selector", "") or "")))
+    selectors = {selector: name for name, (_, _, selector) in components.items() if selector}
+    by_stem = {PurePosixPath(path.replace("\\", "/")).name.split(".")[0]: name
+               for name, (framework, path, _) in components.items() if framework == "Angular"}
+    edges: dict[str, Counter] = defaultdict(Counter)
+    used: Counter = Counter()
+    for child, _, values in _fact_rows(db, "component_child"):
+        parent = str(values.get("parent", ""))
+        if parent.startswith("template:"):
+            parent = by_stem.get(parent[9:], parent)
+        target = selectors.get(child, child) if values.get("selector") else child
+        if target in components and target != parent:
+            count = int(values.get("count", 1) or 1)
+            edges[parent][target] += count
+            used[target] += count
+    libraries: dict[str, Counter] = defaultdict(Counter)
+    for name, _, values in _fact_rows(db, "frontend_library"):
+        libraries[str(values.get("kind", "other"))][name] += 1
+    tools = Counter(name for name, _, _ in _fact_rows(db, "frontend_tool"))
+    frameworks = set(libraries.get("framework", {})) | set(tools)
+    routes: dict[str, set[str]] = defaultdict(set)
+    for route, _, values in _fact_rows(db, "route"):
+        routes[str(values.get("framework", ""))].add(route)
+    routed_files = set()
+    for route, path, values in _fact_rows(db, "route_file"):
+        framework = str(values.get("framework", ""))
+        if _FILE_ROUTERS.get(framework) in frameworks:
+            routes[framework].add(route)
+            routed_files.add(path)
+    if not (components or routes or libraries or tools):
+        return {}, []
+    routed_components = {name for name, (_, path, _) in components.items() if path in routed_files}
+    unused = sorted(name for name in components if not used[name] and name not in _ROOT_COMPONENTS
+                    and name not in routed_components and "/" not in name)
+    roots = sorted(name for name in components if not used[name] and edges.get(name))
+    value = {
+        "components": len(components),
+        "by_framework": dict(Counter(framework for framework, _, _ in components.values()).most_common()),
+        "edges": sum(len(children) for children in edges.values()), "roots": roots[:MAX_LISTED],
+        "most_used": [{"name": name, "uses": count} for name, count in used.most_common(20)],
+        "unused_candidates": unused[:MAX_LISTED],
+        "routes": {framework: sorted(paths)[:200] for framework, paths in sorted(routes.items())},
+        "libraries": {kind: dict(counter.most_common()) for kind, counter in sorted(libraries.items())},
+        "tools": dict(tools.most_common()),
+    }
+    findings = []
+    if components:
+        findings.append(Finding(
+            "frontend", "Component graph",
+            f"{len(components):,} component(s) (" + ", ".join(f"{count:,} {name or 'unknown'}" for name, count in
+                                                         value["by_framework"].items())
+            + f"); {value['edges']:,} parent-child edge(s); roots: {', '.join(roots[:10]) or 'none'}; most reused: "
+            + (", ".join(f"{name} ({count})" for name, count in used.most_common(8)) or "none") + ".",
+            confidence="INFERRED", analyzer="code-index",
+        ))
+    if unused and len(components) > 3:
+        findings.append(Finding(
+            "frontend", "Components never rendered",
+            f"{len(unused):,} component(s) are not rendered by any scanned component or route: "
+            + ", ".join(unused[:30]) + ". Dynamic imports, string-based registration and external consumers are not "
+            "visible, so confirm before removing them.", confidence="INFERRED", analyzer="code-index",
+        ))
+    if routes:
+        findings.append(Finding(
+            "frontend", "Application routes",
+            "; ".join(f"{framework}: {len(paths):,} route(s) ({', '.join(sorted(paths)[:12])})"
+                      for framework, paths in sorted(routes.items())) + ".",
+            confidence="INFERRED", analyzer="code-index",
+        ))
+    if libraries or tools:
+        findings.append(Finding(
+            "frontend", "Frontend stack",
+            "; ".join(f"{kind}: " + ", ".join(f"{name} ({count} file(s))" for name, count in counter.most_common(6))
+                      for kind, counter in sorted(libraries.items()))
+            + (("; build tools: " + ", ".join(sorted(tools))) if tools else "") + ".",
+            confidence="CONFIRMED", analyzer="code-index",
+        ))
+    return value, findings
+
+
+MAX_INTEGRATION_ITEMS = 5000
+
+
+def _integration(context: _Context) -> tuple[dict, list[Finding]]:
+    """What the project provides (endpoints, topics, gRPC services, packages) and consumes."""
+    from .analyzers.integration_analyzer import EndpointIndex, normalize_route
+
+    db = context.db
+    packages = sorted({(name, str(values.get("ecosystem", "")), path)
+                       for name, path, values in _fact_rows(db, "package_name")})[:500]
+    endpoints: dict[tuple[str, str], str] = {}
+    for name, path, _ in _fact_rows(db, "api_endpoint"):
+        method, _, route = name.partition(" ")
+        key = (method.upper(), normalize_route(route))
+        endpoints.setdefault(key, path)
+        if len(endpoints) >= MAX_INTEGRATION_ITEMS:
+            break
+    calls: dict[tuple[str, str, str], str] = {}
+    hosts: Counter = Counter()
+    for name, path, values in _fact_rows(db, "http_call"):
+        method, _, route = name.partition(" ")
+        host = str(values.get("host", ""))
+        if len(calls) < MAX_INTEGRATION_ITEMS:
+            calls.setdefault((method.upper(), route, host), path)
+        if host:
+            hosts[host] += 1
+    topics: dict[tuple[str, str, str], str] = {}
+    for name, path, values in _fact_rows(db, "message_topic"):
+        if len(topics) < MAX_INTEGRATION_ITEMS:
+            topics.setdefault((name, str(values.get("system", "")), str(values.get("role", ""))), path)
+    grpc = {
+        kind: sorted({name for name, _, _ in _fact_rows(db, f"grpc_{kind}")})[:1000]
+        for kind in ("service", "server", "client")
+    }
+    index = EndpointIndex(endpoints)
+    internal = sum(
+        1 for (method, route, host) in calls
+        if (not host or host in {"localhost", "127.0.0.1"}) and index.match(method, route)
+    )
+    value = {
+        "packages": [{"name": name, "ecosystem": ecosystem, "path": path} for name, ecosystem, path in packages],
+        "endpoints": [{"method": method, "path": route, "file": path} for (method, route), path in sorted(endpoints.items())],
+        "http_calls": [{"method": method, "path": route, "host": host, "file": path}
+                       for (method, route, host), path in sorted(calls.items())],
+        "topics": [{"name": name, "system": system, "role": role, "file": path}
+                   for (name, system, role), path in sorted(topics.items())],
+        "grpc": grpc, "hosts": dict(hosts.most_common(50)), "internal_calls_matched": internal,
+    }
+    if not (packages or endpoints or calls or topics or any(grpc.values())):
+        return value, []
+    produced = sorted({name for (name, _, role) in topics if role == "produce"})
+    consumed = sorted({name for (name, _, role) in topics if role == "consume"})
+    parts = []
+    if packages:
+        parts.append("packages " + ", ".join(f"{name} ({ecosystem})" for name, ecosystem, _ in packages[:8]))
+    if endpoints:
+        parts.append(f"{len(endpoints):,} HTTP endpoint(s) served")
+    if calls:
+        parts.append(f"{len(calls):,} outbound HTTP call site(s)"
+                     + (" to " + ", ".join(f"{host} ({count})" for host, count in hosts.most_common(8)) if hosts else "")
+                     + (f"; {internal:,} match this project's own endpoints" if internal else ""))
+    if produced or consumed:
+        parts.append(f"topics produced: {', '.join(produced[:10]) or 'none'}; consumed: {', '.join(consumed[:10]) or 'none'}")
+    if any(grpc.values()):
+        parts.append("gRPC " + "; ".join(f"{kind}s {', '.join(names[:8])}" for kind, names in grpc.items() if names))
+    return value, [Finding(
+        "multi_project", "Integration points", "; ".join(parts) + ". `pdt compare` joins these across scans into an "
+        "integration map.", confidence="INFERRED", analyzer="code-index",
+    )]
+
+
 QUERY_KINDS = ("symbol", "callers", "callees", "references")
 
 
@@ -842,4 +1220,10 @@ _PASSES = (
     ("concurrency", _concurrency_summary),
     ("memory", _memory_summary),
     ("dataflow", _dataflow),
+    ("embedded", _embedded_summary),
+    ("firmware", _firmware_summary),
+    ("hdl", _hdl_hierarchy),
+    ("shaders", _shader_inventory),
+    ("frontend", _component_graph),
+    ("integration", _integration),
 )

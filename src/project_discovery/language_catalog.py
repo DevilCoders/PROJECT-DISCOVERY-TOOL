@@ -109,8 +109,24 @@ _SPECS = (
     LanguageSpec("Assembly", (".s", ".S", ".asm"), family="low_level"),
     LanguageSpec("CUDA", (".cu", ".cuh"), family="gpu"),
     LanguageSpec("OpenCL", (".cl",), family="gpu"),
-    LanguageSpec("GLSL", (".glsl", ".vert", ".frag", ".geom", ".tesc", ".tese"), family="shader"),
-    LanguageSpec("HLSL", (".hlsl", ".fx", ".fxh"), family="shader"),
+    LanguageSpec("GLSL", (".glsl", ".vert", ".frag", ".geom", ".tesc", ".tese", ".comp", ".mesh", ".task",
+                          ".rgen", ".rint", ".rahit", ".rchit", ".rmiss", ".rcall"), family="shader"),
+    LanguageSpec("HLSL", (".hlsl", ".hlsli", ".fx", ".fxh", ".usf", ".ush", ".cginc"), family="shader"),
+    LanguageSpec("ShaderLab", (".shader",), family="shader"),
+    LanguageSpec("SPIR-V Binary", (".spv",), family="binary_shader"),
+    LanguageSpec("Arduino Sketch", (".ino", ".pde")),
+    LanguageSpec("Linker Script", (".ld", ".lds", ".icf", ".sct"), family="build"),
+    LanguageSpec("Device Tree", (".dts", ".dtsi"), family="configuration"),
+    LanguageSpec("Device Tree Blob", (".dtb", ".dtbo"), family="firmware"),
+    LanguageSpec("Intel HEX", (".hex", ".ihex", ".ihx"), family="firmware"),
+    LanguageSpec("Motorola S-record", (".srec", ".s19", ".s28", ".s37", ".mot"), family="firmware"),
+    LanguageSpec("UF2 Firmware", (".uf2",), family="firmware"),
+    LanguageSpec("ELF Binary", (".elf", ".axf"), family="firmware"),
+    LanguageSpec("STM32CubeMX Project", (".ioc",), family="configuration"),
+    LanguageSpec("Kconfig", filenames=("Kconfig", "prj.conf", "sdkconfig", "sdkconfig.defaults"), family="configuration"),
+    LanguageSpec("FPGA Constraints", (".xdc", ".sdc", ".ucf", ".qsf", ".lpf", ".cst"), family="hardware"),
+    LanguageSpec("FPGA Project", (".xpr", ".qpf", ".xise", ".ldf"), family="hardware"),
+    LanguageSpec("BitBake", (".bb", ".bbappend", ".bbclass"), family="build"),
     LanguageSpec("WGSL", (".wgsl",), family="shader"),
     LanguageSpec("Metal Shading Language", (".metal",), family="shader"),
     LanguageSpec("Jupyter Notebook", (".ipynb",), family="notebook"),
@@ -162,6 +178,7 @@ def detect_language(path: str) -> str:
 def language_catalog() -> list[dict[str, str | None]]:
     """Return recognition and parser integration metadata."""
     from .analyzers.tree_sitter_analyzer import GRAMMARS
+    from .code_model.lexical import LEXICAL_LANGUAGES
 
     result = []
     for spec in _SPECS:
@@ -178,7 +195,12 @@ def language_catalog() -> list[dict[str, str | None]]:
             "analysis_status": (
                 "implemented" if spec.name == "Python"
                 else "optional_parser" if spec.name in GRAMMARS
+                else "lexical_structure" if spec.name in LEXICAL_LANGUAGES
                 else "inventory_only"
+            ),
+            # The shared code model: syntax tree (Python), structural lexer, or none.
+            "structural_model": (
+                "ast" if spec.name == "Python" else "lexical" if spec.name in LEXICAL_LANGUAGES else None
             ),
         })
     return result
@@ -193,6 +215,7 @@ _SOURCE_FAMILIES = frozenset({"source", "schema", "low_level", "gpu", "shader", 
 _TEXT_FAMILIES = frozenset({
     "source", "schema", "markup", "stylesheet", "documentation", "data",
     "configuration", "build", "low_level", "gpu", "shader", "notebook", "game_source", "localization",
+    "hardware",
 })
 _EXTRA_TEXT_FILENAMES = frozenset({
     ".env", ".npmrc", ".yarnrc", ".editorconfig", ".gitignore", ".gitattributes",

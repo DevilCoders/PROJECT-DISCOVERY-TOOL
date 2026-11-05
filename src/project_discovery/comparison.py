@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+from .analyzers.integration_analyzer import EndpointIndex, normalize_route
 
 
 SUPPORTED_REPORT_SCHEMA_MAJOR = "1"
@@ -63,6 +66,97 @@ def _resolved_dependency_versions(report: dict[str, Any]) -> dict[str, set[str]]
                 if package and version:
                     resolved[package].add(version)
     return dict(resolved)
+
+
+MAX_EDGE_EVIDENCE = 25
+
+
+def _integration_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """The scan's integration points; endpoints fall back to API findings for older reports."""
+    summary = report.get("metrics", {}).get("code_index", {}).get("integration") or {}
+    endpoints = list(summary.get("endpoints") or [])
+    if not endpoints:
+        for item in report.get("findings", []):
+            if not str(item.get("title", "")).startswith("API route declarations:"):
+                continue
+            for evidence in item.get("evidence", []):
+                location, _, rest = str(evidence).partition(" ")
+                method, _, route = rest.partition(" ")
+                if route:
+                    endpoints.append({"method": method.upper(), "path": normalize_route(route),
+                                      "file": location.rsplit(":", 1)[0]})
+    return {
+        "packages": list(summary.get("packages") or []), "endpoints": endpoints,
+        "http_calls": list(summary.get("http_calls") or []), "topics": list(summary.get("topics") or []),
+        "grpc": dict(summary.get("grpc") or {}),
+    }
+
+
+def _package_key(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name.strip().lower())
+
+
+def integration_map(reports: list[dict[str, Any]], projects: list[dict[str, Any]]) -> dict[str, Any]:
+    """Edges between projects: package dependencies, HTTP calls to served endpoints, topics
+    one project publishes and another consumes, and gRPC services one serves and another calls."""
+    summaries = [_integration_summary(report) for report in reports]
+    declared = [{_package_key(name) for name in _declared_dependencies(report)} for report in reports]
+    labels = [str(project["root"]) for project in projects]
+    edges: list[dict[str, Any]] = []
+    for provider_index, provider in enumerate(summaries):
+        index = EndpointIndex([(item.get("method", ""), item.get("path", "")) for item in provider["endpoints"]])
+        services = {name.rsplit(".", 1)[-1] for name in provider["grpc"].get("service", [])} | set(
+            provider["grpc"].get("server", []))
+        produced = {(item["name"], item.get("system", "")) for item in provider["topics"]
+                    if item.get("role") in {"produce", "declare"}}
+        for consumer_index, consumer in enumerate(summaries):
+            if provider_index == consumer_index:
+                continue
+            provider_label, consumer_label = labels[provider_index], labels[consumer_index]
+            packages = sorted({item["name"] for item in provider["packages"]
+                               if _package_key(item["name"]) in declared[consumer_index]})
+            if packages:
+                edges.append({"from": consumer_label, "to": provider_label, "kind": "package_dependency",
+                              "count": len(packages), "evidence": packages[:MAX_EDGE_EVIDENCE],
+                              "confidence": "CONFIRMED"})
+            calls = []
+            for call in consumer["http_calls"]:
+                hit = index.match(call.get("method", ""), call.get("path", ""))
+                if hit:
+                    calls.append(f"{call.get('method')} {call.get('path')}"
+                                 + (f" on {call['host']}" if call.get("host") else "")
+                                 + f" ({call.get('file')}) -> {hit[0]} {hit[1]} [{hit[2]}]")
+            if calls:
+                edges.append({"from": consumer_label, "to": provider_label, "kind": "http_api", "count": len(calls),
+                              "evidence": calls[:MAX_EDGE_EVIDENCE], "confidence": "INFERRED"})
+            topics = sorted({
+                f"{item['name']} ({item.get('system') or system})" for item in consumer["topics"]
+                if item.get("role") in {"consume", "declare"}
+                for name, system in produced
+                if item["name"] == name and (not item.get("system") or not system or item.get("system") == system
+                                             or "pub/sub" in {item.get("system"), system})
+            })
+            if topics:
+                edges.append({"from": provider_label, "to": consumer_label, "kind": "messaging", "count": len(topics),
+                              "evidence": topics[:MAX_EDGE_EVIDENCE], "confidence": "INFERRED"})
+            grpc = sorted(services & set(consumer["grpc"].get("client", [])))
+            if grpc:
+                edges.append({"from": consumer_label, "to": provider_label, "kind": "grpc", "count": len(grpc),
+                              "evidence": grpc[:MAX_EDGE_EVIDENCE], "confidence": "INFERRED"})
+    return {
+        "edges": edges,
+        "projects": [
+            {"root": labels[index], "packages": [item["name"] for item in summary["packages"]][:20],
+             "endpoints": len(summary["endpoints"]), "http_calls": len(summary["http_calls"]),
+             "topics": len(summary["topics"]), "grpc_services": len(summary["grpc"].get("service", []))}
+            for index, summary in enumerate(summaries)
+        ],
+        "interpretation": (
+            "`from` depends on or calls `to`; for messaging, `from` publishes what `to` consumes. Package edges are "
+            "CONFIRMED declarations; HTTP, messaging and gRPC edges are INFERRED from literal paths, topic and "
+            "service names and need confirmation of deployment and configuration."
+        ),
+    }
 
 
 def compare_reports(
@@ -139,6 +233,9 @@ def compare_reports(
         "shared_api_evidence": shared_api_evidence,
         "resolved_dependency_overlap": resolved_overlap,
         "duplicate_file_content": duplicate_content,
+        "integration_map": integration_map(
+            [left, right], [{"root": left.get("root")}, {"root": right.get("root")}],
+        ),
         "interpretation": {
             "shared_dependencies": "CONFIRMED declarations; not proof of compatible versions or runtime use.",
             "shared_module_names": "INFERRED naming overlap; not proof of equivalent implementation.",
@@ -238,6 +335,7 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "pairwise_comparisons": pairwise,
         "duplicate_file_content": duplicates,
+        "integration_map": integration_map(reports, projects),
         "interpretation": {
             "shared_dependencies": "CONFIRMED declarations; not proof of compatible versions or runtime use.",
             "shared_module_names": "INFERRED naming overlap; not proof of equivalent implementation.",
@@ -340,6 +438,16 @@ def write_comparison(
                     f"- {item['sha256']}: A={', '.join(item['left_paths'])}; "
                     f"B={', '.join(item['right_paths'])}"
                 )
+        mapping = comparison.get("integration_map") or {}
+        lines.extend(["", "## Integration map", ""])
+        if mapping.get("edges"):
+            for edge in mapping["edges"]:
+                lines.append(f"- {edge['from']} → {edge['to']}: {edge['kind']} ({edge['count']}, {edge['confidence']})")
+                lines.extend(f"  - {item}" for item in edge["evidence"][:10])
+        else:
+            lines.append("- No package, HTTP, messaging or gRPC links were found between the projects.")
+        if mapping.get("interpretation"):
+            lines.extend(["", f"> {mapping['interpretation']}"])
         lines.extend([
             "",
             "> Similarity is evidence for review, not a recommendation to merge independent projects.",

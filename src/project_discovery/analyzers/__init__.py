@@ -50,8 +50,13 @@ def builtin_analyzers() -> list[Analyzer]:
     from .deployment_analyzer import DeploymentIntelligenceAnalyzer
     from .docs_analyzer import MarkdownAnalyzer
     from .document_analyzer import DocumentAnalyzer
+    from .embedded_analyzer import EmbeddedAnalyzer
+    from .firmware_analyzer import FirmwareAnalyzer
+    from .frontend_analyzer import FrontendAnalyzer
     from .game_engine_analyzer import GameEngineIntelligenceAnalyzer
+    from .hdl_analyzer import HardwareDescriptionAnalyzer
     from .identity_analyzer import IdentityIntelligenceAnalyzer
+    from .integration_analyzer import IntegrationAnalyzer
     from .license_analyzer import LicenseAnalyzer
     from .localization_analyzer import LocalizationAnalyzer
     from .lockfile_analyzer import LockfileAnalyzer
@@ -65,11 +70,12 @@ def builtin_analyzers() -> list[Analyzer]:
     from .os_analyzer import OperatingSystemAnalyzer
     from .performance_analyzer import PerformanceHotspotAnalyzer
     from .prisma_analyzer import PrismaSchemaAnalyzer
-    from .resource_analyzer import ResourceManagementAnalyzer
     from .python_analyzer import PythonAnalyzer
+    from .resource_analyzer import ResourceManagementAnalyzer
     from .ros_analyzer import ROSIntelligenceAnalyzer
     from .secure_code_analyzer import SecureCodePatternAnalyzer
     from .security_analyzer import SecretPatternAnalyzer
+    from .shader_analyzer import ShaderAnalyzer
     from .sql_analyzer import SQLSchemaAnalyzer
     from .test_analyzer import TestDiscoveryAnalyzer
     from .tree_sitter_analyzer import TreeSitterAnalyzer
@@ -84,6 +90,12 @@ def builtin_analyzers() -> list[Analyzer]:
         ResourceManagementAnalyzer(),
         TypeSystemAnalyzer(),
         DataFlowAnalyzer(),
+        EmbeddedAnalyzer(),
+        FirmwareAnalyzer(),
+        HardwareDescriptionAnalyzer(),
+        ShaderAnalyzer(),
+        FrontendAnalyzer(),
+        IntegrationAnalyzer(),
         MarkdownAnalyzer(),
         DocumentAnalyzer(),
         DeploymentIntelligenceAnalyzer(),

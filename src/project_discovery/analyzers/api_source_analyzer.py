@@ -5,6 +5,7 @@ import ast
 import re
 from pathlib import Path
 
+from .. import code_facts
 from .base import Analyzer
 from ..models import FileRecord, Finding
 from ..language_catalog import source_extensions, source_language_names
@@ -203,6 +204,9 @@ class APIEndpointAnalyzer(Analyzer):
                 )]
 
         unique = sorted(set(routes), key=lambda item: (item[2], item[0], item[1]))
+        for method, route, line in unique[:500]:
+            # Provided endpoints, for the scan's integration summary and cross-project maps.
+            code_facts.emit_fact("api_endpoint", f"{str(method).upper()} {route}", line=line)
         findings: list[Finding] = []
         if unique:
             findings.append(Finding(

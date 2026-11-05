@@ -30,6 +30,12 @@ MATCH_ONLY = {
     "project_discovery.code_model.lexical._ARROW_AFTER": (
         "matched once after the closing parenthesis of a `const x = (` candidate"
     ),
+    "project_discovery.analyzers.frontend_analyzer._STRING_AT": (
+        "matched once at the value position of a `selector:`/`path:` key"
+    ),
+    "project_discovery.analyzers.hdl_analyzer._INSTANCE_NAME": (
+        "matched once after a statement's type name (and its #(...) parameters)"
+    ),
 }
 
 

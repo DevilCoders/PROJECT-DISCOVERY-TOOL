@@ -102,8 +102,11 @@ def emit_references(names) -> None:
             facts.references.add(name)
 
 
-def emit_fact(kind: str, name: str, **detail) -> None:
-    """Record a domain fact, for example ``emit_fact("component", "App", line=3)``."""
+def emit_fact(kind: str, name: str, /, **detail) -> None:
+    """Record a domain fact, for example ``emit_fact("component", "App", line=3)``.
+
+    ``kind`` and ``name`` are positional-only, so details may use those keys too.
+    """
     facts = _current()
     if facts is None:
         return

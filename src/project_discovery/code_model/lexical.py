@@ -117,6 +117,7 @@ LEXICAL_LANGUAGES: dict[str, str] = {
     "Scala": "scala", "Groovy": "groovy", "Swift": "swift", "Dart": "dart",
     "JavaScript": "js", "TypeScript": "js", "Vue": "js", "Svelte": "js", "Go": "go",
     "Rust": "rust", "PHP": "php", "Solidity": "solidity", "Zig": "zig", "WGSL": "wgsl",
+    "Arduino Sketch": "cpp",
 }
 _CONTAINER_KINDS = frozenset({
     "class", "struct", "interface", "record", "impl", "object", "trait", "enum",
