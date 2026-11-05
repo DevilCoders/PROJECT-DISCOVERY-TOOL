@@ -296,7 +296,7 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
         f"{selected_vcs}|{safe_identity}".encode("utf-8")
     ).hexdigest()[:10]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", repository_name).strip("-.")[:48] or "repository"
-    insecure = scheme in {"git", "http", "svn", "tcp", "pserver"}
+    insecure = scheme in {"git", "http", "svn", "bzr", "tcp", "pserver"}
     return RemoteTarget(
         input_url=raw,
         clone_url=clone_url,
@@ -800,7 +800,7 @@ def _jj_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, timeo
         timeout=timeout, env=environment, label="Jujutsu Git-backed clone",
     )
     revision = _run(
-        ["jj", "--repository", str(repository), "log", "-r", "@", "--no-graph", "-T", "commit_id ++ '\\n'"],
+        ["jj", "--repository", str(repository), "log", "-r", "@", "--no-graph", "-T", "commit_id"],
         timeout=timeout, env=environment, label="Jujutsu revision lookup",
     ).stdout.decode("utf-8", errors="replace").strip()
     _copy_tree_without_metadata(
