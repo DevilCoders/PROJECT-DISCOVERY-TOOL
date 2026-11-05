@@ -160,8 +160,6 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
         clone_url = raw[4:]
     elif raw.lower().startswith("svn://"):
         selected_vcs = "svn" if vcs == "auto" else vcs
-    elif raw.lower().startswith("hg://"):
-        selected_vcs = "hg" if vcs == "auto" else vcs
 
     if selected_vcs == "auto":
         selected_vcs = "git"
@@ -278,7 +276,7 @@ def load_remote_targets(path: Path, *, vcs: str = "auto") -> list[RemoteTarget]:
             target = parse_remote_target(value, vcs=vcs)
         except RemoteScanError as exc:
             raise RemoteScanError(f"{source}:{line_number}: {exc}") from exc
-        key = target.clone_url.casefold()
+        key = target.identity
         if key in seen:
             continue
         seen.add(key)
