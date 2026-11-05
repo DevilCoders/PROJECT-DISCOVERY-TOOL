@@ -187,12 +187,12 @@ The baseline is not production-ready:
 - [x] Inspect Git remotes and fingerprint GitHub, GitLab, Bitbucket, Azure Repos, AWS CodeCommit, Google Cloud Source Repositories, SourceHut and selected self-hosted hosts.
 - [x] Detect Git HEAD references, detached HEAD, shallow clone boundaries, packed refs, branch config sections, submodule declarations and Git LFS rules.
 - [x] Add initial Mercurial, Subversion, Bazaar, Darcs, Jujutsu, Pijul, CVS and Perforce metadata markers.
-- [x] Add online repository scanning for Git hosts and native VCS backends: Git, Mercurial, Subversion, Bazaar/Breezy, Darcs, Git-backed Jujutsu, Pijul, CVS and Perforce.
-- [x] Add `pdt scan <target-url>` for a single repository and `pdt scan --url <file.txt>` for mixed-provider/mixed-VCS batches, per-target report directories and failure isolation.
+- [x] Add online repository scanning for Git hosts and native VCS backends: Git, Mercurial, Subversion, Bazaar/Breezy, Darcs, Git-backed Jujutsu, Pijul, CVS, Perforce and Fossil SCM.
+- [x] Add `pdt scan <target-url>` for a single repository and `pdt scan --url <file.txt>` for mixed-provider/mixed-VCS batches, per-target report directories and failure isolation; `pdt capabilities` reports installed native VCS clients.
 - [x] Detect GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines, Jenkins, CircleCI, Buildkite, Travis, Drone, Woodpecker and AppVeyor definitions.
 - [x] Detect AWS CodeBuild/CodeDeploy/CDK/SAM, Google Cloud Build, Firebase and selected deployment markers.
 - [ ] Deeply decode SVN working-copy SQLite metadata, Mercurial revlogs, specialized Jujutsu/Pijul layouts and Perforce workspaces.
-- [ ] Add configurable provider fingerprints for GitHub Enterprise, GitLab self-managed, Bitbucket Data Center, Azure DevOps Server, Gitea/Forgejo, Gerrit and Gitolite.
+- [ ] Add configurable provider fingerprints for GitHub Enterprise, GitLab self-managed, Bitbucket Data Center, Azure DevOps Server, Gitea/Forgejo, Gerrit and Gitolite. Current host heuristics are present but are not operator-configurable.
 - [ ] Correlate remotes, submodules, package registries, CI workflows and cloud deployment manifests into a provenance graph.
 - [ ] Add bare repositories, worktrees, nested repositories, detached/shallow clones, multiple remotes, malformed metadata and credential-bearing remote URL fixtures.
 - [ ] Verify credentials/query/fragment redaction across every report/output path.
