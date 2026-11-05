@@ -33,10 +33,23 @@ MAX_P4_LISTING_BYTES = 64 * 1024 * 1024
 MAX_P4_FILES = 50_000
 REMOTE_VCS = (
     "auto", "git", "hg", "svn", "bzr", "bazaar", "darcs",
-    "jj", "pijul", "cvs", "p4", "perforce",
+    "jj", "pijul", "cvs", "p4", "perforce", "fossil",
 )
 _VCS_ALIASES = {"bazaar": "bzr", "perforce": "p4"}
+_REMOTE_CLIENTS = {
+    "git": ("git",),
+    "hg": ("hg",),
+    "svn": ("svn",),
+    "bzr": ("brz", "bzr"),
+    "darcs": ("darcs",),
+    "jj": ("jj",),
+    "pijul": ("pijul",),
+    "cvs": ("cvs",),
+    "p4": ("p4",),
+    "fossil": ("fossil",),
+}
 _VCS_PREFIXES = (
+    ("fossil+", "fossil"),
     ("perforce+", "p4"),
     ("p4+", "p4"),
     ("cvs+", "cvs"),
@@ -69,6 +82,22 @@ _PROVIDER_HOSTS = (
 
 class RemoteScanError(ValueError):
     """A remote target could not be validated, fetched or safely materialized."""
+
+
+def remote_vcs_capabilities() -> dict[str, dict[str, str | bool | list[str] | None]]:
+    """Report installed remote VCS clients without making network requests."""
+    capabilities: dict[str, dict[str, str | bool | list[str] | None]] = {}
+    for backend, executable_names in _REMOTE_CLIENTS.items():
+        resolved = next(
+            (shutil.which(name) for name in executable_names if shutil.which(name)),
+            None,
+        )
+        capabilities[backend] = {
+            "available": resolved is not None,
+            "executable": resolved,
+            "alternatives": list(executable_names),
+        }
+    return capabilities
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +239,7 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
             raise RemoteScanError(
                 "Use an HTTPS/SSH repository URL, a Git SSH scp-style URL, or a VCS-prefixed "
                 "URL such as hg+https://, svn+https://, bzr+https://, darcs+https://, "
-                "jj+https://, pijul+https://, cvs+pserver:// or p4+ssl://."
+                "jj+https://, pijul+https://, cvs+pserver://, p4+ssl:// or fossil+https://."
             )
         parsed = urlsplit(clone_url)
         scheme = parsed.scheme.lower()
@@ -224,6 +253,7 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
             "pijul": {"https", "ssh", "http"},
             "cvs": {"pserver", "ssh"},
             "p4": {"ssl", "tcp"},
+            "fossil": {"https", "http", "ssh"},
         }
         allowed = allowed_schemes[selected_vcs]
         if scheme not in allowed:
@@ -258,6 +288,8 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto") -> RemoteTarget:
         if selected_vcs == "git":
             provider = _provider(host)
             path = _canonical_git_path(host, path, provider)
+        elif selected_vcs == "fossil":
+            provider = "Fossil server"
         else:
             provider = _provider(host)
         if selected_vcs == "cvs":
@@ -359,11 +391,12 @@ def _run(
     env: dict[str, str],
     label: str,
     check: bool = True,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, timeout=timeout, env=env, check=False,
+            stderr=subprocess.PIPE, timeout=timeout, env=env, check=False, cwd=cwd,
         )
     except FileNotFoundError as exc:
         executable = command[0]
@@ -868,6 +901,83 @@ def _cvs_checkout(target: RemoteTarget, checkout: Path, temporary: Path, *, time
     }
 
 
+def _fossil_checkout(
+    target: RemoteTarget,
+    checkout: Path,
+    temporary: Path,
+    *,
+    timeout: int,
+) -> dict:
+    """Clone a Fossil repository and open one snapshot without auto-syncing."""
+    repository = temporary / "fossil-repository.fossil"
+    environment = os.environ.copy()
+    _run(
+        ["fossil", "clone", "--once", target.clone_url, str(repository)],
+        timeout=timeout,
+        env=environment,
+        label="Fossil clone",
+    )
+    if not repository.is_file() or repository.is_symlink():
+        raise RemoteScanError("Fossil did not create the expected local repository database.")
+
+    _run(
+        [
+            "fossil", "open", str(repository),
+            "--nosync", "--workdir", str(checkout),
+        ],
+        timeout=timeout,
+        env=environment,
+        label="Fossil source checkout",
+    )
+    if not checkout.is_dir() or checkout.is_symlink():
+        raise RemoteScanError("Fossil did not create the expected source working directory.")
+
+    info = _run(
+        ["fossil", "info"],
+        timeout=timeout,
+        env=environment,
+        label="Fossil revision lookup",
+        cwd=checkout,
+    ).stdout.decode("utf-8", errors="replace")
+    branch = _run(
+        ["fossil", "branch", "current"],
+        timeout=timeout,
+        env=environment,
+        label="Fossil branch lookup",
+        cwd=checkout,
+    ).stdout.decode("utf-8", errors="replace").strip()
+    revision_match = re.search(
+        r"(?m)^checkout:\s*([0-9a-f]{40,64})(?:\s|$)",
+        info,
+        re.IGNORECASE,
+    )
+    revision = revision_match.group(1) if revision_match else None
+
+    # Fossil's per-checkout database is not project source. Remove exactly this
+    # well-known metadata file; all tracked project files remain untouched.
+    control_file = checkout / "_FOSSIL_"
+    if control_file.is_symlink():
+        control_file.unlink()
+    elif control_file.is_file():
+        control_file.unlink()
+    elif control_file.exists():
+        raise RemoteScanError("Fossil checkout metadata path is not a regular file.")
+
+    return {
+        "mode": "remote",
+        "vcs": "fossil",
+        "provider": target.provider,
+        "url": target.clone_url,
+        "repository": target.repository_name,
+        "revision": revision,
+        "branch": branch or None,
+        "history_complete": False,
+        "warnings": [
+            "Only the current Fossil checkout was analyzed; repository history was not imported into the analysis tree."
+        ],
+    }
+
+
 def _p4_checkout(target: RemoteTarget, checkout: Path, *, timeout: int) -> dict:
     parsed = urlsplit(target.clone_url)
     depot_parts = [part for part in parsed.path.split("/") if part]
@@ -993,6 +1103,8 @@ def remote_checkout(
                 metadata = _cvs_checkout(target, checkout, temporary, timeout=timeout)
             elif target.vcs == "p4":
                 metadata = _p4_checkout(target, checkout, timeout=timeout)
+            elif target.vcs == "fossil":
+                metadata = _fossil_checkout(target, checkout, temporary, timeout=timeout)
             else:
                 raise RemoteScanError(f"Unsupported remote VCS backend: {target.vcs}")
             if target.insecure_transport:
