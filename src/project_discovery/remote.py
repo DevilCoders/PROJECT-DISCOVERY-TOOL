@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterator
 from urllib.parse import urlsplit, urlunsplit
-import hashlib
 
 
 MAX_URL_FILE_BYTES = 4 * 1024 * 1024
@@ -342,7 +341,7 @@ def _ensure_safe_parent(root: Path, parent: Path) -> None:
     for component in relative.parts:
         current = current / component
         try:
-            info = current.lstat()
+            current.lstat()
         except FileNotFoundError:
             current.mkdir()
             continue
