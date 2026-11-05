@@ -47,7 +47,7 @@ from .python_graph import analyze_python_dependencies
 from .architecture_analyzer import analyze_project_architecture
 from .reporting import write_reports
 from .remote import (
-    DEFAULT_REMOTE_TIMEOUT, REMOTE_VCS, RemoteScanError, is_remote_target,
+    DEFAULT_REMOTE_TIMEOUT, REMOTE_VCS, is_remote_target,
     load_remote_targets, parse_remote_target, remote_checkout,
 )
 from .runtime_metrics import PhaseTimer, peak_rss_bytes
