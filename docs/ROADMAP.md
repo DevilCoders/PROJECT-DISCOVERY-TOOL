@@ -37,7 +37,7 @@ No scan may silently omit an entry. Exclusions, parser gaps, budget limits, unsu
 
 ## Status update — 0.2.0 (2026-11-05)
 
-The production-readiness audit ([AUDIT.md](AUDIT.md)) and its remediation landed on this branch: every recorded defect is fixed with regression tests, CI passes on Linux, Windows and macOS for CPython 3.11–3.14 (including native builds and an optional-integrations job), and the scan engine gained multi-process analysis, `--resume`, `--inventory-only`, CI exit codes and performance telemetry. Items below are ticked only where the implementation is complete and verified. Large-corpus benchmarks (2 GB–100 GB+), plugin isolation and an independent security review remain open release gates.
+The production-readiness audit ([AUDIT.md](AUDIT.md)) and its remediation landed on this branch: every recorded defect is fixed with regression tests, CI passes on Linux, Windows and macOS for CPython 3.11–3.14 (including native builds and an optional-integrations job), and the scan engine gained multi-process analysis, `--resume`, `--inventory-only`, CI exit codes and performance telemetry. Items below are ticked only where the implementation is complete and verified. Third-party plugins now run in a verified operating-system sandbox (complete on Linux and macOS, partial on Windows; see [PLUGIN_SDK.md](PLUGIN_SDK.md)). Large-corpus benchmarks (2 GB–100 GB+) and an independent security review remain open release gates.
 
 ## Current branch baseline
 
@@ -331,13 +331,13 @@ The baseline is not production-ready:
 - [ ] Analyzer conformance and regression coverage for all claimed capabilities.
 - [ ] Reproducible source/wheel builds, clean install, package metadata, dependency/license inventory and CLI smoke tests.
 - [x] Route built-in analyzer reads of scanned project files through shared descriptor-verified binary/text and bounded-reader helpers; apply private scan-time identity checks where the walker supplies them. SHA-256 and signature sampling use the same descriptor boundary; regression tests cover file replacement, symlink substitution, bounded reads and private identity serialization.
-- [ ] Add a descriptor-aware Analyzer/plugin file-access contract and migrate or reject legacy third-party path-open behavior where strict mode requires enforcement.
+- [x] Add a descriptor-aware Analyzer/plugin file-access contract and migrate or reject legacy third-party path-open behavior where strict mode requires enforcement. Isolated plugins receive verified private copies and cannot open project paths; only `--plugin-isolation off` keeps the legacy path interface.
 - [ ] Add stable Windows file identity to the Rust walker and verify scan-to-read continuity on Windows/macOS/Linux. The current Windows Rust walker does not yet supply a stable file ID; open-time `lstat`/`fstat` checks alone do not prove continuity from inventory.
 - [ ] Security review of filesystem races, symlink handling, parsers, archive streams, plugin execution, cache databases, output paths and HTML serialization.
 - [ ] Verified read-only, offline and privacy guarantees.
 - [ ] Verified secret/PII redaction across every output surface.
 - [ ] Verified 100k+ report usability and large-project performance/resource limits.
-- [ ] Plugin SDK documentation, API versioning, compatibility policy, sandbox/isolation guidance and conformance suite.
+- [ ] Plugin SDK documentation, API versioning, compatibility policy, sandbox/isolation guidance and conformance suite. Documentation, API version checks and sandbox guidance are done ([PLUGIN_SDK.md](PLUGIN_SDK.md)); a compatibility policy and a conformance suite for plugin authors are not.
 - [ ] User-facing threat model, architecture guide, support matrix, benchmark report, operations guide and release notes.
 - [ ] Production gate signed off before PR #1 can be merged.
 

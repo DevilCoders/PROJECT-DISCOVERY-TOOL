@@ -73,8 +73,24 @@ the scale and operability features needed for very large repositories.
 - `--resume` can no longer lose findings: a file is marked analyzed only after its findings
   are committed, an interrupted commit keeps its rows, and an interrupted scan saves its
   completed files (PDT-232).
+- Console status lines no longer interpret Rich markup: a path containing `[/x]` crashed the
+  scan, and plugin diagnostics could restyle `pdt capabilities` output (PDT-233).
+- The API endpoint analyzer no longer reports every CRLF source file as truncated by its scan
+  budget (PDT-234).
 
 ### Added
+- Plugin isolation (`--plugin-isolation sandbox|process|off`, default `sandbox`). PDT no longer
+  imports third-party analyzers. Each plugin runs in host processes that apply an OS sandbox,
+  verify it by attempting each forbidden action, and only then import the plugin. Linux uses
+  Landlock and seccomp-bpf; macOS uses Seatbelt; Windows uses a job object, untrusted integrity
+  and mitigation policies. Hosts get a scrubbed environment and private copies of files, and
+  talk JSON, never pickle. PDT validates, bounds, redacts and attributes their findings.
+  Crashes, timeouts (`--plugin-timeout`) and floods become `UNKNOWN` coverage findings, and a
+  plugin is disabled after three consecutive host failures. Memory is limited with
+  `--plugin-memory-mb`. Windows cannot restrict reads or network access; see
+  docs/PLUGIN_SDK.md.
+- `pdt capabilities` reports what the plugin sandbox verifies on the machine and whether each
+  plugin loads; reports record each plugin's verified sandbox in `metrics.plugin_isolation`.
 - Multi-process analysis engine (`--executor auto|process|thread`) with batched tasks, worker
   crash isolation, read-once prefetch, a shared AST memo and parallel import-graph parsing.
 - `pdt scan --resume` continues an interrupted scan; `--inventory-only` inventories without
@@ -92,7 +108,13 @@ the scale and operability features needed for very large repositories.
   of `ruff --select E9,F,B,PLE` plus an optional-integrations job.
 
 ### Changed
-- Report schema 1.4. All changes are additive: `metrics.performance`, executor and resume fields
-  in `metrics.execution`, populated `files[].sha256`, the `analysis_coverage` category and HTML
-  `totals`. Readers of 1.x reports keep working.
+- Report schema 1.5. All changes are additive: `metrics.performance`, executor and resume fields
+  in `metrics.execution`, populated `files[].sha256`, the `analysis_coverage` category, HTML
+  `totals`, `metrics.plugin_isolation`, and `origin`/`isolation` in `metrics.analyzer_registry`.
+  Readers of 1.x reports keep working.
+- Plugins run sandboxed by default. A plugin that needs other files, the network or temporary
+  files must be run with `--plugin-isolation process` or `off`. Isolated plugins cannot set
+  `Finding.analyzer`, and their text fields are redacted.
+- Built-in analyzers are imported when they are loaded, not when `project_discovery.analyzers`
+  is imported, so importing `analyzers.base` is cheap.
 - `packaging` is now a declared dependency.

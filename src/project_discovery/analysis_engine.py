@@ -129,10 +129,23 @@ def analyze_file(analyzers, locks, task: FileTask) -> FileOutcome:
     return outcome
 
 
+def analyze_tasks(analyzers, locks, tasks: Sequence[FileTask]) -> list[FileOutcome]:
+    """Analyze one batch. Isolated plugins answer supports() for the whole batch at once."""
+    records = [task.record for task in tasks]
+    for analyzer in analyzers:
+        prefilter = getattr(analyzer, "supports_many", None)
+        if prefilter is not None:
+            try:
+                prefilter(records)
+            except Exception:
+                pass  # supports() then asks per file and reports any failure for that file
+    return [analyze_file(analyzers, locks, task) for task in tasks]
+
+
 _worker_state: dict[str, Any] = {}
 
 
-def _initialize_worker(vulnerability_db: str | None) -> None:
+def _initialize_worker(vulnerability_db: str | None, plugin_setup=None) -> None:
     """Load this worker process's own analyzer instances (built-ins and plugins)."""
     # Ctrl-C reaches the whole process group. Only the coordinator handles it and stops
     # the workers itself, so workers do not die mid-queue printing KeyboardInterrupt
@@ -141,7 +154,10 @@ def _initialize_worker(vulnerability_db: str | None) -> None:
     from .analyzers import load_analyzers
     from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
 
-    analyzers = load_analyzers().analyzers
+    policy, specs = plugin_setup or (None, None)
+    # Isolated plugins were validated by the coordinator; workers only rebuild proxies,
+    # whose sandboxed hosts start on first use.
+    analyzers = load_analyzers(plugin_policy=policy, plugin_specs=specs).analyzers
     if vulnerability_db:
         analyzers.append(LocalVulnerabilityAnalyzer(Path(vulnerability_db)))
     _worker_state["analyzers"] = analyzers
@@ -168,8 +184,7 @@ def _parse_imports_batch(root: str, records: list[FileRecord]) -> list[tuple]:
 
 
 def _analyze_batch_in_worker(tasks: list[FileTask]) -> list[FileOutcome]:
-    analyzers = _worker_state["analyzers"]
-    return [analyze_file(analyzers, {}, task) for task in tasks]
+    return analyze_tasks(_worker_state["analyzers"], {}, tasks)
 
 
 class AnalysisExecutor:
@@ -183,6 +198,7 @@ class AnalysisExecutor:
         *,
         file_count: int,
         vulnerability_db: Path | None = None,
+        plugin_setup: tuple | None = None,
     ) -> None:
         if mode not in EXECUTOR_MODES:
             raise ValueError(f"--executor must be one of: {', '.join(EXECUTOR_MODES)}")
@@ -192,11 +208,21 @@ class AnalysisExecutor:
         self.workers = workers
         self._analyzers = list(analyzers)
         self._vulnerability_db = str(vulnerability_db) if vulnerability_db else None
+        # (PluginPolicy, validated PluginSpecs) for worker processes to rebuild plugins.
+        self._plugin_setup = plugin_setup
         self._locks = {
             id(analyzer): threading.Lock()
             for analyzer in self._analyzers
             if not getattr(analyzer, "concurrent_safe", True)
         }
+        if mode == "process":
+            from .plugin_isolation import IsolatedAnalyzer
+
+            # Workers start their own plugin hosts; the coordinator's load-time hosts would
+            # only sit idle (and be inherited by forked workers).
+            for analyzer in self._analyzers:
+                if isinstance(analyzer, IsolatedAnalyzer):
+                    analyzer.release_hosts()
         self._pool = self._create_pool()
 
     def _create_pool(self):
@@ -204,7 +230,7 @@ class AnalysisExecutor:
             return ProcessPoolExecutor(
                 max_workers=self.workers,
                 initializer=_initialize_worker,
-                initargs=(self._vulnerability_db,),
+                initargs=(self._vulnerability_db, self._plugin_setup),
             )
         return ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="pdt-analyzer")
 
@@ -216,10 +242,7 @@ class AnalysisExecutor:
     def submit(self, tasks: list[FileTask]) -> Future:
         if self.mode == "process":
             return self._pool.submit(_analyze_batch_in_worker, tasks)
-        return self._pool.submit(
-            lambda batch: [analyze_file(self._analyzers, self._locks, task) for task in batch],
-            tasks,
-        )
+        return self._pool.submit(analyze_tasks, self._analyzers, self._locks, tasks)
 
     def map_python_imports(self, root: Path, records: list[FileRecord]) -> Iterator[tuple]:
         """Parse Python imports in the pool; yield results in input order, bounded in flight."""
@@ -241,12 +264,23 @@ class AnalysisExecutor:
         while pending:
             yield from drain_one()
 
+    def _close_plugin_hosts(self, *, graceful: bool) -> None:
+        from .plugin_isolation import IsolatedAnalyzer
+
+        for analyzer in self._analyzers:
+            if isinstance(analyzer, IsolatedAnalyzer):
+                analyzer.close(graceful=graceful)
+
     def shutdown(self, *, cancel: bool = False) -> None:
-        if cancel and self.mode == "process":
-            # Workers hold no state the coordinator still needs, so a cancelled scan stops
-            # them now instead of waiting for their in-flight batches to finish.
-            _cancel_and_terminate(self._pool)
+        if cancel:
+            if self.mode == "process":
+                # Workers hold no state the coordinator still needs, so a cancelled scan
+                # stops them now instead of waiting for their in-flight batches to finish.
+                _cancel_and_terminate(self._pool)
+            # Killing plugin hosts unblocks threads waiting on them.
+            self._close_plugin_hosts(graceful=False)
         self._pool.shutdown(wait=True, cancel_futures=cancel)
+        self._close_plugin_hosts(graceful=not cancel)
 
     def __enter__(self) -> "AnalysisExecutor":
         return self

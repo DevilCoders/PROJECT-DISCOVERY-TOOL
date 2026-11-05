@@ -363,8 +363,8 @@ def _with_exploding_analyzer(monkeypatch):
     import project_discovery.cli as cli
     from project_discovery.analyzers import load_analyzers
 
-    def patched():
-        result = load_analyzers()
+    def patched(**options):
+        result = load_analyzers(**options)
         result.analyzers.append(_ExplodingAnalyzer())
         return result
 
@@ -517,8 +517,8 @@ def test_interrupted_scan_resumes_without_losing_findings(tmp_path: Path, monkey
     assert run_scan(project, tmp_path / "reference", {"json"}, 1, **scan) == 0
     reference = _json_report(tmp_path / "reference")
 
-    def interrupting():
-        result = load_analyzers()
+    def interrupting(**options):
+        result = load_analyzers(**options)
         result.analyzers.append(_InterruptingAnalyzer())
         return result
 

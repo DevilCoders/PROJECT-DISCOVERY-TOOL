@@ -8,10 +8,12 @@ from ..models import FileRecord, Finding
 class Analyzer(ABC):
     """Base class for local, read-only project analyzers.
 
-    Plugins run in-process with PDT permissions. Implementations must not mutate
-    target files, execute target code, or perform network access during analysis.
-    Analyzer instances may be called concurrently for different files. Plugins with
-    shared mutable state must set ``concurrent_safe = False``.
+    By default PDT runs third-party plugins in sandboxed host processes (see
+    docs/PLUGIN_SDK.md): ``analyze`` receives a private copy of one file, and the plugin
+    cannot write files, open network connections or start processes. Implementations
+    must not mutate target files, execute target code, or perform network access during
+    analysis. Analyzer instances may be called concurrently for different files.
+    In-process plugins with shared mutable state must set ``concurrent_safe = False``.
     """
 
     api_version = 1

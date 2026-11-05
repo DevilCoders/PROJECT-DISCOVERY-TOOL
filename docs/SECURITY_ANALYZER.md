@@ -16,7 +16,7 @@ Filtering:
 - Findings in test, fixture, example, sample, mock and documentation locations are kept but lowered one severity level, and the detail says so.
 
 Safety properties:
-- Matched values are never copied into findings or reports. Excerpts pass through the redactor, and again through the `CodeEvidence` model boundary for every analyzer, including third-party ones.
+- Matched values are never copied into findings or reports. Excerpts pass through the redactor, and again through the `CodeEvidence` model boundary for every analyzer, including third-party ones. For sandboxed plugins, PDT also redacts every text field of every finding.
 - Every pattern is linear-time on adversarial input. `tests/test_regex_complexity.py` times each package regex against crafted inputs, because a scanned repository is untrusted.
 - Findings are INFERRED and require manual validation; patterns can produce false positives.
 - Read failures and budget stops are reported as `UNKNOWN` coverage findings, never as clean results.

@@ -55,6 +55,30 @@ skipped; the rest are analyzed, then the import graph, architecture layout and r
 rebuilt. Files added or removed after the original traversal are not picked up: run a fresh
 scan for a current view. When no resumable inventory exists, PDT warns and starts a fresh scan.
 
+## Third-party plugins
+
+Installed analyzer plugins run in sandboxed host processes (`--plugin-isolation sandbox`, the
+default). At start-up, PDT prints one line per plugin naming the sandbox mechanisms in use and a
+warning for any restriction the platform cannot enforce. `pdt capabilities` shows the same
+information without running a scan.
+
+- A plugin that hangs is stopped after `--plugin-timeout` seconds (default 60) per request. That
+  file gets an `UNKNOWN` coverage finding, and the next file uses a new host.
+- After 3 consecutive host failures, PDT disables the plugin for the rest of the scan and says so
+  in a coverage finding. `--strict` then exits with status 3.
+- `--plugin-memory-mb` (default 4096, `0` = no limit) caps each host on Linux and Windows.
+- Each file a plugin analyzes is copied to `OUTPUT/.pdt-cache/plugins/`, one file at a time per
+  host. Files over 1 GiB are not handed to plugins. The directory is removed when the scan ends.
+- On Linux, `sandbox` mode needs Landlock (Linux 5.13+, with `landlock` in the active LSM list).
+  Without it, plugins are refused with a diagnostic. `--plugin-isolation process` runs them out of
+  process without OS restrictions, and `off` runs them inside PDT. Use either only for plugins you
+  trust.
+- On Windows, the sandbox cannot restrict file reads or network access. Prefer Linux or macOS for
+  plugins you do not fully trust.
+
+Isolation adds about 0.3–1.1 ms per file that a plugin handles (2,000 files, 4 workers, on Linux
+and Windows).
+
 ## Exit codes
 
 | Code | Meaning |

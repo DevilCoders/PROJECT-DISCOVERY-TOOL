@@ -102,6 +102,21 @@ def test_polyglot_endpoint_stream_budget_returns_unknown(tmp_path: Path, monkeyp
     findings = APIEndpointAnalyzer().analyze(path, record)
     assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
 
+
+def test_crlf_source_is_not_reported_as_truncated(tmp_path: Path, monkeypatch):
+    # PDT-234: newline translation shortens decoded CRLF text, so comparing the file size
+    # with decoded bytes reported every CRLF source file as over budget.
+    path = tmp_path / "routes.ts"
+    path.write_bytes(b"app.get('/health', handler);\r\n// comment\r\n" * 3)
+    record = FileRecord("routes.ts", path.stat().st_size, ".ts", "TypeScript")
+    findings = APIEndpointAnalyzer().analyze(path, record)
+    assert [item.title for item in findings] == ["API route declarations: routes.ts"]
+    # A budget that ends exactly at the end of the file is not a truncation either.
+    exact = len(path.read_text(encoding="utf-8").encode("utf-8"))
+    monkeypatch.setattr(api_source_analyzer, "MAX_SOURCE_ENDPOINT_SCAN_BYTES", exact)
+    assert not any("budget reached" in item.title for item in APIEndpointAnalyzer().analyze(path, record))
+
+
 def test_python_api_ast_detects_source_growth_after_inventory(tmp_path: Path, monkeypatch):
     path = tmp_path / "growing_routes.py"
     path.write_text("@app.get('/health')\\ndef health(): pass\\n", encoding="utf-8")

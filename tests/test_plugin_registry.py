@@ -1,6 +1,11 @@
 from project_discovery.analyzers import load_analyzers
 from project_discovery.analyzers.base import Analyzer
 from project_discovery.models import FileRecord
+from project_discovery.plugin_isolation import PluginPolicy
+
+# These fakes have no importable module, so they exercise in-process loading. Isolated
+# loading is covered by tests/test_plugin_isolation.py.
+IN_PROCESS = PluginPolicy(isolation="off")
 
 
 def test_builtin_registry_returns_unique_stable_names():
@@ -47,7 +52,7 @@ def test_registry_reports_invalid_plugin_without_aborting(monkeypatch):
             return object
 
     monkeypatch.setattr(registry, "entry_points", lambda **_kwargs: [EntryPoint()])
-    result = registry.load_analyzers()
+    result = registry.load_analyzers(plugin_policy=IN_PROCESS)
     assert any("broken-plugin" in item for item in result.diagnostics)
     assert any(item.name == "python-ast" for item in result.analyzers)
 
@@ -72,7 +77,7 @@ def test_registry_loads_valid_plugin_and_rejects_duplicate_names(monkeypatch):
             return CustomAnalyzer
 
     monkeypatch.setattr(registry, "entry_points", lambda **_kwargs: [EntryPoint(), EntryPoint()])
-    result = registry.load_analyzers()
+    result = registry.load_analyzers(plugin_policy=IN_PROCESS)
     assert sum(item.name == "custom-test-plugin" for item in result.analyzers) == 1
     assert any("duplicate analyzer name" in item for item in result.diagnostics)
 

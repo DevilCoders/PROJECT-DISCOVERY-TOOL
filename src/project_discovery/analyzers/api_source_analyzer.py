@@ -163,7 +163,12 @@ class APIEndpointAnalyzer(Analyzer):
                     path, encoding="utf-8", errors="replace",
                     expected_identity=record.analysis_identity,
                 ) as stream:
-                    while bytes_scanned < MAX_SOURCE_ENDPOINT_SCAN_BYTES:
+                    while True:
+                        if bytes_scanned >= MAX_SOURCE_ENDPOINT_SCAN_BYTES:
+                            # Truncated only if content remains. Comparing the file size with
+                            # decoded text undercounts CRLF files (newline translation).
+                            truncated = bool(stream.read(1))
+                            break
                         line = stream.readline(min(
                             MAX_ENDPOINT_LINE_CHARS,
                             MAX_SOURCE_ENDPOINT_SCAN_BYTES - bytes_scanned,
@@ -190,7 +195,6 @@ class APIEndpointAnalyzer(Analyzer):
                                 routes.append((method, route, line_number))
                         if line.endswith(("\n", "\r")):
                             line_number += 1
-                truncated = record.size_bytes > bytes_scanned
             except OSError as exc:
                 return [Finding(
                     "api", f"API endpoint scan unavailable: {record.path}",

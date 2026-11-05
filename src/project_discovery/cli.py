@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import platform
+import shutil
 import sqlite3
 from collections import Counter, deque
 from concurrent.futures.process import BrokenProcessPool
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -47,6 +49,9 @@ from .reporting import write_reports
 from .runtime_metrics import PhaseTimer, peak_rss_bytes
 from .scanner import discover_inventory
 from .native_backend import capabilities as native_capabilities, native_available
+from .plugin_isolation import (
+    DEFAULT_MEMORY_LIMIT_MB, DEFAULT_TIMEOUT_SECONDS, ISOLATION_MODES, PluginPolicy, probe_sandbox,
+)
 from .vulnerability_db import VulnerabilityDatabase, default_database_path
 from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
 
@@ -60,7 +65,8 @@ _verified_regular_file_stat = verified_regular_file_stat
 
 
 def _status(console: Console, label: str, message: str, style: str) -> None:
-    console.print(f"[bold {style}][ {label} ][/bold {style}] {message}")
+    # Messages carry paths and plugin text; "[...]" in them must not be read as markup.
+    console.print(f"[bold {style}][ {label} ][/bold {style}] {escape(message)}")
 
 
 _BANNER = r"""
@@ -186,6 +192,32 @@ def _resumable_walk_stats(inventory_path: Path, root: Path) -> dict | None:
     return stats if isinstance(stats, dict) else None
 
 
+def _report_plugins(console: Console, policy: PluginPolicy, analyzer_load) -> None:
+    """Say how each loaded plugin runs, and what its sandbox could not restrict."""
+    for status in analyzer_load.plugins:
+        if status.get("status") != "loaded":
+            continue
+        label = f"Plugin {status.get('name')} {status.get('version', '')}".rstrip()
+        if policy.isolation == "off":
+            _status(console, "WARNING", f"{label}: runs in-process with PDT's permissions (--plugin-isolation off)", "yellow")
+            continue
+        if policy.isolation == "process":
+            _status(console, "WARNING", f"{label}: runs in a separate process without OS restrictions", "yellow")
+            continue
+        sandbox = status.get("sandbox") or {}
+        _status(console, "INFO", f"{label}: sandboxed ({', '.join(sandbox.get('mechanisms', []))})", "cyan")
+        unrestricted = [
+            name.replace("_", " ") for name, denied in sandbox.get("restrictions", {}).items() if not denied
+        ]
+        if unrestricted:
+            _status(
+                console, "WARNING",
+                f"{label}: this platform's sandbox does not restrict {', '.join(unrestricted)}", "yellow",
+            )
+    for diagnostic in analyzer_load.diagnostics:
+        _status(console, "WARNING", diagnostic, "yellow")
+
+
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
     *, skip_oversized: bool = False, ignores: set[str] | None = None,
@@ -193,6 +225,8 @@ def run_scan(
     fail_on: str | None = None, strict: bool = False,
     quiet: bool = False, no_color: bool = False, executor: str = "auto",
     resume: bool = False, inventory_only: bool = False,
+    plugin_isolation: str = "sandbox", plugin_timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    plugin_memory_mb: int = DEFAULT_MEMORY_LIMIT_MB,
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -200,6 +234,8 @@ def run_scan(
         raise ValueError("--jobs must be 0 (automatic) or between 1 and 64")
     if fail_on is not None and fail_on not in SEVERITY_RANK:
         raise ValueError(f"--fail-on must be one of: {', '.join(SEVERITY_RANK)}")
+    # Validates the plugin options before the (potentially long) inventory walk.
+    PluginPolicy(plugin_isolation, plugin_timeout, plugin_memory_mb)
     root = root.expanduser().absolute()
     root_info = root.lstat()
     if root_info.st_mode and root.is_symlink():
@@ -263,10 +299,6 @@ def run_scan(
             )
     timer.lap("inventory")
     resumed_skipped = 0
-    analyzer_load = load_analyzers()
-    analyzers = analyzer_load.analyzers
-    if vulnerability_db is not None:
-        analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
     hardware_threads = max(1, int(native_capabilities().get("hardware_threads", os.cpu_count() or 1)))
@@ -293,11 +325,27 @@ def run_scan(
         MofNCompleteColumn(),
         TimeElapsedColumn(),
     )
-    # The worker pool serves both per-file analysis and import-graph parsing.
-    engine = AnalysisExecutor(
-        executor, worker_count, analyzers,
-        file_count=len(records), vulnerability_db=vulnerability_db,
+    plugin_work_dir = output / ".pdt-cache" / "plugins"
+    shutil.rmtree(plugin_work_dir, ignore_errors=True)  # staging left by a killed scan
+    plugin_policy = PluginPolicy(
+        plugin_isolation, plugin_timeout, plugin_memory_mb,
+        work_dir=str(plugin_work_dir), exclude_paths=(str(root), str(output)),
     )
+    analyzer_load = load_analyzers(plugin_policy=plugin_policy)
+    analyzers = analyzer_load.analyzers
+    try:
+        if vulnerability_db is not None:
+            analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
+        # The worker pool serves both per-file analysis and import-graph parsing.
+        engine = AnalysisExecutor(
+            executor, worker_count, analyzers,
+            file_count=len(records), vulnerability_db=vulnerability_db,
+            plugin_setup=(plugin_policy, analyzer_load.plugin_specs),
+        )
+    except BaseException:
+        analyzer_load.close()
+        raise
+    _report_plugins(console, plugin_policy, analyzer_load)
     try:
         with InventoryStore(inventory_path) as finding_store, ScanCache(cache_path) as cache:
             finding_store.extend_diagnostics(analyzer_load.diagnostics)
@@ -441,13 +489,16 @@ def run_scan(
             finding_store.extend_findings(graph_findings)
             finding_store.extend_findings(architecture_findings)
     except BaseException:
-        engine.shutdown(cancel=True)
+        engine.shutdown(cancel=True)  # also stops plugin hosts
+        shutil.rmtree(plugin_work_dir, ignore_errors=True)
         raise
     engine.shutdown()
+    shutil.rmtree(plugin_work_dir, ignore_errors=True)
     timer.lap("architecture")
     findings = StoredFindingRecords(inventory_path)
     errors = StoredDiagnosticRecords(inventory_path)
     domain_catalog = analyzer_domain_catalog()
+    plugin_names = {item["name"] for item in analyzer_load.plugins if item.get("status") == "loaded"}
     vcs_provider_categories = Counter(
         item.category for item in findings
         if item.category in {"vcs", "hosting_providers", "ci_cd", "cloud_services"}
@@ -527,6 +578,13 @@ def run_scan(
         "analyzer_domain_catalog": domain_catalog,
         "analyzer_domain_count": analyzer_domain_count(),
         "plugin_diagnostics": analyzer_load.diagnostics,
+        "plugin_isolation": {
+            "mode": plugin_policy.isolation,
+            "timeout_seconds": plugin_policy.timeout_seconds,
+            "memory_limit_mb": plugin_policy.memory_limit_mb or None,
+            "required_restrictions": list(plugin_policy.required),
+            "plugins": analyzer_load.plugins,
+        },
         "active_analyzer_domains": sorted({
             domain for analyzer in analyzers for domain in analyzer.domains
         }),
@@ -537,6 +595,8 @@ def run_scan(
                 "api_version": analyzer.api_version,
                 "domains": list(analyzer.domains),
                 "languages": list(analyzer.languages),
+                "origin": "plugin" if analyzer.name in plugin_names else "builtin",
+                "isolation": plugin_policy.isolation if analyzer.name in plugin_names else "in-process",
             }
             for analyzer in analyzers
         ],
@@ -671,6 +731,7 @@ def capabilities_report() -> dict:
     except ImportError:
         pass
     loaded = load_analyzers()
+    loaded.close()  # metadata only; no analysis runs here
     domains = analyzer_domain_catalog()
     return {
         "pdt_version": __version__,
@@ -689,9 +750,27 @@ def capabilities_report() -> dict:
             for analyzer in loaded.analyzers
         ],
         "plugin_diagnostics": loaded.diagnostics,
+        "plugins": loaded.plugins,
+        # A host started without a plugin shows what the default sandbox verifies here.
+        "plugin_sandbox": probe_sandbox(),
         "domain_status_counts": dict(Counter(item["status"] for item in domains)),
         "recognized_language_count": recognized_language_count(),
     }
+
+
+def _sandbox_summary(probe: dict) -> str:
+    sandbox = probe.get("sandbox") or {}
+    restrictions = sandbox.get("restrictions", {})
+    denied = [name.replace("_", " ") for name, value in restrictions.items() if value]
+    open_ = [name.replace("_", " ") for name, value in restrictions.items() if not value]
+    summary = "available" if probe.get("available") else f"unavailable ({probe.get('error')})"
+    if sandbox.get("mechanisms"):
+        summary += f" via {', '.join(sandbox['mechanisms'])}"
+    if denied:
+        summary += f"; denies {', '.join(denied)}"
+    if open_:
+        summary += f"; does not restrict {', '.join(open_)}"
+    return summary
 
 
 def main() -> None:
@@ -749,6 +828,21 @@ def main() -> None:
         "--inventory-only", action="store_true",
         help="Inventory files, directories and links without reading file contents "
              "(no hashing or content analyzers)",
+    )
+    scan.add_argument(
+        "--plugin-isolation", choices=ISOLATION_MODES, default="sandbox",
+        help="How third-party analyzer plugins run: sandbox (a separate process under a "
+             "verified OS sandbox; refused where it cannot be applied), process (a separate "
+             "process without OS restrictions) or off (in-process with PDT's permissions; "
+             "trusted plugins only). Default: sandbox",
+    )
+    scan.add_argument(
+        "--plugin-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, metavar="SECONDS",
+        help="Time a plugin may take per request before its host is stopped (default: 60)",
+    )
+    scan.add_argument(
+        "--plugin-memory-mb", type=int, default=DEFAULT_MEMORY_LIMIT_MB, metavar="MB",
+        help="Memory limit per plugin host on Linux and Windows; 0 disables it (default: 4096)",
     )
     scan.add_argument("--quiet", action="store_true", help="Suppress console output except errors")
     scan.add_argument(
@@ -836,11 +930,17 @@ def main() -> None:
                     value = "n/a" if value is None else f"{len(value)} grammar(s) provisioned locally"
                 table.add_row(name, str(value) if value else "not installed")
             table.add_row("Analyzers", f"{len(report['analyzers'])} loaded")
+            table.add_row("Plugin sandbox", escape(_sandbox_summary(report["plugin_sandbox"])))
+            for plugin in report["plugins"]:
+                table.add_row(
+                    escape(f"Plugin {plugin.get('name') or plugin.get('entry_point')}"),
+                    escape(plugin.get("status", "unknown")),
+                )
             table.add_row("Analyzer domains", ", ".join(f"{k}: {v}" for k, v in sorted(report["domain_status_counts"].items())))
             table.add_row("Recognized languages/formats", str(report["recognized_language_count"]))
             console.print(table)
             for diagnostic in report["plugin_diagnostics"]:
-                console.print("[ WARNING ] " + diagnostic)
+                console.print("[ WARNING ] " + escape(diagnostic))
             raise SystemExit(0)
         if args.command == "catalog-add":
             with ProjectCatalog(args.db) as catalog:
@@ -883,6 +983,8 @@ def main() -> None:
                 fail_on=args.fail_on, strict=args.strict,
                 quiet=args.quiet, no_color=args.no_color, executor=args.executor,
                 resume=args.resume, inventory_only=args.inventory_only,
+                plugin_isolation=args.plugin_isolation, plugin_timeout=args.plugin_timeout,
+                plugin_memory_mb=args.plugin_memory_mb,
             ))
 
         if not formats or formats - {"json", "markdown"}:
