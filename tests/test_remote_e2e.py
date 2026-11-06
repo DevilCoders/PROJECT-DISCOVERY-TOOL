@@ -71,6 +71,10 @@ def _build_repositories(base: Path) -> dict:
     small = base / "small"
     _git("init", "-q", str(small))
     _write(small / "README.md", b"small fixture\n")
+    _write(small / "package-lock.json", json.dumps({
+        "name": "small", "lockfileVersion": 3,
+        "packages": {"": {"name": "small"}, "node_modules/lodash": {"version": "4.17.20"}},
+    }).encode("utf-8"))
     _git("add", ".", cwd=small)
     _git("commit", "-q", "-m", "only", cwd=small)
 
@@ -239,3 +243,34 @@ def test_url_batch_isolates_an_unreachable_repository(git_server, tmp_path: Path
         if item["status"] == "completed":
             assert (Path(item["report_directory"]) / "discovery-report.json").is_file()
     assert "| failed |" in (output / "batch-summary.md").read_text(encoding="utf-8")
+
+
+def test_remote_scan_with_online_vulnerability_lookup(git_server, tmp_path: Path, monkeypatch):
+    from advisory_server import AdvisoryService, RunningService, ghsa_record
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    service = AdvisoryService()
+    service.affected[("npm", "lodash", "4.17.20")] = ["GHSA-35jh-r3h4-6jhm"]
+    service.records["GHSA-35jh-r3h4-6jhm"] = ghsa_record(
+        "GHSA-35jh-r3h4-6jhm", "npm", "lodash", fixed="4.17.21", cve="CVE-2021-23337",
+    )
+    output = tmp_path / "online"
+    with RunningService(service) as running:
+        monkeypatch.setenv("PDT_OSV_API_URL", running.url)
+        code = _main(
+            monkeypatch, "scan", f"{git_server['url']}/small.git", "--allow-insecure-transport",
+            "--vuln-online", "--vuln-cache", str(tmp_path / "cache.sqlite3"),
+            "--output", str(output), "--quiet", "--format", "json",
+        )
+        sent = [item["body"] for item in running.service.paths("/v1/querybatch")]
+    assert code == cli.EXIT_OK
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    assert report["metrics"]["source"]["mode"] == "remote"
+    online = report["metrics"]["vulnerability_intelligence"]["online"]
+    assert online["coverage"] == "complete" and online["vulnerable_packages"] == 1
+    matches = [item for item in report["findings"] if item["analyzer"] == "online-vulnerability-intelligence"]
+    assert matches[0]["title"].startswith("GHSA-35jh-r3h4-6jhm")
+    assert matches[0]["evidence"][0] == "package-lock.json"
+    assert sent == [{"queries": [{"package": {"ecosystem": "npm", "name": "lodash"}, "version": "4.17.20"}]}]

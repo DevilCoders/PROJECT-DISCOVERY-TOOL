@@ -234,6 +234,15 @@ The baseline is not production-ready:
 - [ ] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds.
 - [x] Include advisory snapshot provenance, import timestamp, source identity/hash, ecosystem coverage and freshness warning in reports.
 
+### Online vulnerability intelligence (opt-in)
+
+- [x] Add an explicit opt-in online advisory source, `--vuln-online`, for local paths and remote URLs: OSV.dev `/v1/querybatch` (1,000 packages per request, paginated results) and `/v1/vulns/{id}`, sending only ecosystem, package name and version, with findings built by the same code as the offline matcher. Verified against a loopback OSV/NVD/GitHub service in tests and against the real services with the opt-in live test.
+- [x] Add optional `--vuln-enrich nvd,ghsa` enrichment from NVD CVE API 2.0 and the GitHub Advisory Database (CVSS v2/v3.x/v4.0, CWE, aliases), with each service's rolling rate limit, an enrichment budget, and API keys or tokens sent only to their own host.
+- [x] Cache responses in a private SQLite file with a TTL (`--vuln-cache`, `--vuln-cache-ttl`), honor proxy variables and `--ca-bundle`, bound responses (including gzip), follow redirects only within the same host, and retry transient failures with `Retry-After` support.
+- [x] Report network failures, rate limits, timeouts, unreadable lockfiles and unavailable advisory details as `UNKNOWN` coverage findings and scan diagnostics, never as a clean result; keep local mode offline (a test runs a scan with every socket call disabled).
+- [x] Record online lookup provenance in report metrics: provider, endpoint, query time, package/advisory counts, cache hits, requests per host, retries, failures and coverage state.
+- [ ] Serve stale cache entries, clearly labelled, when the advisory service is unreachable, and let operators refresh the cache ahead of an offline scan.
+
 ## Phase 7 — Secrets, credentials and personal-data indicators
 
 - [x] Field-name indicators for first/given/middle/last/family name, username, email, phone, address, date of birth and government-ID fields.

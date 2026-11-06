@@ -61,6 +61,13 @@ from .plugin_isolation import (
 )
 from .vulnerability_db import VulnerabilityDatabase, default_database_path
 from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
+from .lockfiles import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
+from .source_utils import read_text_bounded
+from .online.cache import default_cache_path as default_vulnerability_cache_path
+from .online.http import DEFAULT_TIMEOUT as DEFAULT_NETWORK_TIMEOUT, resolve_ca_bundle, validate_service_url
+from .online.vulnerabilities import (
+    ENRICHMENT_SOURCES, LockfileSource, OnlineVulnerabilityLookup, OnlineVulnerabilityOptions,
+)
 
 
 def now() -> str:
@@ -272,6 +279,73 @@ def _remote_coverage_findings(source_metadata: dict) -> list[Finding]:
     return findings
 
 
+def _lockfile_sources(root: Path, records, skipped: list[str]):
+    """Yield the inventoried lockfiles for the online lookup, read bounded and identity-pinned."""
+    for record in records:
+        if Path(record.path).name.lower() not in LOCKFILE_NAMES:
+            continue
+        if record.content_skipped_reason:
+            skipped.append(record.path)
+            continue
+        if record.error:
+            def unreadable(error=record.error):
+                raise OSError(error)
+            yield LockfileSource(record.path, unreadable)
+            continue
+        yield LockfileSource(
+            record.path,
+            lambda record=record: read_text_bounded(
+                root / record.path, MAX_LOCKFILE_BYTES, expected_identity=record.analysis_identity,
+            ),
+        )
+
+
+def _run_online_vulnerability_lookup(
+    console: Console, options: OnlineVulnerabilityOptions, root: Path, records,
+    finding_store, *, inventory_only: bool,
+) -> dict:
+    """Run the opt-in OSV.dev lookup in the coordinator and persist its findings."""
+    if inventory_only:
+        return {"enabled": True, **options.describe(), "coverage": "skipped",
+                "reason": "inventory-only scan: lockfile contents were not read"}
+    _status(
+        console, "INFO",
+        "Online vulnerability lookup: " + options.describe()["endpoint"]
+        + " (sends package ecosystem, name and version only)", "cyan",
+    )
+    skipped: list[str] = []
+    result = OnlineVulnerabilityLookup(options).run(_lockfile_sources(root, records, skipped))
+    finding_store.extend_findings(result.findings)
+    finding_store.extend_diagnostics(result.diagnostics)
+    status = result.status
+    if skipped:
+        status["lockfiles_content_skipped"] = len(skipped)
+        finding_store.append_finding(Finding(
+            "vulnerabilities",
+            f"Lockfile(s) not checked online because of --skip: {len(skipped):,}",
+            f"{len(skipped):,} lockfile(s) exceeded --max-file-mb and their content was skipped by "
+            "request, so their packages were not looked up. This is not evidence that they are "
+            "free of known vulnerabilities.",
+            confidence="UNKNOWN", evidence=skipped[:20], analyzer="online-vulnerability-intelligence",
+            severity="LOW",
+        ))
+    if status.get("coverage") in {"partial", "unavailable"}:
+        _status(
+            console, "WARNING",
+            f"Online vulnerability lookup is {status['coverage']}: "
+            f"{status.get('packages_failed', 0):,} package(s) could not be checked; "
+            "see the UNKNOWN findings.", "yellow",
+        )
+    else:
+        _status(
+            console, "INFO",
+            f"Online vulnerability lookup: {status.get('packages_queried', 0):,} package(s) checked, "
+            f"{status.get('vulnerable_packages', 0):,} with known advisories "
+            f"({status.get('cache', {}).get('hits', 0):,} cache hits).", "cyan",
+        )
+    return status
+
+
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
     *, skip_oversized: bool = False, ignores: set[str] | None = None,
@@ -283,6 +357,7 @@ def run_scan(
     plugin_memory_mb: int = DEFAULT_MEMORY_LIMIT_MB,
     source_metadata: dict | None = None,
     display_root: str | None = None,
+    online_vulnerabilities: OnlineVulnerabilityOptions | None = None,
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -321,6 +396,13 @@ def run_scan(
                 "enabled": True,
                 **advisory_store.status(),
             }
+    vulnerability_db_status["sources"] = (["local-database"] if vulnerability_db is not None else []) + (
+        ["osv.dev"] if online_vulnerabilities is not None else []
+    )
+    if online_vulnerabilities is not None and online_vulnerabilities.cache_path is not None:
+        cache_location = online_vulnerabilities.cache_path.expanduser().resolve()
+        if cache_location == root or root in cache_location.parents:
+            raise ValueError("The online vulnerability cache must be outside the analyzed project.")
 
     _render_banner(console)
     if source_metadata is not None:
@@ -547,6 +629,13 @@ def run_scan(
             timer.lap("cache_maintenance")
 
         with InventoryStore(inventory_path) as finding_store:
+            if online_vulnerabilities is not None:
+                # Coordinator only: worker processes never touch the network.
+                vulnerability_db_status["online"] = _run_online_vulnerability_lookup(
+                    console, online_vulnerabilities, root, records, finding_store,
+                    inventory_only=inventory_only,
+                )
+                timer.lap("online_vulnerabilities")
             if inventory_only:
                 python_graph = {"summary": {"skipped": "inventory-only scan"}}
                 graph_findings = []
@@ -757,6 +846,14 @@ def run_scan(
         str(vulnerability_db_status.get("advisory_count", 0))
         if vulnerability_db_status["enabled"] else "not configured",
     )
+    online_status = vulnerability_db_status.get("online")
+    if online_status:
+        summary.add_row(
+            "Online vulnerability lookup",
+            f"{online_status.get('packages_queried', 0):,} checked / "
+            f"{online_status.get('vulnerable_packages', 0):,} vulnerable "
+            f"({online_status.get('coverage', 'unknown')})",
+        )
     summary.add_row("VCS / hosting / delivery signals", str(metrics["vcs_provider_signal_count"]))
     console.print(summary)
     _print_security_findings(console, findings)
@@ -1091,6 +1188,33 @@ def main() -> None:
         help="Use a local OSV advisory SQLite database; scanning performs no network access",
     )
     scan.add_argument(
+        "--vuln-online", action="store_true",
+        help="Opt in to looking up lockfile packages in OSV.dev (sends only ecosystem, package "
+             "name and version; never file contents). Failures are reported as UNKNOWN coverage",
+    )
+    scan.add_argument(
+        "--vuln-enrich", default=None, metavar="SOURCES",
+        help="With --vuln-online: add CVE details from 'nvd' (NVD CVE API 2.0) and/or 'ghsa' "
+             "(GitHub Advisory Database), comma-separated. Keys: NVD_API_KEY, GITHUB_TOKEN",
+    )
+    scan.add_argument(
+        "--vuln-cache", type=Path, default=None, metavar="FILE",
+        help="With --vuln-online: SQLite response cache (default: ~/.pdt/online-vulnerability-cache.sqlite3)",
+    )
+    scan.add_argument(
+        "--vuln-cache-ttl", type=float, default=None, metavar="HOURS",
+        help="With --vuln-online: reuse cached answers for this long; 0 disables the cache (default: 24)",
+    )
+    scan.add_argument(
+        "--network-timeout", type=float, default=None, metavar="SECONDS",
+        help=f"Per-request timeout for online services (default: {DEFAULT_NETWORK_TIMEOUT:.0f})",
+    )
+    scan.add_argument(
+        "--ca-bundle", type=Path, default=None, metavar="FILE",
+        help="PEM CA bundle for HTTPS to online services (private or intercepting CAs); "
+             "certificate verification is never disabled",
+    )
+    scan.add_argument(
         "--fail-on", choices=tuple(SEVERITY_RANK), type=str.upper, default=None,
         metavar="SEVERITY",
         help="Exit with status 1 when a CONFIRMED/INFERRED finding is at or above this "
@@ -1330,6 +1454,35 @@ def main() -> None:
                 parser.error("--remote-max-gb must be greater than 0 and at most 1048576")
             if args.vuln_db is not None and not args.vuln_db.expanduser().is_file():
                 parser.error(f"--vuln-db is not a file: {args.vuln_db}")
+            online_vulnerabilities = None
+            if not args.vuln_online:
+                for option, value in (
+                    ("--vuln-enrich", args.vuln_enrich), ("--vuln-cache", args.vuln_cache),
+                    ("--vuln-cache-ttl", args.vuln_cache_ttl),
+                    ("--network-timeout", args.network_timeout), ("--ca-bundle", args.ca_bundle),
+                ):
+                    if value is not None:
+                        parser.error(f"{option} requires --vuln-online")
+            else:
+                enrich = [item.strip().lower() for item in (args.vuln_enrich or "").split(",") if item.strip()]
+                if set(enrich) - set(ENRICHMENT_SOURCES):
+                    parser.error(f"--vuln-enrich accepts: {', '.join(ENRICHMENT_SOURCES)}")
+                if args.vuln_cache_ttl is not None and not 0 <= args.vuln_cache_ttl <= 87_600:
+                    parser.error("--vuln-cache-ttl must be between 0 and 87600 hours")
+                if args.network_timeout is not None and not 0 < args.network_timeout <= 600:
+                    parser.error("--network-timeout must be greater than 0 and at most 600 seconds")
+                online_vulnerabilities = OnlineVulnerabilityOptions.from_environment(
+                    cache_path=args.vuln_cache or default_vulnerability_cache_path(),
+                    cache_ttl_hours=args.vuln_cache_ttl,
+                    ca_bundle=resolve_ca_bundle(args.ca_bundle),
+                    timeout=args.network_timeout,
+                    enrich=enrich,
+                )
+                validate_service_url(online_vulnerabilities.osv_url, label="PDT_OSV_API_URL")
+                if "nvd" in enrich:
+                    validate_service_url(online_vulnerabilities.nvd_url, label="PDT_NVD_API_URL")
+                if "ghsa" in enrich:
+                    validate_service_url(online_vulnerabilities.github_url, label="PDT_GITHUB_API_URL")
 
             scan_options = {
                 "skip_oversized": args.skip,
@@ -1346,6 +1499,7 @@ def main() -> None:
                 "plugin_isolation": args.plugin_isolation,
                 "plugin_timeout": args.plugin_timeout,
                 "plugin_memory_mb": args.plugin_memory_mb,
+                "online_vulnerabilities": online_vulnerabilities,
             }
             if remote_scan:
                 remote_options = {
@@ -1375,6 +1529,7 @@ def main() -> None:
                 resume=args.resume, inventory_only=args.inventory_only,
                 plugin_isolation=args.plugin_isolation, plugin_timeout=args.plugin_timeout,
                 plugin_memory_mb=args.plugin_memory_mb,
+                online_vulnerabilities=online_vulnerabilities,
             ))
 
         if not formats or formats - {"json", "markdown"}:

@@ -10,8 +10,12 @@ Nothing switches PDT into online mode implicitly. A local `pdt scan PATH` never 
 | Command | What PDT does | Network use |
 |---|---|---|
 | `pdt scan PATH` | Analyzes a local directory | None |
+| `pdt scan PATH --vuln-db FILE` | Adds offline advisory matching from an imported OSV snapshot | None |
+| `pdt scan PATH --vuln-online` | Adds online advisory matching for the project's lockfile packages | Package coordinates are sent to OSV.dev (and, with `--vuln-enrich`, advisory IDs to NVD/GitHub) |
 | `pdt scan URL` | Downloads one repository into a temporary directory, analyzes it, deletes the copy | The VCS client fetches the repository |
 | `pdt scan --url FILE` | Same as above for every repository listed in `FILE`, one report directory each | The VCS client fetches each repository |
+
+The options combine: `pdt scan URL --vuln-online` downloads a repository and looks its dependencies up online, and `--vuln-db` and `--vuln-online` can be used together.
 
 ## Download and analyze
 
@@ -126,7 +130,76 @@ The exit codes are the same as for local scans: `0` complete, `1` a finding at o
 - **Linux and macOS.** Clients run without a controlling terminal and are stopped as a process group. Executable bits from Git trees are preserved.
 - **Both.** `--resume` is not available for remote targets, because every run materializes a fresh copy. The fingerprint cache is not used for temporary checkouts.
 
-### Limitations
+## Online vulnerability intelligence
+
+`--vuln-online` looks up every package resolved in the project's lockfiles in [OSV.dev](https://osv.dev), the aggregated open-source vulnerability database (GitHub advisories, PyPA, RustSec, Go, npm and others). It works for local paths and for remote targets, and next to the offline `--vuln-db` matcher:
+
+```bash
+pdt scan /path/to/project --vuln-online
+pdt scan https://github.com/owner/repository --vuln-online
+pdt scan --url repositories.txt --vuln-online --vuln-enrich nvd,ghsa
+pdt scan /path/to/project --vuln-db ~/.pdt/vulnerability-advisories.sqlite3 --vuln-online
+```
+
+Without `--vuln-online` PDT never contacts an advisory service: local scans stay offline (a test opens a scan with every socket call disabled to prove it).
+
+### What is sent
+
+| Service | Requests | Data sent |
+|---|---|---|
+| OSV.dev | `POST /v1/querybatch` (up to 1,000 packages per request, `next_page_token` pages followed up to 10 times), `GET /v1/vulns/{id}` for each matched advisory | Ecosystem, package name and resolved version, for example `npm` / `lodash` / `4.17.20` (Go versions without the `v` prefix) |
+| NVD CVE API 2.0 (`--vuln-enrich nvd`) | `GET /rest/json/cves/2.0?cveId=…` | CVE IDs of matched advisories |
+| GitHub Advisory Database (`--vuln-enrich ghsa`) | `GET /advisories/{ghsa_id}` | GHSA IDs of matched advisories |
+
+File contents, file paths, lockfile names and project or repository names are never sent. Package names are: if your lockfiles name private packages, those names reach OSV.dev. The `User-Agent` is `PDT/<version> (project-discovery-tool; +https://github.com/DevilCoders/PROJECT-DISCOVERY-TOOL)`.
+
+Supported lockfiles are those of the offline matcher: `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `poetry.lock`, `Pipfile.lock`, `uv.lock`, `pdm.lock`, `composer.lock`, `Gemfile.lock`, `go.sum`, `mix.lock`, `Package.resolved`, `packages.lock.json` and `pubspec.lock`. Each is read once in the scan coordinator (bounded to 128 MiB and 250,000 packages, pinned to the inventoried file identity); worker processes never use the network.
+
+### Results
+
+OSV.dev evaluates the version against the advisory's affected ranges server side, so every match is a `CONFIRMED` finding in the `vulnerabilities` category from the `online-vulnerability-intelligence` analyzer. Findings have the same shape as offline matches: advisory ID and summary, aliases (CVE, GHSA…), severity from the record's CVSS vector or `database_specific` label, fixed-version boundary, conditional impact and remediation, and evidence naming the lockfile, package, ecosystem, resolved version and `source: OSV.dev (<host>), queried <time>`. Withdrawn advisories are skipped. When both `--vuln-db` and `--vuln-online` are used, each source reports its own matches.
+
+Enrichment adds `cvss_<version>: <score> <vector> (<source> <id>)` and `cwe: …` evidence lines. When the OSV record has no severity, the highest enriched CVSS score sets it. At most 200 identifiers are enriched per scan, interleaved per advisory so both sources contribute.
+
+### Failures are coverage gaps, never clean results
+
+| Situation | Finding (confidence `UNKNOWN`) | `--strict` |
+|---|---|---|
+| OSV.dev unreachable, TLS failure, timeout, HTTP error, rate limit beyond the retry bound | `Online vulnerability lookup failed for N package(s)` with the cause and examples (`LOW`) | Incomplete |
+| A lockfile cannot be read or parsed, or exceeds its budget | `Lockfile(s) not checked online: N` (`LOW`) | Incomplete |
+| A matched advisory's details cannot be fetched | The match stays `CONFIRMED` (ID only, `MEDIUM`), plus `Online advisory details unavailable` (`LOW`) | Incomplete |
+| More than 500,000 unique packages | `Online vulnerability lookup limit reached` (`LOW`) | Incomplete |
+| Lockfile content skipped with `--skip` | `Lockfile(s) not checked online because of --skip: N` (`LOW`) | Not affected |
+| Enrichment failed or hit its limit | `CVE/advisory enrichment incomplete` (`INFO`) | Not affected |
+
+Transient failures (timeouts, connection resets, HTTP 408/425/429/5xx) are retried three times with jittered exponential backoff, honoring `Retry-After` up to 120 seconds; a longer `Retry-After`, HTTP 4xx and TLS verification failures are not retried. `--fail-on` ignores `UNKNOWN` findings.
+
+### Options and environment
+
+| Option / variable | Default | Purpose |
+|---|---|---|
+| `--vuln-online` | off | Enable the OSV.dev lookup |
+| `--vuln-enrich nvd,ghsa` | none | Add NVD and/or GitHub Advisory details (CVSS, CWE, aliases) |
+| `--vuln-cache FILE` | `~/.pdt/online-vulnerability-cache.sqlite3` | Response cache; must be outside the analyzed project |
+| `--vuln-cache-ttl HOURS` | 24 | How long answers are reused; `0` disables the cache |
+| `--network-timeout SECONDS` | 30 | Per-request timeout |
+| `--ca-bundle FILE` | system trust store | PEM bundle for private or TLS-intercepting CAs; also read from `PDT_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and OpenSSL's `SSL_CERT_FILE` |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | none | Standard proxy settings |
+| `NVD_API_KEY` | none | NVD API key: 50 instead of 5 requests per rolling 30 seconds |
+| `PDT_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN` | none | GitHub token: 5,000 instead of 60 advisory requests per hour |
+| `PDT_OSV_API_URL`, `PDT_NVD_API_URL`, `PDT_GITHUB_API_URL` | public endpoints | Mirrors or GitHub Enterprise Server; must be `https://` (plain `http://` only for loopback hosts) |
+
+Certificate verification is never disabled, and TLS 1.2 is the minimum. Requests follow redirects only to the same scheme and host. An API key or token is sent only to its own service's host, as a header that is not forwarded on redirects, never logged, never cached and never written to reports (reports record only `nvd_api_key_used` / `github_token_used`). Rate limits are enforced client side with rolling windows: OSV.dev 20 requests per second, NVD 5 (50 with a key) per 30 seconds, GitHub 60 (5,000 with a token) per hour. Responses are capped at 32 MiB (8 MiB per advisory record), including after gzip decoding.
+
+The cache stores public advisory data and the looked-up coordinates (owner-only file permissions on POSIX); failures are never cached. A batch shares one cache, so a dependency used by many repositories is queried once.
+
+### Provenance in reports
+
+`metrics.vulnerability_intelligence.sources` lists the advisory sources used (`local-database`, `osv.dev`). `metrics.vulnerability_intelligence.online` records the provider and endpoint, enrichment sources and endpoints, whether a key or token was used, `query_started_at`/`query_finished_at`/`query_seconds`, lockfile, unique-package, queried, failed and vulnerable-package counts, advisories, findings, withdrawn records skipped, packages per ecosystem, cache statistics (`hits`, `misses`, `writes`, `ttl_seconds`), request statistics (`requests_by_host`, failures, retries, bytes, `osv_querybatch`, `osv_vulns`), enrichment status, failure reasons, and `coverage`: `complete`, `partial`, `unavailable`, `not_applicable` (no lockfiles) or `skipped` (`--inventory-only`).
+
+**Verification status.** The lookup is tested end to end against a loopback service that implements the OSV.dev, NVD and GitHub advisory endpoints (matching, privacy of the request bodies, caching, retries, rate limits, timeouts, pagination, batching, enrichment, secret isolation, proxies). An opt-in test (`PDT_LIVE_NETWORK_TESTS=1`) queries the real services; it passed against OSV.dev, NVD and the GitHub Advisory Database on 2026-11-06.
+
+## Limitations
 
 - Only one revision is analyzed; repository history is not imported, and Git clones are shallow (depth 1).
 - Git submodules, Git LFS objects and Subversion externals are inventoried but not fetched.

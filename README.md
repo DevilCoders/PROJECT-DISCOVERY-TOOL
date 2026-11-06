@@ -89,7 +89,7 @@ The current branch contains first-pass implementations of:
 - ZIP/TAR member metadata and bounded in-memory content samples without extraction, preflight index limits, and cooperative per-archive wall-time limits; archive-member secret/PII findings carry redacted line evidence, impact and remediation. Other recognized archive formats may be detection-only.
 - IPv4/IPv6/CIDR/port, URI/URL, hostname/subdomain and protocol indicators; host OS metadata and target-platform markers.
 - Initial AI/ML, ROS 1/2, mobile, game-engine, accessibility, localization, observability, coverage and VCS/hosting analysis.
-- Local-only OSV advisory database import and lockfile-based vulnerability matching when an operator supplies `--vuln-db`.
+- Local-only OSV advisory database import and lockfile-based vulnerability matching when an operator supplies `--vuln-db`, and an opt-in online lookup in OSV.dev (`--vuln-online`, optional NVD/GitHub Advisory enrichment) that sends only package coordinates.
 - JSON/Markdown reports and an offline dark HTML report with search, filters, pagination and collapsible findings.
 - A Rich CLI with an ASCII banner, progress phases, compact summary panels and TTY-aware screen clearing.
 - A multi-process analysis engine (`--executor auto|process|thread`, `--jobs 0` auto or `--jobs N`) with batched tasks, worker-crash isolation, read-once file prefetch and parallel import-graph parsing, plus a C-native OpenCL GPU byte-count path for large immutable buffers with runtime detection and C/SIMD/Python fallback.
@@ -154,6 +154,7 @@ pdt scan /path/to/project --exclude-dir node_modules --exclude-dir .cache
 pdt vuln-db import /local/advisories/osv --db ~/.pdt/vulnerability-advisories.sqlite3
 pdt vuln-db status --db ~/.pdt/vulnerability-advisories.sqlite3
 pdt scan /path/to/project --vuln-db ~/.pdt/vulnerability-advisories.sqlite3
+pdt scan /path/to/project --vuln-online --vuln-enrich nvd              # opt-in OSV.dev lookup
 pdt scan /path/to/project --fail-on HIGH --strict --quiet --no-color   # CI gate
 pdt scan /path/to/project --output /reports/project --resume          # continue an interrupted scan
 pdt scan /path/to/project --inventory-only                            # metadata only, no content reads
@@ -263,7 +264,18 @@ pdt scan /path/to/project --vuln-db ~/.pdt/vulnerability-advisories.sqlite3
 
 The initial matching layer covers ecosystems represented by supported lockfile parsers (npm, PyPI, crates.io, Go, Packagist, RubyGems, Hex, NuGet and Swift Package Manager). It evaluates OSV explicit affected-version lists and supported SEMVER/ECOSYSTEM event ranges, records aliases such as CVE/GHSA, severity and fixed-version boundaries, and includes advisory snapshot metadata in reports. Lockfile reads are capped at 128 MiB and package extraction is capped at 250,000 resolved entries per lockfile; crossing either limit produces an `UNKNOWN` finding, not a partial clean result.
 
-Confirmed advisory matches include a conditional attacker-impact explanation based on the imported advisory description and a remediation recommendation tied to its fixed-version boundary where available. Uncomparable range schemes (including commit-only GIT ranges), missing version information and parser-budget failures remain `UNKNOWN`, with manual verification guidance. A confirmed range match means the resolved version matches the imported advisory range; it does **not** prove runtime loading, reachability, exploitability or exposure. No automatic online update, hosted API, telemetry or network fallback is performed during scanning. The advisory DB is local and should be refreshed by an operator using a separately obtained, trusted advisory snapshot. Current support is partial; distro packages, OS packages, transitive resolution not represented in lockfiles and additional advisory feeds remain roadmap work.
+Confirmed advisory matches include a conditional attacker-impact explanation based on the imported advisory description and a remediation recommendation tied to its fixed-version boundary where available. Uncomparable range schemes (including commit-only GIT ranges), missing version information and parser-budget failures remain `UNKNOWN`, with manual verification guidance. A confirmed range match means the resolved version matches the imported advisory range; it does **not** prove runtime loading, reachability, exploitability or exposure. The `--vuln-db` path performs no automatic online update, hosted API call, telemetry or network fallback. The advisory DB is local and should be refreshed by an operator using a separately obtained, trusted advisory snapshot. Current support is partial; distro packages, OS packages, transitive resolution not represented in lockfiles and additional advisory feeds remain roadmap work.
+
+### Online vulnerability intelligence (opt-in)
+
+`--vuln-online` looks the same lockfile packages up in OSV.dev instead of, or in addition to, a local snapshot, for local paths and remote URLs alike. Only the ecosystem, package name and resolved version are sent; file contents, paths and project names never leave the machine. `--vuln-enrich nvd,ghsa` adds CVSS and CWE details from NVD CVE API 2.0 and the GitHub Advisory Database (keys from `NVD_API_KEY` and `GITHUB_TOKEN`, sent only to their own hosts and never written anywhere). Answers are cached in a local SQLite file for 24 hours (`--vuln-cache`, `--vuln-cache-ttl`), requests are batched (1,000 packages per OSV.dev request) and rate-limited, and the standard proxy variables and `--ca-bundle` are honored. A network failure, rate limit or timeout is reported as an `UNKNOWN` coverage finding and makes `--strict` scans incomplete; it is never reported as "no vulnerabilities". Without `--vuln-online` no advisory service is contacted.
+
+```bash
+pdt scan /path/to/project --vuln-online
+pdt scan https://github.com/owner/repository --vuln-online --vuln-enrich nvd,ghsa
+```
+
+Request formats, failure handling, every option and the provenance recorded in reports are described in the [Online Mode guide](docs/ONLINE_MODE.md#online-vulnerability-intelligence).
 
 ## Evidence and confidence
 
