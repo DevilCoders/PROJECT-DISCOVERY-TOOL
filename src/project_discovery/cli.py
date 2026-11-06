@@ -68,6 +68,12 @@ from .online.http import DEFAULT_TIMEOUT as DEFAULT_NETWORK_TIMEOUT, resolve_ca_
 from .online.vulnerabilities import (
     ENRICHMENT_SOURCES, LockfileSource, OnlineVulnerabilityLookup, OnlineVulnerabilityOptions,
 )
+from .online.http import NetworkError
+from .online.memory_scan import (
+    DEFAULT_API_MAX_BYTES, DEFAULT_API_MAX_FILE_BYTES, DEFAULT_API_MAX_FILES,
+    DEFAULT_API_MAX_REQUESTS, DEFAULT_API_WORKERS, ApiLimits, NoDownloadOptions, NoDownloadSource,
+)
+from .online.providers import API_PROVIDERS
 
 
 def now() -> str:
@@ -279,10 +285,20 @@ def _remote_coverage_findings(source_metadata: dict) -> list[Finding]:
     return findings
 
 
-def _lockfile_sources(root: Path, records, skipped: list[str]):
-    """Yield the inventoried lockfiles for the online lookup, read bounded and identity-pinned."""
+def _lockfile_sources(root: Path, records, skipped: list[str], memory_source=None):
+    """Yield the inventoried lockfiles for the online lookup, read bounded and identity-pinned.
+
+    In no-download mode the texts come from memory; a lockfile whose content was not
+    fetched (budget, rate limit) is reported as unreadable with that reason.
+    """
     for record in records:
         if Path(record.path).name.lower() not in LOCKFILE_NAMES:
+            continue
+        if record.content_skipped_reason and record.content_skipped_reason.startswith("Explicit --skip"):
+            skipped.append(record.path)
+            continue
+        if memory_source is not None:
+            yield LockfileSource(record.path, lambda path=record.path: memory_source.lockfile_text(path))
             continue
         if record.content_skipped_reason:
             skipped.append(record.path)
@@ -302,7 +318,7 @@ def _lockfile_sources(root: Path, records, skipped: list[str]):
 
 def _run_online_vulnerability_lookup(
     console: Console, options: OnlineVulnerabilityOptions, root: Path, records,
-    finding_store, *, inventory_only: bool,
+    finding_store, *, inventory_only: bool, memory_source=None,
 ) -> dict:
     """Run the opt-in OSV.dev lookup in the coordinator and persist its findings."""
     if inventory_only:
@@ -314,7 +330,9 @@ def _run_online_vulnerability_lookup(
         + " (sends package ecosystem, name and version only)", "cyan",
     )
     skipped: list[str] = []
-    result = OnlineVulnerabilityLookup(options).run(_lockfile_sources(root, records, skipped))
+    result = OnlineVulnerabilityLookup(options).run(
+        _lockfile_sources(root, records, skipped, memory_source),
+    )
     finding_store.extend_findings(result.findings)
     finding_store.extend_diagnostics(result.diagnostics)
     status = result.status
@@ -358,6 +376,7 @@ def run_scan(
     source_metadata: dict | None = None,
     display_root: str | None = None,
     online_vulnerabilities: OnlineVulnerabilityOptions | None = None,
+    memory_source: NoDownloadSource | None = None,
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -367,19 +386,29 @@ def run_scan(
         raise ValueError(f"--fail-on must be one of: {', '.join(SEVERITY_RANK)}")
     # Validates the plugin options before the (potentially long) inventory walk.
     PluginPolicy(plugin_isolation, plugin_timeout, plugin_memory_mb)
-    root = root.expanduser().absolute()
-    root_info = root.lstat()
-    if root_info.st_mode and root.is_symlink():
-        raise ValueError("The scan root itself is a symlink; pass its real directory path explicitly.")
-    root = root.resolve(strict=True)
-    if output is None:
-        project_name = root.name or "root"
-        output = root.parent / f"{project_name}-pdt-report"
-    output = output.expanduser().resolve()
-    if not root.is_dir():
-        raise NotADirectoryError(root)
-    if output == root or root in output.parents:
-        raise ValueError("Report output must be outside the analyzed project directory.")
+    if memory_source is not None:
+        # No-download mode: the root is a namespace for in-memory files, never a directory.
+        if resume:
+            raise ValueError("--resume is not available in no-download mode")
+        if output is None:
+            raise ValueError("no-download scans need an output directory")
+        root = memory_source.virtual_root
+        output = output.expanduser().resolve()
+        executor = "thread"
+    else:
+        root = root.expanduser().absolute()
+        root_info = root.lstat()
+        if root_info.st_mode and root.is_symlink():
+            raise ValueError("The scan root itself is a symlink; pass its real directory path explicitly.")
+        root = root.resolve(strict=True)
+        if output is None:
+            project_name = root.name or "root"
+            output = root.parent / f"{project_name}-pdt-report"
+        output = output.expanduser().resolve()
+        if not root.is_dir():
+            raise NotADirectoryError(root)
+        if output == root or root in output.parents:
+            raise ValueError("Report output must be outside the analyzed project directory.")
 
     # Validate the advisory database before the (potentially long) inventory walk.
     vulnerability_db_status = {"enabled": False, "advisory_count": 0}
@@ -435,13 +464,19 @@ def run_scan(
         with InventoryStore(inventory_path) as inventory_store, console.status(
             "Inventorying filesystem entries…", spinner="dots",
         ):
-            records, directories, symlinks, special_entries, walk_stats = discover_inventory(
-                root,
-                max_file_bytes=max_file_mb * 1024 * 1024,
-                skip_oversized=skip_oversized,
-                ignores=ignores,
-                store=inventory_store,
-            )
+            if memory_source is not None:
+                records, directories, symlinks, special_entries, walk_stats = memory_source.build_inventory(
+                    inventory_store, ignores=ignores,
+                    max_file_bytes=max_file_mb * 1024 * 1024, skip_oversized=skip_oversized,
+                )
+            else:
+                records, directories, symlinks, special_entries, walk_stats = discover_inventory(
+                    root,
+                    max_file_bytes=max_file_mb * 1024 * 1024,
+                    skip_oversized=skip_oversized,
+                    ignores=ignores,
+                    store=inventory_store,
+                )
     timer.lap("inventory")
     resumed_skipped = 0
     counts = Counter()
@@ -478,6 +513,13 @@ def run_scan(
     )
     analyzer_load = load_analyzers(plugin_policy=plugin_policy)
     analyzers = analyzer_load.analyzers
+    if memory_source is not None:
+        # Sandboxed plugins receive a copy of each file on disk; no-download mode never
+        # writes repository content, so only the built-in analyzers run.
+        plugin_names = {item["name"] for item in analyzer_load.plugins if item.get("status") == "loaded"}
+        if plugin_names:
+            analyzers = [item for item in analyzers if item.name not in plugin_names]
+            memory_source.excluded_plugins = sorted(plugin_names)
     try:
         if vulnerability_db is not None:
             analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
@@ -495,7 +537,7 @@ def run_scan(
     try:
         with InventoryStore(inventory_path) as finding_store, fingerprint_cache as cache:
             finding_store.extend_diagnostics(analyzer_load.diagnostics)
-            if source_metadata is not None:
+            if source_metadata is not None and memory_source is None:
                 # Missing content makes the scan incomplete (--strict); notes such as
                 # "history not imported" stay report metadata only.
                 finding_store.extend_diagnostics(source_metadata.get("coverage_gaps", []))
@@ -578,8 +620,46 @@ def run_scan(
                         persist_record(record)
                         progress.advance(task)
 
-                try:
+                def apply_memory_result(record, outcome, reason, fetched_size):
+                    walk_stats[f"file_type:{record.file_type}"] += 1
+                    if outcome is None:
+                        record.content_skipped_reason = f"no-download: {reason}"
+                        memory_source.record_skip(record, reason)
+                    else:
+                        record.analyzed = outcome.analyzed
+                        record.sha256 = outcome.digest
+                        finding_store.extend_findings(outcome.findings)
+                        if outcome.facts:
+                            finding_store.extend_code_facts(record.path, outcome.facts)
+                        finding_store.extend_diagnostics(outcome.errors)
+                        delta = fetched_size - record.size_bytes
+                        if delta:
+                            # Providers that list no sizes (GitLab): correct the aggregates.
+                            walk_stats[f"size_bucket:{record.size_bucket}"] -= 1
+                            record.size_bytes = fetched_size
+                            record.size_bucket = memory_source.size_bucket(fetched_size)
+                            walk_stats[f"size_bucket:{record.size_bucket}"] += 1
+                            walk_stats["total_bytes"] += delta
+                            for ancestor in memory_source.ancestors(record.path):
+                                finding_store.adjust_directory(ancestor, total_bytes_delta=delta)
+                    persist_record(record)
+                    progress.advance(task)
+
+                def eligible_memory_records():
                     for record in records:
+                        counts[record.language] += 1
+                        if record.error or record.content_skipped_reason or inventory_only:
+                            walk_stats[f"file_type:{record.file_type}"] += 1
+                            progress.advance(task)
+                            continue
+                        yield record
+
+                try:
+                    if memory_source is not None:
+                        memory_source.analyze_records(
+                            eligible_memory_records(), analyzers, {}, record_callback=apply_memory_result,
+                        )
+                    for record in (records if memory_source is None else ()):
                         counts[record.language] += 1
                         if record.error or record.content_skipped_reason or inventory_only:
                             progress.advance(task)
@@ -629,11 +709,15 @@ def run_scan(
             timer.lap("cache_maintenance")
 
         with InventoryStore(inventory_path) as finding_store:
+            if memory_source is not None:
+                memory_metadata = memory_source.finalize()
+                finding_store.extend_diagnostics(memory_metadata.get("coverage_gaps", []))
+                finding_store.extend_findings(_remote_coverage_findings(memory_metadata))
             if online_vulnerabilities is not None:
                 # Coordinator only: worker processes never touch the network.
                 vulnerability_db_status["online"] = _run_online_vulnerability_lookup(
                     console, online_vulnerabilities, root, records, finding_store,
-                    inventory_only=inventory_only,
+                    inventory_only=inventory_only, memory_source=memory_source,
                 )
                 timer.lap("online_vulnerabilities")
             if inventory_only:
@@ -642,7 +726,13 @@ def run_scan(
             else:
                 python_graph, graph_findings = analyze_python_dependencies(
                     root, records, finding_sink=finding_store.append_finding,
-                    import_parser=lambda items: engine.map_python_imports(root, items),
+                    import_parser=(
+                        (lambda items: engine.map_python_imports(root, items)) if memory_source is None
+                        else (lambda items: (
+                            memory_source.python_imports.get(item.path, ("read_error", "ContentNotFetched", None))
+                            for item in items
+                        ))
+                    ),
                 )
             timer.lap("python_graph")
             architecture_layout, architecture_findings = analyze_project_architecture(records)
@@ -1015,6 +1105,7 @@ def _run_remote_targets(
     remote_timeout: int,
     scan_options: dict,
     remote_options: dict | None = None,
+    no_download: NoDownloadOptions | None = None,
 ) -> int:
     """Scan one or more remote repositories, continuing after target-specific failures.
 
@@ -1032,6 +1123,8 @@ def _run_remote_targets(
         stderr=True, quiet=bool(scan_options.get("quiet")),
         no_color=True if scan_options.get("no_color") else None,
     )
+    # --quiet suppresses progress, never errors: failures and cleanup problems always print.
+    error_console = Console(stderr=True, no_color=True if scan_options.get("no_color") else None)
 
     def report_directory(target) -> Path:
         if multiple:
@@ -1065,37 +1158,49 @@ def _run_remote_targets(
 
             def cleanup_failed(message: str, entry=entry) -> None:
                 entry["cleanup_error"] = message
-                _status(console, "WARNING", message, "yellow")
+                _status(error_console, "WARNING", message, "yellow")
 
             try:
-                check_transport_policy(target, allow_insecure=allow_insecure)
-                with remote_checkout(
-                    target, timeout=remote_timeout, on_cleanup_error=cleanup_failed,
-                    **remote_options,
-                ) as checkout:
-                    entry["revision"] = checkout.metadata.get("revision")
-                    for note in checkout.metadata.get("warnings", []):
-                        _status(console, "WARNING", str(note), "yellow")
+                if no_download is not None:
+                    # Analyze through the provider API in memory; nothing is cloned.
+                    source = NoDownloadSource(target, no_download)
+                    source.open()
+                    entry["revision"] = source.metadata.get("revision")
+                    entry["acquisition"] = "api"
                     code = run_scan(
-                        checkout.path,
-                        target_output,
-                        formats,
-                        max_file_mb,
-                        source_metadata=checkout.metadata,
-                        display_root=target.clone_url,
-                        **scan_options,
+                        source.virtual_root, target_output, formats, max_file_mb,
+                        source_metadata=source.metadata, display_root=target.clone_url,
+                        memory_source=source, **scan_options,
                     )
+                else:
+                    check_transport_policy(target, allow_insecure=allow_insecure)
+                    with remote_checkout(
+                        target, timeout=remote_timeout, on_cleanup_error=cleanup_failed,
+                        **remote_options,
+                    ) as checkout:
+                        entry["revision"] = checkout.metadata.get("revision")
+                        for note in checkout.metadata.get("warnings", []):
+                            _status(console, "WARNING", str(note), "yellow")
+                        code = run_scan(
+                            checkout.path,
+                            target_output,
+                            formats,
+                            max_file_mb,
+                            source_metadata=checkout.metadata,
+                            display_root=target.clone_url,
+                            **scan_options,
+                        )
                 entry["exit_code"] = code
                 entry["status"] = _REMOTE_STATUS_BY_EXIT.get(code, "failed")
             except KeyboardInterrupt:
                 entry["status"] = "interrupted"
                 entry["exit_code"] = EXIT_INTERRUPTED
                 raise
-            except (OSError, ValueError, sqlite3.Error) as exc:
+            except (OSError, ValueError, sqlite3.Error, NetworkError) as exc:
                 entry["status"] = "failed"
                 entry["error"] = sanitize_client_output(str(exc), max_chars=4_000)
                 _status(
-                    console, "FAILED",
+                    error_console, "FAILED",
                     f"{target.provider} / {target.repository_name}: {entry['error']}", "red",
                 )
             finally:
@@ -1158,6 +1263,45 @@ def main() -> None:
         "--remote-max-gb", type=float, default=None, metavar="GIB",
         help="Stop materializing a remote repository after this much file content; the rest is "
              f"reported as a coverage gap (default: {DEFAULT_REMOTE_MAX_BYTES // 1024 ** 3})",
+    )
+    scan.add_argument(
+        "--no-download", action="store_true",
+        help="Analyze a remote GitHub, GitLab, Bitbucket Cloud or Gitea/Forgejo repository "
+             "through its provider API in memory, without cloning or writing it to disk",
+    )
+    scan.add_argument(
+        "--api-provider", choices=API_PROVIDERS, default="auto",
+        help="With --no-download: provider API to use (default: detected from the URL host)",
+    )
+    scan.add_argument(
+        "--api-url", default=None, metavar="URL",
+        help="With --no-download and one URL: API base URL (GitHub Enterprise, self-managed "
+             "GitLab, Gitea); PDT_API_URL_<HOST> sets it per host for batches",
+    )
+    scan.add_argument(
+        "--api-max-files", type=int, default=None, metavar="N",
+        help=f"With --no-download: fetch at most N file contents (default: {DEFAULT_API_MAX_FILES:,})",
+    )
+    scan.add_argument(
+        "--api-max-mb", type=int, default=None, metavar="MB",
+        help=f"With --no-download: fetch at most this much content (default: {DEFAULT_API_MAX_BYTES // 1024 ** 2})",
+    )
+    scan.add_argument(
+        "--api-max-file-mb", type=int, default=None, metavar="MB",
+        help=f"With --no-download: skip larger files (default: {DEFAULT_API_MAX_FILE_BYTES // 1024 ** 2})",
+    )
+    scan.add_argument(
+        "--api-max-requests", type=int, default=None, metavar="N",
+        help=f"With --no-download: API request budget per repository (default: {DEFAULT_API_MAX_REQUESTS:,})",
+    )
+    scan.add_argument(
+        "--api-workers", type=int, default=None, metavar="N",
+        help=f"With --no-download: parallel content requests (default: {DEFAULT_API_WORKERS})",
+    )
+    scan.add_argument(
+        "--use-credential-helper", action="store_true",
+        help="With --no-download: ask your Git credential helper for the repository host's token "
+             "(non-interactive) when no token variable is set",
     )
     scan.add_argument(
         "--allow-insecure-transport", action="store_true",
@@ -1454,15 +1598,75 @@ def main() -> None:
                 parser.error("--remote-max-gb must be greater than 0 and at most 1048576")
             if args.vuln_db is not None and not args.vuln_db.expanduser().is_file():
                 parser.error(f"--vuln-db is not a file: {args.vuln_db}")
+            no_download_options = None
+            api_options = (
+                ("--api-provider", args.api_provider != "auto"), ("--api-url", args.api_url is not None),
+                ("--api-max-files", args.api_max_files is not None),
+                ("--api-max-mb", args.api_max_mb is not None),
+                ("--api-max-file-mb", args.api_max_file_mb is not None),
+                ("--api-max-requests", args.api_max_requests is not None),
+                ("--api-workers", args.api_workers is not None),
+                ("--use-credential-helper", args.use_credential_helper),
+            )
+            if not args.no_download:
+                for option, value in api_options:
+                    if value:
+                        parser.error(f"{option} requires --no-download")
+            else:
+                if not remote_scan:
+                    parser.error("--no-download can be used only with a remote repository URL or --url FILE")
+                for option, value in (
+                    ("--remote-workdir", args.remote_workdir is not None),
+                    ("--remote-max-gb", args.remote_max_gb is not None),
+                    ("--allow-insecure-transport", args.allow_insecure_transport),
+                ):
+                    if value:
+                        parser.error(f"{option} applies to the download mode, not --no-download")
+                if args.vcs not in {"auto", "git"}:
+                    parser.error("--no-download reads Git hosting provider APIs; --vcs must be auto or git")
+                if args.api_url is not None and args.url is not None:
+                    parser.error("--api-url applies to one URL; use PDT_API_URL_<HOST> variables for --url batches")
+                if args.api_url is not None:
+                    validate_service_url(args.api_url, label="--api-url")
+                for option, value, upper in (
+                    ("--api-max-files", args.api_max_files, 10_000_000),
+                    ("--api-max-mb", args.api_max_mb, 1_048_576),
+                    ("--api-max-file-mb", args.api_max_file_mb, 102_400),
+                    ("--api-max-requests", args.api_max_requests, 10_000_000),
+                    ("--api-workers", args.api_workers, 32),
+                ):
+                    if value is not None and not 1 <= value <= upper:
+                        parser.error(f"{option} must be between 1 and {upper:,}")
+                if args.network_timeout is not None and not 0 < args.network_timeout <= 600:
+                    parser.error("--network-timeout must be greater than 0 and at most 600 seconds")
+                no_download_options = NoDownloadOptions(
+                    provider=args.api_provider,
+                    api_url=args.api_url,
+                    use_credential_helper=args.use_credential_helper,
+                    timeout=args.network_timeout or DEFAULT_NETWORK_TIMEOUT,
+                    ca_bundle=resolve_ca_bundle(args.ca_bundle),
+                    limits=ApiLimits(
+                        max_files=args.api_max_files or DEFAULT_API_MAX_FILES,
+                        max_bytes=(args.api_max_mb * 1024 ** 2) if args.api_max_mb else DEFAULT_API_MAX_BYTES,
+                        max_file_bytes=(args.api_max_file_mb * 1024 ** 2) if args.api_max_file_mb else DEFAULT_API_MAX_FILE_BYTES,
+                        max_requests=args.api_max_requests or DEFAULT_API_MAX_REQUESTS,
+                        workers=args.api_workers or DEFAULT_API_WORKERS,
+                    ),
+                )
             online_vulnerabilities = None
             if not args.vuln_online:
                 for option, value in (
                     ("--vuln-enrich", args.vuln_enrich), ("--vuln-cache", args.vuln_cache),
                     ("--vuln-cache-ttl", args.vuln_cache_ttl),
-                    ("--network-timeout", args.network_timeout), ("--ca-bundle", args.ca_bundle),
                 ):
                     if value is not None:
                         parser.error(f"{option} requires --vuln-online")
+                if not args.no_download:
+                    for option, value in (
+                        ("--network-timeout", args.network_timeout), ("--ca-bundle", args.ca_bundle),
+                    ):
+                        if value is not None:
+                            parser.error(f"{option} requires --vuln-online or --no-download")
             else:
                 enrich = [item.strip().lower() for item in (args.vuln_enrich or "").split(",") if item.strip()]
                 if set(enrich) - set(ENRICHMENT_SOURCES):
@@ -1519,6 +1723,7 @@ def main() -> None:
                     remote_timeout=remote_timeout,
                     scan_options=scan_options,
                     remote_options=remote_options,
+                    no_download=no_download_options,
                 ))
             raise SystemExit(run_scan(
                 Path(args.path), args.output, formats, args.max_file_mb,

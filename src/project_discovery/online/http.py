@@ -173,6 +173,17 @@ def _retry_after_seconds(value: str | None) -> float | None:
     return max(0.0, moment.timestamp() - time.time())
 
 
+def _reset_wait_seconds(value: str | None) -> float | None:
+    """Seconds until a rate-limit window resets (epoch-seconds or delta-seconds header)."""
+    if not value:
+        return None
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    return max(0.0, number - time.time()) if number > 1_000_000_000 else max(0.0, number)
+
+
 def _read_bounded(response, max_bytes: int) -> bytes:
     encoding = (response.headers.get("Content-Encoding") or "").lower()
     raw = response.read(max_bytes + 1)
@@ -275,12 +286,17 @@ class HttpClient:
                     return status, data, response.headers
             except urllib.error.HTTPError as exc:
                 status = exc.code
-                retry_after = _retry_after_seconds(exc.headers.get("Retry-After") if exc.headers else None)
-                remaining = (exc.headers.get("X-RateLimit-Remaining") if exc.headers else None)
+                error_headers = exc.headers or {}
+                retry_after = _retry_after_seconds(error_headers.get("Retry-After"))
+                remaining = error_headers.get("X-RateLimit-Remaining") or error_headers.get("RateLimit-Remaining")
                 exc.close()
                 if status == 404 and not_found_ok:
-                    return 404, b"", exc.headers or {}
+                    return 404, b"", error_headers
                 rate_limited = status == 429 or (status == 403 and remaining == "0")
+                if rate_limited and retry_after is None:
+                    retry_after = _reset_wait_seconds(
+                        error_headers.get("X-RateLimit-Reset") or error_headers.get("RateLimit-Reset"),
+                    )
                 if (status in _RETRY_STATUSES or rate_limited) and attempt <= self.retries:
                     if retry_after is not None and retry_after > MAX_RETRY_AFTER_SECONDS:
                         self._count(self.failures, host)

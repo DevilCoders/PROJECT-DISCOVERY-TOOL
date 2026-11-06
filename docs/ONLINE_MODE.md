@@ -14,8 +14,10 @@ Nothing switches PDT into online mode implicitly. A local `pdt scan PATH` never 
 | `pdt scan PATH --vuln-online` | Adds online advisory matching for the project's lockfile packages | Package coordinates are sent to OSV.dev (and, with `--vuln-enrich`, advisory IDs to NVD/GitHub) |
 | `pdt scan URL` | Downloads one repository into a temporary directory, analyzes it, deletes the copy | The VCS client fetches the repository |
 | `pdt scan --url FILE` | Same as above for every repository listed in `FILE`, one report directory each | The VCS client fetches each repository |
+| `pdt scan URL --no-download` | Analyzes a GitHub, GitLab, Bitbucket Cloud or Gitea/Forgejo repository through its provider API in memory: nothing is cloned or written to disk | Tree listing and file contents from the provider API |
+| `pdt scan --url FILE --no-download` | Same, for every repository in `FILE` | As above, per repository |
 
-The options combine: `pdt scan URL --vuln-online` downloads a repository and looks its dependencies up online, and `--vuln-db` and `--vuln-online` can be used together.
+Online mode therefore has two acquisition paths: **download and analyze** (the default for URLs) and **analyze without downloading** (`--no-download`). The options combine: `pdt scan URL --vuln-online` (with or without `--no-download`) also looks the repository's dependencies up online, and `--vuln-db` and `--vuln-online` can be used together.
 
 ## Download and analyze
 
@@ -154,6 +156,59 @@ The exit codes are the same as for local scans: `0` complete, `1` a finding at o
 - **Linux and macOS.** Clients run without a controlling terminal and are stopped as a process group. Executable bits from Git trees are preserved.
 - **Both.** `--resume` is not available for remote targets, because every run materializes a fresh copy. The fingerprint cache is not used for temporary checkouts.
 
+## Analyze without downloading (`--no-download`)
+
+```bash
+pdt scan https://github.com/owner/repository --no-download
+pdt scan https://gitlab.com/group/subgroup/project --no-download --ref v3.2.0
+pdt scan https://bitbucket.org/workspace/repository --no-download --inventory-only
+pdt scan https://codeberg.org/owner/repository --no-download --vuln-online
+pdt scan https://ghe.example.com/team/service --no-download --api-url https://ghe.example.com/api/v3
+pdt scan --url repositories.txt --no-download --output ./api-reports
+```
+
+`--no-download` reads one commit of the repository through the provider's REST API and streams it straight into PDT's analyzers. The repository is never cloned, archived or written to disk: the tree listing becomes PDT's inventory, and each file's content is requested, held in memory while the built-in analyzers read it (through the same verified-read layer as local scans) and then discarded. PDT writes only its usual outputs into the report directory (reports and the SQLite inventory with findings and code facts). A test runs these scans with every file write outside the report directory, every temporary-directory creation and every subprocess start turned into a failure.
+
+### Providers and requests
+
+| Provider | Default API | Requests |
+|---|---|---|
+| GitHub and GitHub Enterprise Server | `https://api.github.com`; `https://<host>/api/v3` | `GET /repos/{owner}/{repo}`, `/commits/{ref}`, `/git/trees/{tree}?recursive=1` (a truncated tree is walked directory by directory), `/git/blobs/{sha}` (raw) |
+| GitLab (gitlab.com and self-managed) | `https://gitlab.com/api/v4`; `https://<host>/api/v4` | `GET /projects/{path}`, `/repository/commits/{ref}`, `/repository/tree?recursive=true` (keyset pages via `Link`), `/repository/blobs/{sha}/raw` |
+| Bitbucket Cloud | `https://api.bitbucket.org/2.0` | `GET /repositories/{workspace}/{repo}`, `/commit/{ref}`, `/src/{commit}/?max_depth=…` (paginated by `next`), `/src/{commit}/{path}` |
+| Gitea, Forgejo (Codeberg) | `https://<host>/api/v1` | `GET /repos/{owner}/{repo}`, `/commits?sha={ref}&limit=1`, `/git/trees/{sha}?recursive=true` (paginated), `/raw/{path}?ref={sha}` |
+
+The provider is detected from the URL host (github.com, gitlab.com, bitbucket.org, codeberg.org, and host names containing `github`, `gitlab`, `gitea`, `forgejo` or `gogs`); `--api-provider github|gitlab|bitbucket|gitea` sets it for other hosts. `--api-url` sets the API base for a single URL; `PDT_API_URL_<HOST>` (for example `PDT_API_URL_GHE_EXAMPLE_COM`) sets it per host, also for batches. API URLs must use HTTPS (plain HTTP only for loopback hosts). Bitbucket Data Center/Server has a different API and is not supported here; use the download mode. `--ref` selects a branch, tag or commit as in the download mode. SSH and scp-style repository URLs map to the provider's HTTPS API.
+
+### Credentials
+
+Public repositories need no credentials (but anonymous API limits are low: GitHub allows 60 requests per hour). A token is looked up for the repository's host only, in this order:
+
+1. `PDT_API_TOKEN_<HOST>`, for any provider (for example `PDT_API_TOKEN_GITLAB_EXAMPLE_COM`);
+2. the provider's standard variables, used only for its public host: `PDT_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN` (github.com); `PDT_GITLAB_TOKEN`, `GITLAB_TOKEN` (gitlab.com); `PDT_BITBUCKET_TOKEN`, `BITBUCKET_TOKEN`, or `BITBUCKET_USERNAME` with `BITBUCKET_APP_PASSWORD` (bitbucket.org); `CODEBERG_TOKEN` (codeberg.org);
+3. with `--use-credential-helper`, your Git credential helper (`git credential fill` for `https://<host>`), run non-interactively, outside any repository, and never asked to store or erase anything.
+
+Tokens are sent as `Authorization` headers (`Bearer`, Gitea's `token`, or Basic for app passwords and helper user names) only to the configured API host, never forwarded on redirects, and never logged, cached or written to reports; reports record only `credential_source` (for example `env:GITHUB_TOKEN`). A repository that the API reports as missing produces "not found or is not accessible" with a hint to provide a token, and the target fails.
+
+### Budgets, rate limits and coverage
+
+| Budget | Default | Option |
+|---|---|---|
+| File contents fetched | 20,000 | `--api-max-files N` |
+| Total content | 512 MiB | `--api-max-mb MB` |
+| Content per file | 16 MiB | `--api-max-file-mb MB` |
+| API requests (listing, contents, symlink targets) | 15,000 | `--api-max-requests N` |
+| Parallel content requests | 8 | `--api-workers N` (1–32) |
+| Per-request timeout | 30 s | `--network-timeout SECONDS` |
+
+At most twice `--api-workers` file contents are in memory at once. A file that a budget, the rate limit or a failed request kept from being fetched stays in the inventory with a `content_skipped_reason` beginning `no-download:` and the cause. Each cause becomes a `content_not_fetched` coverage gap: an `UNKNOWN` finding and a scan diagnostic, so `--strict` reports the scan as incomplete. When the provider answers that its rate limit is exhausted (HTTP 403/429 with `X-RateLimit-Remaining: 0`, a reset more than 120 seconds away, or `Retry-After`), PDT stops requesting contents for that repository and records when the limit resets. Shorter waits are retried. A truncated tree listing, unsafe or malformed tree paths (absolute, `..`, empty components) and Git submodules are reported as coverage too.
+
+Everything that works on a local tree works here: all built-in analyzers, the Python import graph, the code index, architecture views, `--inventory-only` (one tree listing, no contents), `--exclude-dir`, `--skip`/`--max-file-mb`, `--fail-on`, `--strict` and `--vuln-online` (lockfiles are kept in memory for the lookup, up to 256 MiB in total). Two exceptions: third-party plugins are not run, because their sandbox receives a file copy on disk (reported as a `plugins_not_run` coverage gap when plugins are installed), and `--resume` is not available.
+
+Reports record `acquisition: "api"`, `written_to_disk: false`, the API provider and URL, revision, branch and default branch, `private`, `credential_source`, the budgets, `files_fetched`, `bytes_fetched`, `content_requests`, `api_requests` and per-host request statistics under `metrics.source.remote`, and `scan.network_access: ["provider-api"]`.
+
+**Verification status.** The four provider clients are tested end to end against a loopback emulation of their APIs (authentication, private repositories, pagination styles, truncated GitHub trees, unsafe paths, every budget, rate-limit and request-budget exhaustion, batches with per-host API URLs, the Git credential helper, `--vuln-online` from memory, and the no-disk-write guard). An opt-in test (`PDT_LIVE_NETWORK_TESTS=1`) reads small public repositories through the real GitHub, GitLab, Bitbucket Cloud and Codeberg (Forgejo) APIs without credentials; it passed for all four on 2026-11-06. Authenticated access to private repositories, GitHub Enterprise Server and self-managed GitLab/Gitea instances are covered by the emulation only.
+
 ## Online vulnerability intelligence
 
 `--vuln-online` looks up every package resolved in the project's lockfiles in [OSV.dev](https://osv.dev), the aggregated open-source vulnerability database (GitHub advisories, PyPA, RustSec, Go, npm and others). It works for local paths and for remote targets, and next to the offline `--vuln-db` matcher:
@@ -229,3 +284,5 @@ The cache stores public advisory data and the looked-up coordinates (owner-only 
 - Git submodules, Git LFS objects and Subversion externals are inventoried but not fetched.
 - Jujutsu support covers Git-backed repositories, and `ref` selection is not supported for it.
 - Backends other than Git have not been verified against live servers (see *Verification status*).
+- `--no-download` supports Git hosting APIs only (GitHub, GitLab, Bitbucket Cloud, Gitea/Forgejo); Bitbucket Data Center/Server and the native VCS backends need the download mode. It does not run third-party plugins, and `--resume` is not available.
+- Anonymous provider API limits are low (GitHub: 60 requests per hour); use a token for anything beyond small public repositories.
