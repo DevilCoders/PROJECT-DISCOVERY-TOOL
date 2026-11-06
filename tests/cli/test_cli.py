@@ -1,0 +1,629 @@
+from pathlib import Path
+
+import pytest
+
+from project_discovery.cli import _verified_regular_file_stat, run_scan
+
+
+def test_report_output_inside_target_is_rejected(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    with pytest.raises(ValueError, match="outside"):
+        run_scan(project, project / "reports", {"json"}, 1)
+
+
+def test_default_report_output_is_sibling_of_target(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("def greet():\n    return 'hello'\n", encoding="utf-8")
+    assert run_scan(project, None, {"json"}, 1) == 0
+    report = tmp_path / "project-pdt-report" / "discovery-report.json"
+    assert report.is_file()
+    import json
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert "analyzer_registry" in payload["metrics"]
+    assert "source_structure" in payload["metrics"]["active_analyzer_domains"]
+    assert "native_backend" in payload["metrics"]
+    assert payload["files"][0]["analyzed"] is True
+    assert "vcs_provider_signal_count" in payload["metrics"]
+    persistence = payload["metrics"]["inventory_persistence"]
+    assert persistence["enabled"] is True
+    assert persistence["integrity_check"] == "ok"
+    assert persistence["status"] == "complete"
+    assert persistence["record_count"] >= 2
+    finding_persistence = payload["metrics"]["finding_persistence"]
+    assert finding_persistence["backend"] == "sqlite"
+    assert finding_persistence["record_count"] == len(payload["findings"])
+    assert finding_persistence["deduplicate_identical"] is True
+    assert finding_persistence["public_schema_unchanged"] is True
+    database_path = tmp_path / "project-pdt-report" / ".pdt-cache" / "inventory.sqlite3"
+    assert database_path.is_file()
+    from project_discovery.inventory.store import InventoryStore
+    with InventoryStore(database_path) as store:
+        assert store.count("finding") == len(payload["findings"])
+
+
+def test_scan_writes_reports_without_touching_target(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "app.py"
+    source.write_text("def greet():\n    return 'hello'\n", encoding="utf-8")
+    before = source.read_bytes()
+    output = tmp_path / "reports"
+    assert run_scan(project, output, {"json", "markdown", "html"}, 1) == 0
+    assert source.read_bytes() == before
+    assert (output / "discovery-report.json").is_file()
+    assert (output / "discovery-report.md").is_file()
+    assert (output / "discovery-report.html").is_file()
+
+
+def test_compare_cli_writes_independent_project_report(tmp_path: Path, monkeypatch):
+    import json
+    import sys
+
+    from project_discovery.cli import main
+
+    left = tmp_path / "left.json"
+    right = tmp_path / "right.json"
+    base = {
+        "schema_version": "1.0",
+        "root": "/project",
+        "files": [],
+        "findings": [],
+        "metrics": {"languages": {}, "python_dependency_graph": {"modules": []}},
+    }
+    left.write_text(json.dumps({**base, "root": "/left"}), encoding="utf-8")
+    right.write_text(json.dumps({**base, "root": "/right"}), encoding="utf-8")
+    output = tmp_path / "comparison"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["pdt", "compare", str(left), str(right), "--output", str(output)],
+    )
+    with pytest.raises(SystemExit) as result:
+        main()
+    assert result.value.code == 0
+    assert (output / "project-comparison.json").is_file()
+
+
+def test_catalog_list_cli_without_format_argument(tmp_path: Path, monkeypatch):
+    import sys
+
+    from project_discovery.cli import main
+
+    monkeypatch.setattr(
+        sys, "argv", ["pdt", "catalog-list", "--db", str(tmp_path / "catalog.sqlite3")]
+    )
+    with pytest.raises(SystemExit) as result:
+        main()
+    assert result.value.code == 0
+
+
+def test_large_file_content_skip_is_opt_in(tmp_path: Path):
+    import json
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "large.bin").write_bytes(b"x" * (1024 * 1024 + 1))
+    default_output = tmp_path / "default-report"
+    assert run_scan(project, default_output, {"json"}, 1) == 0
+    default_payload = json.loads(
+        (default_output / "discovery-report.json").read_text(encoding="utf-8")
+    )
+    assert default_payload["files"][0]["content_skipped_reason"] is None
+    assert default_payload["metrics"]["content_skip_enabled"] is False
+
+    skip_output = tmp_path / "skip-report"
+    assert run_scan(
+        project, skip_output, {"json"}, 1, skip_oversized=True
+    ) == 0
+    skip_payload = json.loads(
+        (skip_output / "discovery-report.json").read_text(encoding="utf-8")
+    )
+    assert "Explicit --skip" in skip_payload["files"][0]["content_skipped_reason"]
+    assert skip_payload["metrics"]["oversized_files"] == 1
+    assert skip_payload["metrics"]["content_skip_enabled"] is True
+
+
+
+def test_scan_with_local_vulnerability_database_reports_advisory_match(tmp_path: Path):
+    import json
+
+    from project_discovery.vulnerabilities.database import VulnerabilityDatabase
+
+    project = tmp_path / "vulnerable-project"
+    project.mkdir()
+    (project / "package-lock.json").write_text(
+        json.dumps({
+            "packages": {
+                "": {"name": "fixture", "version": "1.0.0"},
+                "node_modules/demo-lib": {"version": "1.9.0"},
+            }
+        }),
+        encoding="utf-8",
+    )
+    feed = tmp_path / "osv-feed"
+    feed.mkdir()
+    (feed / "advisory.json").write_text(json.dumps({
+        "id": "GHSA-cli-test-1234",
+        "aliases": ["CVE-2025-77777"],
+        "summary": "Fixture vulnerability for CLI integration",
+        "database_specific": {"severity": "HIGH"},
+        "affected": [{
+            "package": {"ecosystem": "npm", "name": "demo-lib"},
+            "ranges": [{
+                "type": "SEMVER",
+                "events": [{"introduced": "1.0.0"}, {"fixed": "2.0.0"}],
+            }],
+        }],
+    }), encoding="utf-8")
+    database_path = tmp_path / "local-advisories.sqlite3"
+    with VulnerabilityDatabase(database_path) as database:
+        database.import_osv(feed)
+
+    output = tmp_path / "report"
+    assert run_scan(
+        project, output, {"json", "markdown", "html"}, 1,
+        vulnerability_db=database_path,
+    ) == 0
+    payload = json.loads(
+        (output / "discovery-report.json").read_text(encoding="utf-8")
+    )
+    matches = [item for item in payload["findings"] if item["category"] == "vulnerabilities"]
+    assert len(matches) == 1
+    assert "GHSA-cli-test-1234" in matches[0]["title"]
+    assert payload["metrics"]["vulnerability_intelligence"]["enabled"] is True
+    html = (output / "discovery-report.html").read_text(encoding="utf-8")
+    markdown = (output / "discovery-report.md").read_text(encoding="utf-8")
+    assert "GHSA-cli-test-1234" in html
+    assert "GHSA-cli-test-1234" in markdown
+
+
+def test_vuln_db_cli_import_and_status_are_local(tmp_path: Path, monkeypatch):
+    import json
+    import sys
+
+    from project_discovery.cli import main
+
+    feed = tmp_path / "osv"
+    feed.mkdir()
+    (feed / "advisory.json").write_text(json.dumps({
+        "id": "GHSA-status-1234",
+        "affected": [{
+            "package": {"ecosystem": "npm", "name": "pkg"},
+            "versions": ["1.0.0"],
+        }],
+    }), encoding="utf-8")
+    db = tmp_path / "advisories.sqlite3"
+    monkeypatch.setattr(
+        sys, "argv", ["pdt", "vuln-db", "import", str(feed), "--db", str(db)]
+    )
+    with pytest.raises(SystemExit) as imported:
+        main()
+    assert imported.value.code == 0
+
+    monkeypatch.setattr(
+        sys, "argv", ["pdt", "vuln-db", "status", "--db", str(db)]
+    )
+    with pytest.raises(SystemExit) as status:
+        main()
+    assert status.value.code == 0
+
+
+def test_scan_uses_bounded_worker_count_and_reports_it(tmp_path: Path):
+    import json
+
+    project = tmp_path / "concurrent-project"
+    project.mkdir()
+    for index in range(12):
+        (project / f"module_{index}.py").write_text(
+            f"def value_{index}(): return {index}\n", encoding="utf-8"
+        )
+    output = tmp_path / "concurrent-report"
+    assert run_scan(project, output, {"json"}, 1, jobs=2) == 0
+    payload = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    execution = payload["metrics"]["execution"]
+    assert execution["mode"] == "bounded-thread-pool"
+    assert execution["worker_count"] == 2
+    assert execution["max_pending_tasks"] == 4
+    assert execution["ordering"] == "deterministic-submission-order"
+
+
+def test_scan_rejects_unbounded_or_negative_job_counts(tmp_path: Path):
+    project = tmp_path / "bad-jobs"
+    project.mkdir()
+    with pytest.raises(ValueError, match="--jobs"):
+        run_scan(project, tmp_path / "bad-jobs-report", {"json"}, 1, jobs=65)
+    with pytest.raises(ValueError, match="--jobs"):
+        run_scan(project, tmp_path / "bad-jobs-report-2", {"json"}, 1, jobs=-1)
+
+
+def test_cli_prints_redacted_source_impact_and_remediation():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from project_discovery.cli import _print_security_findings
+    from project_discovery.models import CodeEvidence, Finding
+
+    output = StringIO()
+    console = Console(
+        file=output, force_terminal=True, color_system="truecolor", width=160
+    )
+    finding = Finding(
+        "security",
+        "Shell command execution API: src/service.py",
+        "Process execution receives untrusted input.",
+        confidence="INFERRED",
+        analyzer="secure-code-patterns",
+        severity="HIGH",
+        code_evidence=[
+            CodeEvidence(41, 'os.system(command)  # password = "do-not-display-this"')
+        ],
+        impact="An attacker may execute operating-system commands with application privileges.",
+        recommendation="Use an argument array and avoid shell interpretation.",
+    )
+    _print_security_findings(console, [finding])
+    rendered = output.getvalue()
+    assert "Shell command execution API" in rendered
+    assert "L   41" in rendered
+    assert "os.system(command)" in rendered
+    assert "do-not-display-this" not in rendered
+    assert "Attacker impact:" in rendered
+    assert "Remediation:" in rendered
+    assert "\x1b[" in rendered
+
+
+
+def test_analysis_guard_rejects_symlink_substitution(tmp_path: Path):
+    target = tmp_path / "outside.txt"
+    target.write_text("must not be analyzed", encoding="utf-8")
+    link = tmp_path / "project-file.txt"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable on this platform")
+    with pytest.raises(OSError, match="non-regular or symlink"):
+        _verified_regular_file_stat(link)
+
+
+def test_analysis_guard_detects_file_identity_change(tmp_path: Path):
+    original = tmp_path / "original.py"
+    replacement = tmp_path / "replacement.py"
+    original.write_text("print('original')", encoding="utf-8")
+    replacement.write_text("print('replacement with different size')", encoding="utf-8")
+    expected = original.lstat()
+    with pytest.raises(OSError, match="identity changed"):
+        _verified_regular_file_stat(replacement, expected)
+
+
+def test_analysis_guard_accepts_unchanged_regular_file(tmp_path: Path):
+    source = tmp_path / "stable.py"
+    source.write_text("print('stable')", encoding="utf-8")
+    expected = source.lstat()
+    current = _verified_regular_file_stat(source, expected)
+    assert current.st_ino == expected.st_ino
+
+
+def _sample_project(root: Path) -> Path:
+    root.mkdir()
+    (root / "app.py").write_text(
+        "import subprocess\n"
+        "def run(cmd):\n"
+        "    return subprocess.run(cmd, shell=True)\n",
+        encoding="utf-8",
+    )
+    (root / "settings.env").write_text("API_TOKEN=ghp_" + "A" * 36 + "\n", encoding="utf-8")
+    (root / "shared.txt").write_text("byte-identical content\n", encoding="utf-8")
+    return root
+
+
+def _json_report(output: Path) -> dict:
+    import json
+
+    return json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+
+
+def test_end_to_end_scan_runs_per_file_analyzers_and_fingerprints(tmp_path: Path):
+    # Regression: the analysis guard rejected every file, so no per-file analyzer ever ran.
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True) == 0
+    report = _json_report(tmp_path / "out")
+    analyzers = {finding["analyzer"] for finding in report["findings"]}
+    assert {"python-ast", "secure-code-patterns", "secret-patterns"} <= analyzers
+    assert report["errors"] == []
+    assert all(len(item["sha256"] or "") == 64 for item in report["files"])
+    assert all(item["analyzed"] for item in report["files"])
+
+
+def test_real_scan_reports_can_be_compared(tmp_path: Path):
+    from project_discovery.projects.comparison import compare_many_reports, load_report
+
+    for name in ("alpha", "beta"):
+        project = _sample_project(tmp_path / name)
+        assert run_scan(project, tmp_path / f"{name}-out", {"json"}, 1, quiet=True) == 0
+    comparison = compare_many_reports([
+        load_report(tmp_path / f"{name}-out" / "discovery-report.json") for name in ("alpha", "beta")
+    ])
+    duplicated = {
+        path for item in comparison["duplicate_file_content"]
+        for paths in item["projects"].values() for path in paths
+    }
+    assert {"app.py", "shared.txt", "settings.env"} <= duplicated
+
+
+class _ExplodingAnalyzer:
+    name = "exploding-test-analyzer"
+    version = "1.0"
+    api_version = 1
+    domains = ("tests",)
+    languages = ("Python",)
+    concurrent_safe = True
+
+    def supports(self, record):
+        return record.path == "app.py"
+
+    def analyze(self, path, record):
+        raise RuntimeError("synthetic analyzer failure password=hunter2hunter2")
+
+
+def _with_exploding_analyzer(monkeypatch):
+    import project_discovery.cli as cli
+    from project_discovery.analyzers import load_analyzers
+
+    def patched(**options):
+        result = load_analyzers(**options)
+        result.analyzers.append(_ExplodingAnalyzer())
+        return result
+
+    monkeypatch.setattr(cli, "load_analyzers", patched)
+
+
+def test_analyzer_failure_is_visible_and_does_not_mark_the_file_unreadable(tmp_path: Path, monkeypatch):
+    _with_exploding_analyzer(monkeypatch)
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True) == 0
+    report = _json_report(tmp_path / "out")
+    failure = next(item for item in report["findings"] if item["title"].startswith("Analyzer failed:"))
+    assert failure["confidence"] == "UNKNOWN"
+    assert "hunter2hunter2" not in str(report)
+    app = next(item for item in report["files"] if item["path"] == "app.py")
+    assert app["error"] is None and app["sha256"]
+    assert any("exploding-test-analyzer" in error for error in report["errors"])
+
+
+def test_fail_on_and_strict_exit_codes(tmp_path: Path, monkeypatch):
+    from project_discovery.cli import EXIT_FINDINGS, EXIT_INCOMPLETE
+
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "a", {"json"}, 1, quiet=True, fail_on="HIGH") == EXIT_FINDINGS
+    assert run_scan(project, tmp_path / "b", {"json"}, 1, quiet=True, fail_on="CRITICAL") == 0
+    assert run_scan(project, tmp_path / "c", {"json"}, 1, quiet=True, strict=True) == 0
+    _with_exploding_analyzer(monkeypatch)
+    assert run_scan(project, tmp_path / "d", {"json"}, 1, quiet=True, strict=True) == EXIT_INCOMPLETE
+    with pytest.raises(ValueError, match="--fail-on"):
+        run_scan(project, tmp_path / "e", {"json"}, 1, quiet=True, fail_on="SEVERE")
+
+
+def test_cli_exit_codes_for_interrupt_and_usage_errors(tmp_path: Path, monkeypatch):
+    import sys
+
+    from project_discovery import cli
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt  # Ctrl-C during a scan
+
+    monkeypatch.setattr(cli, "run_scan", interrupted)
+    monkeypatch.setattr(sys, "argv", ["pdt", "scan", str(tmp_path), "--output", str(tmp_path / "out")])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == cli.EXIT_INTERRUPTED == 130
+
+    def failing(*_args, **_kwargs):
+        raise ValueError("bad option")
+
+    monkeypatch.setattr(cli, "run_scan", failing)
+    with pytest.raises(SystemExit) as failed:
+        cli.main()
+    assert failed.value.code == cli.EXIT_USAGE == 2
+
+
+def test_missing_vulnerability_database_is_rejected_before_inventory(tmp_path: Path, monkeypatch):
+    import project_discovery.cli as cli
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("inventory must not start with an invalid --vuln-db")
+
+    monkeypatch.setattr(cli, "discover_inventory", forbidden)
+    project = _sample_project(tmp_path / "project")
+    with pytest.raises(FileNotFoundError):
+        run_scan(project, tmp_path / "out", {"json"}, 1, vulnerability_db=tmp_path / "missing.sqlite3")
+
+
+def test_security_summary_names_the_file_location(tmp_path: Path, capsys):
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, no_color=True) == 0
+    output = capsys.readouterr().err
+    assert "at settings.env:1" in output
+    assert "\x1b[" not in output
+
+
+def _finding_keys(report: dict) -> set[tuple]:
+    return {(item["analyzer"], item["title"], tuple(item["evidence"])) for item in report["findings"]}
+
+
+def test_process_and_thread_executors_produce_identical_results(tmp_path: Path):
+    project = _sample_project(tmp_path / "project")
+    (project / "pkg").mkdir()
+    for index in range(12):
+        (project / "pkg" / f"mod{index}.py").write_text(
+            f"import os\nfrom pkg import mod{(index + 1) % 12}\nos.system('echo {index}')\n",
+            encoding="utf-8",
+        )
+    (project / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    reports = {}
+    for mode in ("thread", "process"):
+        assert run_scan(project, tmp_path / mode, {"json"}, 1, quiet=True, executor=mode, jobs=2) == 0
+        reports[mode] = _json_report(tmp_path / mode)
+        assert reports[mode]["metrics"]["execution"]["executor"] == mode
+    assert _finding_keys(reports["thread"]) == _finding_keys(reports["process"])
+    assert reports["thread"]["errors"] == reports["process"]["errors"] == []
+    graph = reports["process"]["metrics"]["python_dependency_graph"]["summary"]
+    # "from pkg import modN" links each module to both pkg and pkg.modN.
+    assert graph["edge_count"] == 24 and graph["cycle_count"] == 1
+
+
+def test_inventory_only_scan_reads_no_contents(tmp_path: Path, monkeypatch):
+    import project_discovery.engine.executor as engine
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("inventory-only scans must not analyze file contents")
+
+    monkeypatch.setattr(engine, "analyze_file", forbidden)
+    project = _sample_project(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True, inventory_only=True) == 0
+    report = _json_report(tmp_path / "out")
+    assert len(report["files"]) == 3
+    assert all(item["sha256"] is None and not item["analyzed"] for item in report["files"])
+    # Only path-based correlation may contribute findings; no content analyzer runs.
+    assert {item["analyzer"] for item in report["findings"]} <= {"architecture-layout"}
+    assert report["metrics"]["execution"]["analysis_mode"] == "inventory-only"
+
+
+def test_resume_skips_completed_files_and_keeps_stored_findings(tmp_path: Path, capsys):
+    from project_discovery.inventory.store import InventoryStore, StoredFileRecords
+
+    project = _sample_project(tmp_path / "project")
+    output = tmp_path / "out"
+    # Not quiet: --quiet deliberately suppresses this warning as well.
+    assert run_scan(project, output, {"json"}, 1, no_color=True, resume=True) == 0
+    # Rich wraps console text to the terminal width.
+    assert "starting a fresh scan" in " ".join(capsys.readouterr().err.split())
+    first = _json_report(output)
+    assert first["metrics"]["execution"]["resumed"] is False
+    # Simulate an interruption after every file except app.py had completed.
+    database = output / ".pdt-cache" / "inventory.sqlite3"
+    records = StoredFileRecords(database)
+    pending = next(record for record in records if record.path == "app.py")
+    pending.sha256 = None
+    records.update_records([pending])
+    assert run_scan(project, output, {"json"}, 1, quiet=True, resume=True) == 0
+    resumed = _json_report(output)
+    execution = resumed["metrics"]["execution"]
+    assert execution["resumed"] is True and execution["resumed_files_skipped"] == 2
+    assert _finding_keys(resumed) == _finding_keys(first)
+    assert all(item["sha256"] for item in resumed["files"])
+    with InventoryStore(database) as store:
+        assert store.get_metadata("root") == str(project.resolve())
+
+
+class _InterruptingAnalyzer:
+    name = "interrupting-test-analyzer"
+    version = "1.0"
+    api_version = 1
+    domains = ("tests",)
+    languages = ("Text",)
+    concurrent_safe = True
+
+    def supports(self, record):
+        return record.path == "m6.env"
+
+    def analyze(self, path, record):
+        raise KeyboardInterrupt  # Ctrl-C arriving while this file is analyzed
+
+
+def _secret_files(root: Path, count: int = 9) -> Path:
+    root.mkdir()
+    for index in range(count):
+        (root / f"m{index}.env").write_text(f"API_TOKEN=ghp_{index}" + "A" * 35 + "\n", encoding="utf-8")
+    return root
+
+
+def test_interrupted_scan_resumes_without_losing_findings(tmp_path: Path, monkeypatch):
+    import project_discovery.cli as cli
+    from project_discovery.analyzers import load_analyzers
+
+    project = _secret_files(tmp_path / "project")
+    scan = {"executor": "thread", "jobs": 1, "quiet": True}
+    assert run_scan(project, tmp_path / "reference", {"json"}, 1, **scan) == 0
+    reference = _json_report(tmp_path / "reference")
+
+    def interrupting(**options):
+        result = load_analyzers(**options)
+        result.analyzers.append(_InterruptingAnalyzer())
+        return result
+
+    # One file per batch and a record commit every two files, so the interrupt at m6
+    # lands after several commits.
+    monkeypatch.setattr(cli, "load_analyzers", interrupting)
+    monkeypatch.setattr(cli, "BATCH_MAX_FILES", 1)
+    monkeypatch.setattr(cli, "RECORD_UPDATE_BATCH", 2)
+    output = tmp_path / "out"
+    with pytest.raises(KeyboardInterrupt):
+        run_scan(project, output, {"json"}, 1, **scan)
+
+    monkeypatch.setattr(cli, "load_analyzers", load_analyzers)
+    assert run_scan(project, output, {"json"}, 1, resume=True, **scan) == 0
+    resumed = _json_report(output)
+    assert resumed["metrics"]["execution"]["resumed_files_skipped"] == 6  # m0-m5
+    assert _finding_keys(resumed) == _finding_keys(reference)
+    assert len(resumed["findings"]) == len(reference["findings"])
+
+
+def test_file_records_are_committed_only_after_their_findings(tmp_path: Path, monkeypatch):
+    # A record with a sha256 is skipped by --resume, so its findings must already be
+    # durable when it is committed; otherwise a crash between the two loses them.
+    import project_discovery.cli as cli
+    from project_discovery.inventory.store import InventoryStore, StoredFileRecords
+
+    finding_stores = set()
+    unflushed_at_commit = []
+    append_finding = InventoryStore.append_finding
+    update_records = StoredFileRecords.update_records
+
+    def tracking_append_finding(self, finding):
+        finding_stores.add(self)
+        append_finding(self, finding)
+
+    def checked_update_records(self, records):
+        unflushed_at_commit.append(
+            sum(len(store._pending) for store in finding_stores if not store._closed)
+        )
+        return update_records(self, records)
+
+    monkeypatch.setattr(InventoryStore, "append_finding", tracking_append_finding)
+    monkeypatch.setattr(StoredFileRecords, "update_records", checked_update_records)
+    monkeypatch.setattr(cli, "RECORD_UPDATE_BATCH", 2)
+    project = _secret_files(tmp_path / "project")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True, executor="thread", jobs=1) == 0
+    assert unflushed_at_commit and set(unflushed_at_commit) == {0}
+
+
+
+def test_capabilities_report_includes_remote_vcs_client_status(monkeypatch):
+    from types import SimpleNamespace
+
+    import project_discovery.cli as cli
+
+    loaded = SimpleNamespace(analyzers=[], diagnostics=[], plugins=[], close=lambda: None)
+    monkeypatch.setattr(cli, "load_analyzers", lambda: loaded)
+    monkeypatch.setattr(cli, "analyzer_domain_catalog", lambda: [])
+    monkeypatch.setattr(cli, "native_capabilities", lambda: {})
+    monkeypatch.setattr(cli, "probe_sandbox", lambda: {})
+    monkeypatch.setattr(cli, "recognized_language_count", lambda: 0)
+    monkeypatch.setattr(
+        cli.importlib, "import_module",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ImportError("optional package absent")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "remote_vcs_capabilities",
+        lambda: {
+            "git": {"available": True, "executable": "/usr/bin/git", "alternatives": ["git"]},
+            "fossil": {"available": False, "executable": None, "alternatives": ["fossil"]},
+        },
+    )
+
+    report = cli.capabilities_report()
+
+    assert report["remote_vcs_clients"]["git"]["available"] is True
+    assert report["remote_vcs_clients"]["fossil"]["available"] is False

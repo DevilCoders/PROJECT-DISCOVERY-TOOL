@@ -1,0 +1,375 @@
+"""Offline matching of lockfile-resolved packages against a local OSV database."""
+from __future__ import annotations
+
+import functools
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from ...core.source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ...models import FileRecord, Finding
+from ...vulnerabilities.database import VulnerabilityDatabase
+from ...vulnerabilities.versions import comparator_for, compare_versions
+from ..base import Analyzer
+from .lockfile_parsers import (
+    LOCKFILE_ECOSYSTEMS,
+    LOCKFILE_NAMES,
+    MAX_LOCKFILE_BYTES,
+    MAX_LOCKFILE_PACKAGE_ENTRIES,
+    LockfileEntryBudgetExceeded,
+    ResolvedPackage,
+    normalize_version,
+    parse_lockfile,
+)
+
+_LOCK_NAMES = LOCKFILE_NAMES
+_MAX_LOCKFILE_BYTES = MAX_LOCKFILE_BYTES
+_MAX_LOCKFILE_PACKAGE_ENTRIES = MAX_LOCKFILE_PACKAGE_ENTRIES
+_SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+
+
+def _normalise_version(value: str) -> str:
+    return normalize_version(value, strip_prefix=True)
+
+
+def _compare_versions(left: str, right: str, ecosystem: str | None = None) -> int | None:
+    """Compare versions with the ecosystem ordering (SemVer when unspecified)."""
+    return compare_versions(_normalise_version(left), _normalise_version(right), ecosystem)
+
+
+def _event_range_contains(
+    version: str, range_data: dict[str, Any], ecosystem: str | None = None,
+) -> bool | None:
+    """Evaluate one OSV range per the OSV schema: sort events, then sweep.
+
+    Returns None when the range type or any boundary cannot be ordered.
+    """
+    comparator = comparator_for(ecosystem or "npm", str(range_data.get("type") or ""))
+    if comparator is None:
+        return None
+    events = range_data.get("events", [])
+    if not isinstance(events, list) or not events:
+        return None
+    version = _normalise_version(version)
+    bounds: list[tuple[str, str]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        for kind in ("introduced", "fixed", "last_affected", "limit"):
+            if kind in event:
+                bounds.append((kind, _normalise_version(event[kind])))
+    if not bounds:
+        return None
+
+    def compare_bound(left: str, right: str) -> int:
+        if left == right:
+            return 0
+        if left == "0":
+            return -1
+        if right == "0":
+            return 1
+        result = comparator(left, right)
+        if result is None:
+            raise ValueError("uncomparable advisory boundary")
+        return result
+
+    try:
+        bounds.sort(key=functools.cmp_to_key(lambda a, b: compare_bound(a[1], b[1])))
+        affected = False
+        for kind, bound in bounds:
+            comparison = 1 if bound == "0" else comparator(version, bound)
+            if comparison is None:
+                return None
+            if kind == "introduced" and comparison >= 0:
+                affected = True
+            elif kind == "fixed" and comparison >= 0:
+                affected = False
+            elif kind == "last_affected" and comparison > 0:
+                affected = False
+            elif kind == "limit" and comparison >= 0:
+                return False
+        return affected
+    except ValueError:
+        return None
+
+
+def _affected_version(
+    version: str, affected: dict[str, Any], ecosystem: str | None = None,
+) -> tuple[bool | None, str]:
+    versions = affected.get("versions", [])
+    if isinstance(versions, list):
+        normalized = {_normalise_version(str(item)) for item in versions}
+        if _normalise_version(version) in normalized:
+            return True, "explicit affected-version list"
+    ranges = affected.get("ranges", [])
+    if not ranges:
+        if isinstance(versions, list) and versions:
+            return False, "version not present in explicit affected-version list"
+        return None, "advisory does not contain a comparable affected range"
+    unknown = False
+    for item in ranges:
+        if not isinstance(item, dict):
+            unknown = True
+            continue
+        matched = _event_range_contains(version, item, ecosystem)
+        if matched is True:
+            return True, str(item.get("type", "range")) + " range"
+        if matched is None:
+            unknown = True
+    if unknown:
+        return None, "one or more advisory ranges use an unsupported version scheme"
+    return False, "version falls outside the recorded affected ranges"
+
+
+def _extract_packages(
+    path: Path,
+    name: str,
+    max_bytes: int = _MAX_LOCKFILE_BYTES,
+    *,
+    expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+) -> tuple[list[tuple[str, str, str]], str | None]:
+    """Compatibility wrapper returning (package, version, ecosystem) triples."""
+    source = read_text_bounded(path, max_bytes, expected_identity=expected_identity)
+    packages = parse_lockfile(name, source, max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES)
+    return [(item.name, item.version, item.ecosystem) for item in packages], None
+
+
+def _alias_groups(advisories: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group advisories that describe the same vulnerability through shared IDs/aliases."""
+    parent: dict[str, str] = {}
+
+    def find(key: str) -> str:
+        while parent.setdefault(key, key) != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    for advisory in advisories:
+        for alias in advisory["aliases"]:
+            parent[find(alias)] = find(advisory["id"])
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for advisory in advisories:
+        groups.setdefault(find(advisory["id"]), []).append(advisory)
+    return [sorted(group, key=lambda item: item["id"]) for _, group in sorted(groups.items())]
+
+
+LOCAL_ANALYZER_NAME = "local-vulnerability-intelligence"
+
+
+def match_advisories(
+    package: ResolvedPackage, advisories: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], bool, str]]:
+    """Return (advisory, confirmed, reason) for advisories that may affect ``package``."""
+    matches: list[tuple[dict[str, Any], bool, str]] = []
+    for advisory in advisories:
+        if advisory.get("withdrawn"):
+            continue
+        affected, reason = _affected_version(
+            package.version, advisory["affected"], advisory.get("ecosystem") or package.ecosystem,
+        )
+        if affected is not False:
+            matches.append((advisory, affected is True, reason))
+    return matches
+
+
+def advisory_findings(
+    lockfile_path: str,
+    package: ResolvedPackage,
+    matches: list[tuple[dict[str, Any], bool, str]],
+    *,
+    analyzer: str = LOCAL_ANALYZER_NAME,
+    source_label: str = "local advisory",
+) -> list[Finding]:
+    """One finding per group of advisories that describe the same vulnerability.
+
+    Shared by the offline database matcher and the opt-in online lookup so both report
+    the same fields; ``source_label`` and ``analyzer`` record where the advisory came from.
+    """
+    if not matches:
+        return []
+    by_id = {advisory["id"]: (advisory, confirmed, reason) for advisory, confirmed, reason in matches}
+    return [
+        _advisory_group_finding(
+            lockfile_path, package, [by_id[item["id"]] for item in group],
+            analyzer=analyzer, source_label=source_label,
+        )
+        for group in _alias_groups([advisory for advisory, _, _ in matches])
+    ]
+
+
+def _advisory_group_finding(
+    lockfile_path: str,
+    package: ResolvedPackage,
+    group: list[tuple[dict[str, Any], bool, str]],
+    *,
+    analyzer: str,
+    source_label: str,
+) -> Finding:
+    primary, confirmed, reason = next(
+        (item for item in group if item[1]), group[0],
+    )
+    confirmed = any(item[1] for item in group)
+    ids = [advisory["id"] for advisory, _, _ in group]
+    aliases = sorted({
+        alias for advisory, _, _ in group for alias in advisory["aliases"]
+    } - set(ids))
+    fix_versions = sorted({
+        str(event["fixed"])
+        for advisory, _, _ in group
+        for range_item in advisory["affected"].get("ranges", []) if isinstance(range_item, dict)
+        for event in range_item.get("events", []) if isinstance(event, dict) and event.get("fixed")
+    })
+    fixed = ", ".join(fix_versions) or "not specified"
+    known = [
+        advisory["severity"] for advisory, _, _ in group
+        if advisory["severity"] in _SEVERITY_ORDER
+    ]
+    if not confirmed:
+        severity = "LOW"
+    elif known:
+        severity = min(known, key=_SEVERITY_ORDER.__getitem__)
+    else:
+        # A confirmed match without an advisory severity is not a low-risk result.
+        severity = "MEDIUM"
+    related = f" Related advisories: {', '.join(ids[1:])}." if len(ids) > 1 else ""
+    detail = (
+        f"{package.ecosystem} package {package.name}@{package.version} matched {source_label} "
+        f"{primary['id']} ({reason}).{related} Aliases: {', '.join(aliases[:8]) or 'none recorded'}. "
+        f"Fixed version boundary: {fixed}. "
+        + ("" if known or not confirmed else "The advisory does not record a severity. ")
+        + "This is static dependency/advisory matching, not proof the package "
+        "is loaded at runtime or that a vulnerable code path is reachable."
+    )
+    advisory_detail = redact_source_excerpt(
+        str(primary.get("details") or primary.get("summary") or ""), max_chars=1800,
+    )
+    if confirmed:
+        impact = (
+            f"If {package.name}@{package.version} is installed in the deployed application "
+            "and the affected functionality is reachable, an attacker may exploit the "
+            "weakness described by the advisory. "
+            + (
+                f"Advisory impact details: {advisory_detail}" if advisory_detail else
+                f"The {source_label} record does not provide a detailed impact description."
+            )
+        )
+        recommendation = (
+            f"Upgrade {package.name} from {package.version} to a patched release "
+            + (f"at or beyond {fixed}." if fix_versions else "identified by the upstream advisory.")
+            + " Regenerate and review the lockfile, run the project's tests, and verify "
+            "that the vulnerable dependency is no longer resolved."
+        )
+    else:
+        impact = (
+            f"The {source_label} lists {package.name} as affected, but this PDT version "
+            "matcher could not compare the recorded range with the resolved version "
+            f"{package.version}. This is not evidence that the package is safe."
+        )
+        recommendation = (
+            "Manually verify the package version against the advisory's upstream version "
+            "scheme and affected ranges. Do not treat this UNKNOWN result as a clean check."
+        )
+    evidence = [
+        lockfile_path,
+        f"package: {package.name}",
+        f"ecosystem: {package.ecosystem}",
+        f"resolved_version: {package.version}",
+        *(f"advisory: {advisory_id}" for advisory_id in ids),
+    ]
+    if primary["modified"]:
+        evidence.append(f"advisory_modified: {primary['modified']}")
+    seen = set(evidence)
+    for advisory, _, _ in group:
+        for line in advisory.get("evidence_extra", ()):
+            if line not in seen:
+                seen.add(line)
+                evidence.append(line)
+    return Finding(
+        "vulnerabilities",
+        f"{primary['id']}: {primary['summary']}",
+        detail,
+        confidence="CONFIRMED" if confirmed else "UNKNOWN",
+        evidence=evidence,
+        analyzer=analyzer,
+        severity=severity,
+        impact=impact,
+        recommendation=recommendation,
+    )
+
+
+class LocalVulnerabilityAnalyzer(Analyzer):
+    """Match locked package coordinates against an operator-imported local OSV database."""
+
+    name = LOCAL_ANALYZER_NAME
+    domains = ("vulnerabilities", "dependency_resolution", "supply_chain")
+    languages = tuple(sorted(set(LOCKFILE_ECOSYSTEMS.values())))
+
+    def __init__(self, database_path: Path):
+        self.database_path = database_path.expanduser()
+
+    def supports(self, record: FileRecord) -> bool:
+        return (
+            record.error is None
+            and record.content_skipped_reason is None
+            and Path(record.path).name.lower() in _LOCK_NAMES
+        )
+
+    def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.size_bytes > _MAX_LOCKFILE_BYTES:
+            return [Finding(
+                "vulnerabilities",
+                f"Dependency lockfile exceeds vulnerability parser budget: {record.path}",
+                f"Lockfile size is {record.size_bytes:,} bytes; parser budget is "
+                f"{_MAX_LOCKFILE_BYTES:,} bytes. No vulnerability conclusion is possible.",
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
+        if not self.database_path.is_file():
+            return [Finding(
+                "vulnerabilities", "Local advisory database unavailable",
+                "The configured local advisory database does not exist or is not a regular file. "
+                "No network fallback is attempted.",
+                confidence="UNKNOWN", evidence=[str(self.database_path)],
+                analyzer=self.name, severity="LOW",
+            )]
+        try:
+            source = read_text_bounded(
+                path, _MAX_LOCKFILE_BYTES, expected_identity=record.analysis_identity,
+            )
+            packages = parse_lockfile(
+                Path(record.path).name, source, max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES,
+            )
+        except (SourceBudgetExceeded, LockfileEntryBudgetExceeded) as exc:
+            return [Finding(
+                "vulnerabilities",
+                f"Dependency lockfile resource limit: {record.path}",
+                redact_source_excerpt(str(exc)),
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
+        except (OSError, ValueError, RecursionError, MemoryError) as exc:
+            return [Finding(
+                "vulnerabilities", f"Vulnerability lockfile parse error: {record.path}",
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}"), confidence="UNKNOWN",
+                evidence=[record.path], analyzer=self.name, severity="LOW",
+            )]
+
+        findings = []
+        try:
+            with VulnerabilityDatabase(self.database_path, read_only=True) as database:
+                for package in packages:
+                    findings.extend(self._package_findings(database, record, package))
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            return [Finding(
+                "vulnerabilities", "Local advisory database unavailable",
+                redact_source_excerpt(f"{type(exc).__name__}: {exc}. No network fallback is attempted."),
+                confidence="UNKNOWN", evidence=[str(self.database_path)],
+                analyzer=self.name, severity="LOW",
+            )]
+        return findings
+
+    def _package_findings(
+        self, database: VulnerabilityDatabase, record: FileRecord, package: ResolvedPackage,
+    ) -> list[Finding]:
+        matches = match_advisories(package, database.query(package.ecosystem, package.name))
+        return advisory_findings(record.path, package, matches)

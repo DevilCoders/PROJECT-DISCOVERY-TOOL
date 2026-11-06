@@ -1,0 +1,158 @@
+"""Static message broker and event-system client discovery."""
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+from ...core.source_utils import parse_python, read_text_bounded
+from ...models import FileRecord, Finding
+from ..base import Analyzer
+
+_SOURCE_EXTENSIONS = {
+    ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".java", ".kt", ".kts", ".cs", ".go", ".rs", ".rb", ".php",
+}
+_PYTHON_MODULES = {
+    "kafka": "Kafka", "confluent_kafka": "Kafka", "pika": "RabbitMQ",
+    "kombu": "RabbitMQ", "celery": "Celery", "nats": "NATS",
+    "paho": "MQTT", "zmq": "ZeroMQ", "pulsar": "Apache Pulsar",
+    "stomp": "STOMP", "boto3": "AWS SQS/SNS",
+    "google.cloud.pubsub_v1": "Google Pub/Sub",
+    "azure.servicebus": "Azure Service Bus",
+}
+_IMPORT_PATTERNS = {
+    "Kafka": re.compile(r"(?:kafkajs|confluent-kafka|kafka-go|org\.apache\.kafka|segmentio/kafka-go)", re.I),
+    "RabbitMQ": re.compile(r"(?:amqplib|rabbitmq|pika|com\.rabbitmq|amqp091-go)", re.I),
+    "NATS": re.compile(r"(?:from\s+nats|require\s*\(\s*['\"]nats['\"]|nats\.go)", re.I),
+    "MQTT": re.compile(r"(?:from\s+paho|require\s*\(\s*['\"]mqtt['\"]|eclipse\.paho)", re.I),
+    "ZeroMQ": re.compile(r"(?:import\s+zmq|require\s*\(\s*['\"]zeromq['\"]|zeromq)", re.I),
+    "Celery": re.compile(r"(?:from\s+celery|import\s+celery|shared_task)", re.I),
+    "AWS SQS/SNS": re.compile(r"(?:boto3.*(?:sqs|sns)|@aws-sdk/client-sqs|@aws-sdk/client-sns|services\.sqs|services\.sns)", re.I),
+    "Google Pub/Sub": re.compile(r"(?:google\.cloud\.pubsub|@google-cloud/pubsub)", re.I),
+    "Azure Service Bus": re.compile(r"(?:azure\.servicebus|@azure/service-bus|com\.azure\.messaging\.servicebus)", re.I),
+    "Apache Pulsar": re.compile(r"(?:pulsar|org\.apache\.pulsar)", re.I),
+    "STOMP": re.compile(r"(?:stomp|org\.springframework\.messaging)", re.I),
+}
+_OPERATIONS = {
+    "Kafka": {"produce", "send", "poll", "subscribe", "commit", "send_and_wait"},
+    "RabbitMQ": {"basic_publish", "basic_consume", "basic_ack", "publish", "consume"},
+    "NATS": {"publish", "subscribe", "request", "publish_async"},
+    "MQTT": {"publish", "subscribe", "unsubscribe"},
+    "ZeroMQ": {"send", "recv", "send_string", "recv_string"},
+    "Celery": {"delay", "apply_async", "send_task"},
+    "AWS SQS/SNS": {"send_message", "receive_message", "delete_message", "publish"},
+    "Google Pub/Sub": {"publish", "subscribe", "pull", "ack"},
+    "Azure Service Bus": {"send_messages", "receive_messages", "complete_message"},
+    "Apache Pulsar": {"send", "receive", "subscribe", "acknowledge"},
+    "STOMP": {"send", "subscribe", "ack", "nack"},
+}
+
+
+def _python_scan(source: str, relative: str):
+    try:
+        tree = parse_python(source, filename=relative)
+    except SyntaxError:
+        return {}, {}
+    imports: dict[str, set[int]] = {}
+    operations: dict[str, set[int]] = {}
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                module = alias.name
+                root = module.split(".", 1)[0]
+                broker = _PYTHON_MODULES.get(module) or _PYTHON_MODULES.get(root)
+                if broker:
+                    imports.setdefault(broker, set()).add(node.lineno)
+                    aliases[alias.asname or root] = broker
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            module = node.module
+            root = module.split(".", 1)[0]
+            broker = _PYTHON_MODULES.get(module) or _PYTHON_MODULES.get(root)
+            if broker:
+                imports.setdefault(broker, set()).add(node.lineno)
+                for alias in node.names:
+                    aliases[alias.asname or alias.name] = broker
+        elif isinstance(node, ast.Call):
+            func = node.func
+            method = func.attr if isinstance(func, ast.Attribute) else (
+                func.id if isinstance(func, ast.Name) else ""
+            )
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                broker = aliases.get(func.value.id)
+                if broker and method in _OPERATIONS[broker]:
+                    operations.setdefault(broker, set()).add(node.lineno)
+            elif method in {"delay", "apply_async"}:
+                if "Celery" in imports:
+                    operations.setdefault("Celery", set()).add(node.lineno)
+    return imports, operations
+
+
+class MessagingIntelligenceAnalyzer(Analyzer):
+    """Inventory broker clients and producer/consumer API references statically."""
+
+    name = "messaging-intelligence"
+    domains = ("messaging", "networking")
+    languages = (
+        "Python", "JavaScript", "TypeScript", "Java", "Kotlin", "C#",
+        "Go", "Rust", "Ruby", "PHP",
+    )
+
+    def supports(self, record: FileRecord) -> bool:
+        return record.error is None and record.extension in _SOURCE_EXTENSIONS
+
+    def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        try:
+            source = read_text_bounded(
+                path, 16 * 1024 * 1024,
+                expected_identity=record.analysis_identity,
+            )
+        except (OSError, UnicodeDecodeError) as exc:
+            return [Finding(
+                "messaging", f"Messaging analysis unavailable: {record.path}",
+                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                evidence=[record.path], analyzer=self.name,
+            )]
+        if record.extension in {".py", ".pyi"}:
+            imports, operations = _python_scan(source, record.path)
+        else:
+            lines = source.splitlines()
+            imports = {
+                broker: {number for number, line in enumerate(lines, 1) if pattern.search(line)}
+                for broker, pattern in _IMPORT_PATTERNS.items()
+            }
+            imports = {broker: locations for broker, locations in imports.items() if locations}
+            operations: dict[str, set[int]] = {}
+            for broker, methods in _OPERATIONS.items():
+                if broker not in imports:
+                    continue
+                pattern = re.compile(
+                    r"\.\s*(?:" + "|".join(re.escape(method) for method in sorted(methods))
+                    + r")\s*\("
+                )
+                locations = {
+                    number for number, line in enumerate(lines, 1) if pattern.search(line)
+                }
+                if locations:
+                    operations[broker] = locations
+
+        findings = []
+        for broker in sorted(set(imports) | set(operations)):
+            import_lines = sorted(imports.get(broker, set()))
+            operation_lines = sorted(operations.get(broker, set()))
+            evidence = [f"{record.path}:{line} (client reference)" for line in import_lines]
+            evidence.extend(
+                f"{record.path}:{line} (producer/consumer API)" for line in operation_lines
+            )
+            findings.append(Finding(
+                "messaging",
+                f"{broker} messaging references: {record.path}",
+                f"Detected {len(import_lines)} client reference(s) and "
+                f"{len(operation_lines)} producer/consumer API call site(s). This is a "
+                "static code inventory, not a live broker topology.",
+                confidence="CONFIRMED" if import_lines else "INFERRED",
+                evidence=evidence[:100] or [record.path],
+                analyzer=self.name,
+            ))
+        return findings
