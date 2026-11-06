@@ -18,6 +18,45 @@ A plugin subclasses `project_discovery.analyzers.base.Analyzer` and provides:
 
 PDT validates the plugin type, API version and unique names. Load failures are kept as scan diagnostics instead of being discarded, so `--strict` scans fail when a plugin does not load. Plugins load in entry-point name order.
 
+## Compatibility policy
+
+The plugin API is versioned by `Analyzer.api_version`. PDT supports version 1 and refuses any other value with a load diagnostic.
+
+Version 1 consists of:
+- the `pdt.analyzers` entry-point group;
+- `project_discovery.analyzers.base.Analyzer`: the attributes `name`, `version`, `description`, `domains`, `languages` and `api_version`, and the methods `supports(record)` and `analyze(path, record)`;
+- the `FileRecord` fields a plugin receives: `path`, `size_bytes`, `extension`, `language`, `sha256`, `analyzed`, `error`, `file_type`, `size_bucket`, `is_hidden`, `permissions`, `mtime_ns` and `content_skipped_reason`;
+- `project_discovery.models.Finding` (`category`, `title`, `detail`, `confidence`, `evidence`, `analyzer`, `severity`, `code_evidence`, `impact`, `recommendation`) and `CodeEvidence` (`line_number`, `code`, `vulnerable`);
+- the validation limits in [Writing plugins that work in the sandbox](#writing-plugins-that-work-in-the-sandbox).
+
+Within version 1, PDT only adds: new optional fields, attributes with defaults, and new confidence or severity values. It does not remove or rename these names, change their types, or lower the limits. A change that would break version-1 plugins introduces version 2. PDT then keeps loading version-1 plugins, with a deprecation diagnostic, for at least one further minor release.
+
+Two things are not part of the API:
+- The sandbox's restrictions may tighten in any release; the changelog lists such changes.
+- PDT's other modules are internal and can move between releases. For example, the current development cycle moved every module except `cli`, `models` and `analyzers.base` into subpackages.
+
+## Checking a plugin
+
+`pdt plugin-check` loads a plugin the way a scan does: in a host under the sandbox (or `--isolation process`), through the same protocol and the same validation. It then runs `supports()` and `analyze()` twice on each sample file.
+
+```bash
+pdt plugin-check my_package.analyzer:MyAnalyzer tests/samples/   # or an installed entry-point name
+pdt plugin-check my-analyzer tests/samples/ --json
+```
+
+It reports:
+- **Errors**, which fail the check (exit status 1). These are what a scan would turn into a load failure or an `UNKNOWN` coverage finding: the plugin does not load in the sandbox, invalid metadata or a name that collides with another analyzer, `supports()` or `analyze()` raising, items that are not findings, findings PDT rejects (for example a category outside `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`), and more findings than the per-file limit.
+- **Warnings**: a missing version or description, a finding that sets `analyzer` (PDT replaces it), code evidence that reports will redact, results that differ between two runs on the same file, and samples the plugin supports none of.
+
+From a test suite:
+
+```python
+from project_discovery.plugins.conformance import assert_conformant
+
+def test_plugin_is_conformant(tmp_path):
+    assert_conformant("my_package.analyzer:MyAnalyzer", ["tests/samples"])
+```
+
 ## How PDT runs plugins
 
 By default PDT never imports plugin code itself. Each plugin runs in **host processes**: separate Python interpreters that apply an operating-system sandbox, check that it works, and only then import the plugin. This means the plugin's import-time code is already sandboxed.

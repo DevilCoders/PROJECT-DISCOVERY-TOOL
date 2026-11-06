@@ -370,7 +370,7 @@ The baseline is not production-ready:
 - [ ] Verified read-only, offline and privacy guarantees.
 - [ ] Verified secret/PII redaction across every output surface.
 - [ ] Verified 100k+ report usability and large-project performance/resource limits.
-- [ ] Plugin SDK documentation, API versioning, compatibility policy, sandbox/isolation guidance and conformance suite. Documentation, API version checks and sandbox guidance are done ([PLUGIN_SDK.md](../guides/PLUGIN_SDK.md)); a compatibility policy and a conformance suite for plugin authors are not.
+- [x] Plugin SDK documentation, API versioning, compatibility policy, sandbox/isolation guidance and conformance suite ([PLUGIN_SDK.md](../guides/PLUGIN_SDK.md): the compatibility policy for API version 1, and `pdt plugin-check` / `assert_conformant`, which load a plugin the way a scan does and report what a scan would reject).
 - [ ] User-facing threat model, architecture guide, support matrix, benchmark report, operations guide and release notes. [ARCHITECTURE.md](../architecture/ARCHITECTURE.md), [OPERATIONS.md](../guides/OPERATIONS.md), [BENCHMARKS.md](../guides/BENCHMARKS.md) (small-scale results only) and `CHANGELOG.md` exist. A threat model, a support matrix and the large-corpus benchmark report do not.
 - [ ] Production gate signed off before PR #1 can be merged.
 

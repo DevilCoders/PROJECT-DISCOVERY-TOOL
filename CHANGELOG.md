@@ -70,6 +70,13 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   `--strict`, never a clean result.
 - `pdt capabilities` lists the installed VCS clients.
 
+### Added: plugin tooling
+- `pdt plugin-check PLUGIN [SAMPLES...]` and `project_discovery.plugins.conformance.assert_conformant`
+  load a plugin the way a scan does (sandboxed host, same protocol, same validation), run it twice
+  on sample files and report errors (what a scan would reject or turn into `UNKNOWN` coverage) and
+  warnings (missing metadata, findings that set `analyzer`, redacted evidence, non-deterministic
+  results). docs/guides/PLUGIN_SDK.md states the compatibility policy for plugin API version 1.
+
 ### Changed: Windows plugin sandbox
 - On Windows, `--plugin-isolation sandbox` starts each plugin host suspended inside an AppContainer
   without capabilities, then assigns it to the job object. Hosts can no longer read the user's files,

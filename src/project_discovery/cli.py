@@ -1437,6 +1437,21 @@ def main() -> None:
         "capabilities", help="Show native backends, optional parsers and analyzers available here",
     )
     capabilities.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    plugin_check = sub.add_parser(
+        "plugin-check",
+        help="Check a third-party analyzer plugin the way a scan loads it, on sample files",
+    )
+    plugin_check.add_argument(
+        "plugin", help="module:attribute of the analyzer, or the name of an installed pdt.analyzers entry point",
+    )
+    plugin_check.add_argument("samples", type=Path, nargs="*", help="Sample files or directories to analyze")
+    plugin_check.add_argument(
+        "--isolation", choices=("sandbox", "process"), default="sandbox",
+        help="Run the plugin under the OS sandbox (default) or out of process without restrictions",
+    )
+    plugin_check.add_argument("--timeout", type=float, default=60.0, metavar="SECONDS",
+                              help="Time allowed per plugin request (default: 60)")
+    plugin_check.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     query = sub.add_parser(
         "query", help="Look up symbols, callers, callees or references in a scan's code index",
     )
@@ -1528,6 +1543,15 @@ def main() -> None:
                 print(f"{location}  {detail}".rstrip())
             print(f"[ INFO ] {len(rows)} result(s)" + (" (limit reached)" if len(rows) == args.limit else ""))
             raise SystemExit(0)
+        if args.command == "plugin-check":
+            from .plugins.conformance import check_plugin, format_report, report_json
+
+            if not 0 < args.timeout <= 3600:
+                parser.error("--timeout must be greater than 0 and at most 3600 seconds")
+            result = check_plugin(args.plugin, args.samples, isolation=args.isolation,
+                                  timeout_seconds=args.timeout)
+            print(report_json(result) if args.json else format_report(result))
+            raise SystemExit(EXIT_OK if result.ok else EXIT_FINDINGS)
         if args.command == "capabilities":
             report = capabilities_report()
             if args.json:

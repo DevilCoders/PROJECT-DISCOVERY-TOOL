@@ -161,6 +161,7 @@ pdt scan /path/to/project --output /reports/project --resume          # continue
 pdt scan /path/to/project --inventory-only                            # metadata only, no content reads
 pdt scan /path/to/project --plugin-timeout 30 --plugin-memory-mb 2048  # tighter plugin limits
 pdt capabilities --json
+pdt plugin-check my_package.analyzer:MyAnalyzer tests/samples/      # check a plugin the way scans load it
 pdt query /path/to/reports --callers parse_config --json             # look up the code index
 pdt compare project-a-report/discovery-report.json project-b-report/discovery-report.json
 pdt catalog-add /reports/project-a/discovery-report.json
