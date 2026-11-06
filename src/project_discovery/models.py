@@ -5,7 +5,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Sequence
 
 # Report schema: minor versions are additive, so any 1.x reader can load 1.y reports.
-REPORT_SCHEMA_VERSION = "1.6"
+# 1.7 added the top-level "scan" summary (mode, source, network access, remote source and
+# vulnerability sources) and the online advisory provenance under
+# metrics.vulnerability_intelligence.
+REPORT_SCHEMA_VERSION = "1.7"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

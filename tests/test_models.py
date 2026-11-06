@@ -20,7 +20,7 @@ def test_inventory_models_serialize_additive_metadata():
         special_entries=[SpecialEntryRecord("events.pipe", "fifo", permissions=0o600)],
     )
     payload = result.to_dict()
-    assert payload["schema_version"] == "1.6"
+    assert payload["schema_version"] == "1.7"
     assert payload["files"][0]["file_type"] == "text"
     assert payload["directories"][0]["total_bytes"] == 42
     assert payload["symlinks"][0]["target_scope"] == "internal"

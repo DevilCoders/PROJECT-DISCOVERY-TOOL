@@ -97,7 +97,31 @@ On Linux, `/tmp` is often a RAM-backed `tmpfs`; use `--remote-workdir` on a disk
 
 ### Reports
 
-Each repository gets its own report directory (`OUTPUT/<repository>-<id>/` in a batch, `OUTPUT` or `./<repository>-<id>-pdt-report` for a single URL) with the usual JSON, Markdown and HTML reports. The report root is the credential-free repository URL, and `metrics.source` describes the source:
+Each repository gets its own report directory (`OUTPUT/<repository>-<id>/` in a batch, `OUTPUT` or `./<repository>-<id>-pdt-report` for a single URL) with the usual JSON, Markdown and HTML reports. The report root is the credential-free repository URL.
+
+Every report, local or online, starts from the same scan summary. In the JSON report (schema 1.7) it is the top-level `scan` block:
+
+```json
+"scan": {
+  "mode": "online",
+  "source": "remote",
+  "network_access": ["git-client", "osv.dev", "nvd"],
+  "remote": {
+    "acquisition": "download", "url": "https://github.com/owner/repository",
+    "provider": "GitHub", "vcs": "git", "repository": "repository", "ref": "v2.1.0",
+    "revision": "0123456789abcdef0123456789abcdef01234567", "branch": null,
+    "transport": "https", "transport_insecure": false,
+    "acquired_at": "2026-11-06T10:00:00+00:00", "acquisition_seconds": 3.25,
+    "history_complete": false, "coverage_gap_count": 0
+  },
+  "vulnerability_sources": ["osv.dev"],
+  "online_vulnerability_coverage": "complete"
+}
+```
+
+`mode` is `online` when PDT used the network for the scan (fetching the repository or querying an advisory service) and `local` otherwise; `network_access` lists each use (`<vcs>-client`, `provider-api`, `osv.dev`, `nvd`, `ghsa`). The URL is reduced to its credential-free form again when the summary is written. The Markdown report shows the same facts in its header (`Scan mode`, `Source`) and in *Scan Source* and *Vulnerability Intelligence* sections; the HTML report shows a LOCAL SCAN / ONLINE SCAN badge and a NO TLS badge in its header, a *Scan source* view with the remote metadata, coverage gaps and notes, and the online advisory provenance with a warning whenever a lookup was incomplete. All three formats are self-contained and load nothing from the network.
+
+The full remote metadata is in `metrics.source`:
 
 | Field | Meaning |
 |---|---|

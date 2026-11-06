@@ -53,7 +53,57 @@ $("host-os").textContent=JSON.stringify({
  host:metrics.host_os||{},
  native_backend:metrics.native_backend||{backend:"not reported"}
 },null,2);
+// Scan mode and source: one summary (REPORT.scan) drives every report format.
+const scan=REPORT.scan||{mode:"local",source:"local",network_access:[],remote:null};
+const sourceMetrics=(metrics.source&&typeof metrics.source==="object")?metrics.source:{};
+const remoteMeta=(sourceMetrics.remote&&typeof sourceMetrics.remote==="object")?sourceMetrics.remote:null;
+const remoteSummary=(scan.remote&&typeof scan.remote==="object")?scan.remote:null;
+function keyValues(target,rows){
+ target.replaceChildren();
+ for(const pair of rows){
+  if(pair[1]===undefined||pair[1]===null||pair[1]==="")continue;
+  const row=document.createElement("div");row.className="kv-row";
+  const key=document.createElement("span");key.className="kv-key";key.textContent=pair[0];
+  const value=document.createElement("span");value.className="kv-value";value.textContent=String(pair[1]);
+  row.append(key,value);target.append(row);
+ }
+}
+const NETWORK_LABELS={"provider-api":"provider API","osv.dev":"OSV.dev","nvd":"NVD","ghsa":"GitHub Advisory Database"};
+const networkUses=Array.isArray(scan.network_access)?scan.network_access:[];
+const networkText=networkUses.length?networkUses.map(function(item){return NETWORK_LABELS[item]||String(item);}).join(", "):"none";
+if(remoteSummary){
+ $("source-line").textContent=String(remoteSummary.provider||"remote")+" / "+String(remoteSummary.vcs||"vcs")+" @ "+String(remoteSummary.revision||"unknown revision");
+ $("transport-badge").classList.toggle("hidden",!remoteSummary.transport_insecure);
+}else{
+ $("source-line").textContent="Local directory";
+}
+$("source-summary").textContent=remoteSummary
+ ? "Remote // "+(remoteSummary.acquisition==="api"?"provider API, no download":"temporary download")+" // "+String(remoteSummary.url||"")
+ : (scan.mode==="online"?"Local directory // online advisory lookup":"Local directory // no network access");
+keyValues($("source-details"),remoteSummary?[
+ ["Mode",scan.mode],["Network access",networkText],
+ ["Acquisition",remoteSummary.acquisition==="api"?"provider API; nothing written to disk":"downloaded to a temporary directory; deleted after the scan"],
+ ["URL",remoteSummary.url],["Provider",remoteSummary.provider],["VCS",remoteSummary.vcs],
+ ["Repository",remoteSummary.repository],["Requested ref",remoteSummary.ref||"remote default branch"],
+ ["Revision",remoteSummary.revision||"not reported"],["Branch",remoteSummary.branch],
+ ["Transport",String(remoteSummary.transport||"unknown")+(remoteSummary.transport_insecure?" (NOT ENCRYPTED)":" (encrypted)")],
+ ["Acquired",remoteSummary.acquired_at?String(remoteSummary.acquired_at)+(remoteSummary.acquisition_seconds!==undefined&&remoteSummary.acquisition_seconds!==null?" ("+remoteSummary.acquisition_seconds+" s)":""):null],
+ ["History",remoteSummary.history_complete===false?"only the analyzed revision":null],
+]:[["Mode",scan.mode],["Source","local directory"],["Network access",networkText]]);
+const coverageItems=remoteMeta&&Array.isArray(remoteMeta.coverage)?remoteMeta.coverage:[];
+const coverageList=$("source-coverage");coverageList.replaceChildren();
+for(const item of coverageItems){
+ const li=document.createElement("li");
+ li.textContent=String(item.detail||"")+(item.incomplete?" (missing from the analyzed tree)":" (not fetched)");
+ coverageList.append(li);
+}
+coverageList.classList.toggle("hidden",coverageItems.length===0);
+const coverageDetails=new Set(coverageItems.map(function(item){return String(item.detail||"");}));
+const sourceNotes=remoteMeta&&Array.isArray(remoteMeta.warnings)?remoteMeta.warnings.filter(function(note){return !coverageDetails.has(String(note));}):[];
+$("source-notes").textContent=sourceNotes.length?"Notes: "+sourceNotes.map(String).join(" • "):"";
+
 const vulnMeta=metrics.vulnerability_intelligence||{enabled:false};
+const onlineMeta=(vulnMeta.online&&typeof vulnMeta.online==="object")?vulnMeta.online:null;
 const allFindings=REPORT.findings||[];
 const vulnFindings=[];let vulnFindingCount=0;
 for(const item of allFindings){
@@ -62,10 +112,38 @@ for(const item of allFindings){
   if(vulnFindings.length<200)vulnFindings.push(item);
  }
 }
-$("vuln-summary").textContent=vulnMeta.enabled
- ? number(vulnMeta.advisory_count||0)+" local advisories • "+number(vulnFindingCount)+" matched finding(s)"
- : "Offline advisory database not configured";
+$("vuln-summary").textContent=[
+ vulnMeta.enabled?number(vulnMeta.advisory_count||0)+" local advisories":"No local advisory database",
+ onlineMeta
+  ? (onlineMeta.coverage==="skipped"?"online lookup skipped":"OSV.dev: "+number(onlineMeta.packages_queried||0)+" package(s) checked ("+String(onlineMeta.coverage||"unknown")+")")
+  : "online lookup off",
+ number(vulnFindingCount)+" vulnerability finding(s)",
+].join(" • ");
 $("vuln-db-state").textContent=vulnMeta.enabled?"LOCAL DATABASE ACTIVE":"NO LOCAL DATABASE";
+const onlineState=$("vuln-online-state");
+onlineState.textContent=onlineMeta?"ONLINE: "+String(onlineMeta.coverage||"unknown").toUpperCase():"ONLINE LOOKUP OFF";
+onlineState.className="badge"+(onlineMeta?" "+String(onlineMeta.coverage||"unknown"):"");
+const onlineCache=onlineMeta&&onlineMeta.cache?onlineMeta.cache:{};
+const onlineRequests=onlineMeta&&onlineMeta.requests?onlineMeta.requests:{};
+const requestHosts=Object.entries(onlineRequests.requests_by_host||{}).map(function(pair){return pair[0]+" "+number(pair[1]);}).join(", ");
+keyValues($("vuln-provenance"),onlineMeta?(onlineMeta.coverage==="skipped"?[["Online lookup","skipped: "+String(onlineMeta.reason||"")]]:[
+ ["Online source",String(onlineMeta.provider||"OSV.dev")+" ("+String(onlineMeta.endpoint||"")+")"],
+ ["Enrichment",(onlineMeta.enrichment||[]).length?(onlineMeta.enrichment||[]).join(", "):"none"],
+ ["Query time",String(onlineMeta.query_started_at||"?")+" → "+String(onlineMeta.query_finished_at||"?")+" ("+String(onlineMeta.query_seconds||0)+" s)"],
+ ["Coverage",onlineMeta.coverage],
+ ["Lockfiles",number(onlineMeta.lockfiles||0)+" read, "+number(onlineMeta.lockfiles_unreadable||0)+" unreadable"],
+ ["Packages",number(onlineMeta.unique_packages||0)+" unique • "+number(onlineMeta.packages_queried||0)+" checked • "+number(onlineMeta.packages_failed||0)+" failed • "+number(onlineMeta.vulnerable_packages||0)+" with advisories"],
+ ["Advisories",number(onlineMeta.advisories||0)],
+ ["Cache",onlineCache.enabled?number(onlineCache.hits||0)+" hit(s) • "+number(onlineCache.misses||0)+" miss(es) • TTL "+String((onlineCache.ttl_seconds||0)/3600)+" h":"disabled"],
+ ["Requests",number(onlineRequests.requests||0)+(requestHosts?" ("+requestHosts+")":"")+" • retries "+number(onlineRequests.retries||0)+" • failed "+number(onlineRequests.failed_requests||0)],
+ ["Data sent",onlineMeta.data_sent],
+]):[]);
+const onlineIncomplete=Boolean(onlineMeta&&(onlineMeta.coverage==="partial"||onlineMeta.coverage==="unavailable"));
+const coverageWarning=$("vuln-coverage-warning");
+coverageWarning.textContent=onlineIncomplete
+ ? "Online vulnerability lookup is "+String(onlineMeta.coverage)+": "+number(onlineMeta.packages_failed||0)+" package(s) could not be checked and "+number(onlineMeta.lockfiles_unreadable||0)+" lockfile(s) could not be read. This is not a vulnerability-free result; see the UNKNOWN findings."
+ : "";
+coverageWarning.classList.toggle("hidden",!onlineIncomplete);
 $("vuln-db-updated").textContent=vulnMeta.last_imported_at
  ? "Last local import: "+vulnMeta.last_imported_at
  : "No local advisory snapshot metadata";
@@ -76,7 +154,9 @@ for(const item of vulnFindings){
  const title=document.createElement("span");title.className="finding-title";title.textContent=item.title;
  const severity=document.createElement("span");severity.className="badge sev-"+String(item.severity||"info").toLowerCase();severity.textContent=item.severity||"INFO";
  const confidence=document.createElement("span");confidence.className="badge "+String(item.confidence||"unknown").toLowerCase();confidence.textContent=item.confidence||"UNKNOWN";
- summary.append(title,severity,confidence);details.append(summary);
+ const origin=document.createElement("span");origin.className="badge";
+ origin.textContent=item.analyzer==="online-vulnerability-intelligence"?"OSV.DEV":item.analyzer==="local-vulnerability-intelligence"?"LOCAL DB":String(item.analyzer||"core");
+ summary.append(title,severity,confidence,origin);details.append(summary);
  const body=document.createElement("div");body.className="finding-body";
  const paragraph=document.createElement("p");paragraph.textContent=item.detail||"";body.append(paragraph);
  if(Array.isArray(item.evidence)&&item.evidence.length){

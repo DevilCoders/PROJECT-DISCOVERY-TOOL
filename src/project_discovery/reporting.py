@@ -11,6 +11,7 @@ from importlib.resources import files as resource_files
 from itertools import islice
 from pathlib import Path
 from typing import Any, TextIO
+from urllib.parse import urlsplit, urlunsplit
 
 from .models import REPORT_SCHEMA_VERSION, ScanResult
 
@@ -24,7 +25,69 @@ HTML_MAX_EMBEDDED = {
     "special_entries": 50_000,
     "errors": 10_000,
 }
-_TEMPLATE_PLACEHOLDER = re.compile(r"__(ROOT|GENERATED|REPORT_JS|CSP_NONCE)__")
+_TEMPLATE_PLACEHOLDER = re.compile(r"__(ROOT|GENERATED|REPORT_JS|CSP_NONCE|MODE_CLASS|MODE_LABEL|MODE_META)__")
+
+# Remote-source fields repeated in the top-level "scan" summary of every report.
+_REMOTE_SUMMARY_KEYS = (
+    "acquisition", "url", "provider", "vcs", "repository", "ref", "revision", "branch",
+    "transport", "transport_insecure", "acquired_at", "acquisition_seconds", "history_complete",
+)
+
+
+def public_url(value: Any) -> str:
+    """Return a URL without passwords, query strings or fragments (SSH user names kept)."""
+    text = str(value or "")
+    if "://" not in text:
+        return text
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return text.split("?", 1)[0].split("#", 1)[0]
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc += f":{port}"
+    if parts.username and parts.scheme.lower() in {"ssh", "pserver", "git+ssh", "svn+ssh", "bzr+ssh"}:
+        netloc = f"{parts.username}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def scan_summary(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Describe how a scan obtained its data: local or online, and every network use.
+
+    ``mode`` is "online" when PDT used the network for this scan (fetching the repository
+    or querying advisory services) and "local" otherwise. The same summary feeds the JSON,
+    Markdown and HTML reports so they cannot disagree.
+    """
+    source = metrics.get("source") if isinstance(metrics.get("source"), dict) else {}
+    remote = source.get("remote") if isinstance(source.get("remote"), dict) else None
+    vulnerabilities = metrics.get("vulnerability_intelligence")
+    vulnerabilities = vulnerabilities if isinstance(vulnerabilities, dict) else {}
+    online = vulnerabilities.get("online") if isinstance(vulnerabilities.get("online"), dict) else None
+    network: list[str] = []
+    remote_summary = None
+    if remote is not None:
+        acquisition = str(remote.get("acquisition") or "download")
+        network.append("provider-api" if acquisition == "api" else f"{remote.get('vcs') or 'vcs'}-client")
+        remote_summary = {key: remote.get(key) for key in _REMOTE_SUMMARY_KEYS}
+        remote_summary["acquisition"] = acquisition
+        remote_summary["url"] = public_url(remote.get("url"))
+        remote_summary["coverage_gap_count"] = len(remote.get("coverage_gaps") or [])
+    if online is not None and online.get("coverage") != "skipped":
+        network.append("osv.dev")
+        network.extend(sorted(str(item) for item in online.get("enrichment") or []))
+    sources = vulnerabilities.get("sources")
+    if not isinstance(sources, list):
+        sources = ["local-database"] if vulnerabilities.get("enabled") else []
+    return {
+        "mode": "online" if network else "local",
+        "source": "remote" if remote is not None else "local",
+        "network_access": network,
+        "remote": remote_summary,
+        "vulnerability_sources": list(sources),
+        "online_vulnerability_coverage": online.get("coverage") if online else None,
+    }
 
 
 def _script_json(value: Any) -> str:
@@ -48,11 +111,19 @@ def _html_template(result: ScanResult, *, nonce: str, data_marker: str) -> str:
     report_js = resource_files("project_discovery").joinpath("web/report.js").read_text(encoding="utf-8")
     if report_js.count("__DATA__") != 1:
         raise RuntimeError("report.js must contain exactly one __DATA__ placeholder")
+    summary = scan_summary(result.metrics)
+    online = summary["mode"] == "online"
     values = {
         "ROOT": html.escape(result.root),
         "GENERATED": html.escape(result.finished_at),
         "REPORT_JS": report_js.replace("__DATA__", data_marker),
         "CSP_NONCE": nonce,
+        "MODE_CLASS": "online" if online else "local",
+        "MODE_LABEL": "ONLINE SCAN" if online else "LOCAL SCAN",
+        "MODE_META": (
+            "ONLINE SCAN // OFFLINE REPORT // STATIC EVIDENCE" if online
+            else "LOCAL SCAN // OFFLINE REPORT // STATIC EVIDENCE"
+        ),
     }
     template = """<!doctype html>
 <html lang="en">
@@ -150,6 +221,13 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
  white-space:pre-wrap;overflow-wrap:anywhere;color:#9db5cf;font:11px/1.5 ui-monospace,monospace}
 .footer{padding:28px 0;color:#667b94;text-align:center;font:10px ui-monospace,monospace;letter-spacing:.12em}
 .truncation{margin-top:18px;padding:12px 14px;border:1px solid #6b5420;border-radius:10px;background:#2a210c;color:#fde68a;font-size:12px}
+.mode-line{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:12px}
+.badge.mode-online{background:#0c3a4b;color:#a5f3fc;border:1px solid #26748b}.badge.mode-local{background:#173823;color:var(--green);border:1px solid #2f6b45}
+.badge.insecure{background:#571d2d;color:#fecdd3}.badge.complete{color:var(--green)}.badge.partial,.badge.unavailable{background:#571d2d;color:#fecdd3}
+.kv{display:grid;gap:0}.kv-row{display:grid;grid-template-columns:minmax(120px,220px) minmax(0,1fr);gap:12px;padding:7px 0;border-bottom:1px solid #20334b;font-size:12px}
+.kv-key{color:var(--muted);font:700 10px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;padding-top:2px}
+.kv-value{color:#d5e2f0;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
+.coverage-list{margin:10px 0 0;padding-left:20px;color:#c6d5e5}.coverage-list li{margin:4px 0}
 .hidden{display:none!important}
 @media(max-width:900px){.main-grid{grid-template-columns:1fr}.sidebar{position:static;display:flex;flex-wrap:wrap;gap:4px}.sidebar h3{width:100%}}
 @media(max-width:600px){.top-meta{display:none}.finding summary{flex-wrap:wrap;padding:10px 0}.finding-title{flex-basis:100%;order:3}.section{padding:15px}}
@@ -158,13 +236,14 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
 <body>
 <div class="topbar">
  <div class="brand"><span class="brand-mark">⌁</span><span>PDT <span style="color:var(--cyan)">/</span> INTELLIGENCE</span></div>
- <div class="top-meta">LOCAL REPORT // STATIC EVIDENCE // OFFLINE</div>
+ <div class="top-meta">__MODE_META__</div>
 </div>
 <div class="shell">
  <header class="hero">
   <div class="eyebrow">Project discovery / analysis complete</div>
   <h1>Project Intelligence Report</h1>
   <div class="root">__ROOT__</div><div class="completed">COMPLETED // __GENERATED__</div>
+  <div class="mode-line"><span id="scan-mode" class="badge mode-__MODE_CLASS__">__MODE_LABEL__</span><span id="source-line" class="muted mono"></span><span id="transport-badge" class="badge insecure hidden">NO TLS</span></div>
   <div class="stats">
    <div class="stat cyan"><span>Files</span><strong id="stat-files">0</strong></div>
    <div class="stat"><span>Directories</span><strong id="stat-dirs">0</strong></div>
@@ -179,16 +258,18 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
  <div class="main-grid">
   <aside class="sidebar" aria-label="Report navigation">
    <h3>Navigation</h3>
-   <a href="#overview">01 // Overview</a><a href="#inventory">02 // Inventory</a>
-   <a href="#vulnerabilities">03 // Vulnerabilities</a><a href="#vcs">04 // VCS / Providers</a>
-   <a href="#directories">05 // Directories</a><a href="#symlinks">06 // Symlinks</a>
-   <a href="#special">07 // Special entries</a><a href="#files">08 // File browser</a>
-   <a href="#findings">09 // Findings</a><a href="#diagnostics">10 // Diagnostics</a>
+   <a href="#overview">01 // Overview</a><a href="#source">02 // Scan source</a>
+   <a href="#inventory">03 // Inventory</a>
+   <a href="#vulnerabilities">04 // Vulnerabilities</a><a href="#vcs">05 // VCS / Providers</a>
+   <a href="#directories">06 // Directories</a><a href="#symlinks">07 // Symlinks</a>
+   <a href="#special">08 // Special entries</a><a href="#files">09 // File browser</a>
+   <a href="#findings">10 // Findings</a><a href="#diagnostics">11 // Diagnostics</a>
   </aside>
   <main class="content">
    <section class="section" id="overview">
     <div class="section-head"><h2>Scan overview</h2><span class="kicker">01 / SUMMARY</span></div>
     <div class="profile-grid">
+     <div class="profile-card"><h3>Scan source</h3><div id="source-summary" class="mono muted"></div></div>
      <div class="profile-card"><h3>File type distribution</h3><div id="file-types"></div></div>
      <div class="profile-card"><h3>File size distribution</h3><div id="size-buckets"></div></div>
      <div class="profile-card"><h3>Development dependency trees</h3><div id="development-dirs"></div></div>
@@ -197,47 +278,55 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>Source control & delivery</h3><div id="vcs-summary" class="mono muted"></div></div>
     </div>
    </section>
+   <section class="section" id="source">
+    <div class="section-head"><h2>Scan source</h2><span class="kicker">02 / MODE AND PROVENANCE</span></div>
+    <div id="source-details" class="kv"></div>
+    <ul id="source-coverage" class="coverage-list hidden"></ul>
+    <div id="source-notes" class="muted"></div>
+   </section>
    <section class="section" id="inventory">
-    <div class="section-head"><h2>Filesystem inventory</h2><span class="kicker">02 / ENTRY PROFILE</span></div>
+    <div class="section-head"><h2>Filesystem inventory</h2><span class="kicker">03 / ENTRY PROFILE</span></div>
     <div id="inventory-summary" class="muted"></div>
     <p class="muted">The JSON report contains full inventory metadata. Large tables are rendered in bounded pages.</p>
    </section>
    <section class="section" id="vulnerabilities">
-    <div class="section-head"><h2>Local vulnerability intelligence</h2><span class="kicker">03 / OFFLINE ADVISORY MATCHING</span></div>
-    <div class="controls"><span id="vuln-db-state" class="badge">LOCAL DB STATUS</span><span id="vuln-db-updated" class="muted"></span></div>
+    <div class="section-head"><h2>Vulnerability intelligence</h2><span class="kicker">04 / ADVISORY MATCHING</span></div>
+    <div class="controls"><span id="vuln-db-state" class="badge">LOCAL DB STATUS</span><span id="vuln-online-state" class="badge">ONLINE LOOKUP OFF</span><span id="vuln-db-updated" class="muted"></span></div>
+    <div id="vuln-coverage-warning" class="truncation hidden" role="status"></div>
+    <div id="vuln-provenance" class="kv"></div>
     <div id="vulnerability-findings" class="finding-list"></div>
-    <div id="no-vulnerabilities" class="empty hidden">No local advisory matches were produced. This does not prove dependencies are vulnerability-free.</div>
+    <div id="no-vulnerabilities" class="empty hidden">No advisory matches were produced. This does not prove dependencies are vulnerability-free.</div>
    </section>
    <section class="section" id="vcs">
-    <div class="section-head"><h2>VCS, hosting & delivery providers</h2><span class="kicker">04 / SOURCE PROVENANCE</span></div>
+    <div class="section-head"><h2>VCS, hosting & delivery providers</h2><span class="kicker">05 / SOURCE PROVENANCE</span></div>
     <div id="vcs-findings" class="finding-list"></div>
     <div id="no-vcs" class="empty hidden">No local VCS, source-hosting or delivery-provider metadata was detected.</div>
    </section>
    <section class="section" id="directories">
-    <div class="section-head"><h2>Directory intelligence</h2><span class="kicker">05 / STRUCTURE</span></div>
+    <div class="section-head"><h2>Directory intelligence</h2><span class="kicker">06 / STRUCTURE</span></div>
     <div class="table-wrap"><table><thead><tr><th>Directory</th><th>Depth</th><th>Files</th><th>Aggregate size</th><th>Marker / state</th></tr></thead><tbody id="directory-rows"></tbody></table></div>
    </section>
    <section class="section" id="symlinks">
-    <div class="section-head"><h2>Symbolic links</h2><span class="kicker">06 / NO-FOLLOW INVENTORY</span></div>
+    <div class="section-head"><h2>Symbolic links</h2><span class="kicker">07 / NO-FOLLOW INVENTORY</span></div>
     <div class="table-wrap"><table><thead><tr><th>Link path</th><th>Target</th><th>Lexical scope</th><th>Verification</th><th>Permissions</th><th>Hidden</th></tr></thead><tbody id="symlink-rows"></tbody></table></div>
     <div class="pagination" id="symlink-pagination"><span id="symlink-page-info">0 links</span><button id="symlink-more" class="primary" type="button">Load next page</button></div>
     <div id="no-symlinks" class="empty hidden">No symbolic links were detected.</div>
    </section>
    <section class="section" id="special">
-    <div class="section-head"><h2>Special filesystem entries</h2><span class="kicker">07 / FIFO SOCKET DEVICE</span></div>
+    <div class="section-head"><h2>Special filesystem entries</h2><span class="kicker">08 / FIFO SOCKET DEVICE</span></div>
     <div class="table-wrap"><table><thead><tr><th>Path</th><th>Type</th><th>Permissions</th><th>Hidden</th><th>Size</th></tr></thead><tbody id="special-rows"></tbody></table></div>
     <div class="pagination" id="special-pagination"><span id="special-page-info">0 entries</span><button id="special-more" class="primary" type="button">Load next page</button></div>
     <div id="no-special" class="empty hidden">No FIFO, socket, device or other special entries were detected.</div>
    </section>
    <section class="section" id="files">
-    <div class="section-head"><h2>File browser</h2><span class="kicker">08 / SEARCHABLE INVENTORY</span></div>
+    <div class="section-head"><h2>File browser</h2><span class="kicker">09 / SEARCHABLE INVENTORY</span></div>
     <div class="controls"><input id="file-search" type="search" placeholder="Search paths, languages and file types" aria-label="Search file inventory">
      <select id="file-kind"><option value="">All file types</option></select><button id="file-reset" type="button">Reset</button></div>
     <div class="table-wrap"><table><thead><tr><th>Path</th><th>Size</th><th>Type</th><th>Language</th><th>Flags</th></tr></thead><tbody id="file-rows"></tbody></table></div>
     <div class="pagination"><span id="file-page-info">0 entries</span><button id="file-more" class="primary" type="button">Load next page</button></div>
    </section>
    <section class="section" id="findings">
-    <div class="section-head"><h2>Analysis findings</h2><span class="kicker">09 / EVIDENCE</span></div>
+    <div class="section-head"><h2>Analysis findings</h2><span class="kicker">10 / EVIDENCE</span></div>
     <div class="controls">
      <input id="search" type="search" placeholder="Search findings, evidence and paths" aria-label="Search findings">
      <select id="category"><option value="">All categories</option></select>
@@ -253,14 +342,14 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
     <div id="no-findings" class="empty hidden">No findings match the current filters.</div>
    </section>
    <section class="section" id="diagnostics">
-    <div class="section-head"><h2>Diagnostics and raw metrics</h2><span class="kicker">10 / TRACE</span></div>
+    <div class="section-head"><h2>Diagnostics and raw metrics</h2><span class="kicker">11 / TRACE</span></div>
     <details><summary>Show scan metrics JSON</summary><pre id="raw-metrics" class="raw-json"></pre></details>
     <details><summary>Show scanner/analyzer errors</summary><pre id="raw-errors" class="raw-json"></pre></details>
     <details><summary>Active analyzers</summary><pre id="raw-analyzers" class="raw-json"></pre></details>
    </section>
   </main>
  </div>
- <div class="footer">PDT // LOCAL-FIRST // OFFLINE // READ-ONLY // CONFIDENCE-AWARE</div>
+ <div class="footer">PDT // SELF-CONTAINED OFFLINE REPORT // READ-ONLY // CONFIDENCE-AWARE</div>
 </div>
 <script nonce="__CSP_NONCE__">
 __REPORT_JS__
@@ -308,7 +397,9 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
     def bounded(name: str, values):
         return islice(values, HTML_MAX_EMBEDDED[name])
 
-    stream.write('{"schema_version":' + json.dumps(REPORT_SCHEMA_VERSION) + ',"totals":')
+    stream.write('{"schema_version":' + json.dumps(REPORT_SCHEMA_VERSION) + ',"scan":')
+    _write_json_value(stream, scan_summary(result.metrics), script_safe=True)
+    stream.write(',"totals":')
     _write_json_value(stream, totals, script_safe=True)
     stream.write(',"embedded_limits":')
     _write_json_value(stream, HTML_MAX_EMBEDDED, script_safe=True)
@@ -364,6 +455,8 @@ def _write_json_report(stream: TextIO, result: ScanResult) -> None:
     _write_json_value(stream, result.started_at)
     stream.write(',"finished_at":')
     _write_json_value(stream, result.finished_at)
+    stream.write(',"scan":')
+    _write_json_value(stream, scan_summary(result.metrics))
     stream.write(',"files":')
     _write_json_array(stream, result.files, lambda item: item.to_dict())
     stream.write(',"directories":')
@@ -435,10 +528,13 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     metrics = result.metrics
     native = metrics.get("native_backend", {})
     execution = metrics.get("execution", {})
+    summary = scan_summary(metrics)
     for value in (
         "# Project Discovery Report",
         "",
         f"- Root: {_md(result.root)}",
+        f"- Scan mode: {summary['mode']} ({_md(_network_label(summary))})",
+        f"- Source: {_md(_source_label(summary))}",
         f"- Schema version: {REPORT_SCHEMA_VERSION}",
         f"- Completed: {result.finished_at}",
         f"- Files: {len(result.files):,}",
@@ -458,10 +554,11 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- GPU byte-count dispatches: {native.get('gpu_dispatches', 0):,}",
         f"- GPU CPU fallbacks: {native.get('gpu_fallbacks', 0):,}",
         "",
-        "## File Type Distribution",
-        "",
     ):
         line(value)
+    _write_markdown_source(line, metrics, summary)
+    line("## File Type Distribution")
+    line()
     for name, count in sorted(metrics.get("file_types", {}).items()):
         line(f"- {_md(name)}: {count:,}")
     line()
@@ -512,25 +609,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
                 f"- {_md(item.path)} — {_md(item.entry_type)}, permissions {mode}, "
                 f"hidden: {item.is_hidden}, size: {item.size_bytes:,} bytes"
             )
-    vuln_meta = metrics.get("vulnerability_intelligence", {})
-    vulnerability_count = sum(
-        1 for item in result.findings if item.category == "vulnerabilities"
-    )
-    line()
-    line("## Local Vulnerability Intelligence")
-    line()
-    if not vuln_meta.get("enabled"):
-        line("No local advisory database was configured. This is not a vulnerability-free result.")
-    else:
-        line(f"- Local advisories available: {vuln_meta.get('advisory_count', 0):,}")
-        line(f"- Local advisory snapshot imported: {_md(vuln_meta.get('last_imported_at', 'unknown'))}")
-        line(f"- Matched findings: {vulnerability_count:,}")
-    for item in result.findings:
-        if item.category != "vulnerabilities":
-            continue
-        line(f"- [{item.severity}][{item.confidence}] {_md(item.title)}")
-        line(f"  - {_md(item.detail)}")
-        line("  - Evidence: " + "; ".join(_md(value) for value in item.evidence))
+    _write_markdown_vulnerabilities(line, result, metrics.get("vulnerability_intelligence") or {})
     line()
     line("## Findings")
     line()
@@ -564,6 +643,140 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
             line(f"- {_md(error)}")
     else:
         line("No scanner/analyzer errors recorded.")
+
+
+def _network_label(summary: dict[str, Any]) -> str:
+    uses = summary.get("network_access") or []
+    if not uses:
+        return "no network access"
+    names = {
+        "provider-api": "provider API", "osv.dev": "OSV.dev", "nvd": "NVD", "ghsa": "GitHub Advisory Database",
+    }
+    return "network used: " + ", ".join(names.get(item, item) for item in uses)
+
+
+def _source_label(summary: dict[str, Any]) -> str:
+    remote = summary.get("remote")
+    if not remote:
+        return "local directory"
+    how = (
+        "read through the provider API, not downloaded" if remote.get("acquisition") == "api"
+        else "downloaded to a temporary directory and deleted after the scan"
+    )
+    return f"remote repository {remote.get('url') or ''} ({how})"
+
+
+def _write_markdown_source(line, metrics: dict[str, Any], summary: dict[str, Any]) -> None:
+    line("## Scan Source")
+    line()
+    line(f"- Mode: {summary['mode']}")
+    line(f"- Network access: {_md(_network_label(summary))}")
+    remote_metrics = (metrics.get("source") or {}).get("remote")
+    remote = summary.get("remote")
+    if not remote or not isinstance(remote_metrics, dict):
+        line("- Source: local directory (the report root above)")
+        line()
+        return
+    line(f"- Source: remote repository ({'provider API' if remote.get('acquisition') == 'api' else 'temporary download'})")
+    line(f"- URL: {_md(remote.get('url') or 'not reported')}")
+    line(f"- Provider: {_md(remote.get('provider') or 'unknown')}")
+    line(f"- VCS: {_md(remote.get('vcs') or 'unknown')}")
+    line(f"- Repository: {_md(remote.get('repository') or 'unknown')}")
+    line(f"- Requested ref: {_md(remote.get('ref') or 'remote default branch')}")
+    line(f"- Revision analyzed: {_md(remote.get('revision') or 'not reported')}")
+    if remote.get("branch"):
+        line(f"- Branch: {_md(remote['branch'])}")
+    transport = remote.get("transport") or "unknown"
+    if remote.get("transport_insecure"):
+        line(f"- Transport: {_md(transport)} — **not encrypted** (accepted with --allow-insecure-transport)")
+    else:
+        line(f"- Transport: {_md(transport)} (encrypted)")
+    if remote.get("acquired_at"):
+        seconds = remote.get("acquisition_seconds")
+        timing = f" ({seconds:,} s)" if isinstance(seconds, (int, float)) else ""
+        line(f"- Acquired: {_md(remote['acquired_at'])}{timing}")
+    if remote.get("history_complete") is False:
+        line("- History: only the analyzed revision (history not imported)")
+    coverage = [item for item in remote_metrics.get("coverage") or [] if isinstance(item, dict)]
+    if coverage:
+        line("- Coverage:")
+        for item in coverage:
+            state = "missing from the analyzed tree" if item.get("incomplete") else "not fetched"
+            line(f"  - {_md(item.get('detail', ''))} ({state})")
+    else:
+        line("- Coverage: every listed path was materialized")
+    details = {str(item.get("detail")) for item in coverage}
+    for note in remote_metrics.get("warnings") or []:
+        if str(note) not in details:
+            line(f"- Note: {_md(note)}")
+    line()
+
+
+def _write_markdown_vulnerabilities(line, result: ScanResult, meta: dict[str, Any]) -> None:
+    findings = [item for item in result.findings if item.category == "vulnerabilities"]
+    confirmed = sum(1 for item in findings if item.confidence == "CONFIRMED")
+    online = meta.get("online") if isinstance(meta.get("online"), dict) else None
+    sources = meta.get("sources") if isinstance(meta.get("sources"), list) else (
+        ["local-database"] if meta.get("enabled") else []
+    )
+    labels = {"local-database": "local advisory database", "osv.dev": "OSV.dev (online)"}
+    line("## Vulnerability Intelligence")
+    line()
+    if sources:
+        line("- Sources: " + ", ".join(labels.get(str(item), _md(item)) for item in sources))
+    else:
+        line("- Sources: none configured (use --vuln-db or --vuln-online). This is not a vulnerability-free result.")
+    line(f"- Advisory matches: {confirmed:,} confirmed, {len(findings) - confirmed:,} UNKNOWN (coverage or comparison gaps)")
+    line()
+    line("### Local Advisory Database")
+    line()
+    if not meta.get("enabled"):
+        line("No local advisory database was configured. This is not a vulnerability-free result.")
+    else:
+        line(f"- Local advisories available: {meta.get('advisory_count', 0):,}")
+        line(f"- Local advisory snapshot imported: {_md(meta.get('last_imported_at', 'unknown'))}")
+        if meta.get("snapshot_age_days") is not None:
+            line(f"- Snapshot age: {meta['snapshot_age_days']:,} day(s)")
+    line()
+    line("### Online Advisory Lookup")
+    line()
+    if online is None:
+        line("Not used: no advisory service was contacted (enable with --vuln-online).")
+    elif online.get("coverage") == "skipped":
+        line(f"Skipped: {_md(online.get('reason', 'not run'))}")
+    else:
+        coverage = str(online.get("coverage", "unknown"))
+        line(f"- Provider: {_md(online.get('provider', 'OSV.dev'))} ({_md(public_url(online.get('endpoint')))})")
+        enrichment = online.get("enrichment") or []
+        line(f"- Enrichment: {_md(', '.join(enrichment)) if enrichment else 'none'}")
+        line(f"- Query time: {_md(online.get('query_started_at', 'unknown'))} to "
+             f"{_md(online.get('query_finished_at', 'unknown'))} ({online.get('query_seconds', 0)} s)")
+        line(f"- Coverage: {_md(coverage)}")
+        if coverage in {"partial", "unavailable"}:
+            line(
+                f"- **Incomplete:** {online.get('packages_failed', 0):,} package(s) could not be checked and "
+                f"{online.get('lockfiles_unreadable', 0):,} lockfile(s) could not be read. "
+                "This is not a vulnerability-free result; see the UNKNOWN findings."
+            )
+        line(f"- Lockfiles: {online.get('lockfiles', 0):,}; unique packages: {online.get('unique_packages', 0):,}; "
+             f"checked: {online.get('packages_queried', 0):,}; with advisories: {online.get('vulnerable_packages', 0):,}")
+        cache = online.get("cache") or {}
+        if cache.get("enabled"):
+            line(f"- Cache: {cache.get('hits', 0):,} hit(s), {cache.get('misses', 0):,} miss(es), "
+                 f"TTL {cache.get('ttl_seconds', 0) / 3600:g} h")
+        else:
+            line("- Cache: disabled")
+        requests = online.get("requests") or {}
+        per_host = ", ".join(f"{_md(host)} {count:,}" for host, count in (requests.get("requests_by_host") or {}).items())
+        line(f"- Requests: {requests.get('requests', 0):,}" + (f" ({per_host})" if per_host else "")
+             + f"; retries {requests.get('retries', 0):,}; failed {requests.get('failed_requests', 0):,}")
+        for failure in online.get("failures") or []:
+            line(f"- Failure: {_md(failure.get('reason'))} ({failure.get('packages', 0):,} package(s))")
+        line(f"- Data sent: {_md(online.get('data_sent', 'package coordinates'))}")
+    for item in findings:
+        line(f"- [{item.severity}][{item.confidence}] {_md(item.title)} ({_md(item.analyzer)})")
+        line(f"  - {_md(item.detail)}")
+        line("  - Evidence: " + "; ".join(_md(value) for value in item.evidence))
 
 
 def _markdown_report(result: ScanResult) -> str:
