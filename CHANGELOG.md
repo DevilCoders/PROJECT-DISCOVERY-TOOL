@@ -23,8 +23,9 @@ methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architec
 - `dataflow`: taint from web requests, sockets and stdin to SQL, command, code,
   deserialization, template, path, SSRF, XSS, redirect, format-string and buffer sinks. Python
   is analysed inter-procedurally (helper summaries iterated to a fixed point) and across
-  modules; JavaScript/TypeScript, PHP, Java/Kotlin/Scala/Groovy, Go, C#, Rust and C/C++ within
-  functions.
+  modules; JavaScript/TypeScript, PHP, Java/Kotlin/Scala/Groovy, Go, C#, Rust and C/C++ through
+  the file's own functions (parameter and return summaries) and into other files by a function
+  name that only one file defines.
 - `embedded` (PlatformIO, ESP-IDF, Zephyr, STM32CubeMX, Rust targets, FreeRTOS, linker memory
   maps, device trees, interrupt-handler safety), `firmware` (ELF/PE metadata and hardening,
   HEX, S-record, UF2, DTB/FIT, uImage, Android boot, ESP32 images, filesystems, Cortex-M vector

@@ -193,7 +193,7 @@ Defects found while building this work were fixed before it was committed to the
 ### Limits
 
 - The lexer does not expand macros, resolve overloads or instantiate templates and generics. Lexical call resolution is by name within a language group, and ambiguous names are reported as ambiguous rather than guessed.
-- Taint analysis outside Python is intra-procedural and does not reason about branches. Cross-module flows are joined for Python only. No language has type inference, so a sink reached through a dynamically dispatched call can be missed.
+- Taint analysis does not reason about branches. Outside Python it follows the file's own functions and joins calls into other files only by a function name that a single file defines, so calls through object receivers with common method names are not followed (§10). No language has type inference, so a sink reached through a dynamically dispatched call can be missed.
 - Static analysis cannot see run-time validation, authorization, framework escaping or deployment. Data-flow, concurrency, resource, HDL lint, rules-of-hooks and integration-map results need review before they are treated as defects.
 - Very large repositories reach the index ceilings (5–20 million rows per table). This is reported as an `UNKNOWN` finding, and the index-based results are then incomplete.
 
@@ -225,3 +225,29 @@ The release gates in §5 are unchanged. The large-corpus benchmarks now also mea
 - Files that Windows grants to every app container, such as those under `C:\Windows` and `C:\Program Files`, stay readable. They hold no project data.
 - On Windows a plugin can import only the standard library, its own package and the distributions it declares as dependencies. Python builds that keep native libraries outside `DLLs` (for example conda) can fail to import the affected standard-library modules in the sandbox.
 - The AppContainer profile `ProjectDiscoveryTool.PluginHost` persists per user, as browsers' profiles do; [PLUGIN_SDK.md](../guides/PLUGIN_SDK.md) explains how to remove it.
+
+## 10. Inter-procedural taint for the lexically modelled languages
+
+**Date:** 2026-11-06 · **Scope:** the §8 limit that taint analysis outside Python stayed within one function and that only Python flows were joined across modules.
+
+### What changed
+
+- **Summaries.** Each function of a JavaScript/TypeScript, PHP, Java/Kotlin/Scala/Groovy, Go, C#, Rust or C/C++ file is summarized. Its parameters are followed as marked values to the sinks they reach and to what the function returns, and input the function reads and returns itself is recorded. Summaries are iterated, up to three rounds under an event budget, so chains of helpers are followed. Only functions that hold a sink, call another function of the file, or return to a caller in the file are summarized.
+- **Calls in the file.** A call carries taint into the sinks inside the callee (`app.js:17 req.query -> outer() -> inner() -> exec`) and out through its return value, with the callee's sanitizers respected.
+- **Calls into other files.** Calls passing untrusted input to a function the file does not define are recorded as code facts, with the same fact kinds Python uses. The code index joins a call with the callee's summary when exactly one file of the same language family defines a function of that name. An ambiguous name is not guessed. Calls to source, sink and sanitizer functions and callback arguments are not recorded. Files in dependency trees are summarized for others only when they read untrusted input themselves.
+- **Speed.** Patterns that begin with a boundary lookbehind are searched through a variant without it, and each candidate is confirmed with the original pattern. The variant is built only when the alternative then starts with a fixed character, so every search stays linear. The regex-complexity test checks all 85 variants, and the results equal the original patterns' on every family.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Unit tests | Helper sinks, returned parameters, returned sources, a two-level chain and sanitized calls in JavaScript, PHP, Go, Java and C give the expected flows and helper chains. |
+| End to end | A scan of a JavaScript project reports `app.js:3 req.query -> runQuery() -> pool.query at lib/db.js:2` across files. A call to `save()`, defined in two files, is not joined. |
+| Cost | 1,199 JavaScript files of npm and Babel (17 MB): the data-flow analyzer took 5.62 s before and 5.88 s after (+5%); treating the same files as first-party code, 6.15 s (+9%). One more open-redirect flow, through a helper, was found. |
+| Test suites | Windows 10, Py 3.12 and Ubuntu 26.04, Py 3.14 pass, including the regex-complexity check over every generated pattern. |
+
+### Limits
+
+- Branches are not distinguished, and a variable stays tainted along every path after a tainted assignment.
+- Calls through an object receiver (`dao.find(x)`) are joined only when the method name is unique within the language family, so common method names are not followed across files.
+- A function is identified by name. Overloads and same-named methods of different classes in one file share a summary.

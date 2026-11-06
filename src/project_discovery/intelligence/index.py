@@ -701,6 +701,63 @@ def _memory_summary(context: _Context) -> tuple[dict, list[Finding]]:
     )] if parts else []
 
 
+def _lexical_cross_flows(db: sqlite3.Connection, cross: dict[str, list[str]], kinds) -> tuple[int, int]:
+    """Flows from a tainted call in one lexically modelled file into a function of another.
+
+    A call is matched by the callee's name within the language family, and only when a
+    single file defines a function of that name: an ambiguous name is not guessed.
+    Returns (flows found, exported summaries).
+    """
+    summaries: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for name, detail, path, group in db.execute(
+        """SELECT f.name, f.detail, f.path, files.grp FROM code_facts f JOIN files ON files.path = f.path
+           WHERE f.kind = 'taint_sink_param' AND files.module IS NULL"""
+    ):
+        try:
+            summaries[(group, name)].append(json.loads(detail) | {"path": path})
+        except (ValueError, TypeError):
+            continue
+    if not summaries:
+        return 0, 0
+    db.execute("CREATE TEMP TABLE IF NOT EXISTS taint_names (name TEXT PRIMARY KEY) WITHOUT ROWID")
+    db.execute("DELETE FROM taint_names")
+    db.executemany("INSERT OR IGNORE INTO taint_names VALUES (?)", ((name,) for _, name in summaries))
+    placeholders = ", ".join("?" for _ in _FUNCTION_KINDS)
+    definitions = {
+        (group, name): count for name, group, count in db.execute(
+            f"""SELECT s.name, files.grp, COUNT(DISTINCT s.path) FROM taint_names t
+                JOIN code_symbols s ON s.name = t.name JOIN files ON files.path = s.path
+                WHERE s.kind IN ({placeholders}) AND files.module IS NULL GROUP BY s.name, files.grp""",
+            _FUNCTION_KINDS,
+        )
+    }
+    found = 0
+    for target, detail, path, group in db.execute(
+        """SELECT f.name, f.detail, f.path, files.grp FROM code_facts f JOIN files ON files.path = f.path
+           WHERE f.kind = 'tainted_call' AND files.module IS NULL"""
+    ):
+        entries = summaries.get((group, target))
+        if not entries or definitions.get((group, target)) != 1:
+            continue
+        try:
+            call = json.loads(detail)
+        except ValueError:
+            continue
+        for entry in entries:
+            if entry["path"] == path or call.get("arg") != entry.get("param"):
+                continue
+            found += 1
+            kind = entry.get("sink_kind")
+            if kind in kinds and len(cross[kind]) < MAX_LISTED:
+                callee = f"{call['receiver']}.{target}" if call.get("receiver") else target
+                cross[kind].append(
+                    f"{path}:{call.get('line')} `{call.get('source')}` (line {call.get('source_line')}) -> "
+                    f"{callee}() -> " + (f"{entry['via']} -> " if entry.get("via") else "")
+                    + f"`{entry.get('sink')}` at {entry['path']}:{entry.get('line')}"
+                )
+    return found, sum(len(entries) for entries in summaries.values())
+
+
 def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
     """Totals of per-file taint flows, plus Python flows that cross module boundaries:
     a call passing untrusted input to an imported function whose parameter reaches a sink."""
@@ -748,13 +805,15 @@ def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
                         f"{resolved}() -> " + (f"{entry['via']} -> " if entry.get("via") else "")
                         + f"`{entry.get('sink')}` at {entry['path']}:{entry.get('line')}"
                     )
+    lexical_count, lexical_summaries = _lexical_cross_flows(db, cross, KINDS)
+    cross_count += lexical_count
     sources = sum(counts["sources"] for counts in totals.values())
     flows = sum(counts["flows"] for counts in totals.values())
     truncated = db.execute("SELECT COUNT(*) FROM code_facts WHERE kind = 'dataflow_truncated'").fetchone()[0]
     value = {
         "sources": sources, "files": sum(files.values()),
         "flows": flows, "by_kind": dict(sorted(by_kind.items())), "cross_module_flows": cross_count,
-        "exported_summaries": sum(len(entries) for entries in summaries.values()),
+        "exported_summaries": sum(len(entries) for entries in summaries.values()) + lexical_summaries,
         "truncated_files": truncated,
         "by_language": {language: dict(sorted(counts.items())) | {"files": files[language]}
                         for language, counts in sorted(totals.items())},
@@ -774,7 +833,8 @@ def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
             f"{sources:,} untrusted-input source site(s); {flows:,} flow(s) reach a dangerous operation"
             + (" (" + ", ".join(f"{count:,} {kind}" for kind, count in by_kind.most_common()) + ")" if by_kind else "")
             + f"; {cross_count:,} cross module boundaries. Python flows are followed through assignments, "
-            "branches, loops and helper functions; other languages within each function.",
+            "branches, loops and helper functions; other languages through assignments and the file's own "
+            "functions, and into other files by a function name that only one file defines.",
             confidence="INFERRED", analyzer="dataflow",
         ))
     if truncated:

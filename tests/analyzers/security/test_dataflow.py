@@ -223,3 +223,103 @@ def test_files_without_sources_or_sinks_cost_one_walk():
     engine = PythonTaintEngine(ast.parse("def a(x):\n    return x + 1\n\ndef b():\n    return a(2)\n"))
     assert engine.relevant == [] and not engine.has_sources
     assert analyze_python_taint(ast.parse("def a(x):\n    return x\n")).flows == []
+
+
+def lexical_paths(name: str, language: str, source: str) -> set[tuple[str, int, int, str]]:
+    model = build_lexical_model(name, language, textwrap.dedent(source))
+    flows, _ = analyze_lexical_taint(model, LEXICAL_LANGUAGES[language])
+    return {(flow.kind, flow.sink_line, flow.call_line, flow.via) for flow in flows}
+
+
+def test_lexical_engine_follows_the_files_own_functions():
+    # A parameter reaching a sink, a returned parameter, a returned source and a chain.
+    assert lexical_paths("app.js", "JavaScript", '''
+        function runQuery(sql) {
+          return pool.query(sql);
+        }
+        function wrap(x) {
+          return "SELECT * FROM t WHERE n = '" + x + "'";
+        }
+        function name(req) {
+          return req.query.name;
+        }
+        function outer(a) { inner(a); }
+        function inner(b) { exec(b); }
+        app.get('/x', (req, res) => {
+          runQuery("SELECT * FROM t WHERE id = " + req.query.id);
+          pool.query(wrap(req.query.q));
+          exec("ls " + name(req));
+          outer(req.query.c);
+          runQuery("SELECT 1 WHERE id = " + parseInt(req.query.n, 10));
+        });
+    ''') == {
+        ("sql", 3, 14, "runQuery()"), ("sql", 15, 15, ""), ("command", 16, 16, ""),
+        ("command", 12, 17, "outer() -> inner()"),
+    }
+    assert lexical_paths("index.php", "PHP", '''<?php
+        function run($q) {
+            mysqli_query($GLOBALS['conn'], $q);
+        }
+        run("SELECT * FROM t WHERE id = " . $_GET['id']);
+        run("SELECT * FROM t WHERE id = " . intval($_GET['id']));
+    ''') == {("sql", 3, 5, "run()")}
+    assert lexical_paths("main.go", "Go", '''
+        package main
+        func find(db *sql.DB, name string) {
+            db.Query("SELECT * FROM t WHERE n = '" + name + "'")
+        }
+        func handler(w http.ResponseWriter, r *http.Request) {
+            find(db, r.FormValue("n"))
+            find(r.FormValue("db"), "fixed")
+        }
+    ''') == {("sql", 4, 7, "find()")}
+    assert lexical_paths("Ctl.java", "Java", '''
+        class Ctl {
+          private void run(String sql) throws Exception {
+            stmt.executeQuery(sql);
+          }
+          String user(HttpServletRequest request) throws Exception {
+            run("SELECT " + request.getParameter("n"));
+            return "ok";
+          }
+        }
+    ''') == {("sql", 4, 7, "run()")}
+    assert lexical_paths("srv.c", "C", '''
+        void run(const char *c) {
+          system(c);
+        }
+        void serve(int sock) {
+          char buf[256];
+          recv(sock, buf, sizeof buf, 0);
+          run(buf);
+        }
+    ''') == {("command", 3, 8, "run()")}
+
+
+def test_lexical_flows_are_joined_across_files_by_an_unambiguous_name(tmp_path: Path):
+    project = tmp_path / "project"
+    (project / "lib").mkdir(parents=True)
+    (project / "lib" / "db.js").write_text(
+        "function runQuery(sql) {\n  return pool.query(sql);\n}\n"
+        "function save(row) {\n  return pool.query('INSERT ' + row);\n}\n"
+        "module.exports = { runQuery, save };\n",
+        encoding="utf-8",
+    )
+    # A second file also defines save(), so calls to save() are ambiguous and not joined.
+    (project / "lib" / "cache.js").write_text("function save(item) {\n  store.set(item);\n}\n", encoding="utf-8")
+    (project / "app.js").write_text(
+        "const { runQuery, save } = require('./lib/db');\n"
+        "app.get('/find', (req, res) => {\n"
+        "  runQuery(\"SELECT * FROM t WHERE id = \" + req.query.id);\n"
+        "  save(req.query.row);\n"
+        "});\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    cross = next(item for item in report["findings"] if item["title"] == "SQL injection across modules")
+    assert cross["evidence"] == [
+        "app.js:3 `req.query` (line 3) -> runQuery() -> `pool.query` at lib/db.js:2",
+    ]
+    assert report["metrics"]["code_index"]["dataflow"]["cross_module_flows"] == 1

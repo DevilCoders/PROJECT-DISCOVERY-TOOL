@@ -107,8 +107,23 @@ path, for example `views.py:4 request.args -> shop.db.find() -> run_query() -> e
 Within each function and the top-level code, assignments and sinks are visited in source
 order; string interpolation (template literals, PHP and Kotlin `"$x"`, C# `$"{x}"`), out
 parameters (`recv`, `sprintf`), builder methods (`append`, `push`) and destructuring are
-followed. Re-assigning a variable from clean input in the same block clears it. This engine
-does not follow calls between functions and does not reason about branches.
+followed. Re-assigning a variable from clean input in the same block clears it.
+
+Functions of the file get summaries: each parameter is followed, as a marked value, to the
+sinks it reaches and to what the function returns, and input a function reads itself and
+returns is recorded too. Summaries are iterated (up to three rounds, bounded by an event
+budget) so helpers that call helpers are followed, for example
+`app.js:17 req.query -> outer() -> inner() -> exec`. Only functions that hold a sink, call
+another function of the file, or return to a caller in the file are summarized. Calls that
+pass untrusted input to a function the file does not define are recorded; the code index
+joins them with the summary of the callee when exactly one file of the same language family
+defines a function of that name, and reports them as "... across modules" findings, for
+example `app.js:3 req.query -> runQuery() -> pool.query at lib/db.js:2`. An ambiguous name is
+not guessed. Files in dependency trees (`node_modules`, `vendor`, `site-packages` and similar)
+are summarized for other files only when they read untrusted input themselves, as calls into
+installed packages are not followed in Python either. The engine does not reason about
+branches. On 1,199 JavaScript files of npm and Babel (17 MB) it adds 5% to the data-flow
+analyzer's time (9% when the same files are treated as first-party code).
 
 Every flow names its source, sink and lines. Static analysis cannot see run-time validation,
 authorization or framework escaping, so flows are `INFERRED` and need review.

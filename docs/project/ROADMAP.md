@@ -43,7 +43,7 @@ The production-readiness audit ([AUDIT.md](AUDIT.md)) and its remediation landed
 
 A shared code model (Python syntax tree; a structural lexer for about 25 brace languages), stored code facts and a cross-file code index now exist, with `pdt query`. Every domain that 0.2.0 only catalogued has a built-in analyzer and is `partial`: symbol index, call graph, type systems, performance, concurrency, memory and resources, data flow and taint (Python inter-procedural and cross-module), embedded, firmware, HDL, graphics shaders, frontend component graphs, and multi-project integration maps. See [CODE_INTELLIGENCE.md](../architecture/CODE_INTELLIGENCE.md) and [AUDIT.md §8](AUDIT.md#8-code-intelligence-and-the-formerly-planned-domains).
 
-Next steps for these domains: type inference for dynamically typed code, inter-procedural taint for the lexical languages, cross-file taint beyond Python, Tree-sitter-backed models where grammars are provisioned, HDL elaboration of `generate` blocks and parameters, and measured index cost on the 100 GB+ corpora.
+Inter-procedural taint for the lexical languages and cross-file taint beyond Python landed on 2026-11-06 ([AUDIT.md §10](AUDIT.md#10-inter-procedural-taint-for-the-lexically-modelled-languages)). Next steps for these domains: type inference for dynamically typed code, Tree-sitter-backed models where grammars are provisioned, HDL elaboration of `generate` blocks and parameters, and measured index cost on the 100 GB+ corpora.
 
 ## Status update — checkbox verification (2026-11-06)
 

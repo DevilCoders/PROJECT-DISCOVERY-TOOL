@@ -5,7 +5,9 @@ are followed through assignments, branches, loops and same-module helper functio
 calls into other modules are recorded so the code index can join them with the callee
 module's summary (cross-file flows). JavaScript/TypeScript, PHP, Java/Kotlin/Scala/Groovy,
 Go, C#, Rust and C/C++ use the lexical engine (``taint_lexical``), which follows flows
-within a function. Every result names the source, the sink and their lines, and is
+through assignments and the file's own functions (summaries of what each parameter
+reaches and what each function returns) and records calls into other files for the same
+join, by function name within a language family. Every result names the source, the sink and their lines, and is
 reported as INFERRED because static analysis cannot see run-time validation.
 """
 from __future__ import annotations
@@ -20,7 +22,7 @@ from ...intelligence.model.lexical import LEXICAL_LANGUAGES
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 from ..code.findings import code_finding
-from .taint_lexical import RULES, analyze_lexical_taint
+from .taint_lexical import RULES, analyze_lexical
 from .taint_python import _PROPAGATING_FUNCTIONS, _SANITIZERS, Flow, analyze_python_taint
 
 MAX_FLOWS_DESCRIBED = 6
@@ -132,6 +134,18 @@ def flow_findings(model: FileModel, flows: list[Flow], analyzer: str) -> list[Fi
     return findings
 
 
+# Dependency trees: their functions are not summarized for other files unless they read
+# untrusted input themselves, as calls into installed packages are not followed in Python.
+_THIRD_PARTY_DIRS = frozenset({
+    "node_modules", "bower_components", "jspm_packages", "vendor", "third_party", "third-party",
+    "site-packages", "dist-packages", "Pods", "Carthage", ".venv", "venv",
+})
+
+
+def _third_party(path: str) -> bool:
+    return any(part in _THIRD_PARTY_DIRS for part in path.replace("\\", "/").split("/")[:-1])
+
+
 def _followed(target: str) -> bool:
     """Whether an outgoing call may land in scanned code (relative or first-party)."""
     if target.startswith("."):
@@ -164,12 +178,32 @@ class DataFlowAnalyzer(Analyzer):
             if result.truncated:
                 code_facts.emit_fact("dataflow_truncated", model.language, functions=1)
         else:
-            flows, sources = analyze_lexical_taint(model, LEXICAL_LANGUAGES[model.language])
+            lexical = analyze_lexical(model, LEXICAL_LANGUAGES[model.language],
+                                      export=not _third_party(record.path))
+            flows, sources = lexical.flows, lexical.sources
+            self._lexical_facts(lexical)
         if sources or flows:
             counts = Counter(flow.kind for flow in flows)
             code_facts.emit_fact("dataflow_stats", model.language, sources=sources, flows=len(flows),
                                  **dict(sorted(counts.items())))
         return flow_findings(model, flows, self.name) if flows else []
+
+    @staticmethod
+    def _lexical_facts(result) -> None:
+        exported = [
+            (name, index, summary.params[index] if index < len(summary.params) else "", entry)
+            for name, summary in sorted(result.summaries.items())
+            for index, entries in sorted(summary.sinks.items())
+            for entry in sorted(entries)
+        ]
+        for name, index, parameter, (kind, sink, line, via) in exported[:MAX_EXPORTED_FACTS]:
+            code_facts.emit_fact("taint_sink_param", name, param=index, parameter=parameter, sink_kind=kind,
+                                 sink=sink, line=line, via=via)
+        for call in result.outgoing[:MAX_OUTGOING_FACTS]:
+            code_facts.emit_fact(
+                "tainted_call", call.callee, arg=call.arg, keyword="", receiver=call.receiver,
+                source=call.source, source_line=call.source_line, line=call.line,
+            )
 
     @staticmethod
     def _python_facts(result) -> None:
