@@ -80,6 +80,8 @@ class FileModel:
     braces: dict[int, int] = field(default_factory=dict)
     parens: dict[int, int] = field(default_factory=dict)
     tree: object | None = None
+    # Python backend only: class types of names (``python_types.TypeTable``), shared with taint.
+    types: object | None = None
     _line_starts: list[int] | None = None
 
     def line_of(self, offset: int) -> int:

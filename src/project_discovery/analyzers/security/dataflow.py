@@ -172,7 +172,7 @@ class DataFlowAnalyzer(Analyzer):
         if model is None:
             return []
         if model.tree is not None:
-            result = analyze_python_taint(model.tree)
+            result = analyze_python_taint(model.tree, model.types)
             flows, sources = result.flows, result.sources
             self._python_facts(result)
             if result.truncated:

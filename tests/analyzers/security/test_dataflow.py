@@ -323,3 +323,53 @@ def test_lexical_flows_are_joined_across_files_by_an_unambiguous_name(tmp_path: 
         "app.js:3 `req.query` (line 3) -> runQuery() -> `pool.query` at lib/db.js:2",
     ]
     assert report["metrics"]["code_index"]["dataflow"]["cross_module_flows"] == 1
+
+
+def test_python_flows_follow_methods_of_objects_with_a_known_class():
+    assert python_flows('''
+        from flask import request
+
+        class Repo:
+            def find(self, name):
+                cursor.execute("SELECT * FROM t WHERE n = '" + name + "'")
+
+        class Service:
+            def __init__(self, repo: Repo):
+                self.repo = repo
+
+            def search(self):
+                self.repo.find(request.args["q"])
+
+        def view(other):
+            repo = Repo()
+            repo.find(request.args["a"])
+            other.find(request.args["b"])
+            repo.find(int(request.args["c"]))
+    ''') == {("sql", 13), ("sql", 17)}
+
+
+def test_scan_joins_flows_into_methods_of_imported_classes(tmp_path: Path):
+    project = tmp_path / "project"
+    (project / "shop").mkdir(parents=True)
+    (project / "shop" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "shop" / "store.py").write_text(
+        "import sqlite3\n"
+        "class Store:\n"
+        "    def run(self, sql):\n"
+        "        return sqlite3.connect('x').execute(sql).fetchall()\n",
+        encoding="utf-8",
+    )
+    (project / "shop" / "views.py").write_text(
+        "from flask import request\nfrom .store import Store\n"
+        "def search():\n"
+        "    store = Store()\n"
+        "    return store.run(\"SELECT * FROM p WHERE name = '\" + request.args['q'] + \"'\")\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    cross = next(item for item in report["findings"] if item["title"] == "SQL injection across modules")
+    assert cross["evidence"] == [
+        "shop/views.py:5 `request.args` (line 5) -> shop.store.Store.run() -> `(...).execute` at shop/store.py:4",
+    ]

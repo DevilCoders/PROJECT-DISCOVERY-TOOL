@@ -193,7 +193,7 @@ Defects found while building this work were fixed before it was committed to the
 ### Limits
 
 - The lexer does not expand macros, resolve overloads or instantiate templates and generics. Lexical call resolution is by name within a language group, and ambiguous names are reported as ambiguous rather than guessed.
-- Taint analysis does not reason about branches. Outside Python it follows the file's own functions and joins calls into other files only by a function name that a single file defines, so calls through object receivers with common method names are not followed (§10). No language has type inference, so a sink reached through a dynamically dispatched call can be missed.
+- Taint analysis does not reason about branches. Outside Python it follows the file's own functions and joins calls into other files only by a function name that a single file defines, so calls through object receivers with common method names are not followed (§10). Python calls on objects resolve when the code states the receiver's class (§11). Values whose class is only known at run time, or from code PDT does not see, are not inferred, so a sink reached through such a call can be missed.
 - Static analysis cannot see run-time validation, authorization, framework escaping or deployment. Data-flow, concurrency, resource, HDL lint, rules-of-hooks and integration-map results need review before they are treated as defects.
 - Very large repositories reach the index ceilings (5–20 million rows per table). This is reported as an `UNKNOWN` finding, and the index-based results are then incomplete.
 
@@ -251,3 +251,27 @@ The release gates in §5 are unchanged. The large-corpus benchmarks now also mea
 - Branches are not distinguished, and a variable stays tainted along every path after a tainted assignment.
 - Calls through an object receiver (`dao.find(x)`) are joined only when the method name is unique within the language family, so common method names are not followed across files.
 - A function is identified by name. Overloads and same-named methods of different classes in one file share a summary.
+
+## 11. Python receiver types
+
+**Date:** 2026-11-06 · **Scope:** the §8 limit that no language had type inference, so calls on objects (`repo.find(name)`) were not resolved and taint stopped there.
+
+### What changed
+
+- `intelligence.model.python_types` gives a name the class that the code states for it. Sources are a constructor call, a parameter or variable annotation (including `Optional[...]`, `... | None` and quoted forward references), a return annotation, `with C() as x`, `x or C()`, a module-level instance, and `self` attributes assigned in any method. The inference is flow-insensitive and conservative. A name assigned two classes, or anything of unknown class other than `None`, gets no type, and a parameter shadows a module-level name.
+- The code model resolves calls on such objects to the class's method (`@Repo.find` in the module, or `.store.Store.run` for an imported class), which the code index turns into call-graph edges.
+- The Python taint engine applies method summaries at those calls and exports summaries of public methods. A call on an object of an imported class is recorded for the cross-module join, which now reports flows such as `shop/views.py:5 request.args -> shop.store.Store.run() -> execute`.
+- The code model and the taint engine share one type table per file. Imports are found by scanning statements, not every node, which also removes a full tree walk from the taint engine.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Unit tests | Typed calls through `self` attributes, `x or C()`, locals, module instances, return annotations and context managers resolve. A class conflict, an unannotated parameter, reassignment from an unknown call and a shadowing parameter stay unresolved. Taint follows typed method calls in the module and across modules. |
+| Equivalence | The statement-only import scan finds the same imports as a full walk in 955 real modules. |
+| Effect and cost | 671 scikit-learn modules: 79.8% of call sites resolved instead of 70.7% (8,742 more edges). Model building plus Python taint took 4.29 s instead of 4.82 s; `rich`: 71.9% instead of 59.8%. |
+
+### Limits
+
+- Values whose class is only known at run time (factories without return annotations, dependency injection, `getattr`) are not typed.
+- Imported names count as classes only when capitalized, and an imported class's methods are resolved by name in its module, without its base classes.

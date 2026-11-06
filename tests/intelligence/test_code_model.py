@@ -93,3 +93,64 @@ def test_supported_languages_include_shaders_and_arduino():
     for name in ("shader.comp", "kernel.cu", "sketch.ino", "app.vue", "Main.kt", "lib.rs"):
         assert supports_language(detect_language(name)), name
     assert not supports_language(detect_language("notes.md"))
+
+
+def test_python_calls_on_objects_resolve_to_the_class_the_code_states():
+    import textwrap
+
+    source = textwrap.dedent('''
+        from typing import Optional
+        from .db import Store
+
+        class Repo:
+            def find(self, name): ...
+            def clone(self) -> "Repo": ...
+
+        class Service:
+            store: Store
+
+            def __init__(self, repo: Repo, cache: Optional[Repo] = None):
+                self.repo = repo
+                self.cache = cache or Repo()
+                self.flaky = Repo()
+                self.flaky = Store()
+
+            def run(self):
+                self.repo.find(1)
+                self.cache.find(2)
+                self.store.save(3)
+                self.flaky.find(4)
+
+        SHARED = Repo()
+
+        def main(other):
+            repo = Repo()
+            repo.find(5)
+            SHARED.find(6)
+            Repo().clone().find(7)
+            with Repo() as managed:
+                managed.find(8)
+            other.find(9)
+            changing = Repo()
+            changing = make()
+            changing.find(10)
+
+        def shadow(SHARED):
+            SHARED.find(11)
+    ''')
+    model = build_python_model("app.py", source)
+    targets = {(call.caller, call.line, call.callee): call.target for call in model.calls
+               if call.callee in {"find", "save", "clone"}}
+    resolved = {(caller, callee): target for (caller, _line, callee), target in targets.items() if target}
+    assert resolved == {
+        ("Service.run", "find"): "@Repo.find",
+        ("Service.run", "save"): ".db.Store.save",
+        ("main", "find"): "@Repo.find",
+        ("main", "clone"): "@Repo.clone",
+    }
+    by_line = {line: target for (_caller, line, callee), target in targets.items() if callee == "find"}
+    # Typed: self.repo, self.cache (``cache or Repo()``), a local, a module instance, a call
+    # result and a context manager. Untyped: self.flaky (two classes), an unannotated
+    # parameter, a name reassigned from an unknown call, and a parameter shadowing SHARED.
+    assert sorted(line for line, target in by_line.items() if target) == [19, 20, 28, 29, 30, 32]
+    assert sorted(line for line, target in by_line.items() if not target) == [22, 33, 36, 39]

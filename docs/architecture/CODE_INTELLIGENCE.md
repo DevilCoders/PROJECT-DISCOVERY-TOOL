@@ -18,8 +18,18 @@ always generated or minified, and the code-index analyzer reports them as `UNKNO
 
 | Backend | Languages | Method |
 |---|---|---|
-| Syntax tree | Python | Standard-library `ast`. Symbols carry qualified names (`Class.method`), decorators, parameters and async markers. Call targets are resolved through `import`/`from ... import` aliases (including relative imports), `self`/`cls` and module-level definitions. |
+| Syntax tree | Python | Standard-library `ast`. Symbols carry qualified names (`Class.method`), decorators, parameters and async markers. Call targets are resolved through `import`/`from ... import` aliases (including relative imports), `self`/`cls`, module-level definitions, and the class of the receiver when the code states it (see below). |
 | Structural lexer | C, C++, C/C++ headers, Objective-C/C++, CUDA, OpenCL, GLSL, HLSL, Metal, WGSL, Java, Kotlin, Scala, Groovy, C#, Swift, Dart, JavaScript, TypeScript, Vue, Svelte, Go, Rust, PHP, Solidity, Zig, Arduino | A linear-time cleaner blanks comments and string contents while keeping every offset, so braces and parentheses are paired exactly. Definitions come from type keywords, function keywords and C-style typed signatures, nested by brace containment; calls carry their receiver; imports are read per family. |
+
+**Python receiver types** (`intelligence.model.python_types`). A call on an object resolves to
+its class's method when the code states the class: a constructor call (`repo = Repo()`), an
+annotation (`repo: Repo`, `def f(repo: Repo)`, `Optional[Repo]`, `Repo | None`, quoted forward
+references), a return annotation (`Repo().clone().find()`), `with Repo() as repo`,
+`store or Store()`, a module-level instance, or a `self` attribute assigned in any method. The
+inference is flow-insensitive and conservative: a name that is assigned two classes, or
+anything of unknown class other than `None`, gets no type. Only classes of the module and
+capitalized imported names count as classes. On 671 scikit-learn modules this resolves 79.8%
+of call sites instead of 70.7%.
 
 The lexer is an approximation: it does not expand macros, resolve overloads or understand
 templates and generics. Hostile inputs (unterminated strings and comments, deep nesting) are
@@ -95,11 +105,14 @@ branches merge, and loops run until labels stop growing. Sanitizers clear labels
 kinds they defend (`shlex.quote` for commands, `os.path.basename`/`secure_filename` for paths,
 `html.escape` for HTML, `int()` for all). Functions of the same module get summaries (which
 parameters reach a sink or the return value), iterated to a fixed point, so input that passes
-through local helpers is followed. Only functions that touch a source or sink, and their
+through local helpers is followed, including methods called on objects of a known class
+(`repo.find(name)`, `self.repo.find(name)`). Only functions that touch a source or sink, and their
 callers and callees, are interpreted, so files without either cost a single tree walk.
 
 **Cross-module flows (Python).** Calls that pass tainted values into imported functions are
-recorded, as are module-level functions whose parameters reach a sink; the code index joins
+recorded, as are module-level functions and public methods whose parameters reach a sink; a
+call on an object of an imported class is recorded as a call to that class's method
+(`store = Store(); store.run(sql)` becomes `.store.Store.run`). The code index joins
 the two (resolving relative imports) and reports "… across modules" findings with the full
 path, for example `views.py:4 request.args -> shop.db.find() -> run_query() -> execute`.
 

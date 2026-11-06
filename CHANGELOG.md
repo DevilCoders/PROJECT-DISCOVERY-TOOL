@@ -10,8 +10,9 @@ methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architec
 
 ### Added: code intelligence
 - A shared per-file code model: Python from the syntax tree (qualified symbols, calls resolved
-  through imports, `self`/`cls` and module scope) and about 25 brace languages from a
-  linear-time structural lexer. Every analyzer of a file reuses one model.
+  through imports, `self`/`cls`, module scope and the receiver's class where the code states it:
+  constructors, annotations, return annotations and `self` attributes) and about 25 brace
+  languages from a linear-time structural lexer. Every analyzer of a file reuses one model.
 - Code facts stored with each file's findings in the scan's private SQLite inventory (bounded
   per file and per table, consistent with `--resume`), and a cross-file code index: symbol
   index, call graph with recursion cycles, unreferenced private functions, test-to-code links

@@ -3,8 +3,10 @@
 Target modules are parsed, never imported or executed. Call targets are resolved
 within the file: names bound by imports become absolute (``pkg.mod.name``) or relative
 (``.mod.name``) targets, names defined in the file become ``@Local.name`` targets, and
-``self.x()`` / ``cls.x()`` inside a class become ``@Class.x``. The cross-file index
-turns these hints into module-qualified call-graph edges.
+``self.x()`` / ``cls.x()`` inside a class become ``@Class.x``, and calls on an object
+whose class the code states (``repo = Repo(); repo.find()``, annotations, return
+annotations, ``self`` attributes; see ``python_types``) resolve to that class's method.
+The cross-file index turns these hints into module-qualified call-graph edges.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import builtins
 
 from ...core.source_utils import parse_python
 from . import Call, FileModel, Import, Symbol
+from .python_types import TypeTable
 
 _BUILTINS = frozenset(dir(builtins))
 
@@ -53,6 +56,8 @@ class _Builder(ast.NodeVisitor):
         self.aliases: dict[str, str] = {}
         self.local_top_level: set[str] = set()
         self.declared_all = _exported_names(tree)
+        self.types = TypeTable(tree)
+        self.functions: list = []
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 self.local_top_level.add(node.name)
@@ -110,8 +115,10 @@ class _Builder(ast.NodeVisitor):
         for default in (*arguments.defaults, *filter(None, arguments.kw_defaults)):
             self.visit(default)
         self.scope.append(("function", qualified))
+        self.functions.append(node)
         for statement in node.body:
             self.visit(statement)
+        self.functions.pop()
         self.scope.pop()
 
     visit_FunctionDef = _function
@@ -194,8 +201,15 @@ class _Builder(ast.NodeVisitor):
                 return func.attr, receiver, f"{resolved}.{func.attr}"
             if head in self.local_top_level:
                 return func.attr, receiver, f"@{receiver}.{func.attr}"
-            return func.attr, receiver or "<expression>", ""
+            return func.attr, receiver or "<expression>", self._typed(func) or ""
         return "<dynamic>", "", ""
+
+    def _typed(self, func: ast.Attribute) -> str | None:
+        """``Ref.method`` when the receiver's class is known from the code."""
+        owner = self._enclosing_class()
+        owner = owner if owner in self.types.classes else None
+        scope = self.types.scope(self.functions[-1], owner) if self.functions else self.types.module_scope
+        return self.types.method_target(func.value, func.attr, scope, owner)
 
     def visit_Call(self, node: ast.Call) -> None:
         callee, receiver, target = self._target(node.func)
@@ -215,5 +229,7 @@ class _Builder(ast.NodeVisitor):
 def build_python_model(path: str, source: str) -> FileModel:
     tree = parse_python(source, filename=path)
     model = FileModel(path, "Python", "python-ast", source, tree=tree)
-    _Builder(model, tree).visit(tree)
+    builder = _Builder(model, tree)
+    builder.visit(tree)
+    model.types = builder.types
     return model

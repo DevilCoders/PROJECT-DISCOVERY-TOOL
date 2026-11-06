@@ -21,6 +21,8 @@ import re
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
+from ...intelligence.model.python_types import TypeTable, module_aliases
+
 MAX_LABELS = 6
 MAX_VISITS = 50_000          # statements interpreted per function and round
 MAX_ROUNDS = 4               # summary fixed-point rounds (helper call depth)
@@ -262,23 +264,7 @@ def _base_name(node: ast.AST) -> str:
 
 
 def _aliases(tree: ast.Module) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname:
-                    aliases[alias.asname] = alias.name
-                else:
-                    top = alias.name.split(".", 1)[0]
-                    aliases[top] = top
-        elif isinstance(node, ast.ImportFrom):
-            base = ("." * node.level) + (node.module or "")
-            for alias in node.names:
-                if alias.name == "*":
-                    continue
-                joiner = "" if base.endswith(".") or not base else "."
-                aliases[alias.asname or alias.name] = f"{base}{joiner}{alias.name}"
-    return aliases
+    return module_aliases(tree)
 
 
 def _header(node: ast.stmt) -> tuple:
@@ -332,6 +318,7 @@ class _Function:
     params: tuple[str, ...]
     route_sources: dict[str, str]
     top_level: bool
+    node: object = None
 
 
 class _Collector:
@@ -341,9 +328,10 @@ class _Collector:
 
 
 class PythonTaintEngine:
-    def __init__(self, tree: ast.Module) -> None:
+    def __init__(self, tree: ast.Module, types: TypeTable | None = None) -> None:
         self.tree = tree
-        self.aliases = _aliases(tree)
+        self.aliases = types.aliases if types is not None else _aliases(tree)
+        self.types = types if types is not None else TypeTable(tree, self.aliases)
         self.functions: dict[str, _Function] = {}
         self.source_sites: set[tuple[int, str]] = set()
         self.truncated = False
@@ -415,7 +403,7 @@ class PythonTaintEngine:
                     arguments = arguments[1:]
                 params = tuple(argument.arg for argument in arguments)
                 function = _Function(key, node.body, node.lineno, owner, params,
-                                     self._route_sources(node, arguments), top_level and owner is None)
+                                     self._route_sources(node, arguments), top_level and owner is None, node)
                 if key not in self.functions:
                     self.functions[key] = function
                 nested.append(node.body)
@@ -476,6 +464,27 @@ class PythonTaintEngine:
             key = f"{owner}.{rest}"
             return key if key in self.functions else None
         return name if name.count(".") == 1 and name in self.functions else None
+
+    def typed_method(self, func: ast.AST, function: _Function) -> str | None:
+        """``Ref.method`` for a call on an object whose class the code states."""
+        if not isinstance(func, ast.Attribute):
+            return None
+        owner = function.owner if function.owner in self.types.classes else None
+        scope = self.types.scope(function.node, owner) if function.node is not None else self.types.module_scope
+        return self.types.method_target(func.value, func.attr, scope, owner)
+
+    def resolve(self, call: ast.Call, name: str, function: _Function) -> tuple[str | None, str | None]:
+        """(this module's function key, imported method target) for a call."""
+        local = self.local_function(name, function.owner)
+        if local is not None:
+            return local, None
+        typed = self.typed_method(call.func, function)
+        if typed is None:
+            return None, None
+        if typed.startswith("@"):
+            key = typed[1:]
+            return (key if key in self.functions else None), None
+        return None, typed
 
     def attribute_source(self, node: ast.Attribute) -> str | None:
         if node.attr not in _REQUEST_ATTRIBUTES:
@@ -542,7 +551,8 @@ class PythonTaintEngine:
                 _Interpreter(self, function, collector).run()
         exported = {
             key: summary for key, summary in self.summaries.items()
-            if summary.sinks and self.functions[key].top_level and not key.startswith("_")
+            if summary.sinks and (self.functions[key].top_level or self.functions[key].owner is not None)
+            and not key.rpartition(".")[2].startswith("_") and not key.startswith("_")
         }
         return TaintResult(
             sorted(collector.flows, key=lambda flow: (flow.call_line, flow.sink_line, flow.kind, flow.source)),
@@ -745,7 +755,7 @@ class _Interpreter:
             self.note_source(call.lineno, source)
             return frozenset({Label("source", source, call.lineno)})
         arguments = [*call.args, *(keyword.value for keyword in call.keywords)]
-        local = engine.local_function(name, self.function.owner)
+        local, _ = engine.resolve(call, name, self.function)
         if local is not None:
             summary = engine.summaries[local]
             result = summary.returned_sources
@@ -770,7 +780,7 @@ class _Interpreter:
     def check_call(self, call: ast.Call) -> None:
         engine = self.engine
         name = engine.call_name(call.func)
-        local = engine.local_function(name, self.function.owner)
+        local, imported = engine.resolve(call, name, self.function)
         if local is not None:
             summary = engine.summaries[local]
             for index, entries in summary.sinks.items():
@@ -795,7 +805,9 @@ class _Interpreter:
                     if kind not in label.cleared:
                         self.reach(label, kind, display, call.lineno, call.lineno, "")
             return
-        if self.collect is not None and _base_name(call.func) in engine.aliases:
+        if imported is not None:
+            name = imported  # a method of an imported class, for the cross-module join
+        if self.collect is not None and (imported is not None or _base_name(call.func) in engine.aliases):
             for index, argument in enumerate(call.args):
                 for label in self.taint(argument):
                     if label.kind == "source":
@@ -818,5 +830,5 @@ class _Interpreter:
             self.sinks[label.index].add((kind, sink, sink_line, via))
 
 
-def analyze_python_taint(tree: ast.Module) -> TaintResult:
-    return PythonTaintEngine(tree).run()
+def analyze_python_taint(tree: ast.Module, types: TypeTable | None = None) -> TaintResult:
+    return PythonTaintEngine(tree, types).run()
