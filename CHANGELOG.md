@@ -37,16 +37,37 @@ methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architec
   package identity) and an `integration_map` in `pdt compare` linking projects by package
   dependencies, HTTP endpoints, topics and gRPC services.
 
-### Added: online repository scanning
-- `pdt scan URL` and `pdt scan --url FILE` (one URL per line) materialize remote repositories
-  read-only into a temporary directory, scan them and delete the checkout. Git hosts (GitHub,
+### Added: online mode
+Two acquisition paths and online advisory sources, all opt-in; local scans stay offline. Details
+are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
+- **Download and analyze.** `pdt scan URL` and `pdt scan --url FILE` (one URL per line, with
+  per-line `ref=` and `vcs=` options) materialize remote repositories read-only into a private
+  temporary directory, scan them and delete the copy on every exit path. Git hosts (GitHub,
   GitLab, Bitbucket, Azure Repos, CodeCommit, SourceHut and self-hosted) and native backends
   (Mercurial, Subversion, Bazaar/Breezy, Darcs, Git-backed Jujutsu, Pijul, CVS, Perforce, Fossil)
-  are supported through their installed clients; `--vcs` forces a backend and
-  `--remote-timeout` bounds each checkout. URLs that embed a password or credential query
-  parameters are rejected (SSH and CVS pserver user names are allowed), insecure transports
-  are flagged in report metadata, and `pdt capabilities` lists the
-  installed VCS clients. Online-mode work continues in this cycle.
+  run through their installed clients. Git trees are read from objects without a working-tree
+  checkout, so filters and hooks never run. `--vcs`, `--ref`, `--remote-timeout`,
+  `--remote-workdir` and `--remote-max-gb` control acquisition, and a free-disk floor applies.
+  URLs that embed a password or credential query parameters are rejected (SSH and CVS pserver
+  user names are allowed), plain-text transports need `--allow-insecure-transport`, and option
+  injection through URLs is refused. A timeout or Ctrl-C stops the client and every process it
+  started. Client output is bounded and redacted. Windows device names are refused while
+  materializing. Batches write `batch-summary.json` and `.md` and exit with the worst outcome.
+  The native-VCS adapters have not yet been verified against live servers.
+- **Analyze without downloading.** `--no-download` reads GitHub (including Enterprise), GitLab
+  (including self-managed), Bitbucket Cloud and Gitea/Forgejo repositories through their REST
+  APIs and analyzes the files in memory; nothing is written to disk. `--api-provider`,
+  `--api-url` and the `--api-max-files`, `--api-max-mb`, `--api-max-file-mb`, `--api-max-requests`
+  and `--api-workers` budgets apply. Unfetched files stay inventoried as `UNKNOWN` coverage gaps.
+  Tokens are bound to their host (`PDT_API_TOKEN_<HOST>`, or `--use-credential-helper`). Third-party
+  plugins do not run in this mode, because their sandbox needs a file on disk.
+- **Online vulnerability intelligence.** `--vuln-online` looks up every lockfile-resolved package
+  in OSV.dev, next to or instead of `--vuln-db`, with optional NVD and GitHub Advisory enrichment
+  (`--vuln-enrich nvd,ghsa`). Only ecosystem, package name and version are sent. Responses are
+  cached privately (`--vuln-cache`, `--vuln-cache-ttl`). Requests are rate-limited and honor proxy
+  settings and `--ca-bundle`. A failed or partial lookup becomes an `UNKNOWN` finding and fails
+  `--strict`, never a clean result.
+- `pdt capabilities` lists the installed VCS clients.
 
 ### Changed: Windows plugin sandbox
 - On Windows, `--plugin-isolation sandbox` starts each plugin host suspended inside an AppContainer
@@ -71,7 +92,9 @@ methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architec
   includes, ShaderLab, SPIR-V, Arduino sketches, linker scripts, device trees and blobs, Intel
   HEX, S-record, UF2, ELF, STM32CubeMX projects, Kconfig files, FPGA constraints and projects,
   and BitBake recipes.
-- Report schema 1.6 (`metrics.code_index`); comparison schema 1.1 (`integration_map`).
+- Report schema 1.7: 1.6 added `metrics.code_index`, and 1.7 adds a top-level `scan` block (mode,
+  network use, credential-free remote source and vulnerability sources), shown in Markdown and HTML
+  as scan-source and vulnerability-intelligence sections. Comparison schema 1.1 (`integration_map`).
 
 ### Performance
 - On 4,683 real third-party files (65 MB), the new analyzers add 21.7 s to 113.4 s of existing

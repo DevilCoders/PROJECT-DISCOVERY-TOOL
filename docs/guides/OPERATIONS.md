@@ -32,6 +32,11 @@ read its exit codes and performance data.
 | Skip content of huge files | `--skip --max-file-mb 512` (skipped files stay inventoried) |
 | Prune directories explicitly | `--exclude-dir node_modules --exclude-dir build/cache` |
 | CI gate | `pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color` |
+| Remote repository, downloaded | `pdt scan https://github.com/org/repo --output /reports/repo` |
+| Remote repository, not downloaded | `pdt scan https://github.com/org/repo --no-download --output /reports/repo` |
+| Online advisory lookups | add `--vuln-online` (optionally `--vuln-enrich nvd,ghsa`) |
+
+Online scans, their budgets and credentials are described in [ONLINE_MODE.md](ONLINE_MODE.md).
 
 ### Parallelism
 

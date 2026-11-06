@@ -14,17 +14,18 @@ PDT is not a Python-only scanner. Python is the control plane; native engines an
 | File-signature classification | C++17 | Integrated native magic-byte classifier with Python fallback |
 | Report application | JavaScript + HTML/CSS | Separate packaged offline client bundled into the standalone report; filtering, pagination and disclosure controls |
 | Domain packs | Polyglot | Language, build, API, database, security, tests, ML/robotics/mobile/game/VCS analyzers |
+| Online mode (opt-in) | Python standard library | `online`: URL targets and read-only VCS checkouts (`repositories`), provider REST clients and in-memory scans for `--no-download` (`providers`, `memory_scan`, `credentials`), and OSV.dev/NVD/GitHub advisory lookups (`osv`, `advisories`, `vulnerabilities`) over an HTTPS client with rate limits and a private response cache (`http`, `cache`) |
 
 Each language component must serve a production execution path. Merely listing a language in the roadmap or catalog is not implementation.
 
 ## Pipeline
 
-1. Python validates target/output paths and local-only policy.
+1. Python validates target and output paths and selects the scan mode. A local path is scanned offline. A repository URL is first acquired read-only, either into a private temporary copy (download and analyze) or, with `--no-download`, through the provider's API into memory; the same pipeline then runs (see [ONLINE_MODE.md](../guides/ONLINE_MODE.md)).
 2. Python inventory records files, directories, symlinks and special entries; traversal does not follow symlinks and does not silently prune development/dependency trees.
 3. C provides native byte-counting and host capability reporting. Linux x86-64 may dispatch CPU byte counting to Assembly after runtime feature checks; large immutable byte buffers may use a dynamically loaded OpenCL reduction kernel when a supported GPU is available.
 4. Python coordinates analyzers and per-domain resource policies without importing or executing target modules. Third-party plugins run in sandboxed host processes and receive private copies of the files they analyze (see [PLUGIN_SDK.md](../guides/PLUGIN_SDK.md)).
 5. Polyglot analyzers parse source/configuration/contracts and use locally provisioned optional parsers with explicit capability states. Source analyzers share one structural code model per file (`intelligence.model`: the Python syntax tree, or a linear-time structural lexer for about 25 brace languages) and record code facts (`intelligence.facts`) next to their findings.
-6. Local vulnerability intelligence optionally matches resolved lockfile coordinates against an operator-imported OSV SQLite snapshot. No scan-time network fallback exists.
+6. Vulnerability intelligence matches resolved lockfile coordinates against an operator-imported OSV SQLite snapshot (`--vuln-db`) and, only with `--vuln-online`, against OSV.dev with optional NVD and GitHub Advisory enrichment. Without `--vuln-online` there is no network fallback.
 7. Correlation links symbols, endpoints, VCS remotes, dependencies, configuration and docs with evidence spans. The code index (`intelligence.index`) reads the stored facts through a read-only connection and temporary tables: symbol index, call graph, module graph, cross-module taint flows, domain summaries and integration points (see [CODE_INTELLIGENCE.md](CODE_INTELLIGENCE.md)).
 8. JSON/Markdown are generated locally; the offline JavaScript/TypeScript report application renders paginated/lazy views without remote assets.
 
@@ -54,7 +55,8 @@ The VCS analyzer reads local metadata/configuration as inert text. It identifies
 ## Local vulnerability intelligence
 
 - Advisory data is imported only from local OSV JSON files into a local SQLite store.
-- Scanning is offline and matches supported lockfile-resolved package versions against imported affected version lists/ranges.
+- Matching against the store is offline and compares supported lockfile-resolved package versions with the imported affected version lists and ranges.
+- `--vuln-online` (the `online` package) also looks packages up in OSV.dev. Only ecosystem, package name and version are sent, responses are cached privately, and a failed or partial lookup is an `UNKNOWN` finding, never a clean result.
 - Findings carry CVE/GHSA aliases, severity, affected dependency coordinate, fixed-version boundary, local advisory modification date and file evidence.
 - Unsupported range schemes and unavailable parser/resource-budget results are UNKNOWN, never silently clean.
 - Version matches are not proof of runtime usage, reachability or exploitability. Advisory snapshots may be stale; reports expose import time and ecosystem coverage.
@@ -77,4 +79,4 @@ Plugin execution (`plugins.isolation`, `plugins.host`, `plugins.sandbox`, `plugi
 - INFERRED: heuristic conclusion requiring validation.
 - UNKNOWN: insufficient evidence, unavailable parser or exhausted resource budget.
 
-No telemetry or network requests. Target files are read-only. Cache and generated reports live outside target roots. Secret/PII values are redacted. Archive members are read only through bounded in-memory streams and are never extracted.
+No telemetry. A local scan makes no network request; the network is used only for a URL target and for `--vuln-online`, and the report's `scan` block records every kind of access. Target files are read-only. Cache and generated reports live outside target roots. Secret/PII values are redacted. Archive members are read only through bounded in-memory streams and are never extracted.
