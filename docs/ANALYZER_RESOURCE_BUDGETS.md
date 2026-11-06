@@ -28,7 +28,18 @@ These are per-analyzer safety limits, not a global scan-size policy. They are cu
 | PDF/DOCX documents | 16 MiB compressed input; PDF 5,000 pages; extracted text 16 MiB; DOCX 10,000 entries and 32 MiB total declared uncompressed data | Bounded bytes; DOCX ZIP metadata/ratio checks before python-docx | UNKNOWN on input, page, text, package entry or uncompressed-byte budget stop |
 | ZIP archive index | 200,000 entries; 64 MiB declared central-directory bytes | EOCD/ZIP64 preflight before ZipFile.infolist() | UNKNOWN without index materialization when bounds are exceeded or unavailable |
 | ZIP/TAR member content | 1 MiB per member; 32 MiB per archive | In-memory member streams only; no extraction | UNKNOWN/partial when member/sample limit is reached |
-| ZIP/TAR archive inspection | 8 seconds per archive | Cooperative checks during metadata iteration, member sampling and content-pattern matching | UNKNOWN/partial when the deadline is reached |
+| ZIP/TAR archive inspection | 8 seconds per archive; compressed TAR output capped at 4 GiB | Cooperative checks during metadata iteration, member sampling and content-pattern matching; the TAR decompression reader enforces both limits inside reads | UNKNOWN/partial when the deadline or decompression budget is reached |
+| Shared code model | 4 MiB per file | Bounded read; Python syntax tree or linear-time structural lexer, built once per file and worker | UNKNOWN (code-index analyzer) when a file is too large to model |
+| Code facts | Per file: 5,000 symbols, 20,000 call sites, 10,000 references, 5,000 domain facts. Per table: 5M symbols, 10M calls, 20M references, 5M facts | Stored with the file's findings in bounded SQLite batches | "Code index truncated" UNKNOWN finding; index-based results incomplete |
+| Code index passes | 500,000 resolved call-graph edges for cycle detection; 5,000 items per integration list | Read-only connection and temporary tables | Edge limit recorded in `metrics.code_index`; per-pass errors become UNKNOWN findings |
+| Data flow (Python) | 50,000 statement visits per function and round; 4 summary rounds; 6 labels per value | Syntax-tree interpretation of relevant functions only | Interrupted functions recorded; a "Data-flow analysis truncated" UNKNOWN finding |
+| Data flow (lexical languages) | 20,000 assignments and sinks per function region; 4,000 characters per right-hand side | Cleaned text of the code model | Later events in the region are not visited |
+| Type-checker and frontend configuration | 2 MiB per file | Bounded read | File skipped |
+| Embedded configuration | 4 MiB per file (platformio.ini, sdkconfig, .ioc, linker scripts, device trees, FreeRTOSConfig.h) | Bounded read | File skipped |
+| Firmware and binary headers | 1 MiB header sample; 4 MiB per ELF/PE table and per firmware build file; 64 MiB per Intel HEX or S-record image; 8 MiB scanned for component strings; 65,536 UF2 blocks | Verified binary stream with seeks, never a full read | Partial header results; unreadable formats report nothing |
+| HDL sources and constraints | 8 MiB per file; 2,000 design units per file | Bounded read with linear comment/string blanking | File skipped |
+| Shaders | 4 MiB per source file; SPIR-V up to 2,000,000 words | Bounded read or verified binary stream | File skipped |
+| Integration points | 2 MiB per manifest or `.proto`; 400 facts per source file | Bounded read; source through the code model | Later facts in the file are not recorded |
 
 ## Global oversized-file policy
 
@@ -44,7 +55,7 @@ An analyzer may apply its own specialized budget regardless of --skip. Such a re
 - The archive wall-time limit is cooperative. It is checked between metadata/member operations and regex matches; it cannot preempt a blocked filesystem read or interrupt a single in-progress Python regular-expression call.
 - The archive implementation does not yet impose a shared nested-archive depth or total-uncompressed-size budget because recursive nested archive inspection is not implemented.
 - The vulnerability lockfile limit is a format-parser admission limit, not a streaming parser; files below the limit may still need significant memory.
-- Inventory, scan findings and the complete embedded JSON report payload are still retained in memory. The 100GB+ objective is not met until persistent streaming inventory, bounded result aggregation and external/chunked report data are implemented and benchmarked.
+- Inventory records, findings, diagnostics and code facts are persisted in SQLite and read back lazily, the JSON report is streamed, and the HTML report embeds bounded subsets (`embedded_limits` in the payload). Report metrics, the Python import graph (within its caps) and each per-file analyzer's working set are still held in memory. Bounded-memory behavior at 100 GB+ is unverified until the large-corpus benchmarks run.
 
 ## Release requirements
 

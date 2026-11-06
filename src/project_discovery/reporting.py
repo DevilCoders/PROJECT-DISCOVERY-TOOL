@@ -451,6 +451,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- Hidden entries: {metrics.get('hidden_entry_count', 0):,}",
         f"- Development/cache trees: {metrics.get('development_directory_count', 0):,}",
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
+        f"- Analysis queue limit: {execution.get('max_pending_tasks', 'not reported')} pending batches",
         f"- Native CPU backend: {native.get('backend', 'not reported')}",
         f"- GPU status: {native.get('gpu_status', 'not reported')}",
         f"- GPU device: {_md(native.get('gpu_name') or 'not detected')}",

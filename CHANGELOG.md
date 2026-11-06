@@ -37,6 +37,17 @@ methods and limits are in [docs/CODE_INTELLIGENCE.md](docs/CODE_INTELLIGENCE.md)
   package identity) and an `integration_map` in `pdt compare` linking projects by package
   dependencies, HTTP endpoints, topics and gRPC services.
 
+### Added: online repository scanning
+- `pdt scan URL` and `pdt scan --url FILE` (one URL per line) materialize remote repositories
+  read-only into a temporary directory, scan them and delete the checkout. Git hosts (GitHub,
+  GitLab, Bitbucket, Azure Repos, CodeCommit, SourceHut and self-hosted) and native backends
+  (Mercurial, Subversion, Bazaar/Breezy, Darcs, Git-backed Jujutsu, Pijul, CVS, Perforce, Fossil)
+  are supported through their installed clients; `--vcs` forces a backend and
+  `--remote-timeout` bounds each checkout. URLs that embed a password or credential query
+  parameters are rejected (SSH and CVS pserver user names are allowed), insecure transports
+  are flagged in report metadata, and `pdt capabilities` lists the
+  installed VCS clients. Online-mode work continues in this cycle.
+
 ### Changed
 - The thirteen catalog domains that were `planned` are now `partial`, each claimed by a
   shipped analyzer; a test keeps `planned` domains and shipped analyzers disjoint. Lexically
