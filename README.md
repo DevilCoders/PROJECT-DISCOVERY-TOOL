@@ -6,7 +6,7 @@ PDT inventories a project first, analyzes it with independent evidence-producing
 
 PDT does not assume that a project is Python-based, that one language is its core, or that a repository's README accurately describes its implementation.
 
-> **Status: 0.2.0 — release candidate.** The production-readiness audit ([docs/AUDIT.md](docs/AUDIT.md)) found that 0.1.0 never ran its per-file analyzers and failed CI everywhere; every defect it recorded is fixed and covered by regression tests, and CI passes on Linux, Windows and macOS for CPython 3.11–3.14. Third-party plugins run in a verified operating-system sandbox on Linux, macOS and Windows (see the [Plugin SDK](docs/PLUGIN_SDK.md)). Remaining release gates are listed in [AUDIT.md §5](docs/AUDIT.md#5-release-gates-that-remain-open): large-corpus (2 GB–100 GB+) benchmarks and an independent security review. Unreleased work on this branch adds a shared code model, a cross-file code index and analyzers for every domain that 0.2.0 only catalogued ([AUDIT.md §8](docs/AUDIT.md#8-code-intelligence-and-the-formerly-planned-domains), [Code Intelligence](docs/CODE_INTELLIGENCE.md)). Catalog coverage, grammar mappings, pattern analyzers and full semantic support are still different capability levels, and a catalog entry is never presented as a completed analyzer. See [CHANGELOG.md](CHANGELOG.md) and the [Operations Guide](docs/OPERATIONS.md).
+> **Status: 0.2.0 — release candidate.** The production-readiness audit ([docs/project/AUDIT.md](docs/project/AUDIT.md)) found that 0.1.0 never ran its per-file analyzers and failed CI everywhere; every defect it recorded is fixed and covered by regression tests, and CI passes on Linux, Windows and macOS for CPython 3.11–3.14. Third-party plugins run in a verified operating-system sandbox on Linux, macOS and Windows (see the [Plugin SDK](docs/guides/PLUGIN_SDK.md)). Remaining release gates are listed in [AUDIT.md §5](docs/project/AUDIT.md#5-release-gates-that-remain-open): large-corpus (2 GB–100 GB+) benchmarks and an independent security review. Unreleased work on this branch adds a shared code model, a cross-file code index and analyzers for every domain that 0.2.0 only catalogued ([AUDIT.md §8](docs/project/AUDIT.md#8-code-intelligence-and-the-formerly-planned-domains), [Code Intelligence](docs/architecture/CODE_INTELLIGENCE.md)). Catalog coverage, grammar mappings, pattern analyzers and full semantic support are still different capability levels, and a catalog entry is never presented as a completed analyzer. See [CHANGELOG.md](CHANGELOG.md) and the [Operations Guide](docs/guides/OPERATIONS.md).
 
 ## Project identity
 
@@ -33,7 +33,7 @@ PDT does not assume that a project is Python-based, that one language is its cor
 - Built-in analyzer reads use shared descriptor-verified helpers: reject symlinks/non-regular paths, request `O_NOFOLLOW` where supported, compare the opened descriptor with `fstat`, and enforce available scan-time identity from inventory. Bounded text/Python/binary readers, SHA-256 fingerprinting, signature sampling and ZIP/TAR input streams use that boundary. Third-party plugins still receive the legacy `Path` interface; PDT cannot enforce how arbitrary plugin code opens files. The Rust Windows walker also lacks a stable scan-time file ID in the current implementation, so cross-platform identity continuity remains a release gate.
 - ZIP/TAR members can be inspected through bounded in-memory streams; archive entries are never extracted to disk. ZIP central-directory count/size is checked before materializing the member index; ZIP/TAR traversal and member sampling have an 8-second cooperative wall-time budget, plus a 32 MiB total and 1 MiB per-member content-sample budget. Unknown or exceeded bounds produce `UNKNOWN`/partial findings. Formats without a supported index reader are reported as detected but not deeply inspected.
 - Secret and PII evidence must be redacted. Reports may retain category, file/member path, line, confidence and a keyed local fingerprint; they must not contain complete passwords, tokens, private keys, email addresses or personal-data values.
-- Third-party analyzer plugins never run inside PDT by default. Each runs in a sandboxed host process that receives private copies of the files it analyzes and an allowlisted environment. On Linux (Landlock, seccomp) and macOS (Seatbelt), plugins cannot write files, read outside the Python runtime, use the network or start processes; Windows restricts writes and process creation only. See the [Plugin SDK](docs/PLUGIN_SDK.md).
+- Third-party analyzer plugins never run inside PDT by default. Each runs in a sandboxed host process that receives private copies of the files it analyzes and an allowlisted environment. On Linux (Landlock, seccomp) and macOS (Seatbelt), plugins cannot write files, read outside the Python runtime, use the network or start processes; Windows restricts writes and process creation only. See the [Plugin SDK](docs/guides/PLUGIN_SDK.md).
 - Static references are not runtime facts. A URL, hostname, port, API route, dependency, package manifest or ROS topic found in source is not proof that it is deployed, reachable, installed or active.
 
 ### Polyglot, not Python-only
@@ -76,7 +76,7 @@ The current branch contains first-pass implementations of:
 - File, directory and symlink records; hidden-name indicators; size buckets; permission metadata; directory byte/file totals; common development/cache directory markers; a SQLite fingerprint cache.
 - Incremental SQLite inventory persistence at `OUTPUT/.pdt-cache/inventory.sqlite3` with bounded batches, running/complete/partial checkpoints, directory counters/errors, record-count telemetry and integrity status. Store-backed CLI scans now expose file, directory, symlink and special-entry records through lazy SQLite-backed sequences. Directory aggregates are maintained in a separate bounded SQLite delta state, and the Python fallback uses a depth-bounded active iterator stack. Analyzer findings and ordered scan diagnostics now use lazy SQLite-backed sequences; dependency/architecture correlation state and report metrics still have in-memory components; this is not yet the 100GB+ bounded-memory implementation.
 - Python AST analysis and a Python internal-import graph with cycle detection, explicit module/edge/unresolved-import/skipped-module RAM ceilings, and `UNKNOWN` partial-graph findings when evidence is omitted.
-- A shared code model (Python syntax tree; structural lexer for about 25 brace languages) and a cross-file code index stored in the scan's SQLite inventory: symbol index, call graph with recursion cycles, unreferenced private functions, test links and a polyglot module graph, queried with `pdt query`. See [Code Intelligence](docs/CODE_INTELLIGENCE.md).
+- A shared code model (Python syntax tree; structural lexer for about 25 brace languages) and a cross-file code index stored in the scan's SQLite inventory: symbol index, call graph with recursion cycles, unreferenced private functions, test links and a polyglot module graph, queried with `pdt query`. See [Code Intelligence](docs/architecture/CODE_INTELLIGENCE.md).
 - Performance hotspots, concurrency defects, resource leaks, type-system usage, and data-flow/taint analysis from untrusted input to injection, path, SSRF, XSS and redirect sinks (Python inter-procedurally and across modules; eight more language families within functions).
 - Embedded targets and interrupt-handler safety, firmware and binary metadata (ELF/PE hardening, HEX, UF2, DTB, uImage, Android boot, ESP32 images), Verilog/SystemVerilog/VHDL design hierarchy and FPGA constraints, shader stages and bindings (including SPIR-V and DXIL), frontend component graphs and routes, and cross-project integration maps in `pdt compare`.
 - Language/file-format recognition and an optional, offline-first Tree-sitter adapter.
@@ -99,7 +99,7 @@ The current branch contains first-pass implementations of:
 
 These are initial implementations with varying depth. In store-backed CLI scans, all four inventory record classes are exposed through lazy SQLite-backed sequences; directory counters/errors are updated incrementally and the Python fallback retains only active directory iterators (O(depth)). The Python dependency graph has explicit RAM ceilings (25k modules, 100k edge candidates, 100k unresolved imports and 25k skipped-module details); duplicate module evidence samples at most 8 paths, with every omission/skipped source represented as incomplete `UNKNOWN` evidence. The architecture top-level component detail index is capped at 10k. These graph structures remain in memory within their caps, not SQLite-backed; the code index, by contrast, is built from SQLite with bounded per-file and per-table ceilings. The JSON report is streamed and the HTML report embeds bounded subsets. Per-file analyzer working sets and report metrics are still held in memory, and the large-corpus benchmarks remain open, so the memory model is not yet certified for 100GB+ target workloads. Dependency/cache/build directories are traversed by default unless explicitly excluded, non-ZIP/TAR archive formats have limited inspection, and many polyglot analyzers use conservative lexical patterns rather than full language semantics. Those are explicit production work items—not completed capabilities.
 
-See [Analyzer Coverage](docs/ANALYZER_COVERAGE.md), [Architecture](docs/ARCHITECTURE.md), [Analyzer Resource Budgets](docs/ANALYZER_RESOURCE_BUDGETS.md), and [Roadmap](docs/ROADMAP.md).
+See [Analyzer Coverage](docs/architecture/ANALYZER_COVERAGE.md), [Architecture](docs/architecture/ARCHITECTURE.md), [Analyzer Resource Budgets](docs/architecture/ANALYZER_RESOURCE_BUDGETS.md), and [Roadmap](docs/project/ROADMAP.md).
 
 ## Required discovery surface
 
@@ -170,7 +170,7 @@ pdt catalog-compare --output /reports/project-comparison
 
 ### Remote repository scans (online mode)
 
-Local scans are offline. Online mode is used only when the target is a repository URL or a `--url` list; PDT then downloads each repository read-only into a private temporary directory, scans it like a local project and deletes the copy. The [Online Mode guide](docs/ONLINE_MODE.md) describes every option, the security model, resource limits, report fields and platform behavior.
+Local scans are offline. Online mode is used only when the target is a repository URL or a `--url` list; PDT then downloads each repository read-only into a private temporary directory, scans it like a local project and deletes the copy. The [Online Mode guide](docs/guides/ONLINE_MODE.md) describes every option, the security model, resource limits, report fields and platform behavior.
 
 ```bash
 pdt scan https://github.com/owner/repository
@@ -221,11 +221,11 @@ pdt scan https://gitlab.example.com/group/project --no-download --api-url https:
 pdt scan --url repositories.txt --no-download --vuln-online --output ./api-reports
 ```
 
-Tokens come only from host-bound variables (`PDT_API_TOKEN_<HOST>`, or `GITHUB_TOKEN`/`GITLAB_TOKEN`/`BITBUCKET_TOKEN`/`CODEBERG_TOKEN` for the public hosts) or, with `--use-credential-helper`, from your Git credential helper; they are never logged or written to reports. Work is bounded per repository by `--api-max-files`, `--api-max-mb`, `--api-max-file-mb`, `--api-max-requests` and `--api-workers`; a file left unfetched by a budget, a failed request or an exhausted rate limit stays in the inventory and is reported as an `UNKNOWN` coverage gap (so `--strict` reports the scan as incomplete). Third-party plugins are not run in this mode because their sandbox needs a file copy on disk. Details: [Online Mode guide](docs/ONLINE_MODE.md#analyze-without-downloading---no-download).
+Tokens come only from host-bound variables (`PDT_API_TOKEN_<HOST>`, or `GITHUB_TOKEN`/`GITLAB_TOKEN`/`BITBUCKET_TOKEN`/`CODEBERG_TOKEN` for the public hosts) or, with `--use-credential-helper`, from your Git credential helper; they are never logged or written to reports. Work is bounded per repository by `--api-max-files`, `--api-max-mb`, `--api-max-file-mb`, `--api-max-requests` and `--api-workers`; a file left unfetched by a budget, a failed request or an exhausted rate limit stays in the inventory and is reported as an `UNKNOWN` coverage gap (so `--strict` reports the scan as incomplete). Third-party plugins are not run in this mode because their sandbox needs a file copy on disk. Details: [Online Mode guide](docs/guides/ONLINE_MODE.md#analyze-without-downloading---no-download).
 
 The output directory must remain outside the analyzed project. PDT never changes target files.
 
-Exit codes: `0` scan completed, `1` a finding at or above `--fail-on`, `2` usage or fatal error (including a single remote URL that cannot be fetched), `3` incomplete scan under `--strict` or a URL batch in which a repository could not be fetched, `130` interrupted. In a batch, a `--fail-on` hit in any repository takes precedence. See the [Operations Guide](docs/OPERATIONS.md) for large-scan practice and [Benchmarks](docs/BENCHMARKS.md) for `tools/benchmark.py`.
+Exit codes: `0` scan completed, `1` a finding at or above `--fail-on`, `2` usage or fatal error (including a single remote URL that cannot be fetched), `3` incomplete scan under `--strict` or a URL batch in which a repository could not be fetched, `130` interrupted. In a batch, a `--fail-on` hit in any repository takes precedence. See the [Operations Guide](docs/guides/OPERATIONS.md) for large-scan practice and [Benchmarks](docs/guides/BENCHMARKS.md) for `tools/benchmark.py`.
 
 ### Exclusions and skip accounting
 
@@ -290,7 +290,7 @@ pdt scan /path/to/project --vuln-online
 pdt scan https://github.com/owner/repository --vuln-online --vuln-enrich nvd,ghsa
 ```
 
-Request formats, failure handling, every option and the provenance recorded in reports are described in the [Online Mode guide](docs/ONLINE_MODE.md#online-vulnerability-intelligence).
+Request formats, failure handling, every option and the provenance recorded in reports are described in the [Online Mode guide](docs/guides/ONLINE_MODE.md#online-vulnerability-intelligence).
 
 ## Evidence and confidence
 
@@ -299,6 +299,35 @@ Request formats, failure handling, every option and the provenance recorded in r
 - **UNKNOWN** — evidence is insufficient, parsing was unavailable, or a resource limit prevented analysis.
 
 Documentation does not prove implementation. A declared package does not prove installation or runtime usage. A route definition does not prove that the endpoint is exposed. An email-shaped string does not prove an individual's identity. A host OS metric does not prove the project's target OS.
+
+## Repository layout
+
+```text
+src/project_discovery/
+  cli.py             command-line interface and scan orchestration
+  models.py          report data model (Finding, FileRecord, ScanResult)
+  inventory/         no-follow filesystem walker, SQLite inventory store, fingerprint cache
+  engine/            bounded process/thread executor, native backends, runtime telemetry
+  analyzers/         built-in analyzers by domain, the plugin base class and the registry
+    code/  security/  dependencies/  api/  databases/
+    delivery/  environment/  content/  domains/
+  intelligence/      shared code model, code facts, cross-file code index, project graphs
+  vulnerabilities/   local OSV advisory database, ecosystem version ordering, CVSS
+  plugins/           plugin isolation policy, sandboxed hosts and their protocol
+  online/            online mode: URL targets, read-only VCS checkouts, provider APIs for
+                     no-download scans, online advisory sources
+  reporting/         JSON, Markdown and HTML writers; the offline HTML client in web/
+  projects/          multi-project comparison, integration maps, local project catalog
+  catalog/           language and analyzer-domain capability catalogs
+  core/              verified reads, redaction, safe parsers, credential registry
+  data/              bundled data (IANA TLD list)
+native/              c/, cpp/, asm/ and rust/ sources of the optional native extensions
+tests/               pytest suite, laid out like the package
+docs/                architecture/, analyzers/, guides/ and project/ (roadmap, audit)
+tools/               benchmark corpus generator and runner
+```
+
+Plugins depend only on `project_discovery.analyzers.base` and `project_discovery.models`, whose paths are stable. The [documentation index](docs/README.md) lists every guide.
 
 ## Polyglot and native implementation strategy
 
@@ -309,7 +338,7 @@ PDT is intentionally polyglot. Python is the control plane, not the only impleme
 - **x86-64 Assembly:** implemented Linux x86-64 SIMD backend using SSE2 compare/movemask and POPCNT, selected only after runtime CPU-feature checks. Other CPUs/platforms use C fallback.
 - **Rust:** an optional PyO3 no-follow filesystem iterator is integrated into scanner traversal. It uses native directory iterators and bounded active-directory state; a persistent index reused across scans remains planned.
 - **C++:** an optional C++17 signature classifier is compiled as a native extension and used by scanner file-type detection, with a Python fallback.
-- **JavaScript:** the offline report client is a real source asset at `src/project_discovery/web/report.js`; it is bundled into standalone HTML. TypeScript is not currently a compiled runtime dependency.
+- **JavaScript:** the offline report client is a real source asset at `src/project_discovery/reporting/web/report.js`; it is bundled into standalone HTML. TypeScript is not currently a compiled runtime dependency.
 - **Other languages:** analyzers and parsers use the languages/framework SDKs that provide the most accurate evidence.
 
 C, x86-64 Assembly, C++, Rust and JavaScript now have source files and actual execution paths. Store-backed CLI scans persist all four inventory record kinds in bounded SQLite batches and expose files, directories, symlinks and special entries through lazy typed sequences. Directory child counts, ancestor file counts, byte totals and traversal errors use bounded SQLite state deltas rather than a Python directory map. The Python fallback retains only active directory iterators on a depth-proportional stack. Analyzer findings are persisted in SQLite with deterministic duplicate suppression and lazy iteration; scan diagnostics preserve insertion order and duplicates. The CLI security summary uses bounded top-25 selection. Python dependency-graph indexes/edges/unresolved imports and architecture component details now have explicit caps and incomplete-evidence reporting, but graph adjacency/SCC structures remain in memory within those limits. Per-file analyzer working sets, report metrics and the offline browser's embedded report payload (bounded by `embedded_limits`) remain memory gates. Cross-platform native packaging, sanitizer/fuzz coverage and 2GB–100GB+ benchmarks remain release gates. Every native component needs explicit API/ownership/error contracts, tests, a portable fallback and repeatable benchmark evidence.
@@ -320,10 +349,10 @@ C, x86-64 Assembly, C++, Rust and JavaScript now have source files and actual ex
 |---|---|---|
 | Python orchestration and analyzers | `src/project_discovery/` | CLI, analyzer registry, evidence correlation, report schema and portable fallbacks |
 | Rust filesystem iterator | `native/rust/Cargo.toml`, `native/rust/src/lib.rs` | PyO3 no-follow directory iteration and native filesystem metadata |
-| C++ signature engine | `native/pdt_signatures.cpp` | C++17 magic-byte classifier used by scanner file-type detection |
-| C native core | `native/pdt_native.c` | Portable C/SIMD byte counting, runtime OpenCL GPU detection, bounded large-buffer reduction kernel and CPU fallback |
-| x86-64 Assembly | `native/pdt_simd_x86_64.S` | Linux x86-64 SIMD/POPCNT byte-counting primitive |
-| Offline report client | `src/project_discovery/web/report.js` | Search, paging, filters and expandable/collapsible findings; bundled into HTML |
+| C++ signature engine | `native/cpp/pdt_signatures.cpp` | C++17 magic-byte classifier used by scanner file-type detection |
+| C native core | `native/c/pdt_native.c` | Portable C/SIMD byte counting, runtime OpenCL GPU detection, bounded large-buffer reduction kernel and CPU fallback |
+| x86-64 Assembly | `native/asm/pdt_simd_x86_64.S` | Linux x86-64 SIMD/POPCNT byte-counting primitive |
+| Offline report client | `src/project_discovery/reporting/web/report.js` | Search, paging, filters and expandable/collapsible findings; bundled into HTML |
 
 Native build integration is defined in `setup.py`, `pyproject.toml` and `MANIFEST.in`. The test suite requires the C++, Rust and platform-appropriate C/Assembly components to build in CI; Python fallbacks remain available for unsupported local environments.
 
@@ -345,6 +374,6 @@ The work prioritizes correctness and scale over adding catalog labels. Done on t
 7. Benchmark 2 GB/10 GB/50 GB/100 GB+ corpora and tune worker and GPU thresholds using wall time, throughput and peak RSS.
 8. Run the full cross-platform build, security, coverage and packaging gates on the final PR head, and an independent security review.
 
-PDT recognizes 128 languages and formats (81 source languages), with capability states reported per language and analyzer; see [Polyglot Parsers](docs/POLYGLOT_PARSERS.md). Python is the control plane and implements the analyzers. Native C and x86-64 Assembly provide byte counting, C++ the signature classifier and Rust the integrated filesystem traversal. C++ is used only where an actual native dependency or performance boundary justifies it, and JavaScript owns the offline report interaction layer. No language is considered implemented because it appears in documentation or a catalog.
+PDT recognizes 128 languages and formats (81 source languages), with capability states reported per language and analyzer; see [Polyglot Parsers](docs/architecture/POLYGLOT_PARSERS.md). Python is the control plane and implements the analyzers. Native C and x86-64 Assembly provide byte counting, C++ the signature classifier and Rust the integrated filesystem traversal. C++ is used only where an actual native dependency or performance boundary justifies it, and JavaScript owns the offline report interaction layer. No language is considered implemented because it appears in documentation or a catalog.
 
 The default scan inventories and analyzes oversized files. Only the explicit `--skip` option enables the global threshold-based content skip; skipped files remain in inventory and carry a visible reason. Analyzer-specific hard safety budgets are reported as UNKNOWN/partial and must never be represented as a clean result.

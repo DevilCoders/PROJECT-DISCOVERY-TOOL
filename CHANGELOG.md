@@ -1,12 +1,12 @@
 # Changelog
 
 All notable changes to PDT. IDs such as PDT-001 refer to the defect register in
-[docs/AUDIT.md](docs/AUDIT.md).
+[docs/project/AUDIT.md](docs/project/AUDIT.md).
 
 ## Unreleased
 
 Semantic code intelligence and the thirteen domains that 0.2.0 only catalogued. Details,
-methods and limits are in [docs/CODE_INTELLIGENCE.md](docs/CODE_INTELLIGENCE.md).
+methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architecture/CODE_INTELLIGENCE.md).
 
 ### Added: code intelligence
 - A shared per-file code model: Python from the syntax tree (qualified symbols, calls resolved
@@ -55,9 +55,15 @@ methods and limits are in [docs/CODE_INTELLIGENCE.md](docs/CODE_INTELLIGENCE.md)
   restrictions on Windows too. Hosts run from a copy of the standard-library runtime (cached once per
   Python build under `%LOCALAPPDATA%\ProjectDiscoveryTool\plugin-runtime`) and from staged copies of
   PDT and the plugin's declared dependencies; only those PDT-created folders are granted to the
-  container. See docs/PLUGIN_SDK.md and §9 of docs/AUDIT.md.
+  container. See docs/guides/PLUGIN_SDK.md and §9 of docs/project/AUDIT.md.
 
 ### Changed
+- The package is organized into subpackages by responsibility (`inventory`, `engine`,
+  `analyzers/<domain>`, `intelligence`, `vulnerabilities`, `plugins`, `online`, `reporting`,
+  `projects`, `catalog`, `core`), and tests, docs and native sources are nested the same way.
+  `project_discovery.models`, `project_discovery.analyzers.base` and the `pdt` entry point keep
+  their paths. Internal module paths changed: for example `project_discovery.code_facts` is now
+  `project_discovery.intelligence.facts`.
 - The thirteen catalog domains that were `planned` are now `partial`, each claimed by a
   shipped analyzer; a test keeps `planned` domains and shipped analyzers disjoint. Lexically
   modelled languages report `analysis_status: lexical_structure` and a new `structural_model`.
@@ -157,7 +163,7 @@ the scale and operability features needed for very large repositories.
   Crashes, timeouts (`--plugin-timeout`) and floods become `UNKNOWN` coverage findings, and a
   plugin is disabled after three consecutive host failures. Memory is limited with
   `--plugin-memory-mb`. Windows cannot restrict reads or network access; see
-  docs/PLUGIN_SDK.md.
+  docs/guides/PLUGIN_SDK.md.
 - `pdt capabilities` reports what the plugin sandbox verifies on the machine and whether each
   plugin loads; reports record each plugin's verified sandbox in `metrics.plugin_isolation`.
 - Multi-process analysis engine (`--executor auto|process|thread`) with batched tasks, worker

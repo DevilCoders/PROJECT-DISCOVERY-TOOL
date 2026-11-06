@@ -9,7 +9,7 @@ class Analyzer(ABC):
     """Base class for local, read-only project analyzers.
 
     By default PDT runs third-party plugins in sandboxed host processes (see
-    docs/PLUGIN_SDK.md): ``analyze`` receives a private copy of one file, and the plugin
+    docs/guides/PLUGIN_SDK.md): ``analyze`` receives a private copy of one file, and the plugin
     cannot write files, open network connections or start processes. Implementations
     must not mutate target files, execute target code, or perform network access during
     analysis. Analyzer instances may be called concurrently for different files.

@@ -54,7 +54,7 @@ jobs:
       - name: Build C, C++, Rust and (Linux x86-64) Assembly backends
         run: python setup.py build_ext --inplace
       - name: Report native backend status
-        run: python -c "from project_discovery.native_backend import capabilities; import json; print(json.dumps(capabilities(), indent=1, sort_keys=True))"
+        run: python -c "from project_discovery.engine.native import capabilities; import json; print(json.dumps(capabilities(), indent=1, sort_keys=True))"
       - name: Run test suite with coverage gate
         run: pytest --cov=project_discovery --cov-report=term-missing --cov-fail-under=80
       - name: Build source and wheel distributions

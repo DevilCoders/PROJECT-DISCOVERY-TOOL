@@ -19,9 +19,9 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
-from ..remote import RemoteScanError
 from .credentials import ApiCredential
 from .http import HttpClient, NetworkError, RateLimiter, validate_service_url
+from .repositories import RemoteScanError
 
 API_PROVIDERS = ("auto", "github", "gitlab", "bitbucket", "gitea")
 PUBLIC_API_URLS = {
@@ -204,7 +204,7 @@ class ProviderClient:
             raise NetworkError(f"{self.host} API returned invalid JSON", kind="protocol") from exc
 
     def _not_found(self) -> ProviderError:
-        hint = "" if self.credential else " If it is private, provide a token (see docs/ONLINE_MODE.md)."
+        hint = "" if self.credential else " If it is private, provide a token (see docs/guides/ONLINE_MODE.md)."
         return ProviderError(f"{self.name} repository {self.repository!r} was not found or is not accessible.{hint}")
 
     # Interface -------------------------------------------------------------

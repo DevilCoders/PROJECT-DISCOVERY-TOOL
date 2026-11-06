@@ -10,7 +10,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from ..lockfiles import normalize_version
+from ..analyzers.dependencies.lockfile_parsers import normalize_version
 from .cache import ResponseCache
 from .http import HttpClient, NetworkError, RateLimiter, validate_service_url
 

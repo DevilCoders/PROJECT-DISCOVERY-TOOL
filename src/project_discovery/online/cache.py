@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..inventory_store import prepare_private_database
+from ..inventory.store import prepare_private_database
 
 CACHE_SCHEMA_VERSION = "1"
 DEFAULT_CACHE_TTL_SECONDS = 24 * 3600

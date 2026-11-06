@@ -22,16 +22,16 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
 
-from ..analyzers.vulnerability_analyzer import advisory_findings
-from ..lockfiles import (
+from ..analyzers.dependencies.lockfile_parsers import (
     MAX_LOCKFILE_PACKAGE_ENTRIES,
     LockfileEntryBudgetExceeded,
     ResolvedPackage,
     parse_lockfile,
 )
+from ..analyzers.dependencies.vulnerabilities import advisory_findings
+from ..core.source_utils import SourceBudgetExceeded, redact_source_excerpt
 from ..models import Finding
-from ..source_utils import SourceBudgetExceeded, redact_source_excerpt
-from ..vulnerability_db import osv_record_to_advisories
+from ..vulnerabilities.database import osv_record_to_advisories
 from .advisories import GITHUB_API_URL, NVD_API_URL, GhsaClient, NvdClient, is_cve_id, is_ghsa_id
 from .cache import DEFAULT_CACHE_TTL_SECONDS, ResponseCache, default_cache_path
 from .http import DEFAULT_TIMEOUT, HttpClient, NetworkError
@@ -176,7 +176,7 @@ def _enrichment_lines(advisory: dict[str, Any], details: dict[str, dict[str, Any
 
 
 def _enrichment_severity(advisory: dict[str, Any], details: dict[str, dict[str, Any]]) -> str | None:
-    from ..cvss import qualitative_severity
+    from ..vulnerabilities.cvss import qualitative_severity
 
     best = None
     for identifier in [advisory["id"], *advisory.get("aliases", [])]:

@@ -25,7 +25,7 @@ class CodeEvidence:
     def __post_init__(self) -> None:
         # Enforce redaction at the model boundary so custom analyzers cannot
         # accidentally serialize secrets or direct identifiers in report excerpts.
-        from .source_utils import redact_source_excerpt
+        from .core.source_utils import redact_source_excerpt
         self.code = redact_source_excerpt(self.code)
 
     def to_dict(self) -> dict[str, Any]:

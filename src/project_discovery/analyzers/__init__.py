@@ -25,7 +25,7 @@ class AnalyzerLoadResult:
 
     def close(self) -> None:
         """Stop the plugin host processes owned by isolated analyzers."""
-        from ..plugin_isolation import IsolatedAnalyzer
+        from ..plugins.isolation import IsolatedAnalyzer
 
         for analyzer in self.analyzers:
             if isinstance(analyzer, IsolatedAnalyzer):
@@ -34,53 +34,53 @@ class AnalyzerLoadResult:
 
 def builtin_analyzers() -> list[Analyzer]:
     """Instantiate PDT's own analyzers in their deterministic execution order."""
-    from .accessibility_analyzer import AccessibilityAnalyzer
-    from .api_analyzer import APIContractAnalyzer
-    from .api_source_analyzer import APIEndpointAnalyzer
-    from .api_type_analyzer import APITypeAnalyzer
-    from .archive_analyzer import ArchiveIntelligenceAnalyzer
-    from .build_analyzer import BuildManifestAnalyzer
-    from .code_index_analyzer import CodeIndexAnalyzer
-    from .concurrency_analyzer import ConcurrencyAnalyzer
-    from .configuration_analyzer import ConfigurationAnalyzer
-    from .coverage_analyzer import CoverageArtifactAnalyzer
-    from .data_exposure_analyzer import DataExposureAnalyzer
-    from .dataflow_analyzer import DataFlowAnalyzer
-    from .dependency_manifest_analyzer import DependencyManifestAnalyzer
-    from .deployment_analyzer import DeploymentIntelligenceAnalyzer
-    from .docs_analyzer import MarkdownAnalyzer
-    from .document_analyzer import DocumentAnalyzer
-    from .embedded_analyzer import EmbeddedAnalyzer
-    from .firmware_analyzer import FirmwareAnalyzer
-    from .frontend_analyzer import FrontendAnalyzer
-    from .game_engine_analyzer import GameEngineIntelligenceAnalyzer
-    from .hdl_analyzer import HardwareDescriptionAnalyzer
-    from .identity_analyzer import IdentityIntelligenceAnalyzer
-    from .integration_analyzer import IntegrationAnalyzer
-    from .license_analyzer import LicenseAnalyzer
-    from .localization_analyzer import LocalizationAnalyzer
-    from .lockfile_analyzer import LockfileAnalyzer
-    from .messaging_analyzer import MessagingIntelligenceAnalyzer
-    from .migration_analyzer import MigrationIntelligenceAnalyzer
-    from .ml_analyzer import AIMLIntelligenceAnalyzer
-    from .mobile_analyzer import MobileIntelligenceAnalyzer
-    from .network_analyzer import NetworkIndicatorAnalyzer
-    from .nosql_analyzer import NoSQLIntelligenceAnalyzer
-    from .observability_analyzer import ObservabilityAnalyzer
-    from .os_analyzer import OperatingSystemAnalyzer
-    from .performance_analyzer import PerformanceHotspotAnalyzer
-    from .prisma_analyzer import PrismaSchemaAnalyzer
-    from .python_analyzer import PythonAnalyzer
-    from .resource_analyzer import ResourceManagementAnalyzer
-    from .ros_analyzer import ROSIntelligenceAnalyzer
-    from .secure_code_analyzer import SecureCodePatternAnalyzer
-    from .security_analyzer import SecretPatternAnalyzer
-    from .shader_analyzer import ShaderAnalyzer
-    from .sql_analyzer import SQLSchemaAnalyzer
-    from .test_analyzer import TestDiscoveryAnalyzer
-    from .tree_sitter_analyzer import TreeSitterAnalyzer
-    from .type_system_analyzer import TypeSystemAnalyzer
-    from .vcs_analyzer import VCSHostingAnalyzer
+    from .api.contracts import APIContractAnalyzer
+    from .api.integration import IntegrationAnalyzer
+    from .api.messaging import MessagingIntelligenceAnalyzer
+    from .api.routes import APIEndpointAnalyzer
+    from .api.styles import APITypeAnalyzer
+    from .code.concurrency import ConcurrencyAnalyzer
+    from .code.index import CodeIndexAnalyzer
+    from .code.performance import PerformanceHotspotAnalyzer
+    from .code.python import PythonAnalyzer
+    from .code.resources import ResourceManagementAnalyzer
+    from .code.tree_sitter_syntax import TreeSitterAnalyzer
+    from .code.type_systems import TypeSystemAnalyzer
+    from .content.accessibility import AccessibilityAnalyzer
+    from .content.archives import ArchiveIntelligenceAnalyzer
+    from .content.documents import DocumentAnalyzer
+    from .content.localization import LocalizationAnalyzer
+    from .content.markdown import MarkdownAnalyzer
+    from .databases.migrations import MigrationIntelligenceAnalyzer
+    from .databases.nosql import NoSQLIntelligenceAnalyzer
+    from .databases.prisma import PrismaSchemaAnalyzer
+    from .databases.sql import SQLSchemaAnalyzer
+    from .delivery.builds import BuildManifestAnalyzer
+    from .delivery.coverage_reports import CoverageArtifactAnalyzer
+    from .delivery.deployment import DeploymentIntelligenceAnalyzer
+    from .delivery.testing import TestDiscoveryAnalyzer
+    from .delivery.vcs import VCSHostingAnalyzer
+    from .dependencies.licenses import LicenseAnalyzer
+    from .dependencies.lockfiles import LockfileAnalyzer
+    from .dependencies.manifests import DependencyManifestAnalyzer
+    from .domains.embedded import EmbeddedAnalyzer
+    from .domains.firmware import FirmwareAnalyzer
+    from .domains.frontend import FrontendAnalyzer
+    from .domains.game_engines import GameEngineIntelligenceAnalyzer
+    from .domains.hdl import HardwareDescriptionAnalyzer
+    from .domains.ml import AIMLIntelligenceAnalyzer
+    from .domains.mobile import MobileIntelligenceAnalyzer
+    from .domains.ros import ROSIntelligenceAnalyzer
+    from .domains.shaders import ShaderAnalyzer
+    from .environment.configuration import ConfigurationAnalyzer
+    from .environment.network import NetworkIndicatorAnalyzer
+    from .environment.observability import ObservabilityAnalyzer
+    from .environment.operating_systems import OperatingSystemAnalyzer
+    from .security.dataflow import DataFlowAnalyzer
+    from .security.identity import IdentityIntelligenceAnalyzer
+    from .security.privacy import DataExposureAnalyzer
+    from .security.secrets import SecretPatternAnalyzer
+    from .security.secure_code import SecureCodePatternAnalyzer
 
     return [
         PythonAnalyzer(),
@@ -140,7 +140,7 @@ def load_analyzers(*, plugin_policy=None, plugin_specs=None) -> AnalyzerLoadResu
     ``"off"``. Worker processes pass the coordinator's validated ``plugin_specs`` so
     plugins are not probed again in every worker.
     """
-    from ..plugin_isolation import PluginPolicy, isolated_analyzers, load_isolated_plugins
+    from ..plugins.isolation import PluginPolicy, isolated_analyzers, load_isolated_plugins
 
     policy = plugin_policy or PluginPolicy()
     analyzers = builtin_analyzers()

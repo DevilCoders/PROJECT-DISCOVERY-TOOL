@@ -1,0 +1,172 @@
+from pathlib import Path
+
+from project_discovery.analyzers.environment.network import NetworkIndicatorAnalyzer
+from project_discovery.models import FileRecord
+
+
+def _scan(tmp_path: Path, source: str):
+    path = tmp_path / "network.py"
+    path.write_text(source, encoding="utf-8")
+    record = FileRecord(
+        "src/network.py", path.stat().st_size, ".py", "Python", file_type="text"
+    )
+    return NetworkIndicatorAnalyzer().analyze(path, record)
+
+
+def test_ipv4_ipv6_cidr_ports_uri_and_subdomain_detection(tmp_path: Path):
+    findings = _scan(
+        tmp_path,
+        'IPV4 = "192.0.2.10"\n'
+        'IPV6 = "2001:db8::1"\n'
+        'NETWORK = "10.0.0.0/8"\n'
+        'PORT = 5432\n'
+        'URL = "https://admin:super-secret@api.dev.example.com:8443/v1/users?token=hidden"\n',
+    )
+    titles = [item.title for item in findings]
+    assert any("IPv4 address" in title for title in titles)
+    assert any("IPv6 address" in title for title in titles)
+    assert any("CIDR" in title for title in titles)
+    assert any("Port indicators" in title for title in titles)
+    assert any("URL/URI indicators" in title for title in titles)
+    domain = next(item for item in findings if "Hostname and domain" in item.title)
+    assert "api.dev.example.com" in repr(domain.to_dict())
+    assert all("super-secret" not in repr(item.to_dict()) for item in findings)
+    assert all("token=hidden" not in repr(item.to_dict()) for item in findings)
+
+
+def test_invalid_addresses_are_not_reported_as_valid_literals(tmp_path: Path):
+    findings = _scan(tmp_path, 'IP = "999.999.999.999"\nPORT = 99999\n')
+    assert not any("IPv4 address" in item.title for item in findings)
+    assert not any("Port indicators" in item.title for item in findings)
+
+
+def test_network_analyzer_uses_bounded_line_chunks(tmp_path: Path):
+    source = "x = 1\n" + ("a" * (300 * 1024)) + '\nHOST = "198.51.100.5"\n'
+    findings = _scan(tmp_path, source)
+    assert any("198.51.100.5" in repr(item.evidence) for item in findings)
+    assert any(
+        item.confidence == "UNKNOWN" and "overlong line" in item.title.lower()
+        for item in findings
+    )
+
+
+
+def test_network_analyzer_rejects_file_changed_since_inventory(tmp_path: Path):
+    path = tmp_path / "changed-network.py"
+    original = 'HOST = "198.51.100.5"\n'
+    path.write_text(original, encoding="utf-8")
+    info = path.stat()
+    record = FileRecord(
+        path.name,
+        info.st_size,
+        ".py",
+        "Python",
+        file_type="text",
+        analysis_identity=(
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ),
+    )
+
+    path.write_text('HOST = "203.0.113.5"\n', encoding="utf-8")
+    findings = NetworkIndicatorAnalyzer().analyze(path, record)
+
+    assert len(findings) == 1
+    assert findings[0].confidence == "UNKNOWN"
+    assert "changed" in findings[0].detail.lower()
+    assert "203.0.113.5" not in repr(findings[0].to_dict())
+
+
+def test_bare_container_and_service_ports_are_detected(tmp_path: Path):
+    findings = _scan(
+        tmp_path,
+        "EXPOSE 80\nlisten 443 ssl\nendpoint = \"192.0.2.20:8081\"\n",
+    )
+    ports = next(item for item in findings if "Port indicators" in item.title)
+    for value in ("80", "443", "8081"):
+        assert value in ports.detail
+
+
+def test_ipv4_mapped_ipv6_literal_is_recognized(tmp_path: Path):
+    findings = _scan(tmp_path, 'HOST = "::ffff:192.0.2.128"\n')
+    ipv6 = next(item for item in findings if "IPv6 address" in item.title)
+    assert "::ffff:c000:280" in repr(ipv6.evidence)
+
+def test_network_analyzer_reports_oversized_and_growing_sources_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.environment.network as module
+
+    path = tmp_path / "large-network.py"
+    path.write_text('HOST = "192.0.2.1"\n' * 10, encoding="utf-8")
+    monkeypatch.setattr(module, "_MAX_NETWORK_FILE_BYTES", 24)
+    record = FileRecord(path.name, 1, ".py", "Python", file_type="text")
+    findings = NetworkIndicatorAnalyzer().analyze(path, record)
+    assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
+
+
+def test_network_analyzer_caps_unique_indicator_cardinality(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.environment.network as module
+
+    monkeypatch.setattr(module, "_MAX_NETWORK_INDICATORS", 1)
+    findings = _scan(tmp_path, 'HOSTS = "192.0.2.1 198.51.100.2"\n')
+    assert any(item.confidence == "UNKNOWN" and "budget reached" in item.title for item in findings)
+
+
+def test_network_analyzer_reports_overlong_physical_line_as_unknown(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.environment.network as module
+
+    monkeypatch.setattr(module, "_MAX_NETWORK_LINE_BYTES", 64)
+    path = tmp_path / "long-line.py"
+    path.write_text('HOST = "' + ("x" * 1000) + '"', encoding="utf-8")
+    record = FileRecord(path.name, path.stat().st_size, ".py", "Python", file_type="text")
+    findings = NetworkIndicatorAnalyzer().analyze(path, record)
+    assert any(
+        item.confidence == "UNKNOWN" and "physical line" in item.detail
+        for item in findings
+    )
+
+
+def _evidence(findings, prefix: str) -> list[str]:
+    return [value for item in findings if item.title.startswith(prefix) for value in item.evidence]
+
+
+def test_member_access_file_names_and_scope_operators_are_not_network_indicators(tmp_path: Path):
+    # Regression: every "identifier.identifier" was reported as a domain and bare "::"
+    # (f-strings, slices, C++ scopes) as an IPv6 literal.
+    findings = _scan(
+        tmp_path,
+        "pattern = re.compile(body.count)\n"
+        "evidence.append(self.id)\n"
+        'manifest = "setup.py"\n'
+        'readme = "README.md"\n'
+        'archive = "release.zip"\n'
+        'app_id = "com.example.mobile.app"\n'
+        'label = f"{archive}::{member}"\n'
+        "values = items[::2]\n",
+    )
+    assert not _evidence(findings, "Hostname and domain indicators")
+    assert not _evidence(findings, "IPv6 address indicators")
+
+
+def test_real_hosts_and_ipv6_literals_are_still_found(tmp_path: Path):
+    findings = _scan(
+        tmp_path,
+        'API = "api.github.com"\n'
+        'HOST = "internal.corp.example.org"\n'
+        'LOOPBACK = "::1"\n'
+        'LINK_LOCAL = "fe80::1"\n',
+    )
+    domains = " ".join(_evidence(findings, "Hostname and domain indicators"))
+    assert "api.github.com" in domains and "internal.corp.example.org" in domains
+    addresses = " ".join(_evidence(findings, "IPv6 address indicators"))
+    assert "(::1)" in addresses and "(fe80::1)" in addresses
+
+
+def test_configuration_hosts_do_not_need_string_literals(tmp_path: Path):
+    path = tmp_path / "app.yaml"
+    path.write_text("database:\n  host: db.internal.example.net\n  user.name: ignored\n", encoding="utf-8")
+    record = FileRecord("config/app.yaml", path.stat().st_size, ".yaml", "YAML", file_type="text")
+    domains = _evidence(NetworkIndicatorAnalyzer().analyze(path, record), "Hostname and domain indicators")
+    assert domains == ["config/app.yaml:2 (db.internal.example.net)"]

@@ -20,20 +20,20 @@ LIMIT_SECONDS = 0.75
 # Patterns applied only with .match() at positions chosen by the caller; scanning them
 # from every start position is not how PDT uses them.
 MATCH_ONLY = {
-    "project_discovery.analyzers.network_analyzer._LITERAL_REST": (
+    "project_discovery.analyzers.environment.network._LITERAL_REST": (
         "matched once per quote kind by _literal_spans"
     ),
     # clean_source matches these at each opener; an unterminated quote marks its kind
     # failed for the rest of the line, and an unterminated verbatim string ends the scan.
-    "project_discovery.code_model.lexical._QUOTED": "matched at quote openers by clean_source",
-    "project_discovery.code_model.lexical._VERBATIM": "matched after @\" openers by clean_source",
-    "project_discovery.code_model.lexical._ARROW_AFTER": (
+    "project_discovery.intelligence.model.lexical._QUOTED": "matched at quote openers by clean_source",
+    "project_discovery.intelligence.model.lexical._VERBATIM": "matched after @\" openers by clean_source",
+    "project_discovery.intelligence.model.lexical._ARROW_AFTER": (
         "matched once after the closing parenthesis of a `const x = (` candidate"
     ),
-    "project_discovery.analyzers.frontend_analyzer._STRING_AT": (
+    "project_discovery.analyzers.domains.frontend._STRING_AT": (
         "matched once at the value position of a `selector:`/`path:` key"
     ),
-    "project_discovery.analyzers.hdl_analyzer._INSTANCE_NAME": (
+    "project_discovery.analyzers.domains.hdl._INSTANCE_NAME": (
         "matched once after a statement's type name (and its #(...) parameters)"
     ),
 }
@@ -118,7 +118,7 @@ def test_every_package_regex_is_linear_on_adversarial_input():
 
 def test_literal_spans_matches_reference_regex_semantics():
     # The linear scanner must yield exactly what the original single regex produced.
-    from project_discovery.analyzers.network_analyzer import _literal_spans
+    from project_discovery.analyzers.environment.network import _literal_spans
 
     reference = re.compile(r"""(["'`])((?:\\.|(?!\1)[^\\\r\n])*)\1""")
     samples = [

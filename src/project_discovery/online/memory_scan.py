@@ -26,22 +26,29 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
-from ..analysis_engine import FileOutcome, _run_analyzers
-from ..code_facts import collecting_facts
-from ..inventory_store import InventoryStore, StoredFileRecords, StoredRecordSequence
-from ..language_catalog import detect_language, is_source_path, is_textual_path
-from ..lockfiles import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
+from ..analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
+from ..catalog.languages import detect_language, is_source_path, is_textual_path
+from ..core.source_utils import prefetched_content
+from ..engine.executor import FileOutcome, _run_analyzers
+from ..intelligence.facts import collecting_facts
+from ..intelligence.python_graph import MAX_GRAPH_AST_FILE_BYTES, parse_python_imports
+from ..inventory.scanner import _DEVELOPMENT_MARKERS, _classify_head, _size_bucket
+from ..inventory.store import InventoryStore, StoredFileRecords, StoredRecordSequence
 from ..models import DirectoryRecord, FileRecord, SpecialEntryRecord, SymlinkRecord
-from ..python_graph import MAX_GRAPH_AST_FILE_BYTES, parse_python_imports
-from ..remote import RemoteTarget
-from ..scanner import _DEVELOPMENT_MARKERS, _classify_head, _size_bucket
-from ..source_utils import prefetched_content
 from .credentials import ApiCredential, resolve_credential
 from .http import DEFAULT_TIMEOUT, HttpClient, NetworkError
 from .providers import (
-    CLIENTS, ProviderError, RequestBudget, ResolvedRevision, TreeEntry, api_provider_for,
-    default_api_url, split_repository, symlink_scope,
+    CLIENTS,
+    ProviderError,
+    RequestBudget,
+    ResolvedRevision,
+    TreeEntry,
+    api_provider_for,
+    default_api_url,
+    split_repository,
+    symlink_scope,
 )
+from .repositories import RemoteTarget
 
 DEFAULT_API_MAX_FILES = 20_000
 DEFAULT_API_MAX_BYTES = 512 * 1024 * 1024

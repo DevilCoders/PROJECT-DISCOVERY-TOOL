@@ -15,6 +15,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.markup import escape
+from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -25,55 +26,84 @@ from rich.progress import (
 )
 from rich.table import Table
 from rich.text import Text
-from rich.panel import Panel
 
 from . import __version__
-from .analysis_engine import (
-    BATCH_MAX_BYTES, BATCH_MAX_FILES, EXECUTOR_MODES, AnalysisExecutor, FileOutcome, FileTask,
+from .analyzers import load_analyzers
+from .analyzers.code.tree_sitter_syntax import parser_capabilities
+from .analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
+from .analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
+from .catalog.domains import analyzer_domain_catalog, analyzer_domain_count
+from .catalog.languages import language_catalog, recognized_language_count
+from .core.source_utils import read_text_bounded
+from .engine.executor import (
+    BATCH_MAX_BYTES,
+    BATCH_MAX_FILES,
+    EXECUTOR_MODES,
+    AnalysisExecutor,
+    FileOutcome,
+    FileTask,
     verified_regular_file_stat,
 )
-from .analyzer_catalog import analyzer_domain_catalog, analyzer_domain_count
-from .analyzers import load_analyzers
-from .analyzers.tree_sitter_analyzer import parser_capabilities
-from .cache import ScanCache
-from .inventory_store import (
-    InventoryStore, StoredDiagnosticRecords, StoredFileRecords, StoredFindingRecords,
+from .engine.metrics import PhaseTimer, peak_rss_bytes
+from .engine.native import capabilities as native_capabilities
+from .engine.native import native_available
+from .intelligence.architecture import analyze_project_architecture
+from .intelligence.index import QUERY_KINDS, analyze_code_index, query_code_index
+from .intelligence.python_graph import analyze_python_dependencies
+from .inventory.cache import ScanCache
+from .inventory.scanner import discover_inventory
+from .inventory.store import (
+    InventoryStore,
+    StoredDiagnosticRecords,
+    StoredFileRecords,
+    StoredFindingRecords,
     StoredRecordSequence,
 )
-from .comparison import compare_many_reports, load_report, write_comparison
-from .project_catalog import ProjectCatalog
-from .language_catalog import language_catalog, recognized_language_count
 from .models import DirectoryRecord, Finding, ScanResult, SpecialEntryRecord, SymlinkRecord
-from .python_graph import analyze_python_dependencies
-from .code_index import QUERY_KINDS, analyze_code_index, query_code_index
-from .architecture_analyzer import analyze_project_architecture
-from .reporting import write_remote_batch_summary, write_reports
-from .remote import (
-    DEFAULT_REMOTE_MAX_BYTES, DEFAULT_REMOTE_TIMEOUT, REMOTE_VCS, RemoteLimits,
-    check_transport_policy, is_remote_target, load_remote_targets, parse_remote_target,
-    remote_checkout, remote_vcs_capabilities, sanitize_client_output,
-)
-from .runtime_metrics import PhaseTimer, peak_rss_bytes
-from .scanner import discover_inventory
-from .native_backend import capabilities as native_capabilities, native_available
-from .plugin_isolation import (
-    DEFAULT_MEMORY_LIMIT_MB, DEFAULT_TIMEOUT_SECONDS, ISOLATION_MODES, PluginPolicy, probe_sandbox,
-)
-from .vulnerability_db import VulnerabilityDatabase, default_database_path
-from .analyzers.vulnerability_analyzer import LocalVulnerabilityAnalyzer
-from .lockfiles import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
-from .source_utils import read_text_bounded
 from .online.cache import default_cache_path as default_vulnerability_cache_path
-from .online.http import DEFAULT_TIMEOUT as DEFAULT_NETWORK_TIMEOUT, resolve_ca_bundle, validate_service_url
-from .online.vulnerabilities import (
-    ENRICHMENT_SOURCES, LockfileSource, OnlineVulnerabilityLookup, OnlineVulnerabilityOptions,
-)
-from .online.http import NetworkError
+from .online.http import DEFAULT_TIMEOUT as DEFAULT_NETWORK_TIMEOUT
+from .online.http import NetworkError, resolve_ca_bundle, validate_service_url
 from .online.memory_scan import (
-    DEFAULT_API_MAX_BYTES, DEFAULT_API_MAX_FILE_BYTES, DEFAULT_API_MAX_FILES,
-    DEFAULT_API_MAX_REQUESTS, DEFAULT_API_WORKERS, ApiLimits, NoDownloadOptions, NoDownloadSource,
+    DEFAULT_API_MAX_BYTES,
+    DEFAULT_API_MAX_FILE_BYTES,
+    DEFAULT_API_MAX_FILES,
+    DEFAULT_API_MAX_REQUESTS,
+    DEFAULT_API_WORKERS,
+    ApiLimits,
+    NoDownloadOptions,
+    NoDownloadSource,
 )
 from .online.providers import API_PROVIDERS
+from .online.repositories import (
+    DEFAULT_REMOTE_MAX_BYTES,
+    DEFAULT_REMOTE_TIMEOUT,
+    REMOTE_VCS,
+    RemoteLimits,
+    check_transport_policy,
+    is_remote_target,
+    load_remote_targets,
+    parse_remote_target,
+    remote_checkout,
+    remote_vcs_capabilities,
+    sanitize_client_output,
+)
+from .online.vulnerabilities import (
+    ENRICHMENT_SOURCES,
+    LockfileSource,
+    OnlineVulnerabilityLookup,
+    OnlineVulnerabilityOptions,
+)
+from .plugins.isolation import (
+    DEFAULT_MEMORY_LIMIT_MB,
+    DEFAULT_TIMEOUT_SECONDS,
+    ISOLATION_MODES,
+    PluginPolicy,
+    probe_sandbox,
+)
+from .projects.catalog import ProjectCatalog
+from .projects.comparison import compare_many_reports, load_report, write_comparison
+from .reporting.writers import write_remote_batch_summary, write_reports
+from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
 
 
 def now() -> str:
