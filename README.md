@@ -149,6 +149,7 @@ pdt scan https://github.com/owner/repository
 pdt scan https://github.com/owner/repository --ref v2.1.0
 pdt scan --url repositories.txt --output /reports/remotes
 pdt scan --url repositories.txt --vcs auto --remote-timeout 900 --remote-workdir /scratch
+pdt scan https://github.com/owner/repository --no-download           # provider API, nothing written to disk
 pdt scan /path/to/project --skip --max-file-mb 128
 pdt scan /path/to/project --exclude-dir node_modules --exclude-dir .cache
 pdt vuln-db import /local/advisories/osv --db ~/.pdt/vulnerability-advisories.sqlite3
@@ -209,6 +210,18 @@ pdt scan --url repositories.txt --output ./remote-reports
 The batch creates a separate report directory for each repository, continues after a repository-specific failure, and writes `batch-summary.json` and `batch-summary.md` (status, revision, exit code and error for every repository, also when interrupted). Supported backends are Git (including GitHub, GitLab, Bitbucket, Azure Repos, CodeCommit, SourceHut and compatible/self-hosted hosts), Mercurial, Subversion, Bazaar/Breezy, Darcs, Jujutsu Git-backed repositories, Pijul, CVS, Perforce and Fossil SCM. The corresponding command-line client must be installed; `pdt capabilities --json` reports which clients are present. Use `--vcs` to force a backend for an ambiguous URL; `auto` uses a VCS prefix when present and otherwise treats the target as Git. The Git path is tested end to end against a real Git server; the other backends are tested with recorded client invocations only.
 
 Remote acquisition is read-only and non-interactive: PDT does not push, commit or modify remote repositories, run hooks or filters, fetch submodules/externals or download Git LFS objects, and clients never prompt (a missing credential fails fast). Passwords, tokens and user names embedded in URLs are rejected; use an SSH agent, a credential helper or your VCS client's configuration. Plain-text transports (`git://`, `http://`, `svn://`, `bzr://`, CVS pserver, Perforce `tcp`) are refused unless you pass `--allow-insecure-transport`, and reports then flag them. Repository paths are validated before anything is written (including Windows device names such as `aux.c`), clients are stopped together with their child processes on timeout or Ctrl-C, materialization is capped by `--remote-max-gb` (default 64) and a free-disk floor, and the temporary checkout is removed on every exit path. Content PDT could not materialize is reported as `UNKNOWN` coverage findings and makes `--strict` scans incomplete. Each report records the credential-free URL, revision, ref, transport and coverage under `metrics.source`.
+
+#### Analyze without downloading (`--no-download`)
+
+Online mode has a second path that never clones or writes the repository to disk. `--no-download` reads one commit through the provider's REST API (GitHub and GitHub Enterprise Server, GitLab.com and self-managed GitLab, Bitbucket Cloud, Gitea/Forgejo/Codeberg), turns the tree listing into PDT's inventory and streams each file's content into the built-in analyzers in memory:
+
+```bash
+pdt scan https://github.com/owner/repository --no-download
+pdt scan https://gitlab.example.com/group/project --no-download --api-url https://gitlab.example.com/api/v4
+pdt scan --url repositories.txt --no-download --vuln-online --output ./api-reports
+```
+
+Tokens come only from host-bound variables (`PDT_API_TOKEN_<HOST>`, or `GITHUB_TOKEN`/`GITLAB_TOKEN`/`BITBUCKET_TOKEN`/`CODEBERG_TOKEN` for the public hosts) or, with `--use-credential-helper`, from your Git credential helper; they are never logged or written to reports. Work is bounded per repository by `--api-max-files`, `--api-max-mb`, `--api-max-file-mb`, `--api-max-requests` and `--api-workers`; a file left unfetched by a budget, a failed request or an exhausted rate limit stays in the inventory and is reported as an `UNKNOWN` coverage gap (so `--strict` reports the scan as incomplete). Third-party plugins are not run in this mode because their sandbox needs a file copy on disk. Details: [Online Mode guide](docs/ONLINE_MODE.md#analyze-without-downloading---no-download).
 
 The output directory must remain outside the analyzed project. PDT never changes target files.
 
