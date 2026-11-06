@@ -131,7 +131,7 @@ Gates 1, 2 and 4 cannot be closed by code changes alone and are not claimed as d
 
 1. **Large-corpus benchmarks.** The 2 GB / 10 GB / 50 GB / 100 GB+ wall-time, throughput and peak-RSS figures in the roadmap require representative corpora and dedicated hardware. The tooling is ready (`tools/benchmark.py`, `--resume`, `--inventory-only` and per-phase telemetry; see [BENCHMARKS.md](BENCHMARKS.md)), and the runs are waiting for operator-provided corpora. Small-scale measurements do not certify those targets.
 2. **CI on the final head.** Linux and macOS native builds, plus the x86-64 Assembly path that only builds on Linux, must pass in GitHub Actions on the pushed branch. `4a19af3` passed all 14 jobs on both its push and pull-request runs; every later push must pass the same matrix before merge.
-3. **Plugin isolation: closed on Linux and macOS, partial on Windows.** Third-party analyzers now run in sandboxed host processes by default ([PLUGIN_SDK.md](PLUGIN_SDK.md)). On Linux and macOS, a plugin cannot write files, read outside the runtime and its staged input, use the network or start processes. On Linux this was verified by the red-team run in §7, which also showed that a plugin cannot trace, signal or throttle PDT's process. On macOS it was verified by the sandbox tests on GitHub's macOS runners (Python 3.11–3.14); the profile also denies signals to other processes, but no test covers that yet. Windows denies writes, process creation and access to PDT's memory. It cannot deny reads or network access without ACL changes, and plugins there can terminate same-user processes. Untrusted plugins should therefore run on Linux or macOS. The sandbox does not cover a package's install-time or `.pth` startup code.
+3. **Plugin isolation: closed on Linux, macOS and Windows.** Third-party analyzers run in sandboxed host processes by default ([PLUGIN_SDK.md](PLUGIN_SDK.md)). On every platform a plugin cannot write files, read outside the runtime and its staged input, use the network or start processes. On Linux this was verified by the red-team run in §7, which also showed that a plugin cannot trace, signal or throttle PDT's process. On macOS it was verified by the sandbox tests on GitHub's macOS runners (Python 3.11–3.14). The escape test also checks, on every platform, that a sandboxed plugin cannot signal or open PDT's process, while the same plugin can in `process` mode. On Windows, hosts have run in an AppContainer without capabilities since 2026-11-06, which also stops them from opening PDT's or any other process (§9). The sandbox does not cover a package's install-time or `.pth` startup code.
 4. **Independent security review** of the parsers and native code.
 
 ## 6. Re-audit
@@ -166,7 +166,7 @@ The baseline checks were re-run, and new kinds of check were added. The re-audit
 
 ### Verdict
 
-**0.2.0 is a release candidate, not a production release.** Every defect recorded by the audit and this re-audit is fixed and covered by a regression test, and the same 589-test suite passes on Windows and Linux. Plugin isolation (gate 3) is closed on Linux and macOS and partial on Windows, as described in §5. These gates remain open: large-corpus benchmarks, which are waiting for operator data; CI on each final head; and an independent security review, which should now include the plugin sandbox.
+**0.2.0 is a release candidate, not a production release.** Every defect recorded by the audit and this re-audit is fixed and covered by a regression test, and the same 589-test suite passes on Windows and Linux. Plugin isolation (gate 3) was closed on Linux and macOS and partial on Windows at 0.2.0; §9 closes it on Windows. These gates remain open: large-corpus benchmarks, which are waiting for operator data; CI on each final head; and an independent security review, which should now include the plugin sandbox.
 
 ## 8. Code intelligence and the formerly planned domains
 
@@ -198,3 +198,30 @@ Defects found while building this work were fixed before it was committed to the
 - Very large repositories reach the index ceilings (5–20 million rows per table). This is reported as an `UNKNOWN` finding, and the index-based results are then incomplete.
 
 The release gates in §5 are unchanged. The large-corpus benchmarks now also measure the code index, using the per-phase timings (`code_index`) in each report.
+
+## 9. Windows plugin sandbox
+
+**Date:** 2026-11-06 · **Scope:** gate 3 in §5 on Windows. At 0.2.0 a sandboxed plugin on Windows could still read any file the user could read, use the network and terminate same-user processes, because the job object and untrusted integrity level do not restrict those.
+
+### What changed
+
+- In `sandbox` mode, PDT starts each plugin host suspended inside an AppContainer that holds no capabilities, assigns it to the job object and only then resumes it. Only the three protocol pipes are inherited.
+- An AppContainer reads only what is granted to it. PDT grants read access on three folders it creates and on nothing else: a copy of the standard-library runtime (made once per Python build, about 40 MB), a per-scan copy of PDT's package and the plugin with the distributions it requires, and each host's staging folder. The user's installation, site-packages and projects keep their permissions.
+- Inside the container the host still lowers itself to untrusted integrity, which also denies writes to the container's own folder, and applies the mitigation policies. PDT deletes any file in that folder before its first host starts, so no host can leave data for a later one.
+- Sandbox mode on Windows now requires all four restrictions, as on Linux and macOS. The network check combines the token (an AppContainer with no capabilities), a loopback connection to a listener outside the container that must fail, and a connection to an unrouted documentation address that must fail.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Restriction probes | Windows 10, Py 3.12: writes, reads, network and process creation verified for every host; mechanisms `appcontainer`, `job-object`, `untrusted-integrity` and three mitigation policies. |
+| Hostile plugin (`test_windows_appcontainer_denies_a_hostile_plugin`) | Denied: reading the original project file, PDT's inventory database, the user's site-packages and home folder; writing outside, into the staged PDT package, the runtime copy, the container's folder, `C:\Users\Public` and LocalLow; TCP to loopback and to an unrouted address; name resolution; starting a process; opening PDT with terminate or memory-write rights; and a 1 GiB allocation under a 512 MB limit. A UDP datagram to a loopback socket outside the container was never delivered. |
+| Fixture plugins | All 26 plugin-isolation tests pass under the AppContainer, including import-time escapes, crashes, hangs, floods, interrupts and the process executor. |
+| Test suites | Windows 10, Py 3.12 and Ubuntu 26.04, Py 3.14: the full suites pass (seven new tests cover staging, the launcher and the container's folder). |
+| Cost | Starting a host takes about 1.3 s, mostly the 1 s loopback check. Hosts are reused, so this is paid once per plugin and worker. |
+
+### Limits
+
+- Files that Windows grants to every app container, such as those under `C:\Windows` and `C:\Program Files`, stay readable. They hold no project data.
+- On Windows a plugin can import only the standard library, its own package and the distributions it declares as dependencies. Python builds that keep native libraries outside `DLLs` (for example conda) can fail to import the affected standard-library modules in the sandbox.
+- The AppContainer profile `ProjectDiscoveryTool.PluginHost` persists per user, as browsers' profiles do; [PLUGIN_SDK.md](PLUGIN_SDK.md) explains how to remove it.

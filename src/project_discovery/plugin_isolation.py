@@ -313,18 +313,28 @@ class PluginHost:
             options = {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
         else:
             options = {"start_new_session": True}  # no terminal signals, own process group
+        appcontainer = _WINDOWS and policy.isolation == "sandbox"
+        parent_mechanisms: list[str] = []
         try:
-            self.process = subprocess.Popen(
-                [_interpreter(), "-I", "-B", "-c", _BOOTSTRAP],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                cwd=self.scratch, env=_host_environment(self.scratch), close_fds=True, **options,
-            )
-        except OSError as exc:
+            if appcontainer:
+                self.process = self._start_in_appcontainer(config, work_dir, entry_point)
+                parent_mechanisms.append("job-object")
+            else:
+                self.process = subprocess.Popen(
+                    [_interpreter(), "-I", "-B", "-c", _BOOTSTRAP],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=self.scratch, env=_host_environment(self.scratch), close_fds=True, **options,
+                )
+        except (OSError, PluginHostError) as exc:
+            if self._job is not None:
+                self._job.close()
+                self._job = None
             shutil.rmtree(self.scratch, ignore_errors=True)
+            if isinstance(exc, PluginHostError):
+                raise
             raise PluginHostError(f"could not start a plugin host: {exc}") from exc
         try:
-            parent_mechanisms = []
-            if _WINDOWS:
+            if _WINDOWS and not appcontainer:
                 try:
                     # The host waits for its configuration, so no plugin code has run yet.
                     self._job = WindowsJob(config["memory_limit_bytes"], confine=policy.isolation == "sandbox")
@@ -351,6 +361,33 @@ class PluginHost:
         except BaseException:
             self.close(graceful=False)
             raise
+
+    def _start_in_appcontainer(self, config: dict, work_dir: Path, entry_point: dict | None):
+        """Windows sandbox mode: start the host suspended in the capability-free AppContainer.
+
+        The host imports only staged copies: the standard-library runtime, PDT's package and
+        the plugin with its dependencies, all in folders PDT granted to the container.
+        """
+        from . import plugin_appcontainer as appcontainer
+
+        try:
+            shared = appcontainer.prepared()
+            site = appcontainer.stage_site(shared.container, work_dir, entry_point)
+            shared.container.grant_read(self.scratch)  # inherited by every staged input
+        except OSError as exc:
+            raise PluginHostError(f"could not prepare the Windows AppContainer: {exc}") from exc
+        config.update(
+            sys_path=[str(site)], site_dirs=[str(site)], appcontainer=True, probe_port=shared.probe_port,
+        )
+        try:
+            self._job = WindowsJob(config["memory_limit_bytes"], confine=True)
+        except OSError as exc:
+            raise PluginHostError(f"could not confine the plugin host in a job object: {exc}") from exc
+        python = str(shared.runtime / "python.exe")
+        return appcontainer.AppContainerProcess(
+            [python, "-I", "-B", "-c", _BOOTSTRAP], executable=python, cwd=str(self.scratch),
+            env=appcontainer.host_environment(self.scratch), container=shared.container, job=self._job,
+        )
 
     # The protocol stream is read by a thread so that PDT can apply timeouts portably.
     def _read_frames(self) -> None:
@@ -498,6 +535,9 @@ class PluginHost:
                     stream.close()
                 except (OSError, ValueError):
                     pass
+            release = getattr(self.process, "close_handle", None)
+            if release is not None:
+                release()
             if self._job is not None:
                 self._job.close()
             shutil.rmtree(self.scratch, ignore_errors=True)
@@ -635,6 +675,7 @@ class IsolatedAnalyzer(Analyzer):
             return ready
         host = PluginHost(self.policy, {
             "name": self.spec.entry_point, "value": self.spec.value, "group": _ENTRY_POINT_GROUP,
+            "distribution": self.spec.distribution,
         })
         if not isinstance(host.metadata, dict) or host.metadata.get("name") != self.name:
             host.close(graceful=False)
@@ -813,7 +854,9 @@ def load_isolated_plugins(points, policy: PluginPolicy, *, reserved_names: set[s
         try:
             if not isinstance(value, str) or not value.strip():
                 raise PluginHostError("the entry point does not name an importable object")
-            host = PluginHost(policy, {"name": name, "value": value, "group": _ENTRY_POINT_GROUP})
+            host = PluginHost(policy, {
+                "name": name, "value": value, "group": _ENTRY_POINT_GROUP, "distribution": distribution,
+            })
             metadata = validate_metadata(host.metadata, names)
         except (PluginHostError, ValueError, OSError) as exc:
             if host is not None:

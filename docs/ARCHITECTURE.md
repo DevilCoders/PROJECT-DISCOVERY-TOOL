@@ -66,7 +66,7 @@ Implement `project_discovery.analyzers.base.Analyzer`, then expose a no-argument
 
 Plugin execution (`plugin_isolation`, `plugin_host`, `plugin_sandbox`, `plugin_protocol`):
 
-1. For each entry point, PDT starts a host (`python -I -B`) with an allowlisted environment and a private staging folder. On Windows, PDT first places the host in a kill-on-close job object.
+1. For each entry point, PDT starts a host (`python -I -B`) with an allowlisted environment and a private staging folder. On Windows in `sandbox` mode (`plugin_appcontainer`), PDT starts the host suspended inside an AppContainer without capabilities, from a copy of the standard-library runtime and staged copies of PDT and the plugin's distributions, grants the container read access to those folders only, and places the host in a kill-on-close job object before it runs. In the other modes, PDT places the host in a job object before sending its configuration.
 2. The host applies the operating-system sandbox, attempts each forbidden action to verify it, and only then imports the plugin. It reports the verified restrictions and the plugin's metadata, which PDT validates.
 3. The analysis engine asks isolated plugins about `supports()` once per batch. For each supported file, PDT stages a verified copy, sends a JSON request and rebuilds the findings from the JSON reply, attributing, bounding and redacting them.
 4. A watchdog kills hosts that exceed the request timeout. A crashed, hung or misbehaving host costs one `UNKNOWN` coverage finding and is replaced; three consecutive failures disable the plugin. Worker processes rebuild proxies from the coordinator's validated plugin specs and start their own hosts.

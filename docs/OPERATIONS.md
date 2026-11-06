@@ -109,8 +109,12 @@ information without running a scan.
   Without it, plugins are refused with a diagnostic. `--plugin-isolation process` runs them out of
   process without OS restrictions, and `off` runs them inside PDT. Use either only for plugins you
   trust.
-- On Windows, the sandbox cannot restrict file reads or network access. Prefer Linux or macOS for
-  plugins you do not fully trust.
+- On Windows, plugin hosts run in an AppContainer without capabilities, so reads, network access
+  and access to other processes are denied as on Linux and macOS. The first sandboxed scan copies
+  the standard-library runtime (about 40 MB) to `%LOCALAPPDATA%\ProjectDiscoveryTool\plugin-runtime`,
+  and each scan stages PDT and every plugin with its declared dependencies under
+  `OUTPUT/.pdt-cache/plugins/`. Starting a host takes about 1.3 s, mostly the network check; hosts
+  are reused for the rest of the scan.
 
 Isolation adds about 0.3–1.1 ms per file that a plugin handles (2,000 files, 4 workers, on Linux
 and Windows).

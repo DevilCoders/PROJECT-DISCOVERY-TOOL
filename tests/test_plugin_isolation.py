@@ -34,7 +34,7 @@ from project_discovery.plugin_protocol import (
 )
 
 WINDOWS = sys.platform == "win32"
-# What sandbox mode must verify here (Windows cannot restrict reads or network access).
+# What sandbox mode must verify here: all four restrictions on Linux, macOS and Windows.
 REQUIRED = set(plugin_sandbox.required_restrictions())
 
 PLUGIN_SOURCE = '''
@@ -46,6 +46,7 @@ from project_discovery.plugin_sandbox import is_denial
 
 OUTSIDE = Path(__OUTSIDE__)
 PORT = __PORT__
+PDT_PID = __PDT_PID__
 
 # Import-time code must already run inside the sandbox.
 try:
@@ -62,13 +63,34 @@ def attempt(action):
     return "allowed"
 
 
-def connect():
-    with socket.create_connection(("127.0.0.1", PORT), timeout=5):
-        pass
+def network_attempt():
+    try:
+        with socket.create_connection(("127.0.0.1", PORT), timeout=2):
+            pass
+    except TimeoutError:
+        # The listener is accepting, so a timeout means the sandbox dropped the traffic:
+        # Windows silently drops an AppContainer's loopback connections.
+        return "denied"
+    except Exception as exc:
+        return "denied" if is_denial(exc) else "failed: " + type(exc).__name__
+    return "allowed"
 
 
 def spawn():
     subprocess.run([sys.executable, "-I", "-S", "-c", "pass"], check=True, timeout=60)
+
+
+def signal_pdt():
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(0x0001, False, PDT_PID)  # PROCESS_TERMINATE; never used
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+    else:
+        os.kill(PDT_PID, 0)  # signal 0 checks permission and delivers nothing
 
 
 class Base(Analyzer):
@@ -104,8 +126,9 @@ class Escape(Base):
         report = {
             "read_outside": attempt(lambda: (OUTSIDE / "canary.txt").read_bytes()),
             "write_outside": attempt(lambda: (OUTSIDE / "written.txt").write_text("x")),
-            "network": attempt(connect),
+            "network": network_attempt(),
             "spawn": attempt(spawn),
+            "signal_pdt": attempt(signal_pdt),
             "environment": sorted(os.environ),
             "staged_path": str(path),
             "pid": os.getpid(),
@@ -210,6 +233,7 @@ def plugins(tmp_path, monkeypatch):
         PLUGIN_SOURCE.replace("__OUTSIDE__", repr(str(outside)))
         .replace("__PORT__", str(listener.getsockname()[1]))
         .replace("__FLOOD__", str(MAX_FINDINGS_PER_FILE + 10))
+        .replace("__PDT_PID__", str(os.getpid()))
     )
     (directory / "pdt_fixture_plugins.py").write_text(source, encoding="utf-8")
     (directory / "pdt_fixture_broken.py").write_text('raise RuntimeError("import failed on purpose")\n', encoding="utf-8")
@@ -261,7 +285,9 @@ def test_sandbox_probe_verifies_this_platforms_restrictions():
     sandbox = probe["sandbox"]
     assert _denied(sandbox["restrictions"]) >= REQUIRED
     if WINDOWS:
-        assert {"job-object", "untrusted-integrity", "no-child-processes"} <= set(sandbox["mechanisms"])
+        assert {"job-object", "appcontainer", "untrusted-integrity", "no-child-processes"} <= set(
+            sandbox["mechanisms"]
+        )
     elif sys.platform.startswith("linux"):
         assert any(item.startswith("landlock-abi-") for item in sandbox["mechanisms"])
         assert "seccomp-bpf" in sandbox["mechanisms"]
@@ -307,6 +333,8 @@ def test_sandbox_denies_escape_attempts_including_import_time_code(tmp_path, plu
     assert _denied(observed) >= REQUIRED
     assert not (plugins.outside / "written.txt").exists()
     assert not (plugins.outside / "written-at-import.txt").exists()
+    # Seccomp (Linux), the Seatbelt signal rule (macOS) and the AppContainer (Windows).
+    assert attempts["signal_pdt"] == "denied"
     assert "PDT_FIXTURE_SECRET_TOKEN" not in attempts["environment"]
     assert not Path(attempts["staged_path"]).is_relative_to(project)
     assert attempts["pid"] != os.getpid()
@@ -397,6 +425,7 @@ def test_process_mode_runs_out_of_process_without_os_restrictions(tmp_path, plug
     assert status["isolation"] == "process"
     assert not _denied(status["sandbox"]["restrictions"])
     assert attempts["write_outside"] == "allowed"
+    assert attempts["signal_pdt"] == "allowed"  # the control for the sandboxed run
     assert "PDT_FIXTURE_SECRET_TOKEN" not in attempts["environment"]
     assert attempts["pid"] != os.getpid()
 
@@ -686,3 +715,128 @@ def test_status_lines_print_markup_literally():
     console = Console(file=buffer, force_terminal=False, width=200)
     _status(console, "INFO", "Read-only discovery: /work/repo[/x] [bold]y", "cyan")
     assert "/work/repo[/x] [bold]y" in buffer.getvalue()
+
+
+RED_TEAM_SOURCE = '''
+import ctypes, json, os, socket, subprocess, sys
+from pathlib import Path
+import project_discovery
+from project_discovery.analyzers.base import Analyzer
+from project_discovery.models import Finding
+from project_discovery.plugin_sandbox import is_denial
+
+TARGETS = __TARGETS__
+
+
+def attempt(action):
+    try:
+        action()
+    except TimeoutError:
+        return "denied"  # the listener is accepting: the traffic was dropped
+    except MemoryError:
+        return "denied"
+    except Exception as exc:
+        return "denied" if is_denial(exc) or isinstance(exc, socket.gaierror) else "failed: " + type(exc).__name__
+    return "allowed"
+
+
+def write(path):
+    import _winapi
+    handle = _winapi.CreateFile(str(path), 0x40000000, 0, 0, 1, 0x80, 0)
+    _winapi.CloseHandle(handle)
+
+
+def open_pdt(access):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel32.OpenProcess(access, False, TARGETS["pdt_pid"])
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def connect(address, timeout):
+    with socket.create_connection(address, timeout=timeout):
+        pass
+
+
+class RedTeam(Analyzer):
+    name = "fixture-red-team"
+
+    def supports(self, record):
+        return record.path == "a.txt"
+
+    def analyze(self, path, record):
+        storage = Path(os.environ.get("LOCALAPPDATA", "."))
+        report = {
+            "read_project_file": attempt(lambda: Path(TARGETS["project_file"]).read_bytes()),
+            "read_inventory": attempt(lambda: Path(TARGETS["inventory"]).read_bytes()),
+            "read_user_packages": attempt(lambda: Path(TARGETS["user_package"]).read_bytes()),
+            "list_home": attempt(lambda: os.listdir(TARGETS["home"])),
+            "write_outside": attempt(lambda: write(Path(TARGETS["outside"]) / "red.txt")),
+            "write_staged_pdt": attempt(lambda: write(Path(project_discovery.__file__).parent / "red.py")),
+            "write_runtime": attempt(lambda: write(Path(sys.prefix) / "red.txt")),
+            "write_container_folder": attempt(lambda: write(storage / "red.txt")),
+            "write_public": attempt(lambda: write(Path(TARGETS["public"]) / "pdt-red-team.txt")),
+            "write_locallow": attempt(lambda: write(Path(TARGETS["locallow"]) / "pdt-red-team.txt")),
+            "tcp_loopback": attempt(lambda: connect(("127.0.0.1", TARGETS["tcp_port"]), 2)),
+            "udp_loopback": attempt(lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(
+                b"red-team", ("127.0.0.1", TARGETS["udp_port"]))),
+            "tcp_unrouted": attempt(lambda: connect(("192.0.2.1", 9), 3)),
+            "dns": attempt(lambda: socket.getaddrinfo("example.com", 80)),
+            "spawn": attempt(lambda: subprocess.run([sys.executable, "-c", "pass"], timeout=20)),
+            "terminate_pdt": attempt(lambda: open_pdt(0x0001)),
+            "write_pdt_memory": attempt(lambda: open_pdt(0x0020 | 0x0008)),
+            "allocate_past_limit": attempt(lambda: bytearray(1024 * 1024 * 1024)),
+        }
+        return [Finding("plugin_fixture", "Red team", json.dumps(report))]
+'''
+
+
+@pytest.mark.skipif(not WINDOWS, reason="the Windows AppContainer sandbox")
+def test_windows_appcontainer_denies_a_hostile_plugin(tmp_path, plugins, monkeypatch):
+    import rich
+
+    project = _project(tmp_path / "project")
+    output = tmp_path / "out"
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+    udp.settimeout(0.5)
+    tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp.bind(("127.0.0.1", 0))
+    tcp.listen(16)
+    local = Path(os.environ["LOCALAPPDATA"])
+    targets = {
+        "project_file": str(project / "a.txt"),
+        "inventory": str(output / ".pdt-cache" / "inventory.sqlite3"),
+        "user_package": rich.__file__,
+        "home": os.path.expanduser("~"),
+        "outside": str(plugins.outside),
+        "public": os.environ.get("PUBLIC", r"C:\Users\Public"),
+        "locallow": str(local.parent / "LocalLow"),
+        "tcp_port": tcp.getsockname()[1],
+        "udp_port": udp.getsockname()[1],
+        "pdt_pid": os.getpid(),
+    }
+    directory = Path(sys.path[0])  # the plugins fixture's directory
+    (directory / "pdt_fixture_redteam.py").write_text(
+        RED_TEAM_SOURCE.replace("__TARGETS__", repr(targets)), encoding="utf-8",
+    )
+    point = EntryPoint(name="red-team", value="pdt_fixture_redteam:RedTeam", group="pdt.analyzers")
+    monkeypatch.setattr(registry, "entry_points", lambda **_kwargs: [point])
+    try:
+        report = _scan(project, output, plugin_memory_mb=512)
+        [finding] = _from(report, "fixture-red-team")
+        results = json.loads(finding["detail"])
+        # sendto() returns normally: Windows drops the datagram instead of failing the call.
+        assert results.pop("udp_loopback") in {"allowed", "denied"}
+        assert {name: value for name, value in results.items() if value != "denied"} == {}
+        with pytest.raises(OSError):
+            udp.recvfrom(64)  # the datagram never left the container
+        assert not (plugins.outside / "red.txt").exists()
+        assert not (Path(targets["public"]) / "pdt-red-team.txt").exists()
+        assert not (Path(targets["locallow"]) / "pdt-red-team.txt").exists()
+    finally:
+        udp.close()
+        tcp.close()
+        sys.modules.pop("pdt_fixture_redteam", None)

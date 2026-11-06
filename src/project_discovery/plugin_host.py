@@ -46,7 +46,13 @@ class _Channel:
     def __init__(self) -> None:
         self._input = os.dup(0)
         self._output = os.dup(1)
-        null = os.open(os.devnull, os.O_RDWR)
+        try:
+            null = os.open(os.devnull, os.O_RDWR)
+        except OSError:
+            # A Windows AppContainer may not open the null device; a pipe whose writer
+            # is closed reads as end-of-file just the same.
+            null, writer = os.pipe()
+            os.close(writer)
         os.dup2(null, 0)
         os.dup2(2, 1)
         os.close(null)

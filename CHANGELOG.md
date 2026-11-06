@@ -48,6 +48,15 @@ methods and limits are in [docs/CODE_INTELLIGENCE.md](docs/CODE_INTELLIGENCE.md)
   are flagged in report metadata, and `pdt capabilities` lists the
   installed VCS clients. Online-mode work continues in this cycle.
 
+### Changed: Windows plugin sandbox
+- On Windows, `--plugin-isolation sandbox` starts each plugin host suspended inside an AppContainer
+  without capabilities, then assigns it to the job object. Hosts can no longer read the user's files,
+  use the network (loopback included) or open other processes, so sandbox mode now verifies all four
+  restrictions on Windows too. Hosts run from a copy of the standard-library runtime (cached once per
+  Python build under `%LOCALAPPDATA%\ProjectDiscoveryTool\plugin-runtime`) and from staged copies of
+  PDT and the plugin's declared dependencies; only those PDT-created folders are granted to the
+  container. See docs/PLUGIN_SDK.md and §9 of docs/AUDIT.md.
+
 ### Changed
 - The thirteen catalog domains that were `planned` are now `partial`, each claimed by a
   shipped analyzer; a test keeps `planned` domains and shipped analyzers disjoint. Lexically

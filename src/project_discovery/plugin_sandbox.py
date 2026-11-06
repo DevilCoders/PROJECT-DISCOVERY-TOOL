@@ -16,12 +16,14 @@ macOS
     lookups, signals to other processes, file writes, and file reads outside the same
     allowlist. Plus RLIMIT_CORE/FSIZE.
 Windows
-    A job object created by PDT (no child processes, a memory limit, UI limits, and the
-    host dies with PDT), untrusted integrity level (no writes anywhere, including
-    low-integrity locations such as the LocalLow folder, and no access to PDT's
-    process) and process mitigation policies. Windows has no unprivileged way to deny file reads
-    or network access to an interpreter installed in the user profile, so those two stay
-    open there and reports say so.
+    PDT starts the host in an AppContainer without capabilities (see
+    :mod:`project_discovery.plugin_appcontainer`): no network access, loopback included,
+    no access to other processes, and reads only of folders PDT granted to the container
+    (a copy of the standard-library runtime, the staged PDT and plugin packages, and the
+    host's staging directory). PDT's job object forbids child processes, limits memory
+    and UI access and ties the host's lifetime to PDT. The host lowers itself to
+    untrusted integrity (no writes anywhere, including the container's own folder) and
+    applies process mitigation policies.
 """
 from __future__ import annotations
 
@@ -48,10 +50,12 @@ _WINDOWS = os.name == "nt"
 
 
 def required_restrictions(platform_name: str = sys.platform) -> tuple[str, ...]:
-    """Restrictions that sandbox mode must verify before a plugin may load."""
-    if platform_name == "win32":
-        return (FILESYSTEM_WRITES, PROCESS_CREATION)
-    # Linux and macOS enforce all four; other platforms have no backend and fail closed.
+    """Restrictions that sandbox mode must verify before a plugin may load.
+
+    Linux, macOS and Windows enforce all four; other platforms have no backend and fail
+    closed.
+    """
+    del platform_name
     return RESTRICTIONS
 
 
@@ -443,6 +447,8 @@ def _macos_lock_down(config: dict, directories, files, mechanisms, errors) -> No
 _TOKEN_QUERY = 0x0008
 _TOKEN_ADJUST_DEFAULT = 0x0080
 _TOKEN_INTEGRITY_LEVEL = 25
+_TOKEN_IS_APP_CONTAINER = 29
+_TOKEN_CAPABILITIES = 30
 _SE_GROUP_INTEGRITY = 0x20
 _UNTRUSTED_INTEGRITY_SID = "S-1-16-0"
 _JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
@@ -483,6 +489,9 @@ def _windows_api():
     advapi32.GetLengthSid.argtypes = [ctypes.c_void_p]
     advapi32.GetLengthSid.restype = wintypes.DWORD
     advapi32.SetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
     return wintypes, kernel32, advapi32
 
 
@@ -559,6 +568,10 @@ class WindowsJob:
         finally:
             self._kernel32.CloseHandle(process)
 
+    def assign_handle(self, process) -> None:
+        """Assign a process PDT created (for example suspended) by its handle."""
+        _win_check(self._kernel32.AssignProcessToJobObject(self.handle, process))
+
     def terminate(self) -> None:
         if self.handle:
             self._kernel32.TerminateJobObject(self.handle, 1)
@@ -589,8 +602,42 @@ def _set_untrusted_integrity(wintypes, kernel32, advapi32) -> None:
         kernel32.CloseHandle(token)
 
 
+def appcontainer_token() -> tuple[bool, int | None]:
+    """Whether this process runs in an AppContainer, and how many capabilities it holds."""
+    wintypes, kernel32, advapi32 = _windows_api()
+    token = wintypes.HANDLE()
+    _win_check(advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token)))
+    try:
+        flag, size = wintypes.DWORD(), wintypes.DWORD()
+        _win_check(advapi32.GetTokenInformation(
+            token, _TOKEN_IS_APP_CONTAINER, ctypes.byref(flag), ctypes.sizeof(flag), ctypes.byref(size),
+        ))
+        if not flag.value:
+            return False, None
+        buffer = ctypes.create_string_buffer(64 * 1024)
+        _win_check(advapi32.GetTokenInformation(
+            token, _TOKEN_CAPABILITIES, buffer, len(buffer), ctypes.byref(size),
+        ))
+        # TOKEN_GROUPS starts with its DWORD group count.
+        return True, ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD))[0]
+    finally:
+        kernel32.CloseHandle(token)
+
+
 def _windows_lock_down(config: dict, mechanisms, errors) -> None:
     wintypes, kernel32, advapi32 = _windows_api()
+    if config.get("appcontainer"):
+        try:
+            inside, capabilities = appcontainer_token()
+            if inside and capabilities == 0:
+                mechanisms.append("appcontainer")
+            else:
+                errors.append(
+                    "the host is not in a capability-free AppContainer"
+                    if not inside else f"the host's AppContainer holds {capabilities} capabilities"
+                )
+        except OSError as exc:
+            errors.append(f"AppContainer token unreadable: {exc}")
     try:
         _set_untrusted_integrity(wintypes, kernel32, advapi32)
         mechanisms.append("untrusted-integrity")
@@ -622,9 +669,9 @@ def lock_down(config: dict, directories: list[str], files: list[str]) -> dict:
 
 
 # Windows reports denials as ERROR_ACCESS_DENIED, ERROR_CHILD_PROCESS_BLOCKED (the
-# mitigation policy), a job's ERROR_NOT_ENOUGH_QUOTA or WSAEACCES; POSIX as EPERM/EACCES
-# (or EROFS for writes).
-_DENIAL_WINERRORS = {5, 367, 1816, 10013}
+# mitigation policy), ERROR_PRIVILEGE_NOT_HELD (the integrity level refusing a write), a
+# job's ERROR_NOT_ENOUGH_QUOTA or WSAEACCES; POSIX as EPERM/EACCES (or EROFS for writes).
+_DENIAL_WINERRORS = {5, 367, 1314, 1816, 10013}
 _DENIAL_ERRNOS = {errno.EPERM, errno.EACCES, errno.EROFS, 10013}
 
 
@@ -656,6 +703,17 @@ def prepare_probes() -> socket.socket | None:
 
 
 def _write_probe(path: str) -> None:
+    if _WINDOWS:
+        import _winapi
+
+        # The C runtime reports some denials as EINVAL (an integrity-level refusal is
+        # ERROR_PRIVILEGE_NOT_HELD); the Win32 call keeps the real error code.
+        handle = _winapi.CreateFile(path, 0x40000000, 0, 0, 1, 0x80, 0)  # GENERIC_WRITE, CREATE_NEW
+        try:
+            _winapi.WriteFile(handle, b"x")
+        finally:
+            _winapi.CloseHandle(handle)
+        return
     with open(path, "xb") as stream:
         stream.write(b"x")
 
@@ -689,6 +747,36 @@ def _network_denied(listener: socket.socket | None) -> bool:
     return False
 
 
+# RFC 5737 documentation address: never routed, so the probe contacts no real host.
+_UNROUTED_ADDRESS = ("192.0.2.1", 9)
+
+
+def _connection_fails(address: tuple[str, int], timeout: float) -> bool:
+    try:
+        with socket.create_connection(address, timeout=timeout):
+            return False
+    except OSError:
+        return True
+
+
+def _appcontainer_network_denied(config: dict) -> bool:
+    """A capability-free AppContainer has no network access; check it holds here too.
+
+    Windows drops an AppContainer's loopback traffic silently, so a connection to the
+    listener PDT holds outside the container times out instead of being refused.
+    """
+    try:
+        inside, capabilities = appcontainer_token()
+    except OSError:
+        return False
+    if not inside or capabilities != 0 or not config.get("probe_port"):
+        return False
+    return (
+        _connection_fails(("127.0.0.1", int(config["probe_port"])), timeout=1.0)
+        and _connection_fails(_UNROUTED_ADDRESS, timeout=3.0)
+    )
+
+
 def run_probes(config: dict, listener: socket.socket | None) -> dict[str, bool]:
     """After lock-down: attempt each forbidden action; True means it was denied."""
     try:
@@ -696,10 +784,17 @@ def run_probes(config: dict, listener: socket.socket | None) -> dict[str, bool]:
         writes = _denied(lambda: _write_probe(os.path.join(config["probe_write_dir"], token)))
         # The host must not be able to write even to its own staging directory.
         writes = writes and _denied(lambda: _write_probe(os.path.join(config["scratch"], token)))
+        if config.get("appcontainer"):
+            # Nor to the AppContainer's own folder, where Windows points LOCALAPPDATA.
+            storage = os.environ.get("LOCALAPPDATA")
+            writes = writes and bool(storage) and _denied(lambda: _write_probe(os.path.join(storage, token)))
+            network = _appcontainer_network_denied(config)
+        else:
+            network = _network_denied(listener)
         results = {
             FILESYSTEM_WRITES: writes,
             FILESYSTEM_READS: _denied(lambda: _read_probe(config["probe_canary"])),
-            NETWORK: _network_denied(listener),
+            NETWORK: network,
             PROCESS_CREATION: _denied(_spawn_probe),
         }
     finally:
