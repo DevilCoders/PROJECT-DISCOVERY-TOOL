@@ -397,6 +397,29 @@ def test_fail_on_and_strict_exit_codes(tmp_path: Path, monkeypatch):
         run_scan(project, tmp_path / "e", {"json"}, 1, quiet=True, fail_on="SEVERE")
 
 
+def test_cli_exit_codes_for_interrupt_and_usage_errors(tmp_path: Path, monkeypatch):
+    import sys
+
+    from project_discovery import cli
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt  # Ctrl-C during a scan
+
+    monkeypatch.setattr(cli, "run_scan", interrupted)
+    monkeypatch.setattr(sys, "argv", ["pdt", "scan", str(tmp_path), "--output", str(tmp_path / "out")])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == cli.EXIT_INTERRUPTED == 130
+
+    def failing(*_args, **_kwargs):
+        raise ValueError("bad option")
+
+    monkeypatch.setattr(cli, "run_scan", failing)
+    with pytest.raises(SystemExit) as failed:
+        cli.main()
+    assert failed.value.code == cli.EXIT_USAGE == 2
+
+
 def test_missing_vulnerability_database_is_rejected_before_inventory(tmp_path: Path, monkeypatch):
     import project_discovery.cli as cli
 

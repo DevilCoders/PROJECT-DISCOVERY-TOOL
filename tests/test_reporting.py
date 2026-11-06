@@ -137,6 +137,7 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "Recommended remediation" in content
     assert "🔴 Line 12" in content
     assert "Analysis workers: 4" in content
+    assert "Analysis queue limit: 8 pending batches" in content
     assert "GPU status: online" in content
     assert "GPU device: Test GPU" in content
     assert "GPU byte-count dispatches: 3" in content
