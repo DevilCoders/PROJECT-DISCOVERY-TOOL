@@ -572,6 +572,67 @@ def _markdown_report(result: ScanResult) -> str:
     return buffer.getvalue().rstrip() + "\n"
 
 
+REMOTE_BATCH_SCHEMA_VERSION = "1.0"
+
+
+def write_remote_batch_summary(
+    output: Path,
+    targets: list[dict[str, Any]],
+    *,
+    started_at: str,
+    finished_at: str,
+    exit_code: int,
+) -> list[Path]:
+    """Write batch-summary.json/.md for a `pdt scan --url FILE` run.
+
+    One entry per requested repository: credential-free URL, provider, VCS, ref, revision,
+    status (completed, findings, incomplete, failed, interrupted, not_started), exit code,
+    report directory and the sanitized error, so a failed or skipped repository is visible.
+    """
+    from collections import Counter
+
+    from . import __version__
+
+    output.mkdir(parents=True, exist_ok=True)
+    totals = Counter(str(item.get("status")) for item in targets)
+    payload = {
+        "schema_version": REMOTE_BATCH_SCHEMA_VERSION,
+        "kind": "pdt-remote-batch",
+        "pdt_version": __version__,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "exit_code": exit_code,
+        "target_count": len(targets),
+        "totals": dict(sorted(totals.items())),
+        "targets": targets,
+    }
+    json_path = output / "batch-summary.json"
+    with json_path.open("w", encoding="utf-8", errors="backslashreplace", newline="\n") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+    markdown_path = output / "batch-summary.md"
+    with markdown_path.open("w", encoding="utf-8", errors="backslashreplace", newline="\n") as stream:
+        stream.write("# PDT Remote Batch Summary\n\n")
+        stream.write(f"- Started: {_md(started_at)}\n- Finished: {_md(finished_at)}\n")
+        stream.write(f"- Exit code: {exit_code}\n- Repositories: {len(targets):,}\n")
+        for status, count in sorted(totals.items()):
+            stream.write(f"- {_md(status)}: {count:,}\n")
+        stream.write(
+            "\n| # | Status | Provider | Repository | VCS | Ref | Revision | Report | Error |\n"
+            "|---|---|---|---|---|---|---|---|---|\n"
+        )
+        for item in targets:
+            cells = [
+                str(item.get("index", "")), str(item.get("status", "")),
+                str(item.get("provider") or ""), str(item.get("url") or ""),
+                str(item.get("vcs") or ""), str(item.get("ref") or ""),
+                str(item.get("revision") or ""), str(item.get("report_directory") or ""),
+                str(item.get("error") or item.get("cleanup_error") or ""),
+            ]
+            stream.write("| " + " | ".join(_md(cell) for cell in cells) + " |\n")
+    return [json_path, markdown_path]
+
+
 def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[Path]:
     output.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []

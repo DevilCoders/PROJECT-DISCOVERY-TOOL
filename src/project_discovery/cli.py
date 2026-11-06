@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import sqlite3
+import time
 from collections import Counter, deque
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
@@ -42,14 +43,15 @@ from .inventory_store import (
 from .comparison import compare_many_reports, load_report, write_comparison
 from .project_catalog import ProjectCatalog
 from .language_catalog import language_catalog, recognized_language_count
-from .models import DirectoryRecord, ScanResult, SpecialEntryRecord, SymlinkRecord
+from .models import DirectoryRecord, Finding, ScanResult, SpecialEntryRecord, SymlinkRecord
 from .python_graph import analyze_python_dependencies
 from .code_index import QUERY_KINDS, analyze_code_index, query_code_index
 from .architecture_analyzer import analyze_project_architecture
-from .reporting import write_reports
+from .reporting import write_remote_batch_summary, write_reports
 from .remote import (
-    DEFAULT_REMOTE_TIMEOUT, REMOTE_VCS, is_remote_target,
-    load_remote_targets, parse_remote_target, remote_checkout, remote_vcs_capabilities,
+    DEFAULT_REMOTE_MAX_BYTES, DEFAULT_REMOTE_TIMEOUT, REMOTE_VCS, RemoteLimits,
+    check_transport_policy, is_remote_target, load_remote_targets, parse_remote_target,
+    remote_checkout, remote_vcs_capabilities, sanitize_client_output,
 )
 from .runtime_metrics import PhaseTimer, peak_rss_bytes
 from .scanner import discover_inventory
@@ -223,6 +225,53 @@ def _report_plugins(console: Console, policy: PluginPolicy, analyzer_load) -> No
         _status(console, "WARNING", diagnostic, "yellow")
 
 
+class _EphemeralScanCache:
+    """Fingerprint-cache stand-in for temporary remote checkouts.
+
+    Every remote scan materializes a fresh directory, so stored fingerprints could never
+    be reused; recording them would only grow the output's cache with dead roots.
+    """
+
+    def __enter__(self) -> "_EphemeralScanCache":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def get(self, root: str, relative_path: str) -> None:
+        return None
+
+    def put(self, *args, **kwargs) -> None:
+        return None
+
+    def prune_missing(self, root: str, current_paths) -> int:
+        return 0
+
+
+def _remote_coverage_findings(source_metadata: dict) -> list[Finding]:
+    """Represent remote content that was not materialized as UNKNOWN coverage findings."""
+    findings = []
+    location = str(source_metadata.get("url") or "remote source")
+    for item in source_metadata.get("coverage") or []:
+        if not isinstance(item, dict) or not item.get("detail"):
+            continue
+        incomplete = bool(item.get("incomplete"))
+        findings.append(Finding(
+            "analysis_coverage",
+            "Remote source coverage gap: " + str(item.get("kind", "unknown")).replace("_", " "),
+            str(item["detail"]) + (
+                " This content is missing from the analyzed tree; absence of findings for it "
+                "is not evidence of absence." if incomplete else
+                " The referenced content was not analyzed."
+            ),
+            confidence="UNKNOWN",
+            evidence=[f"source: {location}", f"count: {item.get('count', 0)}"],
+            analyzer="remote-source",
+            severity="LOW" if incomplete else "INFO",
+        ))
+    return findings
+
+
 def run_scan(
     root: Path, output: Path | None, formats: set[str], max_file_mb: int,
     *, skip_oversized: bool = False, ignores: set[str] | None = None,
@@ -274,7 +323,14 @@ def run_scan(
             }
 
     _render_banner(console)
-    _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
+    if source_metadata is not None:
+        _status(
+            console, "INFO",
+            f"Read-only discovery: {display_root or source_metadata.get('url', 'remote source')} "
+            "(temporary read-only checkout)", "cyan",
+        )
+    else:
+        _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
     started = now()
     timer = PhaseTimer()
     inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
@@ -353,11 +409,15 @@ def run_scan(
         analyzer_load.close()
         raise
     _report_plugins(console, plugin_policy, analyzer_load)
+    fingerprint_cache = ScanCache(cache_path) if source_metadata is None else _EphemeralScanCache()
     try:
-        with InventoryStore(inventory_path) as finding_store, ScanCache(cache_path) as cache:
+        with InventoryStore(inventory_path) as finding_store, fingerprint_cache as cache:
             finding_store.extend_diagnostics(analyzer_load.diagnostics)
             if source_metadata is not None:
-                finding_store.extend_diagnostics(source_metadata.get("warnings", []))
+                # Missing content makes the scan incomplete (--strict); notes such as
+                # "history not imported" stay report metadata only.
+                finding_store.extend_diagnostics(source_metadata.get("coverage_gaps", []))
+                finding_store.extend_findings(_remote_coverage_findings(source_metadata))
             with Progress(*progress_columns, console=console) as progress:
                 task = progress.add_task("Analyzing project files", total=len(records))
                 max_pending = max(2, engine.workers * 2)
@@ -659,6 +719,12 @@ def run_scan(
     )
     summary.add_column("Metric")
     summary.add_column("Value", justify="right")
+    if source_metadata is not None:
+        revision = source_metadata.get("revision")
+        summary.add_row(
+            "Remote source",
+            escape(f"{source_metadata.get('url', '')}" + (f" @ {revision}" if revision else "")),
+        )
     summary.add_row("Files inventoried", str(len(records)))
     summary.add_row("Directories inventoried", str(metrics["directory_count"]))
     summary.add_row("Symbolic links", str(metrics["symlink_count"]))
@@ -797,6 +863,52 @@ def _sandbox_summary(probe: dict) -> str:
     return summary
 
 
+_REMOTE_STATUS_BY_EXIT = {
+    EXIT_OK: "completed",
+    EXIT_FINDINGS: "findings",
+    EXIT_INCOMPLETE: "incomplete",
+}
+
+
+def _remote_batch_exit_code(results: list[dict], *, multiple: bool) -> int:
+    """Combine per-target outcomes; a --fail-on hit takes precedence, as in a local scan.
+
+    A single remote target that cannot be fetched is a fatal error (2), like a missing
+    local path. In a batch the other repositories are still scanned, so an unreachable
+    repository makes the batch incomplete (3).
+    """
+    statuses = {entry["status"] for entry in results}
+    if "findings" in statuses:
+        return EXIT_FINDINGS
+    if "failed" in statuses:
+        return EXIT_INCOMPLETE if multiple else EXIT_USAGE
+    if "incomplete" in statuses:
+        return EXIT_INCOMPLETE
+    return EXIT_OK
+
+
+def _remote_target_entry(index: int, target, report_directory: Path, status: str) -> dict:
+    return {
+        "index": index,
+        "url": target.clone_url,
+        "provider": target.provider,
+        "vcs": target.vcs,
+        "repository": target.repository_name,
+        "ref": target.ref,
+        "identity": target.identity,
+        "transport_insecure": target.insecure_transport,
+        "report_directory": str(report_directory),
+        "status": status,
+        "exit_code": None,
+        "revision": None,
+        "error": None,
+        "cleanup_error": None,
+        "started_at": None,
+        "finished_at": None,
+        "seconds": None,
+    }
+
+
 def _run_remote_targets(
     targets,
     *,
@@ -805,54 +917,110 @@ def _run_remote_targets(
     max_file_mb: int,
     remote_timeout: int,
     scan_options: dict,
+    remote_options: dict | None = None,
 ) -> int:
-    """Scan one or more remote repositories, continuing after target-specific failures."""
+    """Scan one or more remote repositories, continuing after target-specific failures.
+
+    Each target gets its own report directory. A batch also writes batch-summary.json
+    and batch-summary.md (per-target status, revision, exit code and error) into the
+    output directory, including when the batch is interrupted.
+    """
+    remote_options = dict(remote_options or {})
+    allow_insecure = bool(remote_options.get("allow_insecure_transport", False))
     multiple = len(targets) > 1
     base_output = output
     if multiple and base_output is None:
         base_output = Path.cwd() / "pdt-remote-reports"
-
-    failed = 0
-    findings_failed = False
-    console = Console(stderr=True)
-    for target in targets:
-        target_output = (
-            base_output / target.output_name
-            if multiple
-            else base_output or Path.cwd() / f"{target.output_name}-pdt-report"
-        )
-        try:
-            console.print(
-                f"[cyan]REMOTE[/cyan] {target.provider} / {target.repository_name} "
-                f"({target.vcs})"
-            )
-            with remote_checkout(target, timeout=remote_timeout) as checkout:
-                code = run_scan(
-                    checkout.path,
-                    target_output,
-                    formats,
-                    max_file_mb,
-                    source_metadata=checkout.metadata,
-                    display_root=target.clone_url,
-                    **scan_options,
-                )
-            if code == EXIT_FINDINGS:
-                findings_failed = True
-            elif code != EXIT_OK:
-                failed += 1
-        except (OSError, ValueError, sqlite3.Error) as exc:
-            failed += 1
-            console.print(
-                f"[red]REMOTE FAILED[/red] {target.provider} / {target.repository_name}: {exc}"
-            )
-
-    console.print(
-        f"[bold]Remote batch complete:[/bold] {len(targets) - failed}/{len(targets)} "
-        f"repository scan(s) completed; {failed} failed or incomplete."
+    console = Console(
+        stderr=True, quiet=bool(scan_options.get("quiet")),
+        no_color=True if scan_options.get("no_color") else None,
     )
-    if findings_failed:
-        return EXIT_FINDINGS
-    return EXIT_INCOMPLETE if failed else EXIT_OK
+
+    def report_directory(target) -> Path:
+        if multiple:
+            return base_output / target.output_name
+        return base_output or Path.cwd() / f"{target.output_name}-pdt-report"
+
+    batch_started = now()
+    results: list[dict] = []
+
+    def summarize(exit_code: int) -> None:
+        if not multiple:
+            return
+        for path in write_remote_batch_summary(
+            base_output, results, started_at=batch_started, finished_at=now(), exit_code=exit_code,
+        ):
+            _status(console, "SUCCESS", "Batch summary: " + str(path), "green")
+
+    try:
+        for index, target in enumerate(targets, 1):
+            target_output = report_directory(target)
+            entry = _remote_target_entry(index, target, target_output, "running")
+            entry["started_at"] = now()
+            results.append(entry)
+            _status(
+                console, "REMOTE",
+                f"[{index}/{len(targets)}] {target.provider} / {target.repository_name} "
+                f"({target.vcs}) {target.clone_url}" + (f" @ {target.ref}" if target.ref else ""),
+                "cyan",
+            )
+            started = time.monotonic()
+
+            def cleanup_failed(message: str, entry=entry) -> None:
+                entry["cleanup_error"] = message
+                _status(console, "WARNING", message, "yellow")
+
+            try:
+                check_transport_policy(target, allow_insecure=allow_insecure)
+                with remote_checkout(
+                    target, timeout=remote_timeout, on_cleanup_error=cleanup_failed,
+                    **remote_options,
+                ) as checkout:
+                    entry["revision"] = checkout.metadata.get("revision")
+                    for note in checkout.metadata.get("warnings", []):
+                        _status(console, "WARNING", str(note), "yellow")
+                    code = run_scan(
+                        checkout.path,
+                        target_output,
+                        formats,
+                        max_file_mb,
+                        source_metadata=checkout.metadata,
+                        display_root=target.clone_url,
+                        **scan_options,
+                    )
+                entry["exit_code"] = code
+                entry["status"] = _REMOTE_STATUS_BY_EXIT.get(code, "failed")
+            except KeyboardInterrupt:
+                entry["status"] = "interrupted"
+                entry["exit_code"] = EXIT_INTERRUPTED
+                raise
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                entry["status"] = "failed"
+                entry["error"] = sanitize_client_output(str(exc), max_chars=4_000)
+                _status(
+                    console, "FAILED",
+                    f"{target.provider} / {target.repository_name}: {entry['error']}", "red",
+                )
+            finally:
+                entry["finished_at"] = now()
+                entry["seconds"] = round(time.monotonic() - started, 3)
+    except KeyboardInterrupt:
+        for index, target in enumerate(targets[len(results):], len(results) + 1):
+            results.append(_remote_target_entry(index, target, report_directory(target), "not_started"))
+        summarize(EXIT_INTERRUPTED)
+        raise
+
+    exit_code = _remote_batch_exit_code(results, multiple=multiple)
+    summarize(exit_code)
+    counts = Counter(entry["status"] for entry in results)
+    _status(
+        console, "SUCCESS" if exit_code == EXIT_OK else "WARNING",
+        f"Remote scan complete: {counts.get('completed', 0) + counts.get('findings', 0)}/"
+        f"{len(targets)} repository scan(s) completed; {counts.get('failed', 0)} failed; "
+        f"{counts.get('incomplete', 0)} incomplete; {counts.get('findings', 0)} hit --fail-on.",
+        "green" if exit_code == EXIT_OK else "yellow",
+    )
+    return exit_code
 
 
 def main() -> None:
@@ -867,15 +1035,37 @@ def main() -> None:
     scan.add_argument("path", nargs="?", type=str, metavar="PATH_OR_URL")
     scan.add_argument(
         "--url", type=Path, default=None, metavar="FILE",
-        help="Read one repository URL per line from a UTF-8 text file; providers and VCS backends may be mixed",
+        help="Read one repository per line from a UTF-8 text file (URL [ref=NAME] [vcs=BACKEND]); "
+             "providers and VCS backends may be mixed",
     )
     scan.add_argument(
         "--vcs", choices=REMOTE_VCS, default="auto",
-        help="Remote VCS backend: auto, git, hg, svn, bzr/bazaar, darcs, jj, pijul, cvs or p4/perforce",
+        help="Remote VCS backend: auto, git, hg, svn, bzr/bazaar, darcs, jj, pijul, cvs, "
+             "p4/perforce or fossil",
     )
     scan.add_argument(
-        "--remote-timeout", type=int, default=DEFAULT_REMOTE_TIMEOUT, metavar="SECONDS",
-        help="Timeout for each remote clone/checkout operation (default: 600)",
+        "--ref", default=None, metavar="REF",
+        help="Branch, tag or revision of a remote repository to scan (Git also accepts a full "
+             "commit ID; Subversion a revision number). Default: the remote default branch",
+    )
+    scan.add_argument(
+        "--remote-timeout", type=int, default=None, metavar="SECONDS",
+        help=f"Timeout for each remote clone/checkout operation (default: {DEFAULT_REMOTE_TIMEOUT})",
+    )
+    scan.add_argument(
+        "--remote-workdir", type=Path, default=None, metavar="DIR",
+        help="Directory for temporary remote checkouts (default: the system temporary directory); "
+             "they are deleted when each scan ends",
+    )
+    scan.add_argument(
+        "--remote-max-gb", type=float, default=None, metavar="GIB",
+        help="Stop materializing a remote repository after this much file content; the rest is "
+             f"reported as a coverage gap (default: {DEFAULT_REMOTE_MAX_BYTES // 1024 ** 3})",
+    )
+    scan.add_argument(
+        "--allow-insecure-transport", action="store_true",
+        help="Allow plain-text transports (git://, http://, svn://, bzr://, CVS pserver, Perforce "
+             "tcp); refused by default because fetched source could be altered in transit",
     )
     scan.add_argument("--output", type=Path, default=None)
     scan.add_argument("--format", default="json,markdown,html")
@@ -1115,14 +1305,31 @@ def main() -> None:
                 parser.error("scan --format accepts json, markdown, html")
             if args.max_file_mb < 1:
                 parser.error("--max-file-mb must be >= 1")
-            if args.remote_timeout < 1 or args.remote_timeout > 86_400:
-                parser.error("--remote-timeout must be between 1 and 86400 seconds")
             if args.url is not None and args.path is not None:
                 parser.error("Use either scan --url FILE or scan PATH_OR_URL, not both")
             if args.url is None and args.path is None:
                 parser.error("Provide a local PATH, a remote URL, or --url FILE")
-            if args.resume and (args.url is not None or is_remote_target(args.path or "")):
+            remote_scan = args.url is not None or is_remote_target(args.path or "")
+            if args.resume and remote_scan:
                 parser.error("--resume is supported for local scan roots, not temporary remote checkouts")
+            if not remote_scan:
+                for option, value in (
+                    ("--vcs", args.vcs != "auto"), ("--ref", args.ref is not None),
+                    ("--remote-timeout", args.remote_timeout is not None),
+                    ("--remote-workdir", args.remote_workdir is not None),
+                    ("--remote-max-gb", args.remote_max_gb is not None),
+                    ("--allow-insecure-transport", args.allow_insecure_transport),
+                ):
+                    if value:
+                        parser.error(f"{option} can be used only when scanning a remote repository URL")
+            remote_timeout = DEFAULT_REMOTE_TIMEOUT if args.remote_timeout is None else args.remote_timeout
+            if remote_timeout < 1 or remote_timeout > 86_400:
+                parser.error("--remote-timeout must be between 1 and 86400 seconds")
+            max_gib = DEFAULT_REMOTE_MAX_BYTES / 1024 ** 3 if args.remote_max_gb is None else args.remote_max_gb
+            if not 0 < max_gib <= 1_048_576:
+                parser.error("--remote-max-gb must be greater than 0 and at most 1048576")
+            if args.vuln_db is not None and not args.vuln_db.expanduser().is_file():
+                parser.error(f"--vuln-db is not a file: {args.vuln_db}")
 
             scan_options = {
                 "skip_oversized": args.skip,
@@ -1140,28 +1347,25 @@ def main() -> None:
                 "plugin_timeout": args.plugin_timeout,
                 "plugin_memory_mb": args.plugin_memory_mb,
             }
-            if args.url is not None:
-                targets = load_remote_targets(args.url, vcs=args.vcs)
+            if remote_scan:
+                remote_options = {
+                    "workdir": args.remote_workdir,
+                    "limits": RemoteLimits(max_bytes=max(1, int(max_gib * 1024 ** 3))),
+                    "allow_insecure_transport": args.allow_insecure_transport,
+                }
+                if args.url is not None:
+                    targets = load_remote_targets(args.url, vcs=args.vcs, ref=args.ref)
+                else:
+                    targets = [parse_remote_target(args.path, vcs=args.vcs, ref=args.ref)]
                 raise SystemExit(_run_remote_targets(
                     targets,
                     output=args.output,
                     formats=formats,
                     max_file_mb=args.max_file_mb,
-                    remote_timeout=args.remote_timeout,
+                    remote_timeout=remote_timeout,
                     scan_options=scan_options,
+                    remote_options=remote_options,
                 ))
-            if is_remote_target(args.path):
-                target = parse_remote_target(args.path, vcs=args.vcs)
-                raise SystemExit(_run_remote_targets(
-                    [target],
-                    output=args.output,
-                    formats=formats,
-                    max_file_mb=args.max_file_mb,
-                    remote_timeout=args.remote_timeout,
-                    scan_options=scan_options,
-                ))
-            if args.vcs != "auto":
-                parser.error("--vcs can be used only when scanning a remote repository URL")
             raise SystemExit(run_scan(
                 Path(args.path), args.output, formats, args.max_file_mb,
                 skip_oversized=args.skip, ignores=set(args.exclude_dir),

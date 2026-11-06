@@ -270,7 +270,7 @@ def test_remote_checkout_cleans_temporary_source_after_context_exit(tmp_path: Pa
     target = remote.parse_remote_target("https://github.com/acme/platform")
     captured = {}
 
-    def fake_checkout(_target, checkout, _git_dir, _temporary, *, timeout):
+    def fake_checkout(_target, checkout, _git_dir, _temporary, *, timeout, **_kwargs):
         checkout.mkdir()
         (checkout / "main.py").write_text("print('ok')\n", encoding="utf-8")
         captured["path"] = checkout
@@ -569,20 +569,38 @@ def test_cvs_checkout_uses_noninteractive_native_checkout_and_strips_CVS_metadat
     commands = []
 
     def fake_run(command, **kwargs):
-        commands.append(command)
-        repository = Path(command[6])
+        commands.append((command, kwargs))
+        # "-d DIR" is relative to the CVS working directory (the private temporary dir).
+        assert not Path(command[6]).is_absolute()
+        repository = Path(kwargs["cwd"]) / command[6]
         repository.mkdir()
         (repository / "CVS").mkdir()
+        (repository / "src").mkdir()
+        (repository / "src" / "CVS").mkdir()
         (repository / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        (repository / "src" / "util.c").write_text("int util;\n", encoding="utf-8")
         return SimpleNamespace(stdout=b"")
 
     monkeypatch.setattr(remote, "_run", fake_run)
     metadata = remote._cvs_checkout(target, checkout, temporary, timeout=30)
 
-    assert commands[0][2] == ":pserver:anonymous@cvs.example.net:2401:/cvsroot"
+    command, kwargs = commands[0]
+    # CVSROOT syntax is [:method:][user@]host[:[port]]/path (no colon before the path).
+    assert command[2] == ":pserver:anonymous@cvs.example.net:2401/cvsroot"
+    assert kwargs["cwd"] == temporary
+    assert command[-1] == "project"
     assert (checkout / "main.c").is_file()
+    assert (checkout / "src" / "util.c").is_file()
     assert not (checkout / "CVS").exists()
+    assert not (checkout / "src" / "CVS").exists()
     assert metadata["vcs"] == "cvs"
+
+
+def test_cvs_root_without_port_and_over_ssh():
+    pserver = remote.parse_remote_target("cvs+pserver://anonymous@cvs.example.net/cvsroot/project")
+    ssh = remote.parse_remote_target("cvs+ssh://cvs@cvs.example.net/cvsroot/project")
+    assert remote._cvs_root(pserver) == (":pserver:anonymous@cvs.example.net:/cvsroot", "project")
+    assert remote._cvs_root(ssh) == (":ext:cvs@cvs.example.net:/cvsroot", "project")
 
 
 def test_p4_checkout_uses_depot_file_listing_and_read_only_print(

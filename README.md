@@ -146,8 +146,9 @@ pdt --help
 pdt scan /path/to/project
 pdt scan /path/to/project --output /path/to/reports --format json,markdown,html
 pdt scan https://github.com/owner/repository
+pdt scan https://github.com/owner/repository --ref v2.1.0
 pdt scan --url repositories.txt --output /reports/remotes
-pdt scan --url repositories.txt --vcs auto --remote-timeout 900
+pdt scan --url repositories.txt --vcs auto --remote-timeout 900 --remote-workdir /scratch
 pdt scan /path/to/project --skip --max-file-mb 128
 pdt scan /path/to/project --exclude-dir node_modules --exclude-dir .cache
 pdt vuln-db import /local/advisories/osv --db ~/.pdt/vulnerability-advisories.sqlite3
@@ -165,33 +166,35 @@ pdt catalog-list
 pdt catalog-compare --output /reports/project-comparison
 ```
 
-### Remote repository scans
+### Remote repository scans (online mode)
 
-A single remote repository is scanned by passing its URL as the target:
+Local scans are offline. Online mode is used only when the target is a repository URL or a `--url` list; PDT then downloads each repository read-only into a private temporary directory, scans it like a local project and deletes the copy. The [Online Mode guide](docs/ONLINE_MODE.md) describes every option, the security model, resource limits, report fields and platform behavior.
 
 ```bash
 pdt scan https://github.com/owner/repository
+pdt scan https://github.com/owner/repository --ref v2.1.0      # branch, tag or full commit ID
 pdt scan hg+https://hg.example.net/team/project
-pdt scan svn+https://svn.example.net/repos/project/trunk
+pdt scan svn+ssh://svn.example.net/repos/project/trunk --ref 4182
 pdt scan fossil+https://fossil.example.net/project
 ```
 
-For a batch, create a UTF-8 text file with one URL per line. Blank lines and lines beginning with `#` are ignored; duplicate targets are removed. A single file can mix providers and VCS types:
+For a batch, create a UTF-8 text file with one repository per line: the URL, optionally followed by `ref=NAME` and `vcs=BACKEND`, and an optional `# comment`. Blank lines and lines beginning with `#` are ignored; duplicate targets are removed. A single file can mix providers and VCS types:
 
 ```text
 # Git hosting providers
 https://github.com/owner/project-a
+https://github.com/owner/project-a ref=v1.4.0        # the release tag as a second target
 https://gitlab.com/group/project-b
 ssh://git@bitbucket.org/workspace/project-c.git
 
 # Native VCS backends
 hg+https://hg.example.net/team/project-d
-svn+https://svn.example.net/repos/project-e/trunk
+svn+https://svn.example.net/repos/project-e/trunk ref=9120
 bzr+https://code.example.net/team/project-f
 darcs+https://code.example.net/team/project-g
 jj+https://github.com/owner/project-h
 pijul+https://nest.pijul.com/owner/project-i
-cvs+pserver://cvs.example.net/cvsroot/project-j
+cvs+ssh://cvs@cvs.example.net/cvsroot/project-j
 p4+ssl://perforce.example.net:1666/depot/project-k
 fossil+https://fossil.example.net/project-l
 ```
@@ -202,13 +205,13 @@ Then run:
 pdt scan --url repositories.txt --output ./remote-reports
 ```
 
-The batch creates a separate report directory for each repository and continues after a repository-specific checkout/scan failure. Supported backends are Git (including GitHub, GitLab, Bitbucket, Azure Repos, CodeCommit, SourceHut and compatible/self-hosted hosts), Mercurial, Subversion, Bazaar/Breezy, Darcs, Jujutsu Git-backed repositories, Pijul, CVS, Perforce and Fossil SCM. Native VCS command-line clients must be installed for the corresponding backend; `pdt capabilities --json` reports which clients are present. Use `--vcs` to force a backend for an ambiguous URL; `auto` uses a VCS prefix when present and otherwise treats the target as Git.
+The batch creates a separate report directory for each repository, continues after a repository-specific failure, and writes `batch-summary.json` and `batch-summary.md` (status, revision, exit code and error for every repository, also when interrupted). Supported backends are Git (including GitHub, GitLab, Bitbucket, Azure Repos, CodeCommit, SourceHut and compatible/self-hosted hosts), Mercurial, Subversion, Bazaar/Breezy, Darcs, Jujutsu Git-backed repositories, Pijul, CVS, Perforce and Fossil SCM. The corresponding command-line client must be installed; `pdt capabilities --json` reports which clients are present. Use `--vcs` to force a backend for an ambiguous URL; `auto` uses a VCS prefix when present and otherwise treats the target as Git. The Git path is tested end to end against a real Git server; the other backends are tested with recorded client invocations only.
 
-Remote acquisition is read-only: PDT does not push, commit, modify remote repositories, fetch submodules/externals or download Git LFS objects. SSH agent/credential helpers and locally configured VCS credentials are used instead of passwords embedded in URLs. Git, Mercurial, SVN, Bazaar, Darcs, Jujutsu and Pijul source metadata is excluded from the temporary analysis tree where the adapter can export clean source; temporary checkouts are deleted when scanning finishes. CVS and Perforce downloads are also temporary. Plain `git://`, HTTP Fossil remotes, CVS pserver, Perforce TCP and other non-TLS transports are explicitly marked as insecure in report metadata.
+Remote acquisition is read-only and non-interactive: PDT does not push, commit or modify remote repositories, run hooks or filters, fetch submodules/externals or download Git LFS objects, and clients never prompt (a missing credential fails fast). Passwords, tokens and user names embedded in URLs are rejected; use an SSH agent, a credential helper or your VCS client's configuration. Plain-text transports (`git://`, `http://`, `svn://`, `bzr://`, CVS pserver, Perforce `tcp`) are refused unless you pass `--allow-insecure-transport`, and reports then flag them. Repository paths are validated before anything is written (including Windows device names such as `aux.c`), clients are stopped together with their child processes on timeout or Ctrl-C, materialization is capped by `--remote-max-gb` (default 64) and a free-disk floor, and the temporary checkout is removed on every exit path. Content PDT could not materialize is reported as `UNKNOWN` coverage findings and makes `--strict` scans incomplete. Each report records the credential-free URL, revision, ref, transport and coverage under `metrics.source`.
 
 The output directory must remain outside the analyzed project. PDT never changes target files.
 
-Exit codes: `0` scan completed, `1` a finding at or above `--fail-on`, `2` usage or fatal error, `3` incomplete scan under `--strict`, `130` interrupted. See the [Operations Guide](docs/OPERATIONS.md) for large-scan practice and [Benchmarks](docs/BENCHMARKS.md) for `tools/benchmark.py`.
+Exit codes: `0` scan completed, `1` a finding at or above `--fail-on`, `2` usage or fatal error (including a single remote URL that cannot be fetched), `3` incomplete scan under `--strict` or a URL batch in which a repository could not be fetched, `130` interrupted. In a batch, a `--fail-on` hit in any repository takes precedence. See the [Operations Guide](docs/OPERATIONS.md) for large-scan practice and [Benchmarks](docs/BENCHMARKS.md) for `tools/benchmark.py`.
 
 ### Exclusions and skip accounting
 
