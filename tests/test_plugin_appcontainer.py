@@ -53,7 +53,8 @@ def test_staging_copies_pdt_the_plugin_and_its_required_dependencies(tmp_path, s
     container = FakeContainer()
     point = {"value": "fixture_red_plugin:Analyzer", "distribution": "fixture-red-plugin"}
     staged = appcontainer.stage_site(container, tmp_path / "work", point)
-    assert (staged / "project_discovery" / "plugin_host.py").is_file()
+    assert (staged / "project_discovery" / "models.py").is_file()
+    assert (staged / "project_discovery" / "analyzers" / "base.py").is_file()
     assert (staged / "fixture_red_plugin" / "__init__.py").is_file()
     assert (staged / "fixture_red_dependency" / "__init__.py").is_file()
     assert (staged / "fixture_red_plugin-1.0.dist-info" / "METADATA").is_file()
