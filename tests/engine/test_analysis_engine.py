@@ -73,3 +73,23 @@ def test_a_pool_that_refuses_work_is_replaced_once_and_the_batch_queued_again():
     stale.pdt_pool = broken
     engine.restart(stale)
     assert len(pools) == 1
+
+
+def test_gpu_counters_of_worker_processes_reach_the_scan_metrics(monkeypatch):
+    # Regression: the native GPU counters are per process, and only the coordinator's were
+    # reported, so process-mode scans always showed 0 dispatches and 0 fallbacks.
+    import project_discovery.engine.executor as executor
+    from project_discovery.cli import _with_worker_gpu
+
+    readings = iter([(3, 1), (7, 2)])
+    monkeypatch.setattr(executor, "_gpu_counters", lambda: next(readings))
+    monkeypatch.setitem(executor._worker_state, "analyzers", [])
+    outcomes = executor._analyze_batch_in_worker([])
+    assert outcomes == []          # no outcome to carry the delta: nothing to report
+    readings = iter([(3, 1), (7, 2)])
+    monkeypatch.setattr(executor, "_gpu_counters", lambda: next(readings))
+    monkeypatch.setattr(executor, "analyze_tasks", lambda *_args: [executor.FileOutcome(), executor.FileOutcome()])
+    outcomes = executor._analyze_batch_in_worker([object(), object()])
+    assert outcomes[0].gpu_counts is None and outcomes[-1].gpu_counts == (4, 1)
+    merged = _with_worker_gpu({"gpu_dispatches": 1, "gpu_fallbacks": 0, "backend": "c"}, [4, 1])
+    assert (merged["gpu_dispatches"], merged["gpu_fallbacks"], merged["backend"]) == (5, 1, "c")

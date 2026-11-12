@@ -182,6 +182,10 @@ class InventoryStore:
                         )
             finally:
                 cursor.close()
+        # Ordered reads page through this index (see iter_records) instead of sorting.
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS inventory_records_order ON inventory_records(kind, sort_key, path)"
+        )
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS inventory_metadata (
                 key TEXT PRIMARY KEY,
@@ -457,44 +461,50 @@ class InventoryStore:
             raise ValueError("fetch_size must be positive")
         kind = self._kind(kind)
         self.flush()
+        # Keyset pages: each page is a separate, fully read query, so no read snapshot
+        # stays open while the caller works. A cursor held for a whole analysis phase
+        # kept SQLite from checkpointing, and the WAL grew to about three times the store.
         if kind == "directory":
-            cursor = self.db.execute(
-                """SELECT r.payload, d.direct_child_count, d.file_count,
-                          d.total_bytes, d.error
+            query = """SELECT r.payload, d.direct_child_count, d.file_count,
+                          d.total_bytes, d.error, r.sort_key, r.path
                    FROM inventory_records AS r
                    LEFT JOIN inventory_directory_state AS d ON d.path=r.path
-                   WHERE r.kind=?
-                   ORDER BY r.sort_key COLLATE BINARY, r.path COLLATE BINARY""",
-                (kind,),
-            )
+                   WHERE r.kind=? {after}
+                   ORDER BY r.sort_key COLLATE BINARY, r.path COLLATE BINARY LIMIT ?"""
+            after = "AND (r.sort_key, r.path) > (?, ?)"
         else:
+            query = """SELECT payload, sort_key, path FROM inventory_records WHERE kind=? {after}
+                   ORDER BY sort_key COLLATE BINARY, path COLLATE BINARY LIMIT ?"""
+            after = "AND (sort_key, path) > (?, ?)"
+        page = max(fetch_size, 256)
+        last: tuple[str, str] | None = None
+        while True:
             cursor = self.db.execute(
-                """SELECT payload FROM inventory_records WHERE kind=?
-                   ORDER BY sort_key COLLATE BINARY, path COLLATE BINARY""",
-                (kind,),
+                query.format(after=after if last else ""),
+                (kind, *last, page) if last else (kind, page),
             )
-        try:
-            while True:
-                rows = cursor.fetchmany(fetch_size)
-                if not rows:
-                    break
-                for row in rows:
-                    if kind == "directory":
-                        payload, children, files, total_bytes, error = row
-                        value = json.loads(payload)
-                        if children is not None:
-                            value["direct_child_count"] = int(children)
-                            value["file_count"] = int(files)
-                            value["total_bytes"] = int(total_bytes)
-                            if error is not None:
-                                value["error"] = str(error)
-                        yield value
-                    else:
-                        yield json.loads(row[0])
-        finally:
-            # Callers commonly stop after a page; release the SQLite read
-            # cursor immediately instead of waiting for generator collection.
-            cursor.close()
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+            if not rows:
+                break
+            last = (rows[-1][-2], rows[-1][-1])
+            for row in rows:
+                if kind == "directory":
+                    payload, children, files, total_bytes, error = row[:5]
+                    value = json.loads(payload)
+                    if children is not None:
+                        value["direct_child_count"] = int(children)
+                        value["file_count"] = int(files)
+                        value["total_bytes"] = int(total_bytes)
+                        if error is not None:
+                            value["error"] = str(error)
+                    yield value
+                else:
+                    yield json.loads(row[0])
+            if len(rows) < page:
+                break
 
     def append_finding(self, finding: Any) -> None:
         """Persist one finding under a deterministic content key.

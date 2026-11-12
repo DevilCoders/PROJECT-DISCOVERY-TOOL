@@ -51,6 +51,9 @@ class FileOutcome:
     analyzed: bool = False
     # Cross-file code facts emitted by built-in analyzers (symbols, calls, ...).
     facts: FileFacts | None = None
+    # Process workers: (GPU dispatches, CPU fallbacks) during this batch, carried by its
+    # last outcome. The native counters are per process, so the coordinator sums them.
+    gpu_counts: tuple[int, int] | None = None
 
 
 @dataclass(slots=True)
@@ -190,8 +193,20 @@ def _parse_imports_batch(root: str, records: list[FileRecord]) -> list[tuple]:
     return [parse_python_imports(Path(root), record) for record in records]
 
 
+def _gpu_counters() -> tuple[int, int]:
+    from .native import capabilities
+
+    values = capabilities()
+    return int(values.get("gpu_dispatches", 0)), int(values.get("gpu_fallbacks", 0))
+
+
 def _analyze_batch_in_worker(tasks: list[FileTask]) -> list[FileOutcome]:
-    return analyze_tasks(_worker_state["analyzers"], {}, tasks)
+    before = _gpu_counters()
+    outcomes = analyze_tasks(_worker_state["analyzers"], {}, tasks)
+    after = _gpu_counters()
+    if outcomes and after != before:
+        outcomes[-1].gpu_counts = (after[0] - before[0], after[1] - before[1])
+    return outcomes
 
 
 class AnalysisExecutor:

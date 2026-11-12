@@ -84,4 +84,8 @@ def create_walker(root, excluded_names, excluded_paths):
     """Create the Rust no-follow walker, or return None for the Python fallback."""
     if _walker is None:
         return None
+    if hasattr(_walker.Walker, "skip_directory"):
+        # The caller decides exclusions (with full Unicode case folding) and calls
+        # skip_directory(); the walker's own to_lowercase() matching would disagree.
+        return _walker.Walker(str(root), [], [])
     return _walker.Walker(str(root), sorted(excluded_names), sorted(excluded_paths))

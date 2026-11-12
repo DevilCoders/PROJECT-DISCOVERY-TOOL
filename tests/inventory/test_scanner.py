@@ -571,11 +571,18 @@ def test_windows_junction_loops_are_recorded_not_followed(tmp_path: Path, monkey
     )
     if created.returncode:
         pytest.skip("junction creation unavailable")
+    targets = set()
     for _ in _walkers(monkeypatch):
         files, directories, links, _, stats = discover_inventory(tmp_path)
         assert [record.path for record in files] == ["src/a.py"]
         assert [link.path for link in links] == ["src/loop"]
         assert stats.get("walk_errors", 0) == 0
+        # Regression: the fallback kept os.readlink's \\?\ prefix, so the junction into the
+        # root was "external" there and "internal" with the Rust walker.
+        assert links[0].target_scope == "internal"
+        assert not links[0].target.startswith("\\\\?\\")
+        targets.add(links[0].target)
+    assert len(targets) == 1
 
 
 @pytest.mark.skipif(os.name != "nt", reason="name-surrogate reparse points are Windows-specific")
@@ -607,6 +614,38 @@ def test_unreadable_link_targets_are_recorded_as_errors_not_crashes(tmp_path: Pa
         ("lx", "", "unknown", "unreadable")
     ]
     assert stats["entry_errors"] == 1
+
+
+def test_exclusions_use_one_case_folding_in_both_walkers(tmp_path: Path, monkeypatch):
+    # Regression: Python matched --exclude-dir with casefold(), the Rust walker with
+    # to_lowercase(), so "Straße" was recorded as pruned yet still walked by Rust.
+    from project_discovery.inventory.scanner import discover_inventory
+
+    (tmp_path / "Straße").mkdir()
+    (tmp_path / "Straße" / "inside.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "keep.py").write_text("y = 2\n", encoding="utf-8")
+    for walker in _walkers(monkeypatch):
+        files, directories, *_ = discover_inventory(tmp_path, ignores={"STRASSE"})
+        assert [record.path for record in files] == ["keep.py"], walker
+        assert {record.path: record.pruned for record in directories}["Straße"] is True, walker
+
+
+def test_files_dated_before_1970_keep_their_signed_mtime(tmp_path: Path, monkeypatch):
+    # Regression: the Rust walker reported pre-1970 modification times as 0, so the file
+    # was refused as "changed after inventory" and never analyzed.
+    from project_discovery.inventory.scanner import discover_inventory
+
+    path = tmp_path / "old.py"
+    path.write_text("x = 1\n", encoding="utf-8")
+    try:
+        os.utime(path, ns=(-315_619_200_000_000_000, -315_619_200_000_000_000))  # 1960-01-01
+    except (OSError, OverflowError, ValueError):
+        pytest.skip("this filesystem cannot store dates before 1970")
+    expected = os.lstat(path).st_mtime_ns
+    assert expected < 0
+    for walker in _walkers(monkeypatch):
+        files, *_ = discover_inventory(tmp_path)
+        assert files[0].mtime_ns == expected, walker
 
 
 def test_native_walker_link_read_errors_are_not_reported_as_internal(tmp_path: Path, monkeypatch):

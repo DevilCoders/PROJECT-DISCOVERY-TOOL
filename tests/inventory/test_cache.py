@@ -32,10 +32,23 @@ def test_cache_migrates_legacy_schema(tmp_path: Path):
     db.close()
 
     with ScanCache(path) as cache:
-        assert cache.get("/repo", "legacy.py") == (5, 10, 0, 0, "digest")
+        # A legacy row has no file-ID key, so it misses once and the file is rehashed.
+        assert cache.get("/repo", "legacy.py") is None
         cache.put("/repo", "new.py", 6, 11, 12, 13, "new")
     with ScanCache(path) as cache:
         assert cache.get("/repo", "new.py") == (6, 11, 12, 13, "new")
+
+
+def test_cache_keeps_file_ids_beyond_64_bits(tmp_path: Path):
+    # Regression: ReFS/Dev Drive file IDs (128 bits) and inodes with the top bit set
+    # overflowed SQLite's signed INTEGER, and every such file got a record error.
+    path = tmp_path / "cache.sqlite3"
+    with ScanCache(path) as cache:
+        for index, inode in enumerate((2**63, 2**64 - 1, 2**127 + 5)):
+            cache.put("/repo", f"f{index}.py", 1, 2, 3, inode, f"digest{index}")
+    with ScanCache(path) as cache:
+        assert cache.get("/repo", "f2.py") == (1, 2, 3, 2**127 + 5, "digest2")
+        assert cache.get("/repo", "f1.py")[3] == 2**64 - 1
 
 
 def test_cache_prunes_removed_paths_without_parameter_limit(tmp_path: Path):

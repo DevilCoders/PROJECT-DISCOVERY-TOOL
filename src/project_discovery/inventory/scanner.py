@@ -265,6 +265,19 @@ def _classify_file(
     return "binary/unclassified", opened_identity
 
 
+def _classify_name_only(
+    path: Path,
+    relative_path: str,
+    expected_info: os.stat_result | FileIdentity | None = None,
+) -> tuple[str, FileIdentity | None]:
+    """The file type from its name alone; nothing is opened (inventory-only scans)."""
+    if is_source_path(relative_path):
+        return "source", None
+    if is_textual_path(relative_path):
+        return "text", None
+    return "unclassified", None
+
+
 def _file_type(
     path: Path,
     relative_path: str,
@@ -272,6 +285,20 @@ def _file_type(
 ) -> str:
     return _classify_file(path, relative_path, expected_info)[0]
 
+
+
+def _user_form_target(target: str) -> str:
+    """A Windows link target without the ``\\\\?\\`` prefix ``os.readlink`` keeps.
+
+    Junction and absolute-symlink targets read as ``\\\\?\\C:\\proj\\src`` or
+    ``\\\\?\\UNC\\server\\share``; the Rust walker reports ``C:\\proj\\src`` and
+    ``\\\\server\\share``. Without this, scope checks against the root saw another drive.
+    """
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[len("\\\\?\\UNC\\"):]
+    if target.startswith("\\\\?\\"):
+        return target[len("\\\\?\\"):]
+    return target
 
 
 def _symlink_scope(root: Path, link_path: Path, target: str) -> str:
@@ -345,6 +372,7 @@ def _discover_with_rust(
     special_entries: list[SpecialEntryRecord],
     stats: Counter[str],
     store: InventoryStore | None = None,
+    classify=None,
 ) -> bool:
     """Consume the optional Rust directory iterator; return False if unavailable."""
     try:
@@ -433,6 +461,10 @@ def _discover_with_rust(
             if exclusion:
                 stats["pruned_directory_count"] += 1
                 stats[f"pruned_dir:{name.casefold()}"] += 1
+                # Recorded as pruned here, so the walker must not descend into it either.
+                skip = getattr(walker, "skip_directory", None)
+                if skip is not None:
+                    skip()
             if error:
                 stats["walk_errors"] += 1
             continue
@@ -441,7 +473,7 @@ def _discover_with_rust(
             file_identity = (
                 device_id, inode_id, size, mtime_ns, ctime_ns,
             ) if device_id is not None and inode_id is not None else None
-            file_type, opened_identity = _classify_file(path, relative, file_identity)
+            file_type, opened_identity = (classify or _classify_file)(path, relative, file_identity)
             language = detect_language(relative)
             record = FileRecord(
                 relative, size, Path(relative).suffix.lower(), language,
@@ -501,6 +533,7 @@ def discover_inventory(
     skip_oversized: bool = False,
     ignores: set[str] | None = None,
     store: InventoryStore | None = None,
+    read_signatures: bool = True,
 ) -> tuple[
     Sequence[FileRecord],
     Sequence[DirectoryRecord],
@@ -547,9 +580,12 @@ def discover_inventory(
     files: list[FileRecord] = []
     symlinks: list[SymlinkRecord] = []
     special_entries: list[SpecialEntryRecord] = []
+    # read_signatures=False (inventory-only): no file is opened, not even for the
+    # 512-byte signature probe, so file types come from names alone.
+    classify = _classify_file if read_signatures else _classify_name_only
     used_rust = _discover_with_rust(
         root, excluded_names, excluded_paths, max_file_bytes, skip_oversized,
-        directories_by_path, files, symlinks, special_entries, stats, store,
+        directories_by_path, files, symlinks, special_entries, stats, store, classify,
     )
     scandir_stack = []
     if not used_rust:
@@ -598,7 +634,7 @@ def discover_inventory(
 
             if _is_link_like(info):
                 try:
-                    target = os.readlink(entry.path)
+                    target = _user_form_target(os.readlink(entry.path))
                 except (OSError, ValueError):
                     # ValueError: a name-surrogate reparse point that CPython does not read
                     # as a link, such as a WSL (LX) symlink on NTFS.
@@ -662,7 +698,7 @@ def discover_inventory(
 
             if stat.S_ISREG(info.st_mode):
                 size = info.st_size
-                file_type, opened_identity = _classify_file(Path(entry.path), relative, info)
+                file_type, opened_identity = classify(Path(entry.path), relative, info)
                 language = detect_language(relative)
                 file_record = FileRecord(
                     relative,

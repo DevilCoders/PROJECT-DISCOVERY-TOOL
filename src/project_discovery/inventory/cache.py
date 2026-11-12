@@ -25,6 +25,7 @@ class ScanCache:
                 sha256 TEXT NOT NULL,
                 ctime_ns INTEGER NOT NULL DEFAULT 0,
                 inode INTEGER NOT NULL DEFAULT 0,
+                inode_key TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(project_root, relative_path)
             )"""
         )
@@ -39,15 +40,20 @@ class ScanCache:
             self.db.execute(
                 "ALTER TABLE fingerprints ADD COLUMN inode INTEGER NOT NULL DEFAULT 0"
             )
+        # File IDs can exceed a signed 64-bit INTEGER (ReFS and Dev Drive report 128 bits,
+        # NFS and overlayfs set the top bit), so they are stored as text. Rows written
+        # before this column have no key and simply miss once.
+        if "inode_key" not in columns:
+            self.db.execute("ALTER TABLE fingerprints ADD COLUMN inode_key TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
     def get(self, root: str, relative_path: str) -> tuple[int, int, int, int, str] | None:
         row = self.db.execute(
-            """SELECT size_bytes, mtime_ns, ctime_ns, inode, sha256
+            """SELECT size_bytes, mtime_ns, ctime_ns, inode_key, sha256
                FROM fingerprints WHERE project_root=? AND relative_path=?""",
             (root, sqlite_text(relative_path)),
         ).fetchone()
-        if row is None:
+        if row is None or not row[3]:
             return None
         return int(row[0]), int(row[1]), int(row[2]), int(row[3]), str(row[4])
 
@@ -63,9 +69,9 @@ class ScanCache:
     ) -> None:
         self.db.execute(
             """INSERT OR REPLACE INTO fingerprints
-               (project_root, relative_path, size_bytes, mtime_ns, sha256, ctime_ns, inode)
+               (project_root, relative_path, size_bytes, mtime_ns, sha256, ctime_ns, inode_key)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (root, sqlite_text(relative_path), size, mtime_ns, digest, ctime_ns, inode),
+            (root, sqlite_text(relative_path), size, mtime_ns, digest, ctime_ns, str(inode)),
         )
 
     def prune_missing(self, root: str, current_paths: Iterable[str]) -> int:

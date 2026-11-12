@@ -530,10 +530,13 @@ def run_scan(
                     skip_oversized=skip_oversized,
                     ignores=ignores,
                     store=inventory_store,
+                    read_signatures=not inventory_only,
                 )
     timer.lap("inventory")
     resumed_skipped = 0
     inventory_error_count = 0
+    worker_gpu = [0, 0]   # GPU dispatches and fallbacks reported by worker processes
+    cache_failures: list[str] = []
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
     hardware_threads = max(1, int(native_capabilities().get("hardware_threads", os.cpu_count() or 1)))
@@ -641,6 +644,9 @@ def run_scan(
 
                 def apply_outcome(item: FileTask, outcome: FileOutcome):
                     record, file_stat = item.record, item.expected_stat
+                    if outcome.gpu_counts:
+                        worker_gpu[0] += outcome.gpu_counts[0]
+                        worker_gpu[1] += outcome.gpu_counts[1]
                     cache_miss = item.digest_hint is None
                     try:
                         record.analyzed = outcome.analyzed
@@ -663,11 +669,21 @@ def run_scan(
                             )
                             if stable:
                                 record.sha256 = digest
-                                cache.put(
-                                    str(root), record.path, file_stat.st_size,
-                                    file_stat.st_mtime_ns, file_stat.st_ctime_ns,
-                                    file_stat.st_ino, digest,
-                                )
+                                try:
+                                    cache.put(
+                                        str(root), record.path, file_stat.st_size,
+                                        file_stat.st_mtime_ns, file_stat.st_ctime_ns,
+                                        file_stat.st_ino, digest,
+                                    )
+                                except (sqlite3.Error, OverflowError, ValueError) as exc:
+                                    # The cache only saves rehashing: its failure never
+                                    # fails the file, and it is reported once.
+                                    if not cache_failures:
+                                        finding_store.append_diagnostic(
+                                            f"fingerprint cache write failed ({type(exc).__name__}: {exc}); "
+                                            "later scans rehash these files"
+                                        )
+                                    cache_failures.append(record.path)
                             else:
                                 message = f"{record.path}: file changed while scan was in progress"
                                 record.error = message
@@ -839,7 +855,7 @@ def run_scan(
         },
         "vcs_provider_signal_count": vcs_provider_signal_count,
         "vcs_provider_categories": dict(sorted(vcs_provider_categories.items())),
-        "native_backend": native_capabilities(),
+        "native_backend": _with_worker_gpu(native_capabilities(), worker_gpu),
         "native_extension_available": native_available(),
         "execution": {
             "mode": f"bounded-{engine.mode}-pool",
@@ -1066,6 +1082,14 @@ def run_scan(
                 "red",
             )
     return exit_code
+
+
+def _with_worker_gpu(native: dict, worker_gpu: list[int]) -> dict:
+    """The coordinator's native counters plus those of the analysis worker processes."""
+    if any(worker_gpu):
+        native = {**native, "gpu_dispatches": int(native.get("gpu_dispatches", 0)) + worker_gpu[0],
+                  "gpu_fallbacks": int(native.get("gpu_fallbacks", 0)) + worker_gpu[1]}
+    return native
 
 
 def capabilities_report() -> dict:

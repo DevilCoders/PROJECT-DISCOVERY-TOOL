@@ -166,6 +166,14 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   source and ecosystems, and report an uncovered lockfile ecosystem as `UNKNOWN` (PDT-260).
 - A corrupt `--vuln-cache` file is detected before the scan (PDT-261), and `--vuln-db` opens
   databases on Windows UNC shares (PDT-262).
+- Inventory: both walkers make the same `--exclude-dir` decision with full Unicode case folding
+  (PDT-263); the Rust walker reports pre-1970 modification times (PDT-264); the Windows fallback
+  reports link targets without the `\\?\` prefix, so internal junctions are internal (PDT-265).
+- GPU dispatch and fallback counts include worker processes (PDT-266).
+- `--inventory-only` opens no file; file types come from names (PDT-267).
+- The fingerprint cache stores file IDs beyond 64 bits and never fails a file (PDT-268).
+- Inventory records are read in keyset pages, so the WAL no longer grows through the analysis
+  phase (PDT-269).
 
 ## 0.2.0 — 2026-11-05
 

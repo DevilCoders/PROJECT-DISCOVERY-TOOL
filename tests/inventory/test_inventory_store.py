@@ -452,3 +452,27 @@ def test_store_and_cache_databases_are_private_including_wal_files(tmp_path: Pat
     with ScanCache(tmp_path / "fingerprints.sqlite3"):
         pass
     assert stat_module.S_IMODE((tmp_path / "fingerprints.sqlite3").stat().st_mode) & 0o077 == 0
+
+
+def test_record_iteration_holds_no_read_snapshot_between_pages(tmp_path):
+    # Regression: one cursor stayed open for the whole analysis loop, so SQLite could not
+    # checkpoint past it and the WAL grew to about three times the store.
+    import sqlite3
+
+    path = tmp_path / "inventory.sqlite3"
+    with InventoryStore(path, batch_size=500) as store:
+        for index in range(1000):
+            store.append("file", FileRecord(f"dir/F{index:04}.py", index, ".py", "Python"))
+        store.flush()
+        records = store.iter_records("file", fetch_size=256)
+        first = [next(records) for _ in range(300)]      # well into the second page
+        other = sqlite3.connect(path)
+        other.execute("CREATE TABLE IF NOT EXISTS probe (value INTEGER)")
+        other.execute("INSERT INTO probe VALUES (1)")
+        other.commit()
+        busy, _, _ = other.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        other.close()
+        rest = list(records)
+    assert busy == 0
+    paths = [item["path"] for item in first + rest]
+    assert len(paths) == 1000 and paths == sorted(paths, key=str.casefold)

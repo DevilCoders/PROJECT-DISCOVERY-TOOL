@@ -14,6 +14,8 @@ struct Walker {
     stack: Vec<(PathBuf, ReadDir, usize)>,
     excluded_names: HashSet<String>,
     excluded_paths: HashSet<String>,
+    // The directory whose entries were pushed last, so skip_directory() can drop them.
+    last_pushed: Option<PathBuf>,
 }
 
 /// Relative path as an OS string. PyO3 converts it losslessly (surrogateescape on
@@ -60,11 +62,16 @@ fn hidden_entry(name: &str, metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn modified_ns(metadata: &fs::Metadata) -> u64 {
-    metadata.modified().ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .map(|value| value.as_nanos().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
+/// Signed nanoseconds since the Unix epoch, as os.lstat() reports them: times before 1970
+/// (such as the 1601 FILETIME zero some extractors leave) are negative, not 0.
+fn modified_ns(metadata: &fs::Metadata) -> i64 {
+    match metadata.modified() {
+        Ok(value) => match value.duration_since(UNIX_EPOCH) {
+            Ok(after) => after.as_nanos().min(i64::MAX as u128) as i64,
+            Err(before) => -(before.duration().as_nanos().min(i64::MAX as u128) as i64),
+        },
+        Err(_) => 0,
+    }
 }
 
 fn identity_ns(metadata: &fs::Metadata) -> (Option<u64>, Option<u64>, Option<u64>) {
@@ -95,7 +102,21 @@ impl Walker {
             stack: vec![(PathBuf::new(), initial, 0)],
             excluded_names: excluded_names.into_iter().map(|value| value.to_lowercase()).collect(),
             excluded_paths: excluded_paths.into_iter().map(|value| value.to_lowercase()).collect(),
+            last_pushed: None,
         })
+    }
+
+    /// Do not descend into the directory just yielded. The caller decides exclusions with
+    /// full Unicode case folding, which Rust's to_lowercase() does not implement, so both
+    /// backends prune exactly the directories they record as pruned.
+    fn skip_directory(&mut self) -> bool {
+        match (self.last_pushed.take(), self.stack.last()) {
+            (Some(pushed), Some((top, _, _))) if *top == pushed => {
+                self.stack.pop();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -103,7 +124,8 @@ impl Walker {
     }
 
     #[allow(clippy::type_complexity)]
-    fn __next__(&mut self) -> PyResult<Option<(OsString, String, u64, Option<u32>, u64, bool, OsString, Option<String>, usize, Option<u64>, Option<u64>, Option<u64>)>> {
+    fn __next__(&mut self) -> PyResult<Option<(OsString, String, u64, Option<u32>, i64, bool, OsString, Option<String>, usize, Option<u64>, Option<u64>, Option<u64>)>> {
+        self.last_pushed = None;
         loop {
             let (parent, next_entry, parent_depth) = match self.stack.last_mut() {
                 Some((path, entries, depth)) => (path.clone(), entries.next(), *depth),
@@ -162,7 +184,10 @@ impl Walker {
                 if !self.excluded_names.contains(&name_key) &&
                    !self.excluded_paths.contains(&path_key) {
                     match fs::read_dir(&path) {
-                        Ok(children) => self.stack.push((path.clone(), children, depth)),
+                        Ok(children) => {
+                            self.stack.push((path.clone(), children, depth));
+                            self.last_pushed = Some(path.clone());
+                        }
                         Err(value) => error = Some(value.to_string()),
                     }
                 }

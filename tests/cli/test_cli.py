@@ -585,6 +585,13 @@ def test_inventory_only_scan_reads_no_contents(tmp_path: Path, monkeypatch):
         raise AssertionError("inventory-only scans must not analyze file contents")
 
     monkeypatch.setattr(engine, "analyze_file", forbidden)
+    # Regression: the inventory still opened every file for a 512-byte signature probe.
+    import project_discovery.inventory.scanner as scanner
+
+    def no_sample(*_args, **_kwargs):
+        raise AssertionError("inventory-only scans must not open files")
+
+    monkeypatch.setattr(scanner, "_read_verified_sample", no_sample)
     project = _sample_project(tmp_path / "project")
     assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True, inventory_only=True) == 0
     report = _json_report(tmp_path / "out")
