@@ -163,6 +163,15 @@ _GO_TYPE = re.compile(
     r"(?<![\w$])type[ \t]++([A-Za-z_]\w*+)[ \t]++(?:\[[^\]\n]{0,200}+\][ \t]*+)?(struct|interface)\b"
 )
 _RUST_IMPL = re.compile(r"(?<![\w$])impl\b")
+# ``type ( A struct {...}; B interface {...} )``: one member per line of a type group.
+_GO_TYPE_GROUP = re.compile(r"(?<![\w$])type[ \t]*+\(")
+_GO_GROUP_MEMBER = re.compile(
+    r"(?m)^[ \t]*+([A-Za-z_]\w*+)[ \t]++(?:\[[^\]\n]{0,200}+\][ \t]*+)?(struct|interface)\b"
+)
+# Swift initializers, deinitializers and subscripts have no ``func`` keyword.
+_SWIFT_SPECIAL = re.compile(r"(?<![\w$.])(init|deinit|subscript)(?=[ \t]*+[?!]?[ \t]*+[(<{])")
+# A ``where`` clause lets rustfmt, ktlint and Swift put the opening brace on its own line.
+_WHERE_CLAUSE = re.compile(r"(?<![\w$])where(?![\w$])")
 _TYPEDEF = re.compile(r"(?<![\w$])typedef\b")
 _MACRO = re.compile(r"(?m)^[ \t]*+#[ \t]*+define[ \t]++([A-Za-z_]\w*+)")
 _JS_EXPORTS = re.compile(r"(?<![\w$])(?:module\.)?exports\.([A-Za-z_$][\w$]*+)[ \t]*+=")
@@ -490,10 +499,89 @@ def _body_after(clean: str, start: int, braces: dict[int, int], family: str = ""
     found = _TERMINATOR.search(clean, start, min(len(clean), start + _SIGNATURE_LOOKAHEAD))
     if found is None or found.group() != "{":
         return None
-    if family in _SAME_LINE_BRACES and "\n" in clean[start:found.start()]:
-        return None
+    if family in _SAME_LINE_BRACES:
+        gap = clean[start:found.start()]
+        if "\n" in gap and not _WHERE_CLAUSE.search(gap):
+            return None
     close = braces.get(found.start())
     return (found.start(), close) if close is not None else None
+
+
+def _after_constructor(clean: str, start: int, parens) -> int:
+    """After a Kotlin/Scala primary constructor (``class A<T>(\n val x: T,\n)``), else ``start``.
+
+    The same-line brace rule then applies to what follows the constructor, so a class
+    whose constructor spans lines keeps its body.
+    """
+    position = start
+    while position < len(clean) and clean[position] in " \t":
+        position += 1
+    if clean.startswith("<", position) or clean.startswith("[", position):
+        depth = 0
+        for index in range(position, min(len(clean), position + 2000)):
+            depth += {"<": 1, "[": 1, ">": -1, "]": -1}.get(clean[index], 0)
+            if depth == 0:
+                position = index + 1
+                break
+        while position < len(clean) and clean[position] in " \t":
+            position += 1
+    close = parens.get(position) if clean.startswith("(", position) else None
+    return close + 1 if close is not None else start
+
+
+def _after_initializers(clean: str, position: int, braces, parens) -> int:
+    """After a C++ constructor's member initializer list (``: a_(a), b_{b}``), else ``position``."""
+    index = position
+    while index < len(clean) and clean[index] in " \t\r\n":
+        index += 1
+    if not clean.startswith(":", index) or clean.startswith("::", index):
+        return position
+    index += 1
+    for _ in range(256):
+        while index < len(clean) and clean[index] in " \t\r\n":
+            index += 1
+        name = re.match(r"[A-Za-z_][\w:]*+(?:<[^<>;{}]{0,200}+>)?", clean[index:index + 400])
+        if name is None:
+            return position
+        index += name.end()
+        while index < len(clean) and clean[index] in " \t\r\n":
+            index += 1
+        pairs = parens if clean.startswith("(", index) else braces if clean.startswith("{", index) else None
+        close = pairs.get(index) if pairs is not None else None
+        if close is None:
+            return position
+        index = close + 1
+        while index < len(clean) and clean[index] in " \t\r\n":
+            index += 1
+        if not clean.startswith(",", index):
+            return index
+        index += 1
+    return position
+
+
+def _expression_body(clean: str, position: int, braces, parens) -> tuple[int, int] | None:
+    """``=> expr;`` after a C#/Dart signature: the span from the arrow to its ``;``."""
+    index = position
+    while index < len(clean) and clean[index] in " \t\r\n":
+        index += 1
+    if not clean.startswith("=>", index):
+        return None
+    arrow = index
+    index += 2
+    limit = min(len(clean), arrow + 20_000)
+    while index < limit:
+        char = clean[index]
+        if char == ";":
+            return arrow, index
+        if char in "({":
+            close = (parens if char == "(" else braces).get(index)
+            if close is None:
+                return None
+            index = close
+        elif char in ")}":
+            return None
+        index += 1
+    return None
 
 
 def _exported(family: str, name: str, prefix: str, kind: str, exported_names: set[str]) -> bool:
@@ -530,14 +618,17 @@ class _Definition:
     container: str = ""
 
 
-def _type_definitions(clean: str, spec: LexicalSpec, braces) -> list[_Definition]:
+def _type_definitions(clean: str, spec: LexicalSpec, braces, parens=None) -> list[_Definition]:
     found = []
     for keyword, kind in spec.type_keywords:
         for match in _TYPE_PATTERNS[keyword].finditer(clean):
             name = match.group(1)
             if name in _NOT_NAMES:
                 continue
-            body = _body_after(clean, match.end(), braces, spec.family)
+            header_end = match.end()
+            if spec.family in {"kotlin", "scala"} and parens is not None:
+                header_end = _after_constructor(clean, header_end, parens)
+            body = _body_after(clean, header_end, braces, spec.family)
             if body is None:
                 following = clean[match.end():match.end() + 40].lstrip()
                 if not (spec.bodiless_types and following[:1] in {"(", ":"}) and not (
@@ -613,6 +704,10 @@ def _keyword_functions(clean: str, spec: LexicalSpec, braces, parens) -> list[_D
                     if depth == 0:
                         following = following[index + 1:].lstrip()
                         break
+            if spec.family == "go" and following[:1] != "(":
+                # ``func() error {`` and ``func(i, j int) bool {`` are function literals:
+                # the word after the parameters is the result type, not a name.
+                continue
             if following[:1] == "(":
                 paren = clean.find("(", end, end + 200)
                 close = parens.get(paren) if paren != -1 else None
@@ -663,31 +758,44 @@ def _typed_functions(clean: str, spec: LexicalSpec, braces, parens, class_bodies
         close = parens.get(match.end() - 1)
         if close is None:
             continue
-        body = _body_after(clean, close + 1, braces)
+        header_end = _after_initializers(clean, close + 1, braces, parens) if spec.family == "cpp" else close + 1
+        body = _body_after(clean, header_end, braces)
+        if body is None and spec.family in {"csharp", "dart"}:
+            body = _expression_body(clean, close + 1, braces, parens)
         if body is None or _closes_outer_paren(clean, close + 1, body[0]):
             continue
         previous, previous_start = _previous_token(clean, match.start())
+        destructor = previous == "~"
+        if destructor:
+            # ``~Widget()`` (and ``Widget::~Widget()``): a destructor, not a function "Widget".
+            name = "~" + name
+            previous, previous_start = _previous_token(clean, previous_start)
         qualifier = ""
         if previous == ":" and clean[max(0, previous_start - 1):previous_start + 1] == "::":
-            qualifier, chain_start = _qualifier_before(clean, match.start())
+            qualifier, chain_start = _qualifier_before(clean, previous_start + 1 if destructor else match.start())
             if not qualifier:
                 continue
             previous, previous_start = _previous_token(clean, chain_start)
+        # ``Widget::Widget(...)`` and ``Widget::~Widget()`` need no return type.
+        special = bool(qualifier) and qualifier.rsplit(".", 1)[-1] == name.lstrip("~")
         if previous == "." or (previous == ">" and clean[previous_start - 1:previous_start + 1] == "->"):
             continue
         enclosing = [owner for start, end, owner in class_bodies if start < match.start() < end]
         in_class = bool(enclosing)
-        constructor = in_class and enclosing[-1] == name and not qualifier
+        constructor = in_class and enclosing[-1] == name.lstrip("~") and not qualifier
         if spec.untyped_methods:
             if not (in_class and previous in _JS_METHOD_PRECEDERS):
                 continue
-        elif not constructor and not (
+        elif not constructor and not special and not (
             previous and (previous[-1:].isalnum() or previous[-1:] in "_*&>]~")
             and previous not in _TYPE_PRECEDERS
         ):
             continue
+        kind = "method" if in_class else "function"
+        if special and not destructor:
+            kind = "constructor"
         found.append(_Definition(match.start(1), previous_start if previous_start >= 0 else match.start(),
-                                 "method" if in_class else "function", name, body, qualifier))
+                                 kind, name, body, qualifier))
     return found
 
 
@@ -701,7 +809,7 @@ def build_lexical_model(path: str, language: str, text: str) -> FileModel:
                       braces=braces, parens=parens)
     exported_names = js_exported_names(clean) if family == "js" else set()
 
-    definitions = _type_definitions(clean, spec, braces)
+    definitions = _type_definitions(clean, spec, braces, parens)
     if family == "rust":
         definitions += _rust_impls(clean, braces)
     if family == "go":
@@ -709,6 +817,35 @@ def build_lexical_model(path: str, language: str, text: str) -> FileModel:
             _Definition(m.start(1), m.start(), m.group(2), m.group(1), _body_after(clean, m.end(), braces))
             for m in _GO_TYPE.finditer(clean)
         ]
+        for group in _GO_TYPE_GROUP.finditer(clean):
+            close = parens.get(group.end() - 1)
+            if close is None:
+                continue
+            for member in _GO_GROUP_MEMBER.finditer(clean, group.end(), close):
+                definitions.append(_Definition(
+                    member.start(1), member.start(1), member.group(2), member.group(1),
+                    _body_after(clean, member.end(), braces),
+                ))
+    if family == "swift":
+        for match in _SWIFT_SPECIAL.finditer(clean):
+            name = match.group(1)
+            after = match.end()
+            while after < len(clean) and clean[after] in " \t?!":
+                after += 1
+            if clean.startswith("<", after):  # init<T>(...)
+                depth = 0
+                for index in range(after, min(len(clean), after + 2000)):
+                    depth += {"<": 1, ">": -1}.get(clean[index], 0)
+                    if depth == 0:
+                        after = index + 1
+                        break
+                while after < len(clean) and clean[after] in " \t":
+                    after += 1
+            close = parens.get(after) if clean.startswith("(", after) else None
+            body = _body_after(clean, close + 1 if close is not None else after, braces, family)
+            if body is not None:
+                kind = "constructor" if name == "init" else "function"
+                definitions.append(_Definition(match.start(1), match.start(1), kind, name, body))
     if family in {"c", "cpp"}:
         definitions += _typedefs(clean, braces)
     definitions += _keyword_functions(clean, spec, braces, parens)
@@ -801,7 +938,9 @@ def identifier_references(counts: dict[str, int], definitions) -> set[str]:
     for word, count in counts.items():
         if count > defined.get(word, 0) and word not in _NOT_NAMES:
             references.add(word)
-            if len(references) >= _MAX_REFERENCES:
+            # One past the per-file fact limit, so emit_references sees and records the cut;
+            # stopping exactly at the limit hid it (no "Code index truncated" finding).
+            if len(references) > _MAX_REFERENCES:
                 break
     return references
 
@@ -828,10 +967,11 @@ def _calls(model: FileModel, clean: str, ordered, function_bodies) -> None:
     function_bodies.sort()
     open_bodies: list[tuple[int, str]] = []  # (body end, qualified), innermost last
     next_body = 0
+    go = model.language == "Go"
     for match in _CALL.finditer(clean):
         name, offset = match.group(1), match.start(1)
-        if name in _NOT_NAMES or offset in definition_offsets:
-            continue
+        if name in _NOT_NAMES or offset in definition_offsets or (go and name == "type"):
+            continue  # Go's ``type (`` opens a type group, not a call
         while next_body < len(function_bodies) and function_bodies[next_body][0] < offset:
             start, end, qualified = function_bodies[next_body]
             while open_bodies and open_bodies[-1][0] < start:

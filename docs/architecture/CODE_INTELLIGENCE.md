@@ -19,7 +19,7 @@ always generated or minified, and the code-index analyzer reports them as `UNKNO
 | Backend | Languages | Method |
 |---|---|---|
 | Syntax tree | Python | Standard-library `ast`. Symbols carry qualified names (`Class.method`), decorators, parameters and async markers. Call targets are resolved through `import`/`from ... import` aliases (including relative imports), `self`/`cls`, module-level definitions, and the class of the receiver when the code states it (see below). |
-| Structural lexer | C, C++, C/C++ headers, Objective-C/C++, CUDA, OpenCL, GLSL, HLSL, Metal, WGSL, Java, Kotlin, Scala, Groovy, C#, Swift, Dart, JavaScript, TypeScript, Vue, Svelte, Go, Rust, PHP, Solidity, Zig, Arduino | A linear-time cleaner blanks comments, string contents and (JavaScript/TypeScript) regular-expression literals while keeping every offset, so braces and parentheses are paired exactly. Definitions come from type keywords, function keywords and C-style typed signatures, nested by brace containment; calls carry their receiver; imports are read per family. A `.m` file, which can be Objective-C or MATLAB, is modelled as Objective-C when it has `#import`, `#include`, `@interface`, `@implementation`, `@protocol` or `@class` at the start of a line, and is not modelled otherwise. |
+| Structural lexer | C, C++, C/C++ headers, Objective-C/C++, CUDA, OpenCL, GLSL, HLSL, Metal, WGSL, Java, Kotlin, Scala, Groovy, C#, Swift, Dart, JavaScript, TypeScript, Vue, Svelte, Go, Rust, PHP, Solidity, Zig, Arduino | A linear-time cleaner blanks comments, string contents and (JavaScript/TypeScript) regular-expression literals while keeping every offset, so braces and parentheses are paired exactly. Definitions come from type keywords, function keywords and C-style typed signatures, nested by brace containment; calls carry their receiver; imports are read per family. Recognized forms include Kotlin/Scala classes whose primary constructor spans lines, `where` clauses before a brace on its own line (Rust, Kotlin, Swift), Go `type ( ... )` groups (function literals such as `func(i, j int) bool {` are not definitions), Swift `init`/`deinit`/`subscript`, C++ out-of-class constructors and destructors (`Widget::Widget(...) : a_(a) {`, `Widget::~Widget()`), and C#/Dart expression-bodied members (`=> expr;`). A `.m` file, which can be Objective-C or MATLAB, is modelled as Objective-C when it has `#import`, `#include`, `@interface`, `@implementation`, `@protocol` or `@class` at the start of a line, and is not modelled otherwise. |
 | Tree-sitter refinement | C, C++, C/C++ headers, CUDA, Arduino, Java, C#, Kotlin, Scala, Swift, JavaScript, TypeScript (and TSX), Go, Rust, PHP, Solidity, when the grammar is provisioned locally | The file is parsed, and the grammar's tags query, completed by patterns PDT adds where a bundled query has gaps, replaces the lexer's symbols and calls: exact definition spans and nesting, method containers (namespaces, Go receivers, Rust `impl` blocks, Swift extensions, C++ `Type::method`), constructors, abstract and interface members, expression-bodied members and calls the lexer cannot see (Kotlin trailing lambdas), and no false definitions or calls from prototypes, declarations and initializers. The cleaned text, brace pairs, strings, imports and macros stay the lexer's, so both backends keep one contract. |
 
 **When the Tree-sitter refinement applies.** `tree-sitter-language-pack` must be installed and the language's grammar already in its local cache: PDT never downloads grammars (see the [Operations Guide](../guides/OPERATIONS.md)). The lexical model is kept when no grammar is provisioned, when `PDT_CODE_MODEL=lexical` is set, when error nodes cover more than 20% of the parse, when the syntax tree nests deeper than 4,096 levels (Tree-sitter's query cursor slows down quadratically on such trees; the deepest of 1,124 real npm JavaScript files measured 53 levels), and on any parser failure. Regions the tree does not structure (error nodes, Rust macro arguments and `macro_rules!` bodies, C/C++ `#define` bodies) keep the lexer's definitions and calls. `metrics.code_index.symbols.models` counts the files each backend modelled, per language, and `pdt capabilities` shows which languages a provisioned grammar refines. Results are still structural, without type resolution, and reported as `INFERRED`.
@@ -47,7 +47,9 @@ message topics and more). Facts are written to the scan's private SQLite invento
 same transaction as the file's findings, so `--resume` stays consistent. Writes are
 idempotent and bounded per file (5,000 symbols, 20,000 calls, 10,000 references and 5,000
 domain facts) and per table (5–20 million rows); a ceiling that is reached is reported as an
-`UNKNOWN` "Code index truncated" finding.
+`UNKNOWN` "Code index truncated" finding. `metrics.code_index.truncated.kinds` counts the files per
+cut kind; a cut of references also qualifies the dead-code finding, and names that are called are
+never dead-code candidates.
 
 After analysis, `intelligence.index.analyze_code_index` runs these passes over a read-only
 connection using temporary tables (memory does not grow with repository size):
@@ -55,10 +57,10 @@ connection using temporary tables (memory does not grow with repository size):
 | Pass | Result |
 |---|---|
 | Symbols | Definitions by language and kind. |
-| Call graph | Python calls resolved to module-qualified definitions; lexical calls resolved by name within a language group (same file, unique, ambiguous or external); recursion cycles from strongly connected components (Kosaraju, capped at 500,000 edges). |
+| Call graph | Python calls resolved to module-qualified definitions; lexical calls resolved by name within a language group (same file, unique, ambiguous or external); recursion cycles from strongly connected components (Kosaraju, capped at 500,000 edges). A lexical call resolves in its own file only without a receiver, through `this`/`self`/`Self`, or through the caller's own class; a call through another receiver (`items.size()`, `PathBuf::new()`) never resolves to the caller itself. A Python module name that several files define (`svc_a/helpers.py` and `svc_b/helpers.py` are both `helpers`) resolves to the file whose import root contains the importer, or not at all; such definitions are named `path:qualified`. Calls through a PEP 420 namespace package (`ns.pkg.mod.run` for `src/ns/pkg/mod.py`) resolve to the package-chain name. |
 | Unreferenced private functions | Private definitions whose name appears nowhere in the scan: dead-code candidates. Reflection and string dispatch are not visible. |
 | Test links | Public functions referenced from test files. |
-| Module graph | JavaScript/TypeScript, C/C++, JVM, Go, Rust, PHP and Dart imports resolved to files, external packages and dependency cycles (Python has its own module graph). |
+| Module graph | JavaScript/TypeScript, C/C++, JVM, Go, Rust, PHP and Dart imports resolved to files, external packages and dependency cycles (Python has its own module graph, which names modules by import name, `pkg.mod` rather than `src.pkg.mod`, keeps the path in each module and edge, and resolves imports through PEP 420 namespace packages). Go imports resolve against the module paths of the scanned `go.mod` files; without one, a directory suffix of at least two segments. Standard-library imports (no dot in the first segment) and other modules stay external. |
 | Complexity, type usage, concurrency model, memory | Project totals of the per-file facts. |
 | Data flow | Totals of taint flows and Python flows that cross module boundaries (see §4). |
 | Embedded, firmware, HDL, shaders, frontend | Domain summaries (targets, binary hardening, design hierarchy, shader inventory, component graph and routes). |
@@ -77,7 +79,7 @@ pdt query OUTPUT --references parse_config
 ```
 
 `OUTPUT` is the scan's output directory (the index is `OUTPUT/.pdt-cache/inventory.sqlite3`).
-Names may be bare (`run`) or qualified (`Engine.run`).
+Names may be bare (`run`), qualified (`Engine.run`) or module-qualified as the call graph prints them (`pkg.engine.Engine.run`, matched against the defining file's path). Callers include calls resolved inside their own file (`self.run()`, `this.run()`).
 
 ## 3. Quality analyzers
 

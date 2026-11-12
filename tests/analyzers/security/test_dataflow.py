@@ -373,3 +373,27 @@ def test_scan_joins_flows_into_methods_of_imported_classes(tmp_path: Path):
     assert cross["evidence"] == [
         "shop/views.py:5 `request.args` (line 5) -> shop.store.Store.run() -> `(...).execute` at shop/store.py:4",
     ]
+
+
+def test_modules_that_share_a_name_join_only_the_importers_own(tmp_path: Path):
+    # Regression: svc_a/helpers.py and svc_b/helpers.py are both module "helpers", and the
+    # taint join used whichever summary came first: a call to svc_a's harmless helper was
+    # reported as a HIGH command injection through svc_b's os.system.
+    project = tmp_path / "project"
+    for service, body in (("svc_a", "def run(value):\n    return value.upper()\n"),
+                          ("svc_b", "import os\ndef run(value):\n    return os.system(value)\n")):
+        (project / service).mkdir(parents=True)
+        (project / service / "helpers.py").write_text(body, encoding="utf-8")
+        (project / service / "app.py").write_text(
+            "from flask import request\nimport helpers\n"
+            "def handle():\n    return helpers.run(request.args['x'])\n",
+            encoding="utf-8",
+        )
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    cross = [item for item in report["findings"] if item["title"].endswith("across modules")]
+    # Only svc_b's own call reaches svc_b's sink.
+    assert [len(item["evidence"]) for item in cross] == [1]
+    assert cross[0]["evidence"][0].startswith("svc_b/app.py:4 ")
+    assert cross[0]["evidence"][0].endswith("at svc_b/helpers.py:3")

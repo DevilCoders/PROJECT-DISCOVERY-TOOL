@@ -369,6 +369,12 @@ class InventoryStore:
                     state = json.loads(previous[0]) if previous else {"tables": [], "files": 0}
                     state["tables"] = sorted(set(state["tables"]) | self._code_truncated)
                     state["files"] += len(file_truncations)
+                    # Files per truncated kind (references, facts, ...), so passes know what
+                    # was cut: a reference cut makes dead-code candidates unreliable.
+                    kinds = state.setdefault("kinds", {})
+                    for _, truncated in file_truncations:
+                        for kind in truncated:
+                            kinds[kind] = kinds.get(kind, 0) + 1
                     self.db.execute(
                         """INSERT INTO inventory_metadata(key, value) VALUES ('code_index_truncated', ?)
                            ON CONFLICT(key) DO UPDATE SET value=excluded.value""",

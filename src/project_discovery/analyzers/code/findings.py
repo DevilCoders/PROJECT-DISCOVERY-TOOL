@@ -63,24 +63,26 @@ def loop_bodies(model: FileModel) -> list[tuple[int, int]]:
 
 
 class Intervals:
-    """Nested [start, end) intervals answering depth and containment by offset."""
+    """[start, end) intervals (loop bodies, lock regions) answering containment by offset."""
 
     def __init__(self, intervals: list[tuple[int, int]]) -> None:
         self.intervals = sorted(intervals)
-        self.starts = [start for start, _ in self.intervals]
-
-    def depth(self, offset: int) -> int:
-        index = bisect.bisect_right(self.starts, offset)
-        return sum(1 for start, end in self.intervals[:index] if start < offset < end)
+        # The union of the open intervals (start, end), merged where they overlap: one
+        # binary search answers containment. Walking back through every earlier interval
+        # cost O(loops) per call, minutes on large generated sources.
+        merged: list[list[int]] = []
+        for start, end in self.intervals:
+            if merged and start < merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        self._starts = [start for start, _ in merged]
+        self._ends = [end for _, end in merged]
 
     def contains(self, offset: int) -> bool:
-        index = bisect.bisect_right(self.starts, offset) - 1
-        while index >= 0:
-            start, end = self.intervals[index]
-            if start < offset < end:
-                return True
-            index -= 1
-        return False
+        """Whether ``offset`` lies strictly inside one of the intervals."""
+        index = bisect.bisect_left(self._starts, offset) - 1
+        return index >= 0 and offset < self._ends[index]
 
     def deepest(self) -> list[tuple[int, int, int]]:
         """(start, end, depth) for every interval, depth 1 for outermost."""

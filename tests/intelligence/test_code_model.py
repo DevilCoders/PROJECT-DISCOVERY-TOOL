@@ -224,3 +224,103 @@ def test_m_files_are_modelled_as_objective_c_only_when_their_content_is(tmp_path
         assert (model.language if model else None) == expected, path.name
     model = model_for(objc, FileRecord("Widget.m", objc.stat().st_size, ".m", AMBIGUOUS_M, mtime_ns=1))
     assert "clamp" in {symbol.name for symbol in model.symbols}
+
+
+def test_interval_containment_is_exact_and_logarithmic():
+    import time
+
+    from project_discovery.analyzers.code.findings import Intervals
+
+    intervals = Intervals([(0, 10), (2, 5), (10, 20), (30, 40), (35, 50)])
+    expected = {0: False, 1: True, 3: True, 10: False, 11: True, 20: False, 25: False, 36: True, 45: True, 50: False}
+    assert {offset: intervals.contains(offset) for offset in expected} == expected
+    # Regression: each query walked back through every earlier sibling interval, O(loops)
+    # per call, so 20,000 calls after 20,000 sibling loops took minutes.
+    siblings = Intervals([(index * 10, index * 10 + 5) for index in range(20_000)])
+    started = time.perf_counter()
+    assert not any(siblings.contains(index * 10 + 7) for index in range(20_000))
+    assert time.perf_counter() - started < 2.0
+
+
+def test_loop_analyzers_stay_fast_on_large_generated_sources(tmp_path):
+    # 30,000 sibling loops in about 3 MB: the old per-call walk over earlier loops needed
+    # about half a minute here; containment by binary search keeps it to seconds.
+    import time
+
+    from project_discovery.analyzers.code.performance import PerformanceHotspotAnalyzer
+    from project_discovery.models import FileRecord
+
+    path = tmp_path / "generated.js"
+    path.write_text("".join(
+        f"function f{index}(items) {{\n  for (const item of items) {{ total += item; }}\n  emit{index}(items);\n}}\n"
+        for index in range(30_000)
+    ), encoding="utf-8")
+    info = path.stat()
+    record = FileRecord("generated.js", info.st_size, ".js", "JavaScript", mtime_ns=info.st_mtime_ns)
+    started = time.perf_counter()
+    PerformanceHotspotAnalyzer().analyze(path, record)
+    assert time.perf_counter() - started < 20.0
+
+
+def _symbols(model):
+    return {(symbol.kind, symbol.qualified) for symbol in model.symbols}
+
+
+def _callers(model):
+    return {(call.caller, call.callee) for call in model.calls}
+
+
+def test_bodies_after_multi_line_headers():
+    # Regression: the same-line brace rule dropped the body of a Kotlin class whose primary
+    # constructor spans lines (ktlint's layout) and of a Rust function with a where clause
+    # (rustfmt's layout), so methods became top-level and calls went to <module>.
+    from project_discovery.intelligence.model.lexical import build_lexical_model
+
+    kotlin = build_lexical_model("a.kt", "Kotlin", (
+        "class OrderService(\n    private val repo: Repo,\n) {\n"
+        "    fun place(order: Order) {\n        repo.save(order)\n    }\n}\n"
+    ))
+    assert ("method", "OrderService.place") in _symbols(kotlin)
+    rust = build_lexical_model("a.rs", "Rust", (
+        "fn largest<T>(list: &[T]) -> &T\nwhere\n    T: PartialOrd,\n{\n    pick(list)\n}\n"
+    ))
+    assert next(symbol for symbol in rust.symbols if symbol.name == "largest").body is not None
+    assert ("largest", "pick") in _callers(rust)
+
+
+def test_definitions_that_were_missed_or_invented():
+    from project_discovery.intelligence.model.lexical import build_lexical_model
+
+    go = build_lexical_model("a.go", "Go", (
+        "package a\n\ntype (\n\tUser struct {\n\t\tName string\n\t}\n\tRepo interface {\n\t\tFind() User\n\t}\n)\n\n"
+        "func main() {\n\tsort.Slice(xs, func(i, j int) bool {\n\t\treturn less(xs, i, j)\n\t})\n"
+        "\tdefer func() error {\n\t\treturn nil\n\t}()\n}\n"
+    ))
+    assert {("struct", "User"), ("interface", "Repo")} <= _symbols(go)
+    assert not {symbol.name for symbol in go.symbols} & {"bool", "error", "type"}
+    assert "type" not in {call.callee for call in go.calls}
+    assert ("main", "less") in _callers(go)  # the closure's call belongs to main
+
+    swift = build_lexical_model("p.swift", "Swift", (
+        "struct Point {\n    var x: Int\n    init(x: Int) {\n        self.x = clamp(x)\n    }\n"
+        "    deinit {\n        release()\n    }\n}\n"
+    ))
+    assert ("constructor", "Point.init") in _symbols(swift)
+    assert {("Point.init", "clamp"), ("Point.deinit", "release")} <= _callers(swift)
+
+    cpp = build_lexical_model("w.cpp", "C++", (
+        "Widget::Widget(int size) : size_(size), name_{\"w\"} {\n    init();\n}\n"
+        "Widget::~Widget() {\n    release();\n}\n"
+    ))
+    symbols = _symbols(cpp)
+    assert ("constructor", "Widget.Widget") in symbols
+    assert any(qualified == "Widget.~Widget" for _, qualified in symbols)
+    assert ("function", "Widget") not in symbols
+    assert {("Widget.Widget", "init"), ("Widget.~Widget", "release")} <= _callers(cpp)
+
+    csharp = build_lexical_model("s.cs", "C#", (
+        "class Service {\n    bool IsValid(int x) => Check(x) && x > 0;\n    void Run() { IsValid(1); }\n}\n"
+    ))
+    assert ("method", "Service.IsValid") in _symbols(csharp)
+    assert ("Service.IsValid", "Check") in _callers(csharp)
+    assert ("<module>", "IsValid") not in _callers(csharp)

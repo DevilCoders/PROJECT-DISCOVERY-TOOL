@@ -201,6 +201,15 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   evidence as no links (PDT-285), compares every resolved package from
   `metrics.code_index.dependencies` (PDT-286), and keeps inputs with one root apart (PDT-287).
 - `tools/benchmark.py` records a failed scan as failed and exits with its code (PDT-288).
+- Code index: Python modules that several files define resolve to the importer's own file,
+  so no taint flow or call edge crosses unrelated services (PDT-289); `pdt query --callers`
+  finds same-file and module-qualified callers (PDT-290); Go standard-library imports never
+  match local directories (PDT-291); delegation through another receiver is not recursion
+  (PDT-292); bodies after multi-line headers (PDT-293) and Go type groups, closures, Swift
+  `init`, C++ out-of-class constructors and destructors and C# expression members (PDT-294)
+  are modelled; a reference cut is reported and called functions are never dead code
+  (PDT-295); loop containment is logarithmic (PDT-296); the Python dependency graph names
+  modules by import name and resolves namespace packages (PDT-297).
 
 ## 0.2.0 — 2026-11-05
 

@@ -63,6 +63,31 @@ def _connect(inventory_path: Path) -> sqlite3.Connection:
     return db
 
 
+def _namespace_alias(path: str, module: str) -> str | None:
+    """The name a module has through the namespace directory above its top package.
+
+    ``src/ns/pkg/mod.py`` is ``pkg.mod`` by package chain, but code imports it as
+    ``ns.pkg.mod`` when ``ns`` is a PEP 420 namespace package (no ``__init__.py``).
+    """
+    directories = path.split("/")[:-1]
+    package_depth = module.count(".") + (1 if path.endswith("/__init__.py") or path == "__init__.py" else 0)
+    top = len(directories) - package_depth
+    if package_depth == 0 or top < 1:
+        return None
+    namespace = directories[top - 1]
+    return f"{namespace}.{module}" if namespace.isidentifier() else None
+
+
+def _namespace_resolved(fq: str, aliases: dict[str, str]) -> str:
+    if aliases:
+        parts = fq.split(".")
+        for end in range(len(parts), 1, -1):
+            owner = aliases.get(".".join(parts[:end]))
+            if owner is not None:
+                return ".".join([owner, *parts[end:]])
+    return fq
+
+
 def _placeholders(values: Iterable[str]) -> str:
     return ",".join("?" for _ in values)
 
@@ -83,11 +108,18 @@ class _Context:
             ) WITHOUT ROWID"""
         )
         rows = []
+        namespace_names: dict[str, list[str]] = defaultdict(list)
+        modules: set[str] = set()
         for record in records:
             if not supports_language(record.language):
                 continue
             posix = record.path.replace("\\", "/")
             module = _import_name(posix, package_dirs) if record.language == "Python" else None
+            if module:
+                modules.add(module)
+                alias = _namespace_alias(posix, module)
+                if alias:
+                    namespace_names[alias].append(module)
             rows.append((
                 sqlite_text(record.path), record.language,
                 _LANGUAGE_GROUPS.get(record.language, record.language), module,
@@ -99,6 +131,11 @@ class _Context:
                 rows.clear()
         db.executemany("INSERT OR IGNORE INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
         db.execute("CREATE INDEX temp.files_base ON files(base)")
+        # ``ns.pkg.mod`` -> ``pkg.mod`` for modules below a PEP 420 namespace directory.
+        self.namespace_aliases = {
+            alias: owners[0] for alias, owners in namespace_names.items()
+            if len(owners) == 1 and alias not in modules
+        }
         self.file_count = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
 
 
@@ -193,14 +230,75 @@ def _python_target(target: str, module: str, package: bool) -> str | None:
     return target
 
 
+def _ambiguous_modules(db: sqlite3.Connection) -> dict[str, list[str]]:
+    """Python module names that more than one scanned file defines, with those files.
+
+    A module outside any package is named by its stem, so svc_a/helpers.py and
+    svc_b/helpers.py are both ``helpers`` (also conftest.py, setup.py, handler.py).
+    """
+    ambiguous: dict[str, list[str]] = defaultdict(list)
+    for module, path in db.execute(
+        """SELECT module, path FROM files WHERE language = 'Python' AND module IN (
+               SELECT module FROM files WHERE language = 'Python' AND module IS NOT NULL
+               GROUP BY module HAVING COUNT(*) > 1)"""
+    ):
+        ambiguous[module].append(path)
+    return dict(ambiguous)
+
+
+def _module_root(module: str, path: str) -> str:
+    """The directory ``module`` is imported from, as ``path`` locates it ("" for the root)."""
+    relative = module.replace(".", "/")
+    for suffix in (relative + ".py", relative + ".pyi", relative + "/__init__.py"):
+        if path == suffix or path.endswith("/" + suffix):
+            return path[: len(path) - len(suffix)]
+    return posixpath.dirname(path) + "/"
+
+
+def _disambiguated(fq: str, importer: str, ambiguous: dict[str, list[str]]) -> str | None:
+    """``fq``, or ``path:rest`` when its module is defined by several files.
+
+    The file whose import root contains the importer is chosen (the innermost one), as
+    ``sys.path[0]`` picks a script's own directory. With no single such file the call
+    stays unresolved: joining an arbitrary file of that name reported a sink in
+    svc_b/helpers.py as a HIGH flow from svc_a/app.py.
+    """
+    if not ambiguous:
+        return fq
+    parts = fq.split(".")
+    for end in range(len(parts), 0, -1):
+        module = ".".join(parts[:end])
+        paths = ambiguous.get(module)
+        if paths is None:
+            continue
+        rest = ".".join(parts[end:])
+        if importer in paths:
+            chosen = [importer]
+        else:
+            roots = [(_module_root(module, item), item) for item in paths]
+            fitting = [(root, item) for root, item in roots if importer.startswith(root)]
+            deepest = max((len(root) for root, _ in fitting), default=-1)
+            chosen = [item for root, item in fitting if len(root) == deepest]
+        if len(chosen) != 1:
+            return None
+        return f"{chosen[0]}:{rest}" if rest else chosen[0]
+    return fq
+
+
 def _call_graph(context: _Context) -> tuple[dict, list[Finding]]:
     db = context.db
     kinds = _placeholders(_CALLABLE_KINDS)
+    ambiguous = _ambiguous_modules(db)
+    db.execute("CREATE TEMP TABLE py_ambiguous (module TEXT PRIMARY KEY) WITHOUT ROWID")
+    db.executemany("INSERT INTO py_ambiguous VALUES (?)", [(module,) for module in ambiguous])
     db.execute("CREATE TEMP TABLE py_defs (fq TEXT PRIMARY KEY, path TEXT, kind TEXT) WITHOUT ROWID")
+    # Definitions in a module that several files share are named ``path:qualified``.
     db.execute(
         f"""INSERT OR IGNORE INTO py_defs
-            SELECT f.module || '.' || s.qualified, s.path, s.kind FROM code_symbols s
-            JOIN files f ON f.path = s.path
+            SELECT CASE WHEN a.module IS NULL THEN f.module || '.' || s.qualified
+                        ELSE s.path || ':' || s.qualified END, s.path, s.kind
+            FROM code_symbols s JOIN files f ON f.path = s.path
+            LEFT JOIN py_ambiguous a ON a.module = f.module
             WHERE f.language = 'Python' AND f.module IS NOT NULL AND s.kind IN ({kinds})""",
         _CALLABLE_KINDS,
     )
@@ -212,7 +310,12 @@ def _call_graph(context: _Context) -> tuple[dict, list[Finding]]:
     ):
         resolved = _python_target(target, module, bool(package))
         if resolved:
-            caller_fq = module if caller == "<module>" else f"{module}.{caller}"
+            resolved = _disambiguated(_namespace_resolved(resolved, context.namespace_aliases), path, ambiguous)
+        if resolved:
+            if module in ambiguous:
+                caller_fq = path if caller == "<module>" else f"{path}:{caller}"
+            else:
+                caller_fq = module if caller == "<module>" else f"{module}.{caller}"
             batch.append((caller_fq, resolved, path, line))
             if len(batch) >= 8192:
                 db.executemany("INSERT INTO py_calls VALUES (?, ?, ?, ?)", batch)
@@ -242,12 +345,24 @@ def _call_graph(context: _Context) -> tuple[dict, list[Finding]]:
         _CALLABLE_KINDS,
     )
     db.execute("CREATE INDEX temp.lex_names_key ON lex_names(name, grp)")
+    # A call through another receiver (items.size(), PathBuf::new()) is not a call of the
+    # same-named function in this file, and never of the caller itself: resolving it by
+    # name alone reported delegation as recursion. Receiverless calls, this./self./Self::
+    # calls and calls through the caller's own class name resolve in the file.
+    db.create_function(
+        "pdt_class_of", 1, lambda qualified: qualified.rpartition(".")[0] if qualified else "", deterministic=True,
+    )
     db.execute(
         f"""CREATE TEMP TABLE lex_calls AS
             SELECT c.path AS path, c.caller AS caller, c.callee AS callee, c.line AS line, f.grp AS grp,
+                   COALESCE(c.target, '') AS target,
                    CASE
-                     WHEN EXISTS (SELECT 1 FROM code_symbols s WHERE s.path = c.path AND s.name = c.callee
-                                  AND s.kind IN ({kinds})) THEN 'local'
+                     WHEN (COALESCE(c.target, '') = '' OR c.target LIKE '@%'
+                           OR c.target = '~' || pdt_class_of(c.caller) || '.' || c.callee)
+                          AND EXISTS (SELECT 1 FROM code_symbols s WHERE s.path = c.path AND s.name = c.callee
+                                      AND s.kind IN ({kinds})) THEN 'local'
+                     WHEN c.target LIKE '~%' AND n.n = 1 AND n.path = c.path AND n.qualified = c.caller
+                       THEN 'external'
                      WHEN n.n = 1 THEN 'unique'
                      WHEN n.n > 1 THEN 'ambiguous'
                      ELSE 'external'
@@ -290,6 +405,8 @@ def _call_graph(context: _Context) -> tuple[dict, list[Finding]]:
                 FROM lex_calls c
                 LEFT JOIN code_symbols s ON c.resolution = 'local' AND s.path = c.path AND s.name = c.callee
                      AND s.kind IN ({kinds})
+                     -- this.run() and Engine::run() name one function, not every run() in the file.
+                     AND (c.target = '' OR s.qualified = substr(c.target, 2))
                 LEFT JOIN lex_names n ON c.resolution = 'unique' AND n.name = c.callee AND n.grp = c.grp
                 WHERE c.resolution IN ('local', 'unique') AND c.caller != '<module>' LIMIT ?""",
             (*_CALLABLE_KINDS, remaining),
@@ -350,12 +467,16 @@ def _unreferenced(context: _Context) -> tuple[dict, list[Finding]]:
     entries = sorted(_ENTRY_NAMES)
     where = f"""s.kind IN ({_placeholders(_FUNCTION_KINDS)}) AND s.exported = 0 AND f.test = 0
         AND s.name NOT LIKE '\\_\\_%' ESCAPE '\\' AND s.name NOT IN ({_placeholders(entries)})
-        AND NOT EXISTS (SELECT 1 FROM code_references r WHERE r.name = s.name)"""
+        AND NOT EXISTS (SELECT 1 FROM code_references r WHERE r.name = s.name)
+        AND NOT EXISTS (SELECT 1 FROM code_calls c WHERE c.callee = s.name)"""
     parameters = (*_FUNCTION_KINDS, *entries)
     count = db.execute(
         f"SELECT COUNT(*) FROM code_symbols s JOIN files f ON f.path = s.path WHERE {where}", parameters,
     ).fetchone()[0]
+    cut = int(context.truncated.get("kinds", {}).get("references", 0))
     value = {"unreferenced_private_functions": count}
+    if cut:
+        value["references_truncated_files"] = cut
     if not count:
         return value, []
     listed = db.execute(
@@ -367,7 +488,9 @@ def _unreferenced(context: _Context) -> tuple[dict, list[Finding]]:
         "call_graph", "Unreferenced private functions",
         f"{count:,} private (non-exported) function(s) or method(s) are never referenced by name "
         "anywhere in the scanned code: dead-code candidates. Reflection, string-based dispatch, "
-        "framework registration and code outside the scan are not visible, so confirm before removal.",
+        "framework registration and code outside the scan are not visible, so confirm before removal."
+        + (f" {cut:,} file(s) had more distinct names than the index keeps, so a name used only in "
+           "those files can be listed here wrongly." if cut else ""),
         confidence="INFERRED", analyzer="code-index", severity="LOW",
         evidence=[f"{path}:{line} {qualified}" for path, line, qualified in listed],
         recommendation="Remove confirmed dead code, or document why it is reached indirectly.",
@@ -422,13 +545,37 @@ def _module_graph(context: _Context) -> tuple[dict, list[Finding]]:
     edge_count = 0
     external: Counter = Counter()
     resolved = unresolved = 0
-    # Every directory suffix of a Go package ("a/b/c", "b/c", "c") maps to its directory,
-    # so an import path such as github.com/org/repo/b/c resolves without a module file.
+    # Go imports resolve against the module paths the scanned go.mod files declare. Without
+    # a go.mod, a directory suffix of at least two segments ("b/c" of .../repo/b/c) is used.
+    # A single trailing segment never matches: "log", "net/http" or "encoding/json" found
+    # local log/, http/ or json/ directories, inventing edges and module cycles.
+    go_dirs = {directory for (directory,) in db.execute("SELECT DISTINCT dir FROM files WHERE language = 'Go'")}
+    go_modules = sorted(
+        ((name, posixpath.dirname(path)) for name, path, values in _fact_rows(db, "package_name")
+         if values.get("ecosystem") == "go"),
+        key=lambda item: -len(item[0]),
+    )
     go_suffixes: dict[str, str] = {}
-    for (directory,) in db.execute("SELECT DISTINCT dir FROM files WHERE language = 'Go'"):
-        parts = directory.split("/") if directory else []
-        for start in range(len(parts)):
-            go_suffixes.setdefault("/".join(parts[start:]), directory)
+    if not go_modules:
+        for directory in go_dirs:
+            parts = directory.split("/") if directory else []
+            for start in range(len(parts) - 1):
+                go_suffixes.setdefault("/".join(parts[start:]), directory)
+
+    def go_directory(target: str) -> str | None:
+        for module, root in go_modules:
+            if target == module or target.startswith(module + "/"):
+                directory = posixpath.join(root, target[len(module) + 1:]) if target != module else root
+                directory = "" if directory in {"", "."} else posixpath.normpath(directory)
+                return directory if directory in go_dirs else None
+        if go_modules or "." not in target.split("/", 1)[0]:
+            return None  # another module, or the standard library (no dot in the first segment)
+        segments = target.split("/")
+        for start in range(len(segments) - 1):
+            match = go_suffixes.get("/".join(segments[start:]))
+            if match is not None:
+                return match
+        return None
 
     def exists(path: str) -> bool:
         return db.execute("SELECT 1 FROM files WHERE path = ?", (sqlite_text(path),)).fetchone() is not None
@@ -480,11 +627,9 @@ def _module_graph(context: _Context) -> tuple[dict, list[Finding]]:
             package = "" if found else ".".join(target.split(".")[:2])
         elif language == "Go":
             segments = target.split("/")
-            for start in range(len(segments)):
-                match = go_suffixes.get("/".join(segments[start:]))
-                if match is not None:
-                    found = f"{match}/"  # Go packages are directories
-                    break
+            match = go_directory(target)
+            if match is not None:
+                found = f"{match}/"  # Go packages are directories ("/" is the root package)
             package = "" if found else "/".join(segments[:3])
         elif language == "Rust":
             if "::" not in target:  # ``mod name;``
@@ -784,12 +929,15 @@ def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
     for counts in totals.values():
         by_kind.update({key: value for key, value in counts.items() if key in KINDS})
     summaries: dict[str, list[dict]] = defaultdict(list)
+    ambiguous = _ambiguous_modules(db)
     for name, detail, path, module in db.execute(
         """SELECT f.name, f.detail, f.path, files.module FROM code_facts f JOIN files ON files.path = f.path
            WHERE f.kind = 'taint_sink_param' AND files.module IS NOT NULL"""
     ):
+        # Keyed like the call graph: ``path:name`` in a module that several files share.
+        key = f"{path}:{name}" if module in ambiguous else f"{module}.{name}"
         try:
-            summaries[f"{module}.{name}"].append(json.loads(detail) | {"path": path})
+            summaries[key].append(json.loads(detail) | {"path": path})
         except (ValueError, TypeError):
             continue
     cross: dict[str, list[str]] = defaultdict(list)
@@ -800,6 +948,8 @@ def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
                JOIN files ON files.path = f.path WHERE f.kind = 'tainted_call' AND files.module IS NOT NULL"""
         ):
             resolved = _python_target(target, module, bool(package))
+            if resolved:
+                resolved = _disambiguated(_namespace_resolved(resolved, context.namespace_aliases), path, ambiguous)
             entries = summaries.get(resolved or "")
             if not entries:
                 continue
@@ -1291,6 +1441,51 @@ def _integration(context: _Context) -> tuple[dict, list[Finding]]:
 QUERY_KINDS = ("symbol", "callers", "callees", "references")
 
 
+def _limited(items, limit: int) -> list[dict]:
+    result = []
+    for item in items:
+        if len(result) >= limit:
+            break
+        result.append(item)
+    return result
+
+
+def _dotted_module(path: str) -> str:
+    """``src/pkg/engine.py`` -> ``src.pkg.engine`` (``pkg/__init__.py`` -> ``pkg``)."""
+    dotted = posixpath.splitext(path.replace("\\", "/"))[0].replace("/", ".")
+    return dotted[: -len(".__init__")] if dotted.endswith(".__init__") else dotted
+
+
+def _names(query: str, qualified: str, path: str) -> bool:
+    """Whether ``query`` names the symbol ``qualified`` defined in ``path``.
+
+    Exactly (``Engine.run``), by a qualified suffix, or with the defining module in front
+    as the call graph prints it (``pkg.engine.Engine.run`` for ``Engine.run`` in
+    ``pkg/engine.py`` or ``src/pkg/engine.py``).
+    """
+    if qualified == query or qualified.endswith("." + query):
+        return True
+    if not query.endswith("." + qualified):
+        return False
+    module = query[: -len(qualified) - 1]
+    dotted = _dotted_module(path)
+    return dotted == module or dotted.endswith("." + module)
+
+
+def _call_names(query: str, target: str, path: str) -> bool:
+    """Whether a call's resolved ``target`` is the function ``query`` names.
+
+    ``@Engine.run`` is a call resolved inside its own file (``self.run()``,
+    ``this.run()``); the condition that should have matched it bound the same pattern
+    twice, so same-file callers of a qualified name were never found.
+    """
+    if target.startswith("@"):
+        return _names(query, target[1:], path)
+    if target.startswith("~"):  # ``items.size()``: a call through another receiver
+        return False
+    return target == query or target.endswith("." + query)
+
+
 def query_code_index(inventory_path: Path, kind: str, name: str, limit: int = 200) -> list[dict]:
     """Look up a scan's code index. ``name`` may be bare (``run``) or qualified (``Engine.run``)."""
     if kind not in QUERY_KINDS:
@@ -1302,21 +1497,28 @@ def query_code_index(inventory_path: Path, kind: str, name: str, limit: int = 20
     db = _connect(inventory_path)
     try:
         if kind == "symbol":
+            keys = ("path", "line", "end_line", "language", "kind", "qualified", "exported")
             rows = db.execute(
                 """SELECT path, line, end_line, language, kind, qualified, exported FROM code_symbols
-                   WHERE name = ? AND (? IS NULL OR qualified = ? OR qualified LIKE '%.' || ?)
-                   ORDER BY path, line LIMIT ?""",
-                (simple, qualified, qualified, qualified, limit),
+                   WHERE name = ? ORDER BY path, line""",
+                (simple,),
             )
-            keys = ("path", "line", "end_line", "language", "kind", "qualified", "exported")
+            return _limited(
+                (dict(zip(keys, row, strict=True)) for row in rows
+                 if qualified is None or _names(qualified, row[5], row[0])),
+                limit,
+            )
         elif kind == "callers":
-            rows = db.execute(
-                """SELECT path, line, caller, target FROM code_calls WHERE callee = ?
-                   AND (? IS NULL OR target = ? OR target LIKE '%.' || ? OR target LIKE '%' || ?)
-                   ORDER BY path, line LIMIT ?""",
-                (simple, qualified, qualified, qualified, qualified and "." + qualified, limit),
-            )
             keys = ("path", "line", "caller", "target")
+            rows = db.execute(
+                "SELECT path, line, caller, target FROM code_calls WHERE callee = ? ORDER BY path, line",
+                (simple,),
+            )
+            return _limited(
+                (dict(zip(keys, row, strict=True)) for row in rows
+                 if qualified is None or _call_names(qualified, row[3] or "", row[0])),
+                limit,
+            )
         elif kind == "callees":
             rows = db.execute(
                 """SELECT path, line, callee, target, caller FROM code_calls

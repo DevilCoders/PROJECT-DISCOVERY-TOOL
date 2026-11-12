@@ -101,3 +101,94 @@ def test_objective_c_m_files_reach_the_code_index(tmp_path: Path):
     inventory = output / ".pdt-cache" / "inventory.sqlite3"
     assert [item["path"] for item in query_code_index(inventory, "symbol", "widget_scale")] == ["Sources/Widget.m"]
     assert query_code_index(inventory, "symbol", "analysis") == []
+
+
+def test_qualified_callers_include_same_file_and_module_qualified_names(tmp_path: Path):
+    # Regression: same-file calls are stored as "@Engine.run", and the condition meant for
+    # them bound the same pattern as another, so `--callers Engine.run` missed them; the
+    # module-qualified name the call graph prints found nothing at all.
+    _, output = _scan(tmp_path, {
+        "pkg/__init__.py": "",
+        "pkg/engine.py": (
+            "class Engine:\n"
+            "    def run(self):\n        return 1\n"
+            "    def start(self):\n        return self.run()\n"
+            "def boot(engine: Engine):\n    return engine.run()\n"
+        ),
+        "pkg/other.py": "class Other:\n    def run(self):\n        return 2\n    def go(self):\n        return self.run()\n",
+    })
+    inventory = output / ".pdt-cache" / "inventory.sqlite3"
+    for name in ("Engine.run", "pkg.engine.Engine.run"):
+        callers = {item["caller"] for item in query_code_index(inventory, "callers", name)}
+        assert "Engine.start" in callers and "Other.go" not in callers, name
+    assert [item["path"] for item in query_code_index(inventory, "symbol", "pkg.engine.Engine.run")] == ["pkg/engine.py"]
+    assert query_code_index(inventory, "symbol", "pkg.other.Engine.run") == []
+
+
+def test_go_standard_library_imports_never_match_local_directories(tmp_path: Path):
+    # Regression: every directory suffix was registered and every import suffix tried, so
+    # "log", "net/http" and "github.com/pkg/errors" resolved to local log/, http/ and
+    # errors/ directories, inventing internal edges and a module cycle.
+    report, _ = _scan(tmp_path, {
+        "go.mod": "module example.com/shop\n\ngo 1.22\n",
+        "main.go": 'package main\n\nimport (\n\t"log"\n\t"net/http"\n\t"example.com/shop/internal/http"\n)\n\nfunc main() {}\n',
+        "internal/http/server.go": 'package http\n\nimport (\n\t"github.com/pkg/errors"\n\t"log"\n)\n\nfunc Serve() {}\n',
+        "internal/log/log.go": 'package log\n\nimport "net/http"\n\nfunc Write() {}\n',
+        "errors/errors.go": 'package errors\n\nimport "log"\n\nfunc New() {}\n',
+    })
+    graph = report["metrics"]["code_index"]["module_graph"]
+    assert graph["resolved_imports"] == 1  # only example.com/shop/internal/http
+    assert graph["cycles"] == 0
+    assert [item["module"] for item in graph["most_imported"]] == ["internal/http/"]
+
+
+def test_delegation_through_another_receiver_is_not_recursion(tmp_path: Path):
+    # Regression: a lexical call resolved to any same-named function in its file, so
+    # size() { return items.size(); } and PathBuf::new() were listed as recursive.
+    report, _ = _scan(tmp_path, {
+        "src/Box.java": (
+            "class Box {\n"
+            "    private java.util.List<String> items;\n"
+            "    int size() {\n        return items.size();\n    }\n"
+            "    int depth(int n) {\n        return n <= 0 ? 0 : 1 + depth(n - 1);\n    }\n"
+            "}\n"
+        ),
+        "src/lib.rs": (
+            "struct Wrapper;\n"
+            "impl Wrapper {\n"
+            "    fn new() -> std::path::PathBuf {\n        PathBuf::new()\n    }\n"
+            "}\n"
+        ),
+    })
+    cycles = next((item for item in report["findings"] if item["title"] == "Recursive call cycles"), None)
+    evidence = " ".join(cycles["evidence"]) if cycles else ""
+    assert "Box.depth" in evidence
+    assert "Box.size" not in evidence and "Wrapper.new" not in evidence
+
+
+def test_a_reference_cap_is_reported_and_called_functions_are_not_dead_code(tmp_path: Path):
+    # Regression: the lexer stopped at exactly 10,000 references without marking the cut,
+    # so no "Code index truncated" finding appeared, and a function called after the cut
+    # was listed as an unreferenced dead-code candidate.
+    names = "\n".join(f"int value_{index} = {index};" for index in range(10_050))
+    source = names + "\nstatic int helper(void) {\n    return 1;\n}\nint main(void) {\n    return helper();\n}\n"
+    report, _ = _scan(tmp_path, {"gen.c": source})
+    titles = {item["title"] for item in report["findings"]}
+    assert "Code index truncated" in titles
+    unreferenced = next((item for item in report["findings"] if item["title"] == "Unreferenced private functions"), None)
+    assert unreferenced is None or not any("helper" in item for item in unreferenced["evidence"])
+    assert report["metrics"]["code_index"]["truncated"]["kinds"] == {"references": 1}
+
+
+def test_calls_through_a_namespace_package_resolve(tmp_path: Path):
+    # Regression: modules are named by their package chain ("pkg.mod" for
+    # src/ns/pkg/mod.py), so a call through the namespace name "ns.pkg.mod.run" never
+    # resolved to its definition.
+    report, _ = _scan(tmp_path, {
+        "src/ns/pkg/__init__.py": "",
+        "src/ns/pkg/mod.py": "def run():\n    return 1\n",
+        "app.py": "import ns.pkg.mod\n\ndef main():\n    return ns.pkg.mod.run()\n",
+    })
+    graph = report["metrics"]["code_index"]["call_graph"]
+    assert graph["python"]["resolved"] == 1
+    assert {"calls": 1, "target": "pkg.mod.run"} in graph["top_fan_in"]

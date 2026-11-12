@@ -17,7 +17,8 @@ from ..base import Analyzer
 
 def _lexical_target(caller: str, callee: str, receiver: str) -> str:
     """Resolution hint for a lexical call; the index resolves names across files."""
-    if receiver in {"this", "self"} and "." in caller:
+    # this./self. calls, and Rust's Self::new(), name the caller's own type.
+    if receiver in {"this", "self", "Self"} and "." in caller:
         return f"@{caller.rsplit('.', 1)[0]}.{callee}"
     if receiver and receiver not in {"new", "<expression>"}:
         return f"~{receiver}.{callee}"

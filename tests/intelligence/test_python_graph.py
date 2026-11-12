@@ -249,12 +249,34 @@ def test_absolute_imports_resolve_through_src_layout_package_roots(tmp_path: Pat
         "tests/test_a.py": "import pkg.a\nfrom pkg.b import helper\nimport json\n",
     })
     graph, _ = analyze_python_dependencies(tmp_path, records)
+    # Modules are reported by import name, as the code index names them (pdt compare then
+    # matches src/ and flat layouts); paths stay in source_path and target_path.
     edges = {(edge["source"], edge["target"]) for edge in graph["edges"]}
-    assert ("src.pkg.a", "src.pkg.b") in edges
-    assert ("tests.test_a", "src.pkg.a") in edges
-    assert ("tests.test_a", "src.pkg.b") in edges
+    assert ("pkg.a", "pkg.b") in edges
+    assert ("test_a", "pkg.a") in edges
+    assert ("test_a", "pkg.b") in edges
+    assert {(edge["source_path"], edge["target_path"]) for edge in graph["edges"]
+            if edge["source"] == "pkg.a" and edge["target"] == "pkg.b"} == {("src/pkg/a.py", "src/pkg/b.py")}
+    assert {item["name"] for item in graph["modules"]} == {"pkg", "pkg.a", "pkg.b", "test_a"}
     unresolved = {item["import"] for item in graph["unresolved_imports"]}
     assert unresolved == {"json"}
+
+
+def test_namespace_package_imports_resolve(tmp_path: Path):
+    # Regression: both module namings stop at the first directory without __init__.py, so
+    # imports through a PEP 420 namespace package (``ns`` here) never resolved.
+    records = _write(tmp_path, {
+        "src/ns/pkg/__init__.py": "",
+        "src/ns/pkg/mod.py": "def run():\n    return 1\n",
+        "app.py": "import ns.pkg.mod\nfrom ns.pkg import mod\nimport utils\n",
+        "lib/helpers/__init__.py": "",
+        "lib/helpers/utils.py": "",
+    })
+    graph, _ = analyze_python_dependencies(tmp_path, records)
+    targets = {edge["target_path"] for edge in graph["edges"] if edge["source"] == "app"}
+    assert targets == {"src/ns/pkg/mod.py", "src/ns/pkg/__init__.py"}
+    # A single segment never matches a suffix: helpers.utils is not a top-level utils.
+    assert "utils" in {item["import"] for item in graph["unresolved_imports"]}
 
 
 def test_a_scan_root_that_is_a_package_does_not_hang(tmp_path: Path):

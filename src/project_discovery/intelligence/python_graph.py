@@ -228,11 +228,44 @@ def analyze_python_dependencies(
         if import_name and import_name != name and import_name not in known_modules:
             package_aliases.setdefault(import_name, set()).add(name)
 
+    # PEP 420 namespace packages have no __init__.py, so the package walk stops below them:
+    # src/ns/pkg/mod.py is "src.ns.pkg.mod" by path and "pkg.mod" by package chain, while
+    # code imports "ns.pkg.mod". A suffix of two or more segments that starts at a
+    # directory without __init__.py resolves such imports when exactly one module has it.
+    # (One segment never does: inside a package, ``import utils`` means a top-level utils.)
+    suffix_owners: dict[str, set[str]] = {}
+    for name in known_modules:
+        parts = name.split(".")
+        for start in range(1, len(parts) - 1):
+            if "/".join(parts[:start + 1]) not in package_dirs:
+                suffix_owners.setdefault(".".join(parts[start:]), set()).add(name)
+
     def canonical(target: str) -> str | None:
         if target in known_modules:
             return target
         owners = package_aliases.get(target)
+        if owners:
+            return next(iter(owners)) if len(owners) == 1 else None
+        owners = suffix_owners.get(target)
         return next(iter(owners)) if owners and len(owners) == 1 else None
+
+    # Reports name modules as Python imports them (pkg.mod, not src.pkg.mod), as the code
+    # index does, so the two graphs and `pdt compare` agree on src/ and flat layouts. A
+    # name that more than one module would get keeps the path-based name.
+    import_names = {
+        name: _import_name(paths[0], package_dirs) or name for name, paths in module_paths.items()
+        if module_path_counts[name] == 1
+    }
+    import_name_counts: dict[str, int] = {}
+    for alias in import_names.values():
+        import_name_counts[alias] = import_name_counts.get(alias, 0) + 1
+    display = {
+        name: alias for name, alias in import_names.items()
+        if import_name_counts[alias] == 1 and (alias == name or alias not in known_modules)
+    }
+
+    def shown(name: str) -> str:
+        return display.get(name, name)
     edges: list[dict[str, Any]] = []
     edge_keys: set[tuple[str, str, str, int, str]] = set()
     omitted_edge_candidate_count = 0
@@ -405,7 +438,7 @@ def analyze_python_dependencies(
                     adjacency[source_module].add(target)
                     emit(Finding(
                         "dependency",
-                        f"Internal Python dependency: {source_module} -> {target}",
+                        f"Internal Python dependency: {shown(source_module)} -> {shown(target)}",
                         f"Static import resolves to an inventoried module at line {lineno}.",
                         confidence="CONFIRMED",
                         evidence=[f"{record.path}:{lineno}", unique_modules[target]],
@@ -429,7 +462,7 @@ def analyze_python_dependencies(
         })
         emit(Finding(
             "architecture",
-            "Python circular dependency: " + " <-> ".join(component),
+            "Python circular dependency: " + " <-> ".join(shown(name) for name in component),
             f"Static import graph contains a strongly connected component of {len(component)} modules.",
             confidence="CONFIRMED",
             evidence=evidence,
@@ -461,11 +494,15 @@ def analyze_python_dependencies(
             severity="LOW",
         ))
 
+    edges = [edge | {"source": shown(edge["source"]), "target": shown(edge["target"])} for edge in edges]
+    unresolved = [item | {"source": shown(item["source"])} for item in unresolved]
+    cycles = [[shown(name) for name in component] for component in cycles]
     graph = {
-        "modules": [
-            {"name": name, "path": path, "confidence": "CONFIRMED"}
-            for name, path in sorted(unique_modules.items())
-        ],
+        "modules": sorted(
+            ({"name": shown(name), "path": path, "confidence": "CONFIRMED"}
+             for name, path in unique_modules.items()),
+            key=lambda item: item["name"],
+        ),
         "skipped_modules": skipped_modules,
         "omitted_skipped_module_count": omitted_skipped_module_count,
         "duplicate_modules": duplicate_modules,
