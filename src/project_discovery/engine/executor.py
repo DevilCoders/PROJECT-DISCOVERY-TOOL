@@ -253,13 +253,28 @@ class AnalysisExecutor:
         self._pool.shutdown(wait=False, cancel_futures=True)
         self._pool = self._create_pool()
 
+    def _submit(self, function, *arguments) -> Future:
+        """Queue work, replacing the pool first if a dead worker has already broken it.
+
+        A broken pool refuses new work at once (``submit`` raises ``BrokenProcessPool``),
+        which happens when the death is noticed before the next batch is queued.
+        """
+        for attempt in range(2):
+            try:
+                future = self._pool.submit(function, *arguments)
+            except BrokenProcessPool:
+                if attempt:
+                    raise
+                self.restart()
+                continue
+            future.pdt_pool = self._pool
+            return future
+        raise AssertionError("unreachable")
+
     def submit(self, tasks: list[FileTask]) -> Future:
         if self.mode == "process":
-            future = self._pool.submit(_analyze_batch_in_worker, tasks)
-        else:
-            future = self._pool.submit(analyze_tasks, self._analyzers, self._locks, tasks)
-        future.pdt_pool = self._pool
-        return future
+            return self._submit(_analyze_batch_in_worker, tasks)
+        return self._submit(analyze_tasks, self._analyzers, self._locks, tasks)
 
     def map_python_imports(self, root: Path, records: list[FileRecord]) -> Iterator[tuple]:
         """Parse Python imports in the pool; yield results in input order, bounded in flight."""
@@ -275,9 +290,7 @@ class AnalysisExecutor:
 
         for start in range(0, len(records), BATCH_MAX_FILES):
             batch = records[start:start + BATCH_MAX_FILES]
-            future = self._pool.submit(_parse_imports_batch, str(root), batch)
-            future.pdt_pool = self._pool
-            pending.append((future, batch))
+            pending.append((self._submit(_parse_imports_batch, str(root), batch), batch))
             while len(pending) >= self.workers * 2:
                 yield from drain_one()
         while pending:
