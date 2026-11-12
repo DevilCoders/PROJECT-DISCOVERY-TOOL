@@ -63,16 +63,49 @@ def normalize_version(value: Any, *, strip_prefix: bool = False) -> str:
     return text
 
 
+# Lockfile "versions" that name a source instead of a registry release: git and local
+# dependencies, tarball URLs and workspace links. npm v1 lockfiles write them as the
+# version itself ("git+https://user:token@host/repo.git#sha", "file:../lib"), and they can
+# carry credentials and local paths. Registry versions never contain "/", "\", "@" or
+# whitespace (pnpm peer suffixes are stripped before this point).
+_NON_REGISTRY_VERSION = re.compile(
+    r"(?i)^(?:git|github|gitlab|bitbucket|gist|file|link|portal|patch|workspace|exec|https?|ssh)[+:]"
+    r"|^[a-z][a-z0-9+.-]{0,20}+://|[/\\@\s]"
+)
+
+
+class ParsedLockfile(list):
+    """Resolved registry packages, plus the names of dependencies that resolve elsewhere.
+
+    ``non_registry`` holds names whose lockfile entry points at git, a path, a URL or a
+    workspace link. They have no registry version, so they are not matched to advisories.
+    """
+
+    non_registry: list[str]
+
+
 class _Collector:
     def __init__(self, ecosystem: str, max_entries: int) -> None:
         self.ecosystem = ecosystem
         self.max_entries = max_entries
         self.packages: set[ResolvedPackage] = set()
+        self.non_registry: set[str] = set()
 
     def add(self, name: Any, version: Any) -> None:
         if not name or not version:
             return
-        package = ResolvedPackage(self.ecosystem, str(name).strip(), normalize_version(version))
+        name, text = str(name).strip(), normalize_version(version)
+        if text[:4].lower() == "npm:":
+            # npm alias ("npm:real-name@1.2.3"): the real package and its version.
+            real, _, aliased = text[4:].rpartition("@")
+            if real and aliased:
+                name, text = real, aliased
+        if _NON_REGISTRY_VERSION.search(text):
+            # Only the name is kept: the specifier can hold credentials or local paths.
+            if name and len(self.non_registry) < self.max_entries:
+                self.non_registry.add(name)
+            return
+        package = ResolvedPackage(self.ecosystem, name, text)
         if not package.name or not package.version or package in self.packages:
             return
         if len(self.packages) >= self.max_entries:
@@ -286,8 +319,11 @@ def _pubspec_lock(source: str, out: _Collector) -> None:
 
 def parse_lockfile(
     filename: str, source: str, *, max_entries: int = MAX_LOCKFILE_PACKAGE_ENTRIES,
-) -> list[ResolvedPackage]:
-    """Return de-duplicated resolved packages in deterministic order.
+) -> ParsedLockfile:
+    """Return de-duplicated resolved registry packages in deterministic order.
+
+    Dependencies resolved from git, paths, URLs or workspaces are listed by name only in
+    the result's ``non_registry`` attribute.
 
     Raises ValueError subclasses (including JSON/TOML decode errors and
     LockfileEntryBudgetExceeded) for malformed or over-budget input.
@@ -321,4 +357,6 @@ def parse_lockfile(
         _nuget_lock(json.loads(source), out)
     elif name == "pubspec.lock":
         _pubspec_lock(source, out)
-    return sorted(out.packages, key=lambda p: (p.name.casefold(), p.name, p.version))
+    result = ParsedLockfile(sorted(out.packages, key=lambda p: (p.name.casefold(), p.name, p.version)))
+    result.non_registry = sorted(out.non_registry - {package.name for package in out.packages})
+    return result

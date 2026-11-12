@@ -39,11 +39,14 @@ def _import_name(relative_path: str, package_dirs: set[str]) -> str | None:
 
     Python resolves ``import pkg.mod`` from the directory above the topmost package
     (a directory with ``__init__.py``), so ``src/pkg/mod.py`` imports as ``pkg.mod``.
+    The walk stops at the scan root: when the root itself is a package, its modules are
+    named relative to it (``core``, ``sub.mod``).
     """
     path = PurePosixPath(relative_path)
     parts = [] if path.stem == "__init__" else [path.stem]
     directory = path.parent
-    while directory.as_posix() in package_dirs:
+    # ``PurePosixPath(".").parent`` is ``.`` again, so the root must end the walk.
+    while directory.as_posix() != "." and directory.as_posix() in package_dirs:
         parts.insert(0, directory.name)
         directory = directory.parent
     if not parts or not all(part.isidentifier() for part in parts):

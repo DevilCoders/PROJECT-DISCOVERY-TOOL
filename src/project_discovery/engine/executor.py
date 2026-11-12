@@ -12,7 +12,7 @@ import signal
 import stat
 import threading
 from collections import deque
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -38,6 +38,8 @@ BATCH_MAX_BYTES = 4 * 1024 * 1024
 # Below this many files a process pool's start-up cost outweighs its parallelism.
 PROCESS_POOL_MIN_FILES = 1000
 EXECUTOR_MODES = ("auto", "process", "thread")
+# A dead worker breaks its pool; the pool's queued futures fail or are cancelled with it.
+POOL_FAILURES = (BrokenProcessPool, CancelledError)
 
 
 @dataclass(slots=True)
@@ -239,15 +241,25 @@ class AnalysisExecutor:
             )
         return ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="pdt-analyzer")
 
-    def restart(self) -> None:
-        """Replace a broken process pool; in-flight work on the old pool is abandoned."""
+    def restart(self, failed: Future | None = None) -> None:
+        """Replace a broken process pool; in-flight work on the old pool is abandoned.
+
+        When a worker dies, every future of its pool fails. Passing the ``failed`` future
+        replaces the pool only if that future's pool is still the current one, so the
+        replacement (and the work already submitted to it) is never torn down again.
+        """
+        if failed is not None and getattr(failed, "pdt_pool", self._pool) is not self._pool:
+            return
         self._pool.shutdown(wait=False, cancel_futures=True)
         self._pool = self._create_pool()
 
     def submit(self, tasks: list[FileTask]) -> Future:
         if self.mode == "process":
-            return self._pool.submit(_analyze_batch_in_worker, tasks)
-        return self._pool.submit(analyze_tasks, self._analyzers, self._locks, tasks)
+            future = self._pool.submit(_analyze_batch_in_worker, tasks)
+        else:
+            future = self._pool.submit(analyze_tasks, self._analyzers, self._locks, tasks)
+        future.pdt_pool = self._pool
+        return future
 
     def map_python_imports(self, root: Path, records: list[FileRecord]) -> Iterator[tuple]:
         """Parse Python imports in the pool; yield results in input order, bounded in flight."""
@@ -257,13 +269,15 @@ class AnalysisExecutor:
             future, batch = pending.popleft()
             try:
                 return future.result()
-            except BrokenProcessPool:
-                self.restart()
+            except POOL_FAILURES:
+                self.restart(future)
                 return _parse_imports_batch(str(root), batch)
 
         for start in range(0, len(records), BATCH_MAX_FILES):
             batch = records[start:start + BATCH_MAX_FILES]
-            pending.append((self._pool.submit(_parse_imports_batch, str(root), batch), batch))
+            future = self._pool.submit(_parse_imports_batch, str(root), batch)
+            future.pdt_pool = self._pool
+            pending.append((future, batch))
             while len(pending) >= self.workers * 2:
                 yield from drain_one()
         while pending:

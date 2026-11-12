@@ -544,6 +544,11 @@ class InventoryStore:
             raise TypeError("diagnostic messages must be strings")
         if not message:
             raise ValueError("diagnostic messages must not be empty")
+        # Diagnostics carry plugin errors, exception text and paths: terminal control
+        # characters are neutralized before they can reach any report or console.
+        from ..core.source_utils import neutralize_controls
+
+        message = neutralize_controls(message)
         # Reserve the sequence value transactionally so independent store
         # connections cannot reuse a diagnostic key. A crash can leave a gap,
         # but can never cause an earlier diagnostic to be overwritten.

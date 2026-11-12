@@ -79,7 +79,7 @@ class LockfileAnalyzer(Analyzer):
         )
         if omitted:
             detail += f" Evidence lists the first {_MAX_INVENTORY_EVIDENCE}; {omitted} more are omitted."
-        return [Finding(
+        findings = [Finding(
             "dependency",
             f"Resolved dependency inventory: {record.path}",
             detail,
@@ -89,3 +89,18 @@ class LockfileAnalyzer(Analyzer):
             ] or [record.path],
             analyzer=self.name,
         )]
+        non_registry = getattr(packages, "non_registry", [])
+        if non_registry:
+            # Their specifiers (git URLs, paths) can hold credentials: only names are listed.
+            findings.append(Finding(
+                "dependency",
+                f"Dependencies outside a package registry: {record.path}",
+                f"{len(non_registry)} dependencies resolve to git, a local path, a URL or a "
+                "workspace link instead of a registry release. They have no registry version, "
+                "so they are not matched against vulnerability advisories.",
+                confidence="UNKNOWN",
+                evidence=[record.path, *non_registry[:_MAX_INVENTORY_EVIDENCE]],
+                analyzer=self.name,
+                severity="LOW",
+            ))
+        return findings

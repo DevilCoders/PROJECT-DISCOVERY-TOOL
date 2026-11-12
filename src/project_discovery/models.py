@@ -24,9 +24,10 @@ class CodeEvidence:
 
     def __post_init__(self) -> None:
         # Enforce redaction at the model boundary so custom analyzers cannot
-        # accidentally serialize secrets or direct identifiers in report excerpts.
-        from .core.source_utils import redact_source_excerpt
-        self.code = redact_source_excerpt(self.code)
+        # accidentally serialize secrets or direct identifiers in report excerpts, and so
+        # escape sequences in scanned code never reach a terminal or report.
+        from .core.source_utils import neutralize_controls, redact_source_excerpt
+        self.code = neutralize_controls(redact_source_excerpt(self.code))
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -50,6 +51,17 @@ class Finding:
             "security", "supply_chain", "migration", "privacy",
         }:
             self.severity = "MEDIUM"
+        # Titles and evidence carry scanned text (file names, values, source fragments):
+        # terminal control characters in them are neutralized for every output surface.
+        from .core.source_utils import neutralize_controls
+
+        self.title = neutralize_controls(self.title)
+        self.detail = neutralize_controls(self.detail)
+        self.evidence = [neutralize_controls(item) for item in self.evidence]
+        if self.impact is not None:
+            self.impact = neutralize_controls(self.impact)
+        if self.recommendation is not None:
+            self.recommendation = neutralize_controls(self.recommendation)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

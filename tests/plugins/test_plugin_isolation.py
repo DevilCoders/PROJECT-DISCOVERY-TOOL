@@ -416,6 +416,37 @@ def test_process_executor_runs_isolated_plugins_in_its_workers(tmp_path, plugins
     assert titles(processes) == titles(threads) == ["Echo a.txt", "Echo b.txt", "Echo c.txt"]
 
 
+def test_a_dead_worker_costs_only_its_own_file(tmp_path, plugins, monkeypatch):
+    # Regression: every in-flight future of the broken pool restarted the pool again,
+    # cancelling the batches already queued on the replacement, and the scan died with an
+    # unhandled CancelledError. Here an in-process plugin kills its worker on one file.
+    directory = Path(plugins.outside).parent / "plugins"
+    (directory / "pdt_fixture_killer.py").write_text(
+        "import os\n"
+        "from project_discovery.analyzers.base import Analyzer\n\n\n"
+        "class Killer(Analyzer):\n"
+        "    name = 'fixture-killer'\n\n"
+        "    def supports(self, record):\n"
+        "        return record.path.endswith('.txt')\n\n"
+        "    def analyze(self, path, record):\n"
+        "        if record.path == 'a_crash.txt':\n"
+        "            os._exit(3)\n"
+        "        return []\n",
+        encoding="utf-8",
+    )
+    points = [EntryPoint(name="killer", value="pdt_fixture_killer:Killer", group="pdt.analyzers")]
+    monkeypatch.setattr(registry, "entry_points", lambda **_kwargs: points)
+    names = ["a_crash.txt", *(f"f{index:03}.txt" for index in range(200))]
+    report = _scan(
+        _project(tmp_path / "project", *names), tmp_path / "out",
+        executor="process", jobs=2, plugin_isolation="off",
+    )
+    assert report["exit_code"] == 0
+    failed = {item["path"]: item["error"] for item in report["files"] if item["error"]}
+    assert failed == {"a_crash.txt": "a_crash.txt: analysis worker process terminated"}
+    assert sum(1 for item in report["files"] if item["analyzed"]) == 200
+
+
 def test_process_mode_runs_out_of_process_without_os_restrictions(tmp_path, plugins, monkeypatch):
     monkeypatch.setenv("PDT_FIXTURE_SECRET_TOKEN", "do-not-leak")
     plugins("escape")

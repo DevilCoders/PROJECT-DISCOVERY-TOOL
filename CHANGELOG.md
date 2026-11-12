@@ -110,6 +110,26 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   analysis time (about +19%), at most about 2.1 ms per file each. Files without taint sources
   or sinks cost the data-flow analyzer a single syntax-tree walk.
 
+### Fixed: the 2026-11-12 re-audit
+Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project/AUDIT_2026-11-12.md).
+- A scan whose root is itself a Python package (a root `__init__.py`) never finished (PDT-235).
+- A worker process that died aborted the whole process-mode scan with `CancelledError`; now
+  only the culprit file is reported, after failing twice on its own (PDT-236).
+- WSL (LX) symlinks crashed the fallback walker, and the Rust walker reported unreadable links
+  as `internal`; both now record `target_state: "unreadable"` and an entry error (PDT-237).
+- The Tree-sitter analyzer failed on every file once grammars were provisioned (`str` passed to
+  the parser), and C# could never be provisioned (`c_sharp` instead of `csharp`). Error columns
+  now count characters, and CI tests against real grammars (PDT-238).
+- Terminal control characters in scanned content, plugin errors and diagnostics are neutralized
+  on every output surface, so a scanned file cannot rewrite the operator's terminal (PDT-239).
+- `project-comparison.md` escapes the names, roots and paths it takes from scanned projects
+  (PDT-240).
+- npm v1 git, file and URL dependencies are no longer treated as versions: their specifiers
+  could carry credentials into reports, OSV.dev queries and the cache. They are reported as an
+  `UNKNOWN` coverage gap, and `npm:` aliases resolve to the real package (PDT-241).
+- With `--plugin-isolation off`, process workers load exactly the coordinator's plugins
+  (PDT-242).
+
 ## 0.2.0 — 2026-11-05
 
 The production-readiness release. At 0.1.0 (`1895455`) CI failed on every job and `pdt scan`

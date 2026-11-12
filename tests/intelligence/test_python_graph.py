@@ -257,6 +257,35 @@ def test_absolute_imports_resolve_through_src_layout_package_roots(tmp_path: Pat
     assert unresolved == {"json"}
 
 
+def test_a_scan_root_that_is_a_package_does_not_hang(tmp_path: Path):
+    # Regression: a root __init__.py put "." among the package directories, and the
+    # package walk never ended because PurePosixPath(".").parent is "." again.
+    import threading
+
+    from project_discovery.intelligence.python_graph import _import_name
+
+    records = _write(tmp_path, {
+        "__init__.py": "",
+        "core.py": "from sub import mod\n",
+        "sub/__init__.py": "",
+        "sub/mod.py": "import core\n",
+    })
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.update(graph=analyze_python_dependencies(tmp_path, records)[0]),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(30)
+    assert not worker.is_alive(), "dependency analysis of a root package did not finish"
+    edges = {(edge["source"], edge["target"]) for edge in result["graph"]["edges"]}
+    assert ("core", "sub.mod") in edges and ("sub.mod", "core") in edges
+    packages = {".", "sub"}
+    assert _import_name("sub/mod.py", packages) == "sub.mod"
+    assert _import_name("core.py", packages) == "core"
+    assert _import_name("__init__.py", packages) is None
+
+
 def test_package_aliases_shared_by_several_subprojects_are_ambiguous(tmp_path: Path):
     records = _write(tmp_path, {
         "one/pkgx/__init__.py": "",

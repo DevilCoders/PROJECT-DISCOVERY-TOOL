@@ -80,6 +80,29 @@ def test_multi_project_markdown_writer(tmp_path):
     assert "/a" in markdown and "/b" in markdown and "/c" in markdown
 
 
+def test_comparison_markdown_neutralizes_scanned_strings(tmp_path):
+    # Regression (PDT-107 class): project-comparison.md wrote dependency names, module
+    # names, roots and paths from scanned projects verbatim, so a package.json entry could
+    # inject live HTML, links or new Markdown blocks.
+    from project_discovery.projects.comparison import compare_many_reports, write_comparison
+
+    payload = "<img src=x onerror=alert(1)>[x](javascript:alert(1))\n# Forged heading `x`"
+    files = [{"path": "evil\n# Owned <b>.py", "sha256": "same"}]
+    reports = [
+        _report(f"/{name}<script>", ["Python"], [payload], [payload], list(files))
+        for name in ("a", "b")
+    ]
+    for compared in (compare_reports(*reports), compare_many_reports(reports)):
+        markdown = write_comparison(compared, tmp_path, {"markdown"})[0].read_text(encoding="utf-8")
+        assert "<img" not in markdown and "<script>" not in markdown and "<b>" not in markdown
+        import re
+
+        assert not re.search(r"(?<!\\)\]\(javascript:", markdown)
+        assert r"\[x\](javascript:alert(1))" in markdown
+        assert "\n# Forged" not in markdown and "\n# Owned" not in markdown
+        assert "&lt;img src=x onerror=alert(1)&gt;" in markdown
+
+
 def test_comparison_reports_resolved_dependency_version_conflicts():
     left = _report("/left", ["Python"], [], [], [])
     right = _report("/right", ["Python"], [], [], [])

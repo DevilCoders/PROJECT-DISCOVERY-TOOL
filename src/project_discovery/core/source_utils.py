@@ -124,6 +124,21 @@ _PRIVATE_KEY_BODY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?----
 _PRIVATE_KEY_MATERIAL_LINE = re.compile(r"(?m)^([ \t]*)[A-Za-z0-9+/]{32,}={0,2}([ \t]*)$")
 
 
+# C0 and C1 control characters except tab and newline. Escape sequences (ESC), carriage
+# returns and backspaces in scanned text could rewrite or spoof an operator's terminal.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def neutralize_controls(text: str) -> str:
+    """Replace terminal control characters with U+FFFD; tab and newline are kept.
+
+    CRLF line ends become LF first, so text read from Windows files is not marked.
+    """
+    if not _CONTROL_CHARACTERS.search(text):
+        return text
+    return _CONTROL_CHARACTERS.sub("�", text.replace("\r\n", "\n"))
+
+
 def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     """Return a bounded source line with credentials and direct identifiers removed."""
     value = source_line.rstrip("\r\n")

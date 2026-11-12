@@ -20,7 +20,8 @@ class AnalyzerLoadResult:
     diagnostics: list[str]
     # One status entry per discovered plugin (loaded or failed), for reports.
     plugins: list[dict[str, Any]] = field(default_factory=list)
-    # Validated isolated-plugin specs that worker processes rebuild proxies from.
+    # What worker processes load: validated isolated-plugin specs to rebuild proxies from,
+    # or with ``--plugin-isolation off`` the entry points the coordinator loaded.
     plugin_specs: list[Any] = field(default_factory=list)
 
     def close(self) -> None:
@@ -157,7 +158,14 @@ def load_analyzers(*, plugin_policy=None, plugin_specs=None) -> AnalyzerLoadResu
 
     diagnostics: list[str] = []
     statuses: list[dict[str, Any]] = []
-    for point in sorted(entry_points(group=ENTRY_POINT_GROUP), key=lambda item: item.name):
+    # Worker processes load exactly the entry points the coordinator loaded, instead of
+    # rediscovering them (a different set, or failures nobody would see).
+    points = (
+        list(plugin_specs) if plugin_specs is not None
+        else sorted(entry_points(group=ENTRY_POINT_GROUP), key=lambda item: item.name)
+    )
+    loaded_points = []
+    for point in points:
         try:
             loaded = point.load()
             candidate = loaded() if callable(loaded) and not isinstance(loaded, Analyzer) else loaded
@@ -173,6 +181,7 @@ def load_analyzers(*, plugin_policy=None, plugin_specs=None) -> AnalyzerLoadResu
                 raise ValueError(f"duplicate analyzer name: {candidate.name}")
             names.add(candidate.name)
             analyzers.append(candidate)
+            loaded_points.append(point)
             statuses.append({
                 "entry_point": point.name, "name": candidate.name,
                 "version": candidate.version, "status": "loaded", "isolation": "off",
@@ -185,4 +194,8 @@ def load_analyzers(*, plugin_policy=None, plugin_specs=None) -> AnalyzerLoadResu
                 "entry_point": point.name, "status": "failed", "isolation": "off",
                 "error": f"{type(exc).__name__}: {exc}",
             })
-    return AnalyzerLoadResult(analyzers, diagnostics, statuses)
+    if plugin_specs is not None and diagnostics:
+        # A worker could not load what the coordinator loaded: running on would silently
+        # analyze files without that plugin.
+        raise RuntimeError("; ".join(diagnostics))
+    return AnalyzerLoadResult(analyzers, diagnostics, statuses, loaded_points)

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import urlsplit, urlunsplit
 
+from ..core.source_utils import neutralize_controls
 from ..models import REPORT_SCHEMA_VERSION, ScanResult
 
 # The offline HTML report embeds bounded slices so browsers can open reports of very
@@ -506,15 +507,19 @@ def _md(value: object) -> str:
     characters are backslash-escaped; newlines (legal in POSIX file names) are flattened
     so a value cannot start new Markdown blocks.
     """
-    text = " ".join(str(value).splitlines())
+    text = neutralize_controls(" ".join(str(value).splitlines()))
     return _MD_INLINE_SPECIAL.sub(
         lambda match: "\\" + match.group(0), html.escape(text, quote=False),
     )
 
 
+# The same neutralization for other Markdown writers (project comparisons).
+md_inline = _md
+
+
 def _md_code(value: str) -> str:
     """Render text as a CommonMark code span; backslash escapes do not work inside spans."""
-    text = " ".join(value.splitlines()) or " "
+    text = neutralize_controls(" ".join(value.splitlines())) or " "
     fence = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
     pad = " " if text[0] == "`" or text[-1] == "`" else ""
     return f"{fence}{pad}{text}{pad}{fence}"

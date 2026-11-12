@@ -578,6 +578,54 @@ def test_windows_junction_loops_are_recorded_not_followed(tmp_path: Path, monkey
         assert stats.get("walk_errors", 0) == 0
 
 
+@pytest.mark.skipif(os.name != "nt", reason="name-surrogate reparse points are Windows-specific")
+def test_unreadable_link_targets_are_recorded_as_errors_not_crashes(tmp_path: Path, monkeypatch):
+    # Regression: os.readlink raises ValueError ("not a symbolic link") for WSL (LX)
+    # symlinks, which aborted the whole fallback walk. The link stays in the inventory
+    # with an unreadable target, and the inventory is partial.
+    import subprocess
+
+    from project_discovery.inventory import scanner
+
+    (tmp_path / "target").mkdir()
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(tmp_path / "lx"), str(tmp_path / "target")],
+        capture_output=True,
+    )
+    if created.returncode:
+        pytest.skip("junction creation unavailable")
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *_args, **_kwargs: None)
+
+    def readlink(path):
+        raise ValueError("not a symbolic link")
+
+    monkeypatch.setattr(scanner.os, "readlink", readlink)
+    files, _, links, _, stats = scanner.discover_inventory(tmp_path)
+    assert [record.path for record in files] == ["a.py"]
+    assert [(link.path, link.target, link.target_scope, link.target_state) for link in links] == [
+        ("lx", "", "unknown", "unreadable")
+    ]
+    assert stats["entry_errors"] == 1
+
+
+def test_native_walker_link_read_errors_are_not_reported_as_internal(tmp_path: Path, monkeypatch):
+    # Regression: the Rust walker's read_link error was dropped, so the empty target
+    # resolved to the link's own directory and the link was reported as "internal".
+    from project_discovery.inventory import scanner
+
+    entries = [
+        ("broken", "symlink", 0, 0o777, 0, False, "", "Permission denied (os error 13)", 1, None, None, None),
+        ("good", "symlink", 0, 0o777, 0, False, "a.txt", None, 1, None, None, None),
+    ]
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *_args, **_kwargs: iter(entries))
+    _, _, links, _, stats = scanner.discover_inventory(tmp_path)
+    by_path = {link.path: link for link in links}
+    assert (by_path["broken"].target_scope, by_path["broken"].target_state) == ("unknown", "unreadable")
+    assert (by_path["good"].target_scope, by_path["good"].target_state) == ("internal", "unverified")
+    assert stats["entry_errors"] == 1
+
+
 @pytest.mark.skipif(os.name != "nt", reason="unpaired surrogates are legal only in NTFS names")
 def test_windows_names_with_unpaired_surrogates_stay_openable(tmp_path: Path, monkeypatch):
     from project_discovery.inventory.scanner import discover_inventory

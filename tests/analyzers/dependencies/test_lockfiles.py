@@ -95,3 +95,34 @@ def test_entry_budget_and_unsupported_formats_raise():
         parse_lockfile("Cargo.lock", source, max_entries=1)
     with pytest.raises(ValueError, match="unsupported"):
         parse_lockfile("requirements.txt", "requests==2.0\n")
+
+
+def test_npm_v1_source_specifiers_are_not_versions_and_never_leak(tmp_path):
+    # Regression: npm v1 lockfiles write git and local dependencies as the version itself.
+    # The token-bearing URL reached the report evidence and, with --vuln-online, OSV.dev.
+    from project_discovery.analyzers.dependencies.lockfiles import LockfileAnalyzer
+    from project_discovery.models import FileRecord
+
+    secret = "ghp_" + "A" * 36
+    lock = {
+        "lockfileVersion": 1,
+        "dependencies": {
+            "private-lib": {"version": f"git+https://ci:{secret}@github.example/org/lib.git#0123abc"},
+            "local-lib": {"version": "file:../local-lib"},
+            "shorthand": {"version": "github:org/repo#main"},
+            "aliased": {"version": "npm:real-package@2.4.1"},
+            "left-pad": {"version": "1.3.0"},
+        },
+    }
+    source = json.dumps(lock)
+    parsed = parse_lockfile("package-lock.json", source)
+    assert {(item.name, item.version) for item in parsed} == {("real-package", "2.4.1"), ("left-pad", "1.3.0")}
+    assert parsed.non_registry == ["local-lib", "private-lib", "shorthand"]
+    path = tmp_path / "package-lock.json"
+    path.write_text(source, encoding="utf-8")
+    record = FileRecord("package-lock.json", path.stat().st_size, ".json", "JSON")
+    findings = LockfileAnalyzer().analyze(path, record)
+    text = json.dumps([finding.to_dict() for finding in findings])
+    assert secret not in text and "github.example" not in text and "../local-lib" not in text
+    gap = next(finding for finding in findings if finding.title.startswith("Dependencies outside"))
+    assert gap.confidence == "UNKNOWN" and gap.evidence[1:] == ["local-lib", "private-lib", "shorthand"]

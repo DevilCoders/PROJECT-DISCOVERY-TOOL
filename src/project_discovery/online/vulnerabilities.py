@@ -13,6 +13,7 @@ reported as UNKNOWN coverage findings plus scan diagnostics, never as "no vulner
 from __future__ import annotations
 
 import os
+import re
 import time
 import urllib.parse
 from collections import Counter, defaultdict
@@ -36,6 +37,9 @@ from .advisories import GITHUB_API_URL, NVD_API_URL, GhsaClient, NvdClient, is_c
 from .cache import DEFAULT_CACHE_TTL_SECONDS, ResponseCache, default_cache_path
 from .http import DEFAULT_TIMEOUT, HttpClient, NetworkError
 from .osv import OSV_API_URL, OsvClient, PackageQuery
+
+# A registry release: no URL, path, scope or whitespace (Go "+incompatible" is fine).
+_PLAIN_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+~_-]{0,127}+\Z")
 
 ONLINE_ANALYZER_NAME = "online-vulnerability-intelligence"
 ENRICHMENT_SOURCES = ("nvd", "ghsa")
@@ -226,6 +230,10 @@ class OnlineVulnerabilityLookup:
                 parse_failures.append((source.path, redact_source_excerpt(f"{type(exc).__name__}: {exc}")))
                 continue
             for package in packages:
+                # Defense in depth: only plain registry versions leave the machine or reach
+                # the response cache; source specifiers can hold credentials and paths.
+                if not _PLAIN_VERSION.match(package.version):
+                    continue
                 paths = paths_by_package[PackageQuery(package.ecosystem, package.name, package.version)]
                 if source.path not in paths:
                     paths.append(source.path)

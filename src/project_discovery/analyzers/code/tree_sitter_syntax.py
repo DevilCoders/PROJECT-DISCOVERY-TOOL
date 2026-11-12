@@ -27,7 +27,7 @@ GRAMMARS = {
     "Java": "java",
     "Kotlin": "kotlin",
     "Swift": "swift",
-    "C#": "c_sharp",
+    "C#": "csharp",
     "F#": "fsharp",
     "Dart": "dart",
     "Ruby": "ruby",
@@ -94,7 +94,7 @@ DECLARATION_NODE_TYPES = {
     "java": {"class_declaration": "class", "interface_declaration": "interface", "enum_declaration": "enum", "record_declaration": "record", "method_declaration": "method", "constructor_declaration": "constructor"},
     "kotlin": {"class_declaration": "class", "object_declaration": "object", "function_declaration": "function", "property_declaration": "property"},
     "swift": {"class_declaration": "class", "struct_declaration": "struct", "enum_declaration": "enum", "protocol_declaration": "protocol", "function_declaration": "function"},
-    "c_sharp": {"class_declaration": "class", "struct_declaration": "struct", "interface_declaration": "interface", "enum_declaration": "enum", "method_declaration": "method"},
+    "csharp": {"class_declaration": "class", "struct_declaration": "struct", "interface_declaration": "interface", "enum_declaration": "enum", "method_declaration": "method"},
     "ruby": {"class": "class", "module": "module", "method": "method", "singleton_method": "method"},
     "php": {"class_declaration": "class", "interface_declaration": "interface", "trait_declaration": "trait", "function_definition": "function", "method_declaration": "method"},
     "perl": {"subroutine_declaration_statement": "function"},
@@ -163,7 +163,7 @@ IMPORT_NODE_TYPES = {
     "java": {"import_declaration"},
     "kotlin": {"import_header"},
     "swift": {"import_declaration"},
-    "c_sharp": {"using_directive"},
+    "csharp": {"using_directive"},
     "ruby": {"call"},
     "php": {"namespace_use_declaration"},
     "dart": {"import_or_export"},
@@ -217,23 +217,35 @@ def _extract_imports(root_node, grammar: str) -> list[dict[str, str | int]]:
     )
 
 
-def _walk_tree(root_node):
-    """Iteratively summarize a syntax tree without recursion-depth risk."""
+_MAX_ERROR_LOCATIONS = 10_000
+
+
+def _walk_tree(root_node, data: bytes = b""):
+    """Iteratively summarize a syntax tree without recursion-depth risk.
+
+    Tree-sitter columns are byte offsets in the line; error locations are reported as
+    1-based character columns, so they match what an editor shows on non-ASCII lines.
+    """
     stack = [(root_node, 0)]
     node_count = 0
     max_depth = 0
     errors: list[tuple[str, int, int, bool]] = []
+    error_count = 0
     top_level = [child.type for child in root_node.children]
     while stack:
         node, depth = stack.pop()
         node_count += 1
         max_depth = max(max_depth, depth)
         if node.is_error or node.is_missing:
+            error_count += 1
+        if (node.is_error or node.is_missing) and len(errors) < _MAX_ERROR_LOCATIONS:
             point = node.start_point
-            errors.append((node.type, point.row + 1, point.column + 1, node.is_missing))
+            line_start = node.start_byte - point.column
+            column = len(data[line_start:node.start_byte].decode("utf-8", "replace")) if data else point.column
+            errors.append((node.type, point.row + 1, column + 1, node.is_missing))
         for child in reversed(node.children):
             stack.append((child, depth + 1))
-    return node_count, max_depth, errors, top_level
+    return node_count, max_depth, errors, top_level, error_count
 
 
 def _grammar_provisioned(pack, grammar: str) -> bool:
@@ -301,8 +313,10 @@ class TreeSitterAnalyzer(Analyzer):
                 severity="LOW",
             )]
         try:
+            # Undecodable bytes become U+FFFD: the parse is structural, and a strict decode
+            # would turn every non-UTF-8 source file into an analysis error.
             source = read_text_bounded(
-                path, _MAX_TREE_SITTER_FILE_BYTES,
+                path, _MAX_TREE_SITTER_FILE_BYTES, errors="replace",
                 expected_identity=record.analysis_identity,
             )
         except SourceBudgetExceeded as exc:
@@ -343,11 +357,13 @@ class TreeSitterAnalyzer(Analyzer):
                     analyzer=self.name,
                 )]
             parser = pack.get_parser(grammar)
-            tree = parser.parse(source)
+            # py-tree-sitter parses bytes only; a str argument raises TypeError.
+            data = source.encode("utf-8")
+            tree = parser.parse(data)
             if tree is None:
                 raise RuntimeError("Tree-sitter parser returned no syntax tree")
             root = tree.root_node
-            node_count, max_depth, errors, top_level = _walk_tree(root)
+            node_count, max_depth, errors, top_level, error_count = _walk_tree(root, data)
             declarations = _extract_declarations(root, grammar)
             imports = _extract_imports(root, grammar)
         except SourceBudgetExceeded as exc:
@@ -424,7 +440,7 @@ class TreeSitterAnalyzer(Analyzer):
             findings.append(Finding(
                 "code",
                 f"Parser diagnostics: {record.path}",
-                f"Tree-sitter emitted {len(errors)} error or missing nodes. This is parser "
+                f"Tree-sitter emitted {error_count:,} error or missing nodes. This is parser "
                 "evidence, not by itself a compiler or runtime failure diagnosis.",
                 confidence="CONFIRMED",
                 evidence=evidence,

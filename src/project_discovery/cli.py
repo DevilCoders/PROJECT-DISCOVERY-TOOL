@@ -9,7 +9,6 @@ import shutil
 import sqlite3
 import time
 from collections import Counter, deque
-from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,11 +33,12 @@ from .analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFIL
 from .analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
 from .catalog.domains import analyzer_domain_catalog, analyzer_domain_count
 from .catalog.languages import language_catalog, recognized_language_count
-from .core.source_utils import read_text_bounded
+from .core.source_utils import neutralize_controls, read_text_bounded
 from .engine.executor import (
     BATCH_MAX_BYTES,
     BATCH_MAX_FILES,
     EXECUTOR_MODES,
+    POOL_FAILURES,
     AnalysisExecutor,
     FileOutcome,
     FileTask,
@@ -115,8 +115,9 @@ _verified_regular_file_stat = verified_regular_file_stat
 
 
 def _status(console: Console, label: str, message: str, style: str) -> None:
-    # Messages carry paths and plugin text; "[...]" in them must not be read as markup.
-    console.print(f"[bold {style}][ {label} ][/bold {style}] {escape(message)}")
+    # Messages carry paths and plugin text: "[...]" in them must not be read as markup,
+    # and escape sequences must not reach the terminal.
+    console.print(f"[bold {style}][ {label} ][/bold {style}] {escape(neutralize_controls(message))}")
 
 
 _BANNER = r"""
@@ -582,19 +583,24 @@ def run_scan(
                 def batch_outcomes(future, tasks):
                     try:
                         return future.result()
-                    except BrokenProcessPool:
-                        # A worker died (native fault or OOM kill). Restart the pool and rerun
-                        # this batch file by file so only the culprit file is lost.
-                        engine.restart()
-                        outcomes = []
-                        for item in tasks:
-                            try:
-                                outcomes.extend(engine.submit([item]).result())
-                            except BrokenProcessPool:
-                                engine.restart()
-                                message = f"{item.record.path}: analysis worker process terminated"
-                                outcomes.append(FileOutcome(file_error=message, errors=[message]))
-                        return outcomes
+                    except POOL_FAILURES:
+                        # A worker died (native fault or OOM kill). Replace the pool once and
+                        # rerun this batch file by file, so only the culprit file is lost.
+                        engine.restart(future)
+                        return [rerun_alone(item) for item in tasks]
+
+                def rerun_alone(item: FileTask) -> FileOutcome:
+                    # A pool can also break because of another in-flight batch, so a file is
+                    # blamed only when it fails twice on its own.
+                    for _attempt in range(2):
+                        single = engine.submit([item])
+                        try:
+                            [outcome] = single.result()
+                            return outcome
+                        except POOL_FAILURES:
+                            engine.restart(single)
+                    message = f"{item.record.path}: analysis worker process terminated"
+                    return FileOutcome(file_error=message, errors=[message])
 
                 def collect_one():
                     future, tasks = pending.popleft()

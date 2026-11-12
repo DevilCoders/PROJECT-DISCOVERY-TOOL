@@ -40,6 +40,10 @@ Status values: **Fixed** (implemented and covered by regression tests) · **Open
 | PDT-006 | Reports | `FileRecord.sha256` was never assigned (0/143 files), so duplicate-content comparison could never match. | Fixed |
 | PDT-007 | Python security | `PythonSecurityAnalyzer` was never registered in `load_analyzers()`. | Fixed |
 | PDT-008 | Test suite | 4 stale or non-portable tests plus 2 shadowed duplicate test functions; the CI lint gate could not catch F811. | Fixed |
+| PDT-235 | Import graph and code index | *Found in the 2026-11-12 re-audit (§12).* A scan root that is itself a Python package (a root `__init__.py`, as in add-on repositories or `pdt scan src/pkg`) never finished: the package walk climbed from `.` to `PurePosixPath(".").parent`, which is `.` again. The walk now stops at the scan root. | Fixed |
+| PDT-236 | Process executor | *Found in the 2026-11-12 re-audit.* When a worker died, every in-flight future of the broken pool restarted the pool again, which cancelled the batches already queued on the replacement, and the scan aborted with an unhandled `CancelledError`. A pool is now replaced once per breakage, cancelled futures are handled like broken ones, and a file is blamed only after failing twice on its own. | Fixed |
+| PDT-237 | Inventory | *Found in the 2026-11-12 re-audit.* The fallback walker crashed the whole scan on a WSL (LX) symlink, because `os.readlink` raises `ValueError` for it. The Rust walker dropped link-read errors, so unreadable links were reported as `internal`. Both walkers now record such links with `target_state: "unreadable"`, scope `unknown`, and an entry error. | Fixed |
+| PDT-238 | Tree-sitter analyzer | *Found in the 2026-11-12 re-audit.* With grammars provisioned, every file got "Tree-sitter analysis error", because the analyzer passed `str` to `Parser.parse()`, which accepts bytes only. C# was mapped to `c_sharp`, a name the grammar pack does not use. The tests used fake parsers, and CI provisioned no grammars. Parsing now uses bytes, error columns count characters, and CI provisions real grammars for the tests. | Fixed |
 
 ### P1: security of PDT itself
 
@@ -58,6 +62,9 @@ Status values: **Fixed** (implemented and covered by regression tests) · **Open
 | PDT-225 | Redaction | The detector and redactor used separate token lists: Docker PATs, Stripe restricted keys and Azure AccountKey values were detected but copied verbatim into report excerpts. One shared registry (secret_patterns) now drives both. | Fixed |
 | PDT-226 | Offline guarantee | `tree-sitter-language-pack` 1.23+ downloads grammar bundles from the network inside `get_parser()`, and its `has_parser()` probe does not exist in 1.23.1, so a scan of a polyglot repository silently made network requests. Parsing is now gated on `downloaded_languages()`: grammars that are not already provisioned are reported as `UNKNOWN` and nothing is fetched. | Fixed |
 | PDT-227 | Regex denial of service | *Found in re-audit.* Scanned content is untrusted, yet the redaction patterns applied to every excerpt were cubic: 2,000 characters of `tokentoken…` took 9.3 s, so one crafted line could stall a worker indefinitely. The secret detector, network domain and string-literal scanners, email, archive-member, Nix-assignment and Markdown patterns were quadratic (50–220 ms at 4 KB, minutes to hours on megabyte lines). Each now uses start anchoring, possessive quantifiers, RFC length bounds or a linear scanner, and `tests/test_regex_complexity.py` times every package regex against 60 adversarial 48 KB inputs. | Fixed |
+| PDT-239 | Terminal and report output | *Found in the 2026-11-12 re-audit.* Escape sequences in scanned content reached the console and Markdown verbatim: a flagged source line could retitle or clear the operator's terminal and forge links (OSC 0/8, CSI 2J). Plugin exception and load-error text took the same path. C0/C1 control characters are now neutralized in findings, code evidence, diagnostics, status lines and Markdown. | Fixed |
+| PDT-240 | Comparison report | *Found in the 2026-11-12 re-audit.* `pdt compare` and `catalog-compare` wrote dependency, module and path names from scanned projects into `project-comparison.md` verbatim, so a `package.json` entry could inject HTML, links or Markdown blocks: the PDT-107 defect class in the second Markdown writer. Every value now goes through the scan report's neutralizer. | Fixed |
+| PDT-241 | Lockfiles and online advisories | *Found in the 2026-11-12 re-audit.* npm v1 lockfiles record git and local dependencies as their version (`git+https://user:token@host/repo.git`, `file:../lib`). The string reached report evidence and, with `--vuln-online`, OSV.dev and the response cache. Such specifiers are no longer versions: the names are reported as an `UNKNOWN` coverage gap, `npm:` aliases resolve to the real package, and only plain versions are ever sent online. | Fixed |
 | PDT-230 | CI supply chain | *Found in re-audit by PDT's own deployment analyzer.* Workflows referenced `actions/checkout@v4`, `actions/setup-python@v5` and `dtolnay/rust-toolchain@stable`, which are mutable tags and branches. They are now pinned to verified commit SHAs, with the version in a comment. | Fixed |
 
 ### P2: correctness, precision and operability
@@ -94,6 +101,7 @@ Status values: **Fixed** (implemented and covered by regression tests) · **Open
 | PDT-232 | Resume integrity | *Found in re-audit (live interrupt/resume test).* An analyzed file's record, whose SHA-256 marks it complete for `--resume`, was committed in batches through its own connection, independently of the finding store's 512-row buffer. A `KeyboardInterrupt` during a finding commit also discarded the rolled-back rows. A crash or interrupt in that window left files marked analyzed whose findings were never stored, so `--resume` skipped them and silently lost those findings. Also, an interrupted scan kept none of its uncommitted progress, so resume redid it. Records are now committed only after the finding store has flushed, an interrupted flush keeps its rows, and an interrupted scan saves its completed files. Regression tests check the ordering at every commit and resume an interrupted scan to identical findings. | Fixed |
 | PDT-233 | Console output | *Found while adding plugin isolation.* Status lines were printed as Rich markup, so `pdt scan` on a directory whose path contained `[/x]` crashed with `MarkupError`, and `[bold]` in a path restyled the output. `pdt capabilities` printed plugin diagnostics, which are plugin-controlled text, the same way. Messages are now escaped, and plugin names and errors never pass through markup. | Fixed |
 | PDT-234 | Coverage reporting | *Found in the re-audit self-scan on Windows.* The API endpoint analyzer decided whether its 32 MiB budget had truncated a file by comparing the file size with the length of the decoded text. Universal-newline decoding shortens CRLF text, so every CRLF source file it supports got a false "API endpoint scan budget reached" `UNKNOWN` finding: four files in this repository, and potentially every source file of a Windows-checked-out project. Truncation is now reported only when content remains after the budget is used. | Fixed |
+| PDT-242 | Plugins with `--plugin-isolation off` | *Found while fixing PDT-236.* Process-mode workers rediscovered entry points instead of loading the ones the coordinator had loaded, so a worker could run a different plugin set, and a worker-side load failure went unreported. Workers now load exactly the coordinator's entry points and refuse to run without them. | Fixed |
 
 ## 4. Capability matrix at the baseline
 
@@ -275,3 +283,24 @@ The release gates in §5 are unchanged. The large-corpus benchmarks now also mea
 
 - Values whose class is only known at run time (factories without return annotations, dependency injection, `getattr`) are not typed.
 - Imported names count as classes only when capitalized, and an imported class's methods are resolved by name in its module, without its base classes.
+
+## 12. Re-audit of 2026-11-12
+
+**Date:** 2026-11-12 · **Code:** `65dc3e2`, the head after §11 · **Findings:** [AUDIT_2026-11-12.md](AUDIT_2026-11-12.md)
+
+The owner suspected that parts of PDT had been started and left unfinished, or were broken in ways the green test suites (Windows 891 passed, Linux 900 passed) did not show. Eleven auditors each took one subsystem, read its code, tests and documentation end to end, and proved candidate defects with scripts against a fixture or the real code. Seven areas finished and reported 124 findings: 4 P0, 4 P1, 62 P2 and 54 P3. The security analyzers, both domain-analyzer groups and the black-box end-to-end run did not finish before the session's usage limit and are not covered by this round.
+
+At the owner's request the findings were not independently verified by further agents; the owner verifies them. [AUDIT_2026-11-12.md](AUDIT_2026-11-12.md) lists every finding as reported, with its status. Each one fixed so far has a register entry in §3 and a regression test.
+
+### Fixed
+
+- **P0:** PDT-235 (package scan roots hung), PDT-236 (a dead worker aborted process-mode scans), PDT-237 (WSL symlinks crashed the fallback walker; unreadable links were reported as internal) and PDT-238 (the Tree-sitter analyzer failed on every file once grammars were provisioned).
+- **P1:** PDT-239 (terminal escape sequences from scanned content and plugin errors), PDT-240 (HTML and Markdown injection in comparison reports) and PDT-241 (npm v1 source specifiers leaked credentials into reports and online queries).
+- **P2:** PDT-242 (with `--plugin-isolation off`, process workers could load a different plugin set).
+
+### Method notes
+
+- The CI job with optional integrations installed `tree-sitter-language-pack` but provisioned no grammar, so the Tree-sitter tests only ever exercised fakes. That job now provisions real grammars before the suite runs, as an operator would.
+- Process-mode tests now kill a real worker process (`os._exit`) to exercise pool recovery end to end.
+
+The open findings are worked through in severity order. The release gates in §5 are unchanged.

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..analyzers.base import Analyzer
-from ..core.source_utils import open_verified_binary, redact_source_excerpt
+from ..core.source_utils import neutralize_controls, open_verified_binary, redact_source_excerpt
 from ..models import CodeEvidence, FileRecord, Finding
 from .protocol import (
     MAX_FINDINGS_PER_FILE,
@@ -547,8 +547,6 @@ class PluginHost:
 
 _NAME_LIMIT = 64
 _CATEGORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-# C0/C1 controls (except tab and newline) could rewrite terminal output.
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _CONFIDENCES = {"CONFIRMED", "INFERRED", "UNKNOWN"}
 _SEVERITIES = {"INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
 _MAX_EVIDENCE_ITEMS = 64
@@ -559,7 +557,8 @@ def _bounded_text(value: Any, limit: int, label: str, *, required: bool = False)
         return ""
     if not isinstance(value, str) or (required and not value.strip()):
         raise ValueError(f"{label} must be {'a non-empty' if required else 'a'} string")
-    return redact_source_excerpt(_CONTROL_CHARACTERS.sub("�", value), max_chars=limit)
+    # C0/C1 controls (except tab and newline) could rewrite terminal output.
+    return redact_source_excerpt(neutralize_controls(value), max_chars=limit)
 
 
 def validate_metadata(value: Any, reserved_names: set[str]) -> dict:
@@ -613,7 +612,7 @@ def finding_from_plugin(item: Any, analyzer_name: str) -> Finding:
         if not isinstance(code, str) or not isinstance(vulnerable, bool):
             raise ValueError("code evidence must carry a source line string")
         # CodeEvidence redacts and bounds the line itself.
-        lines.append(CodeEvidence(number, _CONTROL_CHARACTERS.sub("�", code[:4000]), vulnerable))
+        lines.append(CodeEvidence(number, neutralize_controls(code[:4000]), vulnerable))
     return Finding(
         category=category,
         title=_bounded_text(item.get("title"), 300, "title", required=True),

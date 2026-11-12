@@ -397,9 +397,14 @@ def _discover_with_rust(
                 _update_file_ancestor_totals(relative, 0, store)
             continue
         if kind == "symlink":
-            scope = _symlink_scope(root, root / relative, target)
+            if error:
+                # The target could not be read: the link is inventoried, its target is not.
+                target, scope, state = "", "unknown", "unreadable"
+                stats["entry_errors"] += 1
+            else:
+                scope, state = _symlink_scope(root, root / relative, target), "unverified"
             link_record = SymlinkRecord(
-                relative, target, scope, target_state="unverified",
+                relative, target, scope, target_state=state,
                 is_hidden=hidden, permissions=mode,
             )
             if store is None:
@@ -594,11 +599,17 @@ def discover_inventory(
             if _is_link_like(info):
                 try:
                     target = os.readlink(entry.path)
-                    scope = _symlink_scope(root, Path(entry.path), target)
-                except OSError:
-                    target, scope = "", "unknown"
+                except (OSError, ValueError):
+                    # ValueError: a name-surrogate reparse point that CPython does not read
+                    # as a link, such as a WSL (LX) symlink on NTFS.
+                    target = None
+                if target is None:
+                    target, scope, state = "", "unknown", "unreadable"
+                    stats["entry_errors"] += 1
+                else:
+                    scope, state = _symlink_scope(root, Path(entry.path), target), "unverified"
                 link_record = SymlinkRecord(
-                    relative, target, scope, target_state="unverified", is_hidden=hidden,
+                    relative, target, scope, target_state=state, is_hidden=hidden,
                     permissions=stat.S_IMODE(info.st_mode),
                 )
                 if store is None:

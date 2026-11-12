@@ -20,6 +20,9 @@ read its exit codes and performance data.
    grammars. With `tree-sitter-language-pack` 1.23+, download the grammars you need in a
    separate, deliberate step, for example
    `python -c "import tree_sitter_language_pack as t; t.download(['python', 'rust'])"`.
+   The pack keeps grammars in a per-user cache. To provision them once for a shared or
+   offline host, set `TREE_SITTER_LANGUAGE_PACK_CACHE_DIR` to the same directory for the
+   download and for scans. Grammar names are the pack's (C# is `csharp`).
    Unprovisioned grammars are reported as `UNKNOWN`.
 
 ## Scan modes

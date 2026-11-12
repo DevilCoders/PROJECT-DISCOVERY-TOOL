@@ -323,6 +323,29 @@ def _json_report(output: Path) -> dict:
     return json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
 
 
+def test_scan_of_a_directory_that_is_a_python_package_completes(tmp_path: Path):
+    # Regression: a scan root holding __init__.py made the package walk of the import
+    # graph and the code index loop forever, so no report was ever written.
+    import threading
+
+    project = tmp_path / "pkg"
+    (project / "sub").mkdir(parents=True)
+    (project / "__init__.py").write_text("from . import core\n", encoding="utf-8")
+    (project / "core.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (project / "sub" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "sub" / "mod.py").write_text("import core\ncore.run()\n", encoding="utf-8")
+    outcome = {}
+    worker = threading.Thread(
+        target=lambda: outcome.update(code=run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(120)
+    assert not worker.is_alive(), "scan of a package root did not finish"
+    assert outcome["code"] == 0
+    assert (tmp_path / "out" / "discovery-report.json").is_file()
+
+
 def test_end_to_end_scan_runs_per_file_analyzers_and_fingerprints(tmp_path: Path):
     # Regression: the analysis guard rejected every file, so no per-file analyzer ever ran.
     project = _sample_project(tmp_path / "project")
@@ -445,6 +468,32 @@ def test_security_summary_names_the_file_location(tmp_path: Path, capsys):
     output = capsys.readouterr().err
     assert "at settings.env:1" in output
     assert "\x1b[" not in output
+
+
+def test_escape_sequences_in_scanned_content_never_reach_the_terminal_or_reports(tmp_path: Path, capsys):
+    # Regression: redacted excerpts, titles and evidence kept ESC, so a scanned line could
+    # retitle the operator's terminal (OSC 0), clear it (CSI 2J) or forge links (OSC 8),
+    # in the console summary and in discovery-report.md alike.
+    import sys
+
+    project = tmp_path / "project"
+    project.mkdir()
+    payload = "\x1b]0;owned\x07\x1b[2J\x1b]8;;https://evil.example\x07click\x1b]8;;\x07\x08\r"
+    (project / "app.py").write_bytes(f"import os\nos.system('ls')  # {payload}\n".encode("utf-8"))
+    if sys.platform != "win32":
+        (project / f"name{chr(27)}[31m.py").write_bytes(b"import os\nos.system('id')\n")
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json", "markdown", "html"}, 1, no_color=True) == 0
+    console = capsys.readouterr()
+    for stream in (console.out, console.err):
+        assert "\x1b" not in stream and "\x07" not in stream
+    markdown = (output / "discovery-report.md").read_text(encoding="utf-8")
+    assert "\x1b" not in markdown and "\x07" not in markdown and "\x08" not in markdown
+    report = _json_report(output)
+    for finding in report["findings"]:
+        texts = [finding["title"], finding["detail"], *finding["evidence"]]
+        texts += [item["code"] for item in finding["code_evidence"]]
+        assert not any("\x1b" in text or "\x07" in text for text in texts), finding["title"]
 
 
 def _finding_keys(report: dict) -> set[tuple]:

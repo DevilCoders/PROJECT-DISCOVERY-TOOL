@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from project_discovery.analyzers.code.tree_sitter_syntax import GRAMMARS, TreeSitterAnalyzer
 from project_discovery.models import FileRecord
 
@@ -64,10 +66,10 @@ def test_iterative_tree_walker_summarizes_nested_nodes():
         type="module", children=[leaf], is_error=False, is_missing=False,
         start_point=point,
     )
-    node_count, max_depth, errors, top_level = _walk_tree(root)
+    node_count, max_depth, errors, top_level, error_count = _walk_tree(root)
     assert node_count == 2
     assert max_depth == 1
-    assert errors == []
+    assert errors == [] and error_count == 0
     assert top_level == ["identifier"]
 
 
@@ -264,3 +266,56 @@ def test_unprovisioned_grammars_are_never_loaded_or_downloaded(tmp_path: Path, m
     assert findings[0].title.startswith("Grammar not provisioned offline")
     assert module.parser_capabilities({"Rust"}) == {"Rust": "grammar_not_provisioned"}
     module._CAPABILITY_CACHE.clear()
+
+
+def _provisioned(*grammars: str) -> bool:
+    """Whether real grammars are available offline (CI's optional-integrations job)."""
+    try:
+        import tree_sitter_language_pack as pack
+    except ImportError:
+        return False
+    return set(grammars) <= set(pack.downloaded_languages())
+
+
+_REAL = pytest.mark.skipif(
+    not _provisioned("javascript", "csharp"), reason="real Tree-sitter grammars are not provisioned"
+)
+
+
+@_REAL
+def test_provisioned_grammars_parse_real_files(tmp_path: Path, monkeypatch):
+    # Regression: the analyzer passed str to Parser.parse(), which accepts bytes only, so
+    # every provisioned grammar produced an analysis error; C# was mapped to "c_sharp".
+    import project_discovery.analyzers.code.tree_sitter_syntax as module
+
+    monkeypatch.setattr(module, "_CAPABILITY_CACHE", {})
+    samples = {
+        "JavaScript": ("tool.js", "import fs from 'fs';\nclass Tool {\n  run() { return fs.cwd(); }\n}\n"),
+        "C#": ("Service.cs", "using System;\nnamespace App {\n  public class Service {\n    public void Run() {}\n  }\n}\n"),
+    }
+    for language, (name, text) in samples.items():
+        path = tmp_path / name
+        path.write_bytes(text.encode("utf-8"))
+        record = _record(language)
+        record.path, record.size_bytes = name, path.stat().st_size
+        assert TreeSitterAnalyzer().supports(record), language
+        findings = TreeSitterAnalyzer().analyze(path, record)
+        titles = [finding.title for finding in findings]
+        assert titles[0] == f"Syntax tree: {name}", titles
+        assert any(title.startswith("Declarations:") for title in titles), titles
+        assert not any("error" in title.lower() for title in titles), titles
+
+
+@_REAL
+def test_parser_error_columns_count_characters_not_bytes(tmp_path: Path, monkeypatch):
+    import project_discovery.analyzers.code.tree_sitter_syntax as module
+
+    monkeypatch.setattr(module, "_CAPABILITY_CACHE", {})
+    path = tmp_path / "broken.js"
+    # "é" and "€" take 2 and 3 bytes: the stray ")" is byte 15 but character 12 of line 1.
+    path.write_bytes("let é = '€');\n".encode("utf-8"))
+    record = _record("JavaScript")
+    record.path, record.size_bytes = "broken.js", path.stat().st_size
+    findings = TreeSitterAnalyzer().analyze(path, record)
+    diagnostics = next(finding for finding in findings if finding.title.startswith("Parser diagnostics"))
+    assert diagnostics.evidence[0].startswith("broken.js:1:12 "), diagnostics.evidence
