@@ -24,6 +24,7 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 
+from ...core.secret_patterns import ANY_TOKEN
 from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...intelligence.model import model_for
@@ -110,8 +111,32 @@ def is_vendored(path: str) -> bool:
     return any(part.lower() in _VENDORED_DIRECTORIES for part in path.replace("\\", "/").split("/")[:-1])
 
 
+# Path segments after these name a hook and its credential (Discord /api/webhooks/<id>/
+# <token>, Teams /webhookb2/..., Zapier /hooks/catch/...); hosts named hooks.* (Slack
+# /services/T.../B.../<secret>) carry it in every segment after the first.
+_HOOK_SEGMENTS = frozenset({"webhook", "webhooks", "webhookb2", "hooks", "incomingwebhook"})
+_TOKEN_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+
+
+def _opaque(segment: str) -> bool:
+    """A credential or opaque identifier rather than a route name.
+
+    Long token-alphabet runs, and shorter ones that mix letters with several digits
+    (Slack's 24-character webhook secret); route names such as ``oauth2-callback`` stay.
+    """
+    if not 20 <= len(segment) <= 512 or not set(segment) <= _TOKEN_ALPHABET:
+        return False
+    return len(segment) >= 32 or (
+        sum(character.isdigit() for character in segment) >= 2 and any(character.isalpha() for character in segment)
+    )
+
+
 def _normalize_url(url: str) -> tuple[str, str]:
-    """(host, path template) with interpolations, numbers and UUIDs as ``{}``."""
+    """(host, path template) with interpolations, numbers, UUIDs and credentials as ``{}``.
+
+    Webhook URLs carry their secret in the path, so hook segments, long opaque segments
+    and anything the secret registry recognizes never reach the integration facts.
+    """
     value = re.sub(r"\$\{[^{}]{0,200}+\}|\{[^{}]{0,200}+\}|%[sd]|:[A-Za-z_]\w{0,60}+(?=/|$)", "{}", url.strip())
     host = ""
     match = re.match(r"(?i)^(?:https?|wss?|grpc)://([^/?#]{1,253}+)(.*)$", value)
@@ -121,10 +146,19 @@ def _normalize_url(url: str) -> tuple[str, str]:
         value = value[value.index("/"):]  # "${BASE}/users" -> "/users"
     path = value.split("?", 1)[0].split("#", 1)[0] or "/"
     segments = []
-    for segment in path.split("/"):
-        if re.fullmatch(r"\d{1,20}+|[0-9a-fA-F-]{32,36}+|\{\}", segment):
+    # hooks.slack.com/services/T.../B.../<secret>: only the first segment is a name.
+    keep = 2 if host.startswith("hooks.") else None
+    hidden = False
+    for index, segment in enumerate(path.split("/")):
+        if segment and (hidden or (keep is not None and index >= keep)):
+            segment = "{}"
+        elif re.fullmatch(r"\d{1,20}+|[0-9a-fA-F-]{32,36}+|\{\}", segment) or _opaque(segment) or (
+            ANY_TOKEN.search(segment)
+        ):
             segment = "{}"
         segments.append(segment)
+        if segment.lower() in _HOOK_SEGMENTS:
+            hidden = True
     path = "/".join(segments)
     if not path.startswith("/"):
         path = "/" + path

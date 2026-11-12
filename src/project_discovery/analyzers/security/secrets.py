@@ -11,24 +11,21 @@ from ...catalog.languages import (
     is_textual_path,
     textual_language_names,
 )
-from ...core.secret_patterns import COMPILED_FORMATS, PRIVATE_KEY_ANCHORS, PRIVATE_KEY_MARKER
-from ...core.source_utils import keyed_identifier, open_verified_binary, redact_source_excerpt
+from ...core.secret_patterns import (
+    ASSIGNMENT_OPERATOR,
+    COMPILED_FORMATS,
+    CREDENTIAL_KEYWORDS,
+    PRIVATE_KEY_ANCHORS,
+    PRIVATE_KEY_MARKER,
+)
+from ...core.source_utils import describe_error, keyed_identifier, open_verified_binary, redact_source_excerpt
 from ...engine.native import count_byte as native_count_byte
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
 
-_CREDENTIAL_KEY = keyed_identifier(
-    r"api[_-]?key|client[_-]?secret|service[_-]?token|access[_-]?(?:token|key)"
-    r"|auth[_-]?token|refresh[_-]?token|password|passwd|passphrase"
-    r"|secret[_-]?(?:access[_-]?)?key|secret|token|encryption[_-]?key|signing[_-]?key"
-    r"|aws_secret_access_key|database_url"
-)
-# An optional closing key quote ("password": / 'password' =>), an optional type annotation
-# (password: str = / apiKey: string =), then the operator. Separators never cross a line.
-_ASSIGNMENT_OPERATOR = (
-    r"""["']?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\]]*(?:[ \t]*\|[ \t]*[A-Za-z_][\w.\[\]]*)*[ \t]*=(?!=)"""
-    r"""|:=|=>|[:=](?!=))[ \t]*"""
-)
+_CREDENTIAL_KEY = keyed_identifier(CREDENTIAL_KEYWORDS)
+# Shared with the excerpt redactor, so every syntax detected here is also redacted.
+_ASSIGNMENT_OPERATOR = ASSIGNMENT_OPERATOR
 _QUOTED_VALUE = r""""([^"\r\n]{6,})"|'([^'\r\n]{6,})'"""
 _UNQUOTED_VALUE = r"""([^\s"'#,;]{6,})"""
 # Configuration, environment and shell files hold literal unquoted values (TOKEN=abc123).
@@ -260,7 +257,7 @@ class SecretPatternAnalyzer(Analyzer):
         except OSError as exc:
             return [Finding(
                 "secrets", f"Secret scan could not read file: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name, severity="LOW",
             )]
 

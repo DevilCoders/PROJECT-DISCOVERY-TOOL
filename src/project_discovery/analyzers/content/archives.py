@@ -16,7 +16,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from ...core.secret_patterns import ANY_TOKEN, PRIVATE_KEY_MARKER
-from ...core.source_utils import open_verified_binary, redact_source_excerpt
+from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
 
@@ -449,7 +449,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             return [Finding(
                 "archive",
                 f"ZIP metadata read error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
@@ -613,7 +613,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             return [Finding(
                 "archive",
                 f"TAR metadata read error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

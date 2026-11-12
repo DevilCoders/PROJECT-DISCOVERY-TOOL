@@ -9,7 +9,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 from ...catalog.languages import source_extensions
-from ...core.source_utils import read_text_bounded
+from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -162,7 +162,7 @@ class MigrationIntelligenceAnalyzer(Analyzer):
             return [Finding(
                 "migration",
                 f"Migration file read error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

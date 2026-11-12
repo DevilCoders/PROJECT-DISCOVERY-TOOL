@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from ...core.source_utils import read_text_bounded
+from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -161,7 +161,7 @@ def _read_text(
             expected_identity=expected_identity,
         ), None
     except OSError as exc:
-        return None, f"{type(exc).__name__}: {exc}"
+        return None, describe_error(exc)
 
 
 class VCSHostingAnalyzer(Analyzer):

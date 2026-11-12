@@ -170,3 +170,17 @@ def test_configuration_hosts_do_not_need_string_literals(tmp_path: Path):
     record = FileRecord("config/app.yaml", path.stat().st_size, ".yaml", "YAML", file_type="text")
     domains = _evidence(NetworkIndicatorAnalyzer().analyze(path, record), "Hostname and domain indicators")
     assert domains == ["config/app.yaml:2 (db.internal.example.net)"]
+
+
+def test_jdbc_properties_and_replica_lists_never_reach_uri_or_host_evidence(tmp_path: Path):
+    # Regression: urlsplit took "db01;user=..;password=.." as the host name, so Microsoft's
+    # JDBC form put the password into URI and hostname evidence in every report.
+    findings = _scan(
+        tmp_path,
+        'URL = "jdbc:sqlserver://sqlprod01;databaseName=orders;user=svc;password=fakejdbcpwd42;encrypt=true"\n'
+        'MONGO = "mongodb://h1.example.com:27017,h2.example.com:27017/app"\n',
+    )
+    dumped = repr([item.to_dict() for item in findings])
+    assert "fakejdbcpwd42" not in dumped and "databasename" not in dumped.lower()
+    assert "sqlserver://sqlprod01/<redacted-path>" in dumped
+    assert "mongodb://h1.example.com:27017/<redacted-path>" in dumped

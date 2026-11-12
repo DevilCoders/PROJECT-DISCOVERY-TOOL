@@ -157,3 +157,19 @@ def test_field_name_inventory_is_low_severity_and_bare_mobile_is_not_a_phone(tmp
         "models.py:2 (field-name indicator: phone)",
         "models.py:3 (field-name indicator: phone)",
     ]
+
+
+def test_credential_field_lines_hide_positional_literals(tmp_path: Path):
+    # Regression: an SQL seed row names the password column, and every finding citing the
+    # line (credential field names, personal-data fields) kept the password verbatim.
+    path = tmp_path / "schema.sql"
+    path.write_text(
+        "INSERT INTO users (username, email, password) VALUES ('alice', 'alice@fixture-mailbox.net', 'plaintextpw');\n",
+        encoding="utf-8",
+    )
+    record = FileRecord("db/schema.sql", path.stat().st_size, ".sql", "SQL", file_type="text")
+    findings = DataExposureAnalyzer().analyze(path, record)
+    assert any("Credential field-name" in item.title for item in findings)
+    serialized = repr([item.to_dict() for item in findings])
+    for raw in ("plaintextpw", "alice@fixture-mailbox.net", "'alice'"):
+        assert raw not in serialized

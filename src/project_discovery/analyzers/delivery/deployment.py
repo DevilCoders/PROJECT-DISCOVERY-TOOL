@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.safe_parsers import safe_yaml_load_all
-from ...core.source_utils import read_text_bounded
+from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -101,7 +101,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             return None, Finding(
                 "deployment",
                 f"Deployment manifest unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
@@ -116,7 +116,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "containers", f"Dockerfile read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         instructions: dict[str, list[tuple[int, str]]] = {}
@@ -180,7 +180,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "infrastructure", f"Terraform file read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         blocks = re.findall(
@@ -452,7 +452,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return [Finding(
                 "infrastructure", f"Deployment JSON parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         if "Resources" in root and isinstance(root["Resources"], dict):
@@ -468,7 +468,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "ci_cd", f"Jenkinsfile read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         stages = re.findall(r"""(?m)\bstage\s*\(\s*['"]([^'"]+)['"]\s*\)""", source)

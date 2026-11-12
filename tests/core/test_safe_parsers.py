@@ -96,3 +96,39 @@ def test_analyzers_report_document_bombs_as_unknown_quickly(tmp_path: Path, anal
     findings = analyzer.analyze(path, record)
     assert time.monotonic() - started < 5
     assert findings and all(item.confidence == "UNKNOWN" for item in findings)
+
+
+def test_describe_error_quotes_no_yaml_or_configparser_content():
+    import configparser
+
+    from project_discovery.core.source_utils import describe_error
+
+    yaml = pytest.importorskip("yaml")
+    with pytest.raises(yaml.YAMLError) as caught:
+        yaml.load("password: FakeYamlSecret1\n  bad: [\n", Loader=yaml.SafeLoader)
+    text = describe_error(caught.value)
+    assert "FakeYamlSecret1" not in text and "line" in text
+    with pytest.raises(configparser.Error) as caught:
+        configparser.ConfigParser().read_string("db_pass: FakeHunter2Value\n")
+    text = describe_error(caught.value)
+    assert "FakeHunter2Value" not in text and text.startswith("MissingSectionHeaderError")
+    with pytest.raises(ValueError) as caught:
+        try:
+            yaml.load("a: FakeYamlSecret2\n b: [\n", Loader=yaml.SafeLoader)
+        except yaml.YAMLError as inner:
+            raise ValueError(f"wrapped: {inner}") from inner
+    assert "FakeYamlSecret2" not in describe_error(caught.value)
+
+
+def test_analyzer_error_details_go_through_describe_error():
+    # Every analyzer names a failure without quoting the file: a raw f"{exc}" detail
+    # copied YAML snippets and configparser lines (passwords included) into reports.
+    import project_discovery
+
+    analyzers = Path(project_discovery.__file__).parent / "analyzers"
+    offenders = [
+        path.relative_to(analyzers).as_posix()
+        for path in analyzers.rglob("*.py")
+        if path.parent != analyzers and 'f"{type(exc).__name__}: {exc}"' in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []

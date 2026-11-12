@@ -214,3 +214,28 @@ def test_configuration_risk_evidence_is_bounded_per_rule(tmp_path: Path, monkeyp
     risks = [item for item in findings if item.category == "security"]
     assert len(risks) == 10
     assert [item.code_evidence[0].line_number for item in risks] == list(range(1, 11))
+
+
+def test_parse_errors_never_quote_configuration_values(tmp_path: Path):
+    # Regression: configparser messages quote the offending line and the raw value that
+    # failed interpolation, and the finding copied them into every report.
+    for name, content, value in (
+        ("legacy.ini", "db_pass: FakeHunter2Value\n", "FakeHunter2Value"),
+        ("odbc.ini", "[odbc]\nFakePlainPasswordLine\n", "FakePlainPasswordLine"),
+    ):
+        findings = _scan(tmp_path, name, content)
+        assert any(item.title.startswith("Configuration parse error") for item in findings), name
+        assert value not in repr([item.to_dict() for item in findings]), name
+
+
+def test_logging_style_ini_files_parse_without_interpolation(tmp_path: Path):
+    # alembic.ini and logging.ini hold %(name)s format strings; interpolating values that
+    # are never read raised, and the error quoted the value.
+    findings = _scan(
+        tmp_path,
+        "alembic.ini",
+        "[alembic]\nscript_location = migrations\nsecret = %FakeSecretValue123\n"
+        "[formatter_generic]\nformat = %(levelname)-5.5s [%(name)s] %(message)s\n",
+    )
+    assert [item.title for item in findings] == ["Configuration inventory: alembic.ini"]
+    assert "FakeSecretValue123" not in repr(findings[0].to_dict())

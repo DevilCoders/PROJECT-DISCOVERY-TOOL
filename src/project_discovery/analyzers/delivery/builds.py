@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ...core.safe_parsers import safe_xml_fromstring
-from ...core.source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -303,7 +303,7 @@ class BuildManifestAnalyzer(Analyzer):
             return [Finding(
                 "build",
                 f"Build manifest parse error: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

@@ -5,7 +5,7 @@ from collections import defaultdict
 from html.parser import HTMLParser
 from pathlib import Path
 
-from ...core.source_utils import read_text_bounded
+from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -123,7 +123,7 @@ class AccessibilityAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             return [Finding(
                 "accessibility", f"Markup accessibility scan error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
 

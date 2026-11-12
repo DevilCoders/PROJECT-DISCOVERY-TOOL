@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from ...catalog.languages import source_extensions, source_language_names
-from ...core.source_utils import parse_python, read_text_bounded
+from ...core.source_utils import describe_error, parse_python, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -165,7 +165,7 @@ class NoSQLIntelligenceAnalyzer(Analyzer):
             return [Finding(
                 "database",
                 f"NoSQL analysis unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

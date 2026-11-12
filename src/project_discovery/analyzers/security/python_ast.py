@@ -50,6 +50,7 @@ _IMPACTS = {
 
 
 from ...core.source_utils import (
+    describe_error,
     SourceBudgetExceeded,
     parse_python,
     read_python_source_bounded,
@@ -122,7 +123,7 @@ class PythonSecurityAnalyzer(Analyzer):
             return [Finding(
                 "security",
                 f"Python security analysis unavailable: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
@@ -133,7 +134,7 @@ class PythonSecurityAnalyzer(Analyzer):
             return [Finding(
                 "security",
                 f"Python security parse resource limit: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

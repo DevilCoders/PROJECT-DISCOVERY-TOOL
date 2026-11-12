@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..catalog.languages import detect_language
+from ..core.source_utils import neutralize_controls, redact_source_excerpt
 from ..inventory.scanner import _classify_file, _is_hidden, _size_bucket
 from ..models import FileRecord
 from .isolation import (
@@ -37,6 +38,10 @@ from .protocol import MAX_FINDINGS_PER_FILE, MAX_RESPONSE_BYTES
 
 ENTRY_POINT_GROUP = "pdt.analyzers"
 MAX_SAMPLE_FILES = 200
+
+
+def _clean(text: str) -> str:
+    return redact_source_excerpt(neutralize_controls(str(text)), max_chars=2000)
 
 
 @dataclass(frozen=True)
@@ -63,11 +68,14 @@ class ConformanceReport:
     def ok(self) -> bool:
         return not any(problem.severity == "error" for problem in self.problems)
 
+    # Messages carry plugin-supplied text (exception messages, load errors): they are
+    # neutralized and redacted like scan diagnostics, so a plugin under test cannot rewrite
+    # the verdict on the operator's terminal or print a credential.
     def error(self, check: str, message: str, path: str = "") -> None:
-        self.problems.append(Problem("error", check, message, path))
+        self.problems.append(Problem("error", check, _clean(message), _clean(path)))
 
     def warning(self, check: str, message: str, path: str = "") -> None:
-        self.problems.append(Problem("warning", check, message, path))
+        self.problems.append(Problem("warning", check, _clean(message), _clean(path)))
 
     def to_dict(self) -> dict:
         return {

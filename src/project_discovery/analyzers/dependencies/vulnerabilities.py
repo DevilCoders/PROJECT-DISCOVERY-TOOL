@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from ...core.source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
 from ...models import FileRecord, Finding
 from ...vulnerabilities.database import VulnerabilityDatabase
 from ...vulnerabilities.versions import comparator_for, compare_versions
@@ -370,7 +370,7 @@ class LocalVulnerabilityAnalyzer(Analyzer):
         except (OSError, ValueError, RecursionError, MemoryError) as exc:
             return [Finding(
                 "vulnerabilities", f"Vulnerability lockfile parse error: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name, severity="LOW",
             )]
 

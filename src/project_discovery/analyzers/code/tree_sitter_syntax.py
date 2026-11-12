@@ -9,7 +9,7 @@ import importlib
 import re
 from pathlib import Path
 
-from ...core.source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -380,7 +380,7 @@ class TreeSitterAnalyzer(Analyzer):
             return [Finding(
                 "code",
                 f"Tree-sitter analysis error: {record.language}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

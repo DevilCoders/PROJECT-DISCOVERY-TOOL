@@ -229,7 +229,9 @@ Angular HttpClient/ky/got, RestTemplate/WebClient/OkHttp, net/http, .NET HttpCli
 topics produced and consumed (Kafka, RabbitMQ, NATS, MQTT, SQS, Google Pub/Sub, Redis, Celery,
 Socket.IO, Spring listeners), gRPC services, servers and client stubs, and package identity
 from manifests. Served endpoints come from the API endpoint analyzer. Interpolated URL parts,
-numbers and UUIDs become `{}`. Files below dependency and vendor directories (`node_modules`,
+numbers, UUIDs and credential-like segments become `{}`: everything after a `webhooks` or
+`hooks` segment and after the first segment on `hooks.*` hosts (webhook URLs carry their secret
+in the path), long opaque tokens, and anything the secret registry recognizes. Files below dependency and vendor directories (`node_modules`,
 `vendor`, `site-packages`, `.venv`, `target`, `third_party`, ...) describe other projects and are
 skipped. Lists are capped (500 packages, root and workspace manifests first; 5,000 endpoints,
 calls and topics); what a cap leaves out is counted under `truncated` and reported as an

@@ -253,6 +253,20 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
 - `tools/benchmark.py generate` writes the requested size (PDT-341); README, BENCHMARKS and
   domain scopes describe what exists (PDT-342, PDT-344).
 
+### Fixed: the 2026-11-12 re-audit, second round
+Findings and their status are in the second-round section of
+[docs/project/AUDIT_2026-11-12.md](docs/project/AUDIT_2026-11-12.md#second-round).
+- Report excerpts kept credential values the secret scanner had just reported (Go `:=`,
+  PHP/Ruby `=>`, typed defaults, signing and encryption keys); detector and redactor now share
+  one key list and operator definition (PDT-346).
+- JDBC `;user=...;password=...` properties no longer reach URI or host evidence (PDT-347), and
+  webhook secrets no longer reach integration paths or `pdt compare` (PDT-348).
+- Parse-error findings name the error and its position only; configparser and YAML messages
+  quoted the offending line or value (PDT-349). INI files are read without interpolation.
+- Plugin findings are validated and redacted with `--plugin-isolation off` too (PDT-350), and
+  `plugin-check` neutralizes and redacts plugin-supplied text (PDT-351).
+- Lines that name a credential field hide every quoted literal (PDT-352).
+
 ## 0.2.0 — 2026-11-05
 
 The production-readiness release. At 0.1.0 (`1895455`) CI failed on every job and `pdt scan`

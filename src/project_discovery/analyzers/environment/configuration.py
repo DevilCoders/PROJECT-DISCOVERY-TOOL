@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
-from ...core.source_utils import open_verified_binary, redact_source_excerpt
+from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
 
@@ -200,12 +200,13 @@ def _parse_config(
     elif record.extension == ".toml":
         keys = _flatten(tomllib.loads(content))
     elif record.extension in {".ini", ".cfg"}:
-        parser = configparser.ConfigParser()
+        # Values are never read, so nothing is interpolated: interpolation raised on
+        # logging-style "%(asctime)s" values (alembic.ini, logging.ini) and quoted the raw
+        # value in its error. Duplicate keys are merged rather than refused.
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
         parser.read_string(content)
         keys = _collect_keys(
-            f"{section}.{key}"
-            for section in parser.sections()
-            for key, _ in parser.items(section)
+            f"{section}.{key}" for section in parser.sections() for key in parser.options(section)
         )
     elif record.extension in {".xml", ".plist"} or name == "web.config" or name.endswith(".xml"):
         keys = _xml_keys(content)
@@ -223,7 +224,7 @@ def _parse_config(
             try:
                 keys = _flatten(safe_yaml_load(content))
             except yaml.YAMLError as exc:
-                raise ValueError(f"YAML parse error: {exc}") from exc
+                raise ValueError("YAML parse error") from exc
     elif name in {"dockerfile", "containerfile"}:
         keys = _collect_keys(
             match.group(1).upper()
@@ -312,7 +313,7 @@ class ConfigurationAnalyzer(Analyzer):
             return [Finding(
                 "configuration",
                 f"Configuration parse error: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

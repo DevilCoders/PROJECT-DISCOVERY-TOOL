@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
-from ...core.source_utils import read_text_bounded
+from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -201,7 +201,7 @@ class LocalizationAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ET.ParseError, ValueError) as exc:
             return [Finding(
                 "localization", f"Localization catalog parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
 

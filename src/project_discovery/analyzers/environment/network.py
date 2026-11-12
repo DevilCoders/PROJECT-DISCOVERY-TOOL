@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ...catalog.languages import is_source_path, is_textual_path, known_extensions
-from ...core.source_utils import open_verified_binary
+from ...core.source_utils import describe_error, open_verified_binary
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -150,24 +150,51 @@ _COMMON_PORTS = {
 }
 
 
+_HOST_NAME = re.compile(r"\w(?:[\w.-]{0,251}\w)?")
+
+
+def _authority(netloc: str) -> tuple[str | None, int | None]:
+    """(host, port) of a URI authority, without userinfo, properties or other hosts.
+
+    urlsplit takes everything up to the first ``/`` as the host, so Microsoft's JDBC form
+    ``sqlserver://db01;user=sa;password=...``, a named instance ``db01\\SQLEXPRESS`` and
+    a replica list ``h1:27017,h2:27017`` became "host names" that carried their
+    properties, password included, into the report.
+    """
+    authority = re.split(r"[;\\,]", netloc, maxsplit=1)[0]
+    try:
+        parts = urlsplit("//" + authority)
+        host = parts.hostname
+    except ValueError:
+        return None, None
+    if not host:
+        return None, None
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if not _HOST_NAME.fullmatch(host):
+            return None, None
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return host, port
+
+
 def _safe_uri(value: str) -> str | None:
     value = value.rstrip(".,;:)]}")
     try:
         parsed = urlsplit(value)
-        if not parsed.scheme:
-            return None
-        host = parsed.hostname
-        if not host:
-            return f"{parsed.scheme.lower()}:<non-network URI>"
-        host_text = f"[{host}]" if ":" in host else host
-        try:
-            port = parsed.port
-        except ValueError:
-            port = None
-        suffix = f":{port}" if port is not None else ""
-        return f"{parsed.scheme.lower()}://{host_text}{suffix}/<redacted-path>"
     except ValueError:
         return None
+    if not parsed.scheme:
+        return None
+    host, port = _authority(parsed.netloc)
+    if not host:
+        return f"{parsed.scheme.lower()}:<non-network URI>"
+    host_text = f"[{host}]" if ":" in host else host
+    suffix = f":{port}" if port is not None else ""
+    return f"{parsed.scheme.lower()}://{host_text}{suffix}/<redacted-path>"
 
 
 @lru_cache(maxsize=8192)
@@ -177,14 +204,9 @@ def _parse_uri(raw_uri: str) -> tuple[str | None, str | None, int | None]:
     if not safe:
         return None, None, None
     try:
-        parts = urlsplit(raw_uri)
-        host = parts.hostname
+        host, port = _authority(urlsplit(raw_uri.rstrip(".,;:)]}")).netloc)
     except ValueError:
         return safe, None, None
-    try:
-        port = parts.port
-    except ValueError:
-        port = None
     if host:
         try:
             ipaddress.ip_address(host)
@@ -413,7 +435,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
             return [Finding(
                 "network",
                 f"Network indicator scan unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

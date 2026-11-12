@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import configparser
 import io
 import os
 import re
@@ -12,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
-from .secret_patterns import ANY_TOKEN
+from .secret_patterns import ANY_TOKEN, ASSIGNMENT_OPERATOR, CREDENTIAL_KEYWORDS
 
 FileIdentity =tuple[int | None, int | None, int | None, int | None, int | None]
 
@@ -84,28 +85,34 @@ def keyed_identifier(keywords: str) -> str:
     return rf"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*?(?:{keywords}))[A-Za-z0-9_-]++"
 
 
+# Every key the secret scanner reports (CREDENTIAL_KEYWORDS) plus names only redacted, with
+# the scanner's own operators (typed defaults, :=, =>), so no detected syntax leaves its
+# value behind: "password :=" once lost only the operator and kept the literal.
+_ASSIGNED_VALUE = r"""("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
 _SECRET_ASSIGNMENT = re.compile(
     r"""(?i)(["']?"""
     + keyed_identifier(
-        r"password|passwd|passphrase|pwd|secret|token|api[_-]?key|client[_-]?secret|access[_-]?key"
-        r"|account[_-]?key|shared[_-]?access[_-]?key|sas[_-]?token|private[_-]?key|database[_-]?url"
-        r"|connection[_-]?string|credential|refresh[_-]?token|aws_secret_access_key"
+        CREDENTIAL_KEYWORDS
+        + r"|pwd|account[_-]?key|shared[_-]?access[_-]?key|sas[_-]?token|private[_-]?key"
+        r"|database[_-]?url|connection[_-]?string|credential"
     )
-    + r"""["']?\s*+[:=]\s*+)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
+    + ASSIGNMENT_OPERATOR + ")" + _ASSIGNED_VALUE
 )
 _IDENTITY_ASSIGNMENT = re.compile(
     r"""(?i)(["']?"""
     + keyed_identifier(
-        r"first_?name|given_?name|middle_?name|last_?name|family_?name|surname|user_?name"
-        r"|login_?name|account_?name|email|e_mail|email_?address|phone|telephone|mobile"
+        r"first_?name|given_?name|forename|middle_?name|last_?name|family_?name|surname|user_?name"
+        r"|login_?name|account_?name|email|e_mail|email_?address|mail_?address|phone|telephone|mobile"
         r"|cell_?number|street_?address|postal_?address|home_?address|date_?of_?birth"
         r"|birth_?date|dob|ssn|social_?security|passport_?number|national_?id"
     )
-    + r"""["']?\s*+[:=]\s*+)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
+    + ASSIGNMENT_OPERATOR + ")" + _ASSIGNED_VALUE
 )
 _CREDENTIAL_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]{0,31}://[^:/@\s]+:)[^@\s/]+(@)")
+# A quoted or subscripted header key ("Authorization": "Bearer ...", headers['authorization']
+# = ...) as well as Authorization: Basic ...
 _AUTHORIZATION_HEADER = re.compile(
-    r"(?i)\bauthorization\s*[:=]\s*(?:(?:bearer|basic)\s+)?[^,\r\n;]+"
+    r"""(?i)(\bauthorization["']?\]?[ \t]*[:=][ \t]*["']?)(?:(?:bearer|basic|token)[ \t]+)?[^,\r\n;"']+"""
 )
 # RFC 5321 limits: 64-character local part, 253-character domain.
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}\b")
@@ -144,7 +151,7 @@ def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     value = source_line.rstrip("\r\n")
     value = _PRIVATE_KEY_BODY.sub("[REDACTED PRIVATE KEY MATERIAL]", value)
     value = _PRIVATE_KEY_MATERIAL_LINE.sub(r"\1[REDACTED PRIVATE KEY MATERIAL]\2", value)
-    value = _AUTHORIZATION_HEADER.sub("Authorization: [REDACTED]", value)
+    value = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", value)
     value = _SECRET_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _IDENTITY_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _CREDENTIAL_URL.sub(r"\1[REDACTED]\2", value)
@@ -155,6 +162,41 @@ def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     if len(value) > max_chars:
         value = value[:max_chars] + " … [truncated]"
     return value
+
+
+def _quotes_content(exc: BaseException) -> bool:
+    return isinstance(exc, configparser.Error) or hasattr(exc, "problem_mark")
+
+
+def describe_error(exc: BaseException) -> str:
+    """``Type: message`` for an analysis failure, quoting nothing from the scanned file.
+
+    configparser and YAML messages quote the offending line or value (a password on a
+    line without ``=``, the raw value that failed interpolation, a YAML snippet), so for
+    those only the parser's description and the position are kept. Every other message is
+    redacted like a source excerpt.
+    """
+    cause = exc.__cause__ if exc.__cause__ is not None and _quotes_content(exc.__cause__) else exc
+    name = type(cause).__name__
+    mark = getattr(cause, "problem_mark", None) or getattr(cause, "context_mark", None)
+    if hasattr(cause, "problem_mark") or hasattr(cause, "context_mark"):  # yaml.MarkedYAMLError
+        problem = getattr(cause, "problem", None) or getattr(cause, "context", None) or "invalid YAML"
+        where = f" (line {mark.line + 1}, column {mark.column + 1})" if hasattr(mark, "line") else ""
+        return redact_source_excerpt(f"{name}: {problem}{where}")
+    if isinstance(cause, configparser.Error):
+        parts = []
+        if getattr(cause, "section", None):
+            parts.append(f"section {cause.section!r}")
+        if getattr(cause, "option", None):
+            parts.append(f"option {cause.option!r}")
+        if getattr(cause, "lineno", None):
+            parts.append(f"line {cause.lineno}")
+        errors = getattr(cause, "errors", None)
+        if errors:
+            lines = ", ".join(str(number) for number, _ in errors[:5])
+            parts.append(f"line {lines}" if len(errors) == 1 else f"lines {lines}" + (", ..." if len(errors) > 5 else ""))
+        return redact_source_excerpt(f"{name}" + (f" ({'; '.join(parts)})" if parts else ""))
+    return redact_source_excerpt(f"{name}: {exc}")
 
 
 _prefetch = threading.local()

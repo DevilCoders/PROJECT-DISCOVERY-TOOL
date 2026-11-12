@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ...core.safe_parsers import safe_xml_fromstring
-from ...core.source_utils import read_bytes_bounded, read_text_bounded
+from ...core.source_utils import describe_error, read_bytes_bounded, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -161,7 +161,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return None, Finding(
                 "game_engine", f"Game project file read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )
 
@@ -217,7 +217,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return [Finding(
                 "game_engine", f"Game project JSON parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         if not isinstance(data, dict):
@@ -320,7 +320,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
         except (OSError, ValueError, ET.ParseError) as exc:
             return [Finding(
                 "game_engine", f"Roblox model parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         classes = {}

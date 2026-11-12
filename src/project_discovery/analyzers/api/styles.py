@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from ...catalog.languages import is_textual_path, source_extensions
-from ...core.source_utils import open_verified_binary
+from ...core.source_utils import describe_error, open_verified_binary
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -97,7 +97,7 @@ class APITypeAnalyzer(Analyzer):
         except OSError as exc:
             return [Finding(
                 "api", f"API classification unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
 

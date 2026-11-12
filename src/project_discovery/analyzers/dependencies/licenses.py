@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from ...core.source_utils import open_verified_binary, read_text_bounded
+from ...core.source_utils import describe_error, open_verified_binary, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -102,7 +102,7 @@ class LicenseAnalyzer(Analyzer):
             return [Finding(
                 "license",
                 f"License inspection error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

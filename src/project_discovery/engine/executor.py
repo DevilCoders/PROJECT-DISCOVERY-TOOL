@@ -82,10 +82,14 @@ def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: Fi
                 if analyzer.supports(record):
                     produced = analyzer.analyze(path, record)
                     if getattr(analyzer, "_pdt_in_process_plugin", False):
-                        produced = list(produced)
-                        for finding in produced:
-                            if isinstance(finding, Finding):
-                                finding.analyzer = analyzer.name
+                        # The isolated modes' validation, redaction and bounds; the plugin
+                        # cannot choose the analyzer name either (PDT-317).
+                        from ..plugins.isolation import rebuild_plugin_findings
+
+                        produced = rebuild_plugin_findings(
+                            [item.to_dict() if isinstance(item, Finding) else item for item in produced],
+                            analyzer.name, record.path,
+                        )
                     outcome.findings.extend(produced)
                     outcome.analyzed = True
         except Exception as exc:

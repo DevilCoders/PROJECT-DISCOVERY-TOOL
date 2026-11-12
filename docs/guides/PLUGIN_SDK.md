@@ -37,7 +37,7 @@ Two things are not part of the API:
 
 ## Checking a plugin
 
-`pdt plugin-check` loads a plugin the way a scan does: in a host under the sandbox (or `--isolation process`), through the same protocol and the same validation. It then runs `supports()` and `analyze()` twice on each sample file, with the file record a scan builds: the same file type (from the file's signature), size bucket, hidden flag, permissions and modification time.
+`pdt plugin-check` loads a plugin the way a scan does: in a host under the sandbox (or `--isolation process`), through the same protocol and the same validation. Text that comes from the plugin (exception messages, load errors) is neutralized and redacted in its output, as in scan diagnostics, so a plugin cannot rewrite the verdict on the terminal. It then runs `supports()` and `analyze()` twice on each sample file, with the file record a scan builds: the same file type (from the file's signature), size bucket, hidden flag, permissions and modification time.
 
 ```bash
 pdt plugin-check my_package.analyzer:MyAnalyzer tests/samples/   # or an installed entry-point name
@@ -64,7 +64,7 @@ By default PDT never imports plugin code itself. Each plugin runs in **host proc
 - **File access.** For each file the plugin supports, PDT reads the file through its verified, no-follow path and gives the host a private copy under the original file name. `record.path` still holds the real path relative to the project.
 - **Environment.** Hosts get only `PATH`, locale, time-zone and Windows system variables. `HOME` and the temporary-directory variables point at the host's own folder, so tokens and cloud credentials in PDT's environment never reach a plugin.
 - **Protocol.** Hosts talk to PDT in length-prefixed JSON frames over pipes, never pickle, so nothing a plugin sends can run code in PDT. A plugin that prints to stdout cannot corrupt the stream.
-- **Validation.** PDT rebuilds every finding from that JSON. It always sets `analyzer` to the plugin's name, so a plugin cannot pose as a built-in analyzer. It redacts and bounds all text fields and replaces terminal control characters. Invalid findings are dropped and reported.
+- **Validation.** PDT rebuilds every finding from that JSON. It always sets `analyzer` to the plugin's name, so a plugin cannot pose as a built-in analyzer. It redacts and bounds all text fields and replaces terminal control characters. Invalid findings are dropped and reported. With `--plugin-isolation off` the findings an in-process plugin returns go through the same validation.
 - **Failures.** If a host crashes, exceeds `--plugin-timeout` (default 60 s per request) or breaks the protocol, PDT kills it. The file gets an `UNKNOWN` coverage finding, and the next file starts a new host. After 3 consecutive host failures, the plugin is disabled for the rest of the scan, with a final coverage finding that says so.
 - **Concurrency.** Each host holds its own plugin instance and handles one request at a time. PDT starts more hosts when analysis threads or worker processes need them. Do not rely on state shared across files.
 

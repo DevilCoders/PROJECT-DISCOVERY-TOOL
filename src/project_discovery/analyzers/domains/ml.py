@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-from ...core.source_utils import parse_python, read_python_source_bounded, read_text_bounded
+from ...core.source_utils import describe_error, parse_python, read_python_source_bounded, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -105,7 +105,7 @@ def _python_evidence(
         return [Finding(
             "machine_learning",
             f"AI/ML source analysis unavailable: {relative}",
-            f"{type(exc).__name__}: {exc}",
+            describe_error(exc),
             confidence="UNKNOWN",
             evidence=[relative],
             analyzer="ai-ml-intelligence",
@@ -276,7 +276,7 @@ class AIMLIntelligenceAnalyzer(Analyzer):
                 return [Finding(
                     "model_artifacts",
                     f"Model metadata parse error: {record.path}",
-                    f"{type(exc).__name__}: {exc}",
+                    describe_error(exc),
                     confidence="UNKNOWN",
                     evidence=[record.path],
                     analyzer=self.name,

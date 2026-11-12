@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.safe_parsers import safe_xml_fromstring
-from ...core.source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -228,7 +228,7 @@ class CoverageArtifactAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ET.ParseError, ValueError, RecursionError, MemoryError) as exc:
             return [Finding(
                 "coverage", f"Coverage report parse error: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         if not summary:

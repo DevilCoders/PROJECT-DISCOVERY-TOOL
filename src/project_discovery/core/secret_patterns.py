@@ -64,6 +64,23 @@ TOKEN_FORMATS: tuple[TokenFormat, ...] = (
     TokenFormat("azure_sas_signature", r"(?<=[?&]sig=)[A-Za-z0-9%+/]{20,}={0,2}", anchors=('sig=',)),
 )
 
+# Key names whose literal values the secret scanner reports as credential assignments.
+# The excerpt redactor uses this list too (plus a few names it only redacts), so every
+# value the scanner reports is also removed from report excerpts.
+CREDENTIAL_KEYWORDS = (
+    r"api[_-]?key|client[_-]?secret|service[_-]?token|access[_-]?(?:token|key)"
+    r"|auth[_-]?token|refresh[_-]?token|password|passwd|passphrase"
+    r"|secret[_-]?(?:access[_-]?)?key|secret|token|encryption[_-]?key|signing[_-]?key"
+    r"|aws_secret_access_key|database_url"
+)
+# An optional closing key quote and subscript bracket ("password": / 'password' => /
+# env['API_TOKEN'] =), an optional type annotation (password: str = / apiKey: string =),
+# then the operator: Go's :=, PHP and Ruby's =>, or : and =. Separators never cross a line.
+ASSIGNMENT_OPERATOR = (
+    r"""["']?\]?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\]]*(?:[ \t]*\|[ \t]*[A-Za-z_][\w.\[\]]*)*[ \t]*=(?!=)"""
+    r"""|:=|=>|[:=](?!=))[ \t]*"""
+)
+
 PRIVATE_KEY_ANCHORS = ("PRIVATE KEY",)
 PRIVATE_KEY_MARKER = re.compile(
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"

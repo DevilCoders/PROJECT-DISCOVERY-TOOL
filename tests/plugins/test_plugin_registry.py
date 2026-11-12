@@ -124,3 +124,37 @@ def test_in_process_plugin_findings_carry_the_plugin_name(tmp_path):
     path.write_text("x", encoding="utf-8")
     _run_analyzers([plugin], {}, FileRecord("a.txt", 1, ".txt", "Text"), path, outcome)
     assert {finding.analyzer for finding in outcome.findings} == {"poser"}
+
+
+def test_in_process_plugin_findings_are_validated_like_isolated_ones(tmp_path):
+    # Regression: with --plugin-isolation off a plugin's title, detail and evidence reached
+    # the reports unredacted; the isolated modes redact, bound and validate every field.
+    import json
+
+    from project_discovery.analyzers.base import Analyzer
+    from project_discovery.engine.executor import FileOutcome, _run_analyzers
+    from project_discovery.models import FileRecord, Finding
+
+    token = "ghp_" + "A" * 36
+
+    class Talker(Analyzer):
+        name = "talker"
+
+        def supports(self, record):
+            return True
+
+        def analyze(self, path, record):
+            return [
+                Finding("x", "token " + token, f"token={token} contact owner@example.com", evidence=[token]),
+                Finding("bad category!", "rejected", ""),
+            ]
+
+    plugin = Talker()
+    plugin._pdt_in_process_plugin = True
+    outcome = FileOutcome()
+    path = tmp_path / "a.txt"
+    path.write_text("x", encoding="utf-8")
+    _run_analyzers([plugin], {}, FileRecord("a.txt", 1, ".txt", "Text"), path, outcome)
+    dumped = json.dumps([finding.to_dict() for finding in outcome.findings])
+    assert token not in dumped and "owner@example.com" not in dumped
+    assert [finding.title for finding in outcome.findings][-1] == "Plugin output rejected: talker: a.txt"

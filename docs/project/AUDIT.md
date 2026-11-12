@@ -205,6 +205,13 @@ Status values: **Fixed** (implemented and covered by regression tests) · **Open
 | PDT-343 | Multi-project guide and output location | *Found in the 2026-11-12 re-audit (P3).* The guide overstated the per-pair output, Markdown omitted the API evidence and per-pair module names, and `compare` wrote into a compared project when run from its root. The guide matches the output, Markdown renders both, and an `--output` inside a compared project is refused. | Fixed |
 | PDT-344 | Domain catalog scopes | *Found in the 2026-11-12 re-audit (P3).* The gpu_compute, logging, accessibility and localization scopes described analysis no analyzer performs, and the architecture and vulnerability passes never appeared as active domains. Scopes name the implemented subset, and both passes count when they run. | Fixed |
 | PDT-345 | Language catalog and overlap | *Found in the 2026-11-12 re-audit (P3).* A dead `C` header spec put `C` twice in every report's language catalog, and comparisons counted `Other` as a shared language. | Fixed |
+| PDT-346 | Redactor and detector parity | *Found in the 2026-11-12 re-audit, second round (P1).* The secret scanner reported Go `:=`, PHP/Ruby `=>`, typed defaults and signing/encryption keys, but the excerpt redactor only knew `key = value`, so each finding's own excerpt kept the value on every surface. Both now share one key list and one operator definition (with quoted and subscripted keys and quoted `Authorization` headers). | Fixed |
+| PDT-347 | JDBC authorities in network evidence | *Found in the 2026-11-12 re-audit, second round (P1).* urlsplit took `sqlserver://db01;user=..;password=..` as the host name, so the password reached URI and hostname evidence. The host is cut at `;`, `\` and `,` and must be a host name or IP address. | Fixed |
+| PDT-348 | Webhook secrets in integration paths | *Found in the 2026-11-12 re-audit, second round (P1).* Slack and Discord webhook URLs carry their credential in the path, and `http_calls` (and `pdt compare`) stored it verbatim. Hook segments, long opaque segments and registry-recognized tokens become `{}`. | Fixed |
+| PDT-349 | Parse errors quoting content | *Found in the 2026-11-12 re-audit, second round (P1).* configparser messages quote the offending line and the raw value that failed interpolation, and PyYAML without libyaml quotes a snippet; 35 analyzers copied such messages into findings, some without redaction. One `describe_error` names the error and its position only; INI files are read without interpolation. | Fixed |
+| PDT-350 | Plugin findings in off mode | *Found in the 2026-11-12 re-audit, second round (P2).* With `--plugin-isolation off` a plugin's findings were only re-attributed (PDT-317), not redacted or bounded. They now go through the isolated modes' validation. | Fixed |
+| PDT-351 | plugin-check output | *Found in the 2026-11-12 re-audit, second round (P2).* Exception text from the plugin under test reached the terminal with its escape sequences (which could rewrite the verdict) and its secrets. Problems are neutralized and redacted when recorded. | Fixed |
+| PDT-352 | Credential field lines | *Found in the 2026-11-12 re-audit, second round (P3).* A line flagged for a credential field name kept positional values (an SQL `INSERT ... VALUES` row) in every finding that cited it. Quoted literals on such lines are hidden. | Fixed |
 
 ## 4. Capability matrix at the baseline
 
@@ -407,7 +414,11 @@ At the owner's request the findings were not independently verified by further a
 - The CI job with optional integrations installed `tree-sitter-language-pack` but provisioned no grammar, so the Tree-sitter tests only ever exercised fakes. That job now provisions real grammars before the suite runs, as an operator would.
 - Process-mode tests now kill a real worker process (`os._exit`) to exercise pool recovery end to end.
 
-The findings were fixed in severity order (P0 to P3). Four areas were not audited in this pass: the security analyzers, the two groups of domain analyzers, and the end-to-end paths. The release gates in §5 are unchanged.
+The findings were fixed in severity order (P0 to P3). The release gates in §5 are unchanged.
+
+### Second round
+
+The four areas the first pass did not reach (the security analyzers, the two groups of domain analyzers and the end-to-end paths) were audited against `2367023`, after the first round's fixes, by at most two auditors at a time and without verification agents. They reported 76 findings: 6 P1, 42 P2 and 28 P3, listed with their status in [AUDIT_2026-11-12.md](AUDIT_2026-11-12.md#second-round). Fixed so far: PDT-346 to PDT-352 (redactor and detector parity, JDBC authorities, webhook secrets, parse errors that quoted content, plugin findings in off mode, `plugin-check` output, credential field lines).
 
 ## 13. Tree-sitter code model
 

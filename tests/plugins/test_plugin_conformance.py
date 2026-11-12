@@ -266,3 +266,16 @@ def test_samples_beyond_the_limit_are_reported(fixtures, tmp_path, monkeypatch):
     report = check_plugin("pdt_conformance_fixtures:Good", [samples], isolation="process")
     assert len(report.files) == 2
     assert any(problem.check == "samples" and "3 were not" in problem.message for problem in report.problems)
+
+
+def test_plugin_supplied_text_is_neutralized_and_redacted_in_plugin_check():
+    # Regression: an exception raised by the plugin under test reached the terminal with its
+    # escape sequences (rewriting "NOT conformant" as "conformant") and its secrets.
+    from project_discovery.plugins.conformance import ConformanceReport
+
+    token = "ghp_" + "B" * 36
+    report = ConformanceReport("pkg:Plugin", "sandbox")
+    report.error("analyze", "RuntimeError: \x1b[1A\x1b[2Kconformant token=" + token, "a.txt\x1b]0;x\x07")
+    for text in (format_report(report), json.dumps(report.to_dict())):
+        assert "\x1b" not in text and "\\u001b" not in text and token not in text
+    assert "NOT conformant" in format_report(report)

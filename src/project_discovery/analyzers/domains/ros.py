@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ...core.safe_parsers import safe_xml_fromstring
-from ...core.source_utils import parse_python, read_bytes_bounded, read_text_bounded
+from ...core.source_utils import describe_error, parse_python, read_bytes_bounded, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -86,7 +86,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "robotics", f"ROS source read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         if record.extension == ".py":
@@ -220,7 +220,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
         except (OSError, ValueError, ET.ParseError) as exc:
             return [Finding(
                 "robotics", f"ROS package manifest parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         values: dict[str, list[str]] = {}
@@ -260,7 +260,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "robotics", f"ROS interface read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         content = [

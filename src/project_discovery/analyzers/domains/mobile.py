@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ...core.safe_parsers import safe_xml_fromstring
-from ...core.source_utils import open_verified_binary, read_bytes_bounded, read_text_bounded
+from ...core.source_utils import describe_error, open_verified_binary, read_bytes_bounded, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -86,7 +86,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         except (OSError, ValueError, ET.ParseError) as exc:
             return None, Finding(
                 "mobile", f"Mobile XML parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )
 
@@ -152,7 +152,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         except (OSError, plistlib.InvalidFileException, ValueError) as exc:
             return [Finding(
                 "mobile", f"Apple property list parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         if not isinstance(data, dict):
@@ -242,7 +242,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return [Finding(
                 "mobile", f"Mobile JSON manifest parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         if not isinstance(data, dict):
@@ -278,7 +278,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Flutter manifest read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         if not re.search(r"(?m)^dependencies\s*:", source):
@@ -300,7 +300,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Podfile read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         platform = re.findall(r"(?im)^\s*platform\s*:ios\s*,\s*['\"]([^'\"]+)", source)
@@ -323,7 +323,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Android Gradle manifest read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         markers = [
@@ -352,7 +352,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Xcode project read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         targets = len(re.findall(r"\bPBXNativeTarget\b", source))
@@ -372,7 +372,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "mobile", f"Mobile source read error: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         markers = []

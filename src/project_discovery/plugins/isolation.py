@@ -658,6 +658,42 @@ def validate_metadata(value: Any, reserved_names: set[str]) -> dict:
     }
 
 
+def rebuild_plugin_findings(items: list, analyzer_name: str, record_path: str, *, cut: bool = False) -> list[Finding]:
+    """Validate, redact and bound one file's plugin findings, and report what was dropped.
+
+    Isolated hosts' replies and, with ``--plugin-isolation off``, the findings an
+    in-process plugin returns both pass through here, so every mode applies the same
+    checks: off mode used to keep a plugin's titles, details and evidence unredacted.
+    """
+    findings, rejected = [], []
+    for item in items[:MAX_FINDINGS_PER_FILE]:
+        try:
+            findings.append(finding_from_plugin(item, analyzer_name))
+        except ValueError as exc:
+            rejected.append(str(exc))
+    truncated = len(items) > MAX_FINDINGS_PER_FILE
+    if rejected or truncated or cut:
+        problems = []
+        if rejected:
+            problems.append(f"{len(rejected):,} invalid finding(s) were discarded ({rejected[0]})")
+        if truncated:
+            problems.append(f"findings beyond the first {MAX_FINDINGS_PER_FILE:,} were dropped")
+        if cut:
+            problems.append(
+                f"findings beyond the {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB response limit were dropped"
+            )
+        findings.append(Finding(
+            "analysis_coverage",
+            f"Plugin output rejected: {analyzer_name}: {record_path}",
+            "; ".join(problems) + ". This plugin's results for the file are incomplete.",
+            confidence="UNKNOWN",
+            evidence=[record_path],
+            analyzer=analyzer_name,
+            severity="LOW",
+        ))
+    return findings
+
+
 def finding_from_plugin(item: Any, analyzer_name: str) -> Finding:
     """Rebuild one plugin finding from JSON. The plugin cannot choose ``analyzer``."""
     if not isinstance(item, dict):
@@ -863,34 +899,9 @@ class IsolatedAnalyzer(Analyzer):
         items = reply.get("findings")
         if not isinstance(items, list):
             raise IsolatedPluginError("plugin host returned malformed findings")
-        findings, rejected = [], []
-        for item in items[:MAX_FINDINGS_PER_FILE]:
-            try:
-                findings.append(finding_from_plugin(item, self.name))
-            except ValueError as exc:
-                rejected.append(str(exc))
-        truncated = len(items) > MAX_FINDINGS_PER_FILE
-        cut = reply.get("truncated") == "response_bytes"
-        if rejected or truncated or cut:
-            problems = []
-            if rejected:
-                problems.append(f"{len(rejected):,} invalid finding(s) were discarded ({rejected[0]})")
-            if truncated:
-                problems.append(f"findings beyond the first {MAX_FINDINGS_PER_FILE:,} were dropped")
-            if cut:
-                problems.append(
-                    f"findings beyond the {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB response limit were dropped"
-                )
-            findings.append(Finding(
-                "analysis_coverage",
-                f"Plugin output rejected: {self.name}: {record.path}",
-                "; ".join(problems) + ". This plugin's results for the file are incomplete.",
-                confidence="UNKNOWN",
-                evidence=[record.path],
-                analyzer=self.name,
-                severity="LOW",
-            ))
-        return findings
+        return rebuild_plugin_findings(
+            items, self.name, record.path, cut=reply.get("truncated") == "response_bytes"
+        )
 
     def release_hosts(self) -> None:
         """Stop idle hosts now; the proxy starts new ones if it is used again."""

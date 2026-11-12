@@ -5,10 +5,10 @@ import re
 from pathlib import Path
 
 from ...catalog.languages import is_documentation_path, is_textual_path
-from ...core.source_utils import open_verified_binary, redact_source_excerpt
+from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
-from ..environment.network import iana_tlds
+from ..environment.network import _literal_spans, iana_tlds
 
 # The RFC 5321 64-character local-part limit also keeps scanning linear on long
 # dotted runs without an "@" nearby.
@@ -45,6 +45,24 @@ _MAX_LINE_BYTES = 256 * 1024
 _MAX_DATA_EXPOSURE_FILE_BYTES = 64 * 1024 * 1024
 _MAX_EVIDENCE_LINES = 100
 _MAX_CODE_EXCERPTS = 20
+
+
+def _line_excerpt(line: str) -> str:
+    """A redacted excerpt of one line, shared by every finding that cites it.
+
+    On a line that names a credential field every literal is hidden, because any of them
+    may be that field's value: the redactor only knows ``key = value`` shapes, so an SQL
+    ``INSERT ... (email, password) VALUES ('...', 'plaintext')`` row kept the password.
+    """
+    if _SECRET_FIELDS.search(line):
+        # The network analyzer's linear quote scanner: a regex over quoted literals
+        # restarts at every quote after an unterminated one, which is quadratic.
+        parts, last = [], 0
+        for start, end in _literal_spans(line):
+            parts += [line[last:start], "[REDACTED]"]
+            last = end
+        line = "".join(parts) + line[last:]
+    return redact_source_excerpt(line)
 
 
 def _has_personal_email(line: str) -> bool:
@@ -154,7 +172,7 @@ class DataExposureAnalyzer(Analyzer):
                             if len(samples) < _MAX_EVIDENCE_LINES:
                                 samples.append(current_line)
                             if len(samples) <= _MAX_CODE_EXCERPTS:
-                                excerpt = excerpt or redact_source_excerpt(line)
+                                excerpt = excerpt or _line_excerpt(line)
                                 field_excerpts[(field_name, current_line)] = excerpt
 
                     if "@" in line and email_last_line != current_line and _has_personal_email(line):
@@ -163,7 +181,7 @@ class DataExposureAnalyzer(Analyzer):
                         if len(email_lines) < _MAX_EVIDENCE_LINES:
                             email_lines.append(current_line)
                         if len(email_excerpts) < _MAX_CODE_EXCERPTS:
-                            excerpt = excerpt or redact_source_excerpt(line)
+                            excerpt = excerpt or _line_excerpt(line)
                             email_excerpts[current_line] = excerpt
 
                     if (
@@ -176,7 +194,7 @@ class DataExposureAnalyzer(Analyzer):
                         if len(secret_field_lines) < _MAX_EVIDENCE_LINES:
                             secret_field_lines.append(current_line)
                         if len(secret_excerpts) < _MAX_CODE_EXCERPTS:
-                            excerpt = excerpt or redact_source_excerpt(line)
+                            excerpt = excerpt or _line_excerpt(line)
                             secret_excerpts[current_line] = excerpt
 
                     if line.endswith(("\n", "\r")):
@@ -187,7 +205,7 @@ class DataExposureAnalyzer(Analyzer):
         except OSError as exc:
             return [Finding(
                 "privacy", f"Data exposure scan unavailable: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                describe_error(exc),
                 confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
             )]
 

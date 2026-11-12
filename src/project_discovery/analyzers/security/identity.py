@@ -7,7 +7,7 @@ import re
 import tokenize
 from pathlib import Path
 
-from ...core.source_utils import open_verified_binary, parse_python, redact_source_excerpt
+from ...core.source_utils import describe_error, open_verified_binary, parse_python
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -187,7 +187,7 @@ class IdentityIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
             return [Finding(
                 "identity", f"Identity analysis unavailable: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                describe_error(exc),
                 confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
             )]
         frameworks: dict[str, set[int]] = {}

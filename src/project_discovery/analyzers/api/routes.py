@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ...catalog.languages import source_extensions, source_language_names
 from ...core.source_utils import (
+    describe_error,
     SourceBudgetExceeded,
     open_verified_text,
     parse_python,
@@ -155,7 +156,7 @@ class APIEndpointAnalyzer(Analyzer):
             except (OSError, UnicodeDecodeError, SyntaxError, LookupError, RecursionError, MemoryError) as exc:
                 return [Finding(
                     "api", f"API endpoint scan unavailable: {record.path}",
-                    f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                    describe_error(exc), confidence="UNKNOWN",
                     evidence=[record.path], analyzer=self.name, severity="LOW",
                 )]
         else:
@@ -201,7 +202,7 @@ class APIEndpointAnalyzer(Analyzer):
             except OSError as exc:
                 return [Finding(
                     "api", f"API endpoint scan unavailable: {record.path}",
-                    f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                    describe_error(exc), confidence="UNKNOWN",
                     evidence=[record.path], analyzer=self.name,
                 )]
 

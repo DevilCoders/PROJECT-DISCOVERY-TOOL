@@ -12,7 +12,7 @@ import tokenize
 from pathlib import Path
 
 from ...catalog.languages import is_source_path, source_language_names
-from ...core.source_utils import open_verified_binary, parse_python, redact_source_excerpt
+from ...core.source_utils import describe_error, open_verified_binary, parse_python, redact_source_excerpt
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
 
@@ -598,7 +598,7 @@ class SecureCodePatternAnalyzer(Analyzer):
             return [Finding(
                 "security",
                 f"Secure-code scan unavailable: {record.path}",
-                redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
@@ -612,7 +612,7 @@ class SecureCodePatternAnalyzer(Analyzer):
                 return [Finding(
                     "security",
                     f"Secure-code parse error: {record.path}",
-                    redact_source_excerpt(f"{type(exc).__name__}: {exc}"),
+                    describe_error(exc),
                     confidence="UNKNOWN",
                     evidence=[record.path],
                     analyzer=self.name,

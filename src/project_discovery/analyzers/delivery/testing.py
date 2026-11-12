@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from ...catalog.languages import is_source_path, source_extensions, source_language_names
-from ...core.source_utils import read_text_bounded
+from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -129,7 +129,7 @@ class TestDiscoveryAnalyzer(Analyzer):
             return [Finding(
                 "testing",
                 f"Test file read error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,

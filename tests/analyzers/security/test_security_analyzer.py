@@ -334,3 +334,38 @@ def test_literal_credential_assignments_are_detected_across_syntaxes(tmp_path: P
     assert _assignment_lines(tmp_path, "deploy.sh", "export API_TOKEN=abc123def456\n") == [1]
     assert _assignment_lines(tmp_path, "app.yaml", "password: hunter22-lit\n") == [1]
     assert _assignment_lines(tmp_path, "settings.ini", "password = hunter22-lit\n") == [1]
+
+
+def test_every_detected_assignment_syntax_is_redacted_from_findings(tmp_path: Path):
+    # Regression: the detector learned :=, =>, typed defaults and signing/encryption keys,
+    # but the redactor only knew "key = value", so the finding's own excerpt kept the value.
+    import json
+
+    samples = {
+        "main.go": ('password := "FakeGoPass-9183"\n', "FakeGoPass-9183"),
+        "app.php": ("$db = ['password' => 'FakePhpPass-5521'];\n", "FakePhpPass-5521"),
+        "settings.py": ('secret_key: str = "FakePySecret-7731"\n', "FakePySecret-7731"),
+        "app.ts": ('const apiKey: string = "FakeTsKey-4410";\n', "FakeTsKey-4410"),
+        "App.kt": ('val password: String = "FakeKtPass-2208"\n', "FakeKtPass-2208"),
+        "config.rb": ('config = { :password => "FakeRbPass-6652" }\n', "FakeRbPass-6652"),
+        ".env": ("SIGNING_KEY=FakeSigningKey-3391\n", "FakeSigningKey-3391"),
+        "crypto.py": ('encryption_key = "FakeEncKey-8820"\n', "FakeEncKey-8820"),
+    }
+    for filename, (content, value) in samples.items():
+        findings = _scan(tmp_path, filename, content)
+        assert any(item.title.endswith("credential_assignment") for item in findings), filename
+        dumped = json.dumps([item.to_dict() for item in findings])
+        assert value not in dumped, filename
+
+
+def test_quoted_authorization_headers_and_identity_forms_are_redacted():
+    from project_discovery.core.source_utils import redact_source_excerpt
+
+    for line, value in (
+        ('headers = {"Authorization": "Bearer FakeOpaqueBearer-7c1d"}', "FakeOpaqueBearer-7c1d"),
+        ("headers['authorization'] = 'Token FakeOpaqueToken-9e2f'", "FakeOpaqueToken-9e2f"),
+        ('forename = "Alicia"', "Alicia"),
+        ('user = {"ssn" => "078-05-1120"}', "078-05-1120"),
+        ('email := "someone@example.org"', "someone@example.org"),
+    ):
+        assert value not in redact_source_excerpt(line), line

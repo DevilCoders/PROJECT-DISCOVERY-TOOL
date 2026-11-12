@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from ...catalog.languages import is_textual_path
-from ...core.source_utils import open_verified_text
+from ...core.source_utils import describe_error, open_verified_text
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -64,7 +64,7 @@ class OperatingSystemAnalyzer(Analyzer):
         except OSError as exc:
             return [Finding(
                 "platform", f"Platform analysis unavailable: {record.path}",
-                f"{type(exc).__name__}: {exc}", confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
         if not line_hits:

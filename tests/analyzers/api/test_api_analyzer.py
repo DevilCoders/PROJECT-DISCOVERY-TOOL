@@ -156,3 +156,22 @@ def test_api_contract_reports_growth_as_unknown_and_redacts_parser_errors(tmp_pa
     error = APIContractAnalyzer().analyze(path, record)
     assert error[0].confidence == "UNKNOWN"
     assert "api-parser-secret" not in error[0].detail
+
+
+def test_webhook_secrets_never_reach_integration_paths():
+    # Regression: Slack and Discord webhook URLs carry the credential in the path, and the
+    # integration summary (and pdt compare) stored it verbatim.
+    from project_discovery.analyzers.api.integration import _normalize_url
+
+    # Built at run time so no complete webhook URL is committed (secret scanners flag it).
+    slack = "https://hooks.slack.com/services/" + "T0FAKE000/B0FAKE000/" + "FakeSlack" + "WebhookSecret24"
+    assert _normalize_url(slack) == (
+        "hooks.slack.com", "/services/{}/{}/{}",
+    )
+    assert _normalize_url(
+        "https://discord.com/api/webhooks/" + "123456789012345678/" + "FakeDiscordWebhook" + "TokenValue_abcdef"
+    ) == ("discord.com", "/api/webhooks/{}/{}")
+    assert _normalize_url("https://api.example.com/v1/oauth2-callback/users/42") == (
+        "api.example.com", "/v1/oauth2-callback/users/{}",
+    )
+    assert _normalize_url("https://api.example.com/keys/sk_live_" + "Ab12" * 6) == ("api.example.com", "/keys/{}")

@@ -8,7 +8,7 @@ import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
 
-from ...core.source_utils import SourceBudgetExceeded, read_bytes_bounded, read_text_bounded
+from ...core.source_utils import SourceBudgetExceeded, describe_error, read_bytes_bounded, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -275,7 +275,7 @@ class DocumentAnalyzer(Analyzer):
             return [Finding(
                 "documentation",
                 f"Document parse error: {record.path}",
-                f"{type(exc).__name__}: {exc}",
+                describe_error(exc),
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
