@@ -186,6 +186,13 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
 - A `--url` file with one repository gets the batch layout, summary and exit codes (PDT-275).
 - VCS markers for `hg init`, `darcs init`, Jujutsu, Bazaar, Pijul, CVS and POSIX Fossil
   checkouts, Jujutsu Git remotes and bare repositories at any depth (PDT-276).
+- `pdt plugin-check` hands plugins the file records a scan builds (PDT-277).
+- Plugin findings over the 16 MiB response frame are cut with a coverage note instead of
+  all being lost (PDT-278).
+- Linux and macOS sandbox: the current directory and `PYTHONPATH` directories are no longer
+  readable to plugins (PDT-279).
+- A second scan into the same output in one process no longer refuses every sandboxed
+  plugin (PDT-280).
 
 ## 0.2.0 — 2026-11-05
 

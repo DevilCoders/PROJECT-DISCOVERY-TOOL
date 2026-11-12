@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..catalog.languages import detect_language
+from ..inventory.scanner import _classify_file, _is_hidden, _size_bucket
 from ..models import FileRecord
 from .isolation import (
     MAX_PLUGIN_FILE_BYTES,
@@ -31,7 +33,7 @@ from .isolation import (
     finding_from_plugin,
     validate_metadata,
 )
-from .protocol import MAX_FINDINGS_PER_FILE
+from .protocol import MAX_FINDINGS_PER_FILE, MAX_RESPONSE_BYTES
 
 ENTRY_POINT_GROUP = "pdt.analyzers"
 MAX_SAMPLE_FILES = 200
@@ -105,7 +107,21 @@ def _sample_files(samples: Sequence[Path]) -> list[tuple[Path, str]]:
 
 
 def _record(path: Path, relative: str) -> FileRecord:
-    return FileRecord(relative, path.stat().st_size, path.suffix.lower(), detect_language(path), file_type="text")
+    """The FileRecord a scan builds for ``path``: the same classification and metadata.
+
+    A stub with a fixed file type and default size bucket, hidden flag, permissions and
+    modification time made plugins that decide on those fields behave differently here
+    than in a scan, which defeated the check.
+    """
+    info = path.lstat()
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    file_type, opened_identity = _classify_file(path, relative, identity)
+    return FileRecord(
+        relative, info.st_size, Path(relative).suffix.lower(), detect_language(relative),
+        file_type=file_type, size_bucket=_size_bucket(info.st_size),
+        is_hidden=_is_hidden(path.name, info), permissions=stat.S_IMODE(info.st_mode),
+        mtime_ns=info.st_mtime_ns, analysis_identity=opened_identity or identity,
+    )
 
 
 def check_plugin(target: str, samples: Sequence[Path] = (), *, isolation: str = "sandbox",
@@ -180,12 +196,13 @@ def _check_file(host: PluginHost, plugin: str, path: Path, relative: str, report
         report.warning("analyze", "the sample exceeds the isolated-plugin file limit and is not handed over", relative)
         return
     runs = []
+    cut = False
     for _ in range(2):
         staged = host.stage(path, record)
         started = time.perf_counter()
         try:
-            items = _request(host, {"op": "analyze", "record": record.to_dict(), "path": str(staged)}, timeout)[
-                "findings"]
+            reply = _request(host, {"op": "analyze", "record": record.to_dict(), "path": str(staged)}, timeout)
+            items = reply["findings"]
         except (RuntimeError, PluginHostError, KeyError) as exc:
             report.error("analyze", f"analyze() failed: {exc}", relative)
             return
@@ -193,7 +210,11 @@ def _check_file(host: PluginHost, plugin: str, path: Path, relative: str, report
             host.unstage(staged)
         entry["seconds"] = round(max(entry["seconds"], time.perf_counter() - started), 4)
         runs.append(items if isinstance(items, list) else [])
+        cut = cut or reply.get("truncated") == "response_bytes"
     first = runs[0]
+    if cut:
+        report.error("findings", f"the findings exceed the {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB response "
+                     "limit for one file; the rest are dropped", relative)
     if len(first) > MAX_FINDINGS_PER_FILE:
         report.error("findings", f"more than {MAX_FINDINGS_PER_FILE:,} findings for one file; the rest are dropped",
                      relative)

@@ -714,7 +714,9 @@ def test_host_request_handlers(tmp_path, plugins):
     assert plugin_host._supports(analyzer, {"unexpected": 1})["error"].startswith("TypeError")
     staged = tmp_path / "a.txt"
     staged.write_text("x", encoding="utf-8")
-    [finding] = plugin_host._analyze(analyzer, {"record": record, "path": str(staged)})
+    findings, cut = plugin_host._analyze(analyzer, {"record": record, "path": str(staged)})
+    [finding] = findings
+    assert cut is False
     assert finding["detail"] == str(os.getpid())
 
     class Mixed(Analyzer):
@@ -726,7 +728,7 @@ def test_host_request_handlers(tmp_path, plugins):
         def analyze(self, path, record):
             return ["not a finding"]
 
-    assert plugin_host._analyze(Mixed(), {"record": record, "path": str(staged)}) == [{"invalid": "str"}]
+    assert plugin_host._analyze(Mixed(), {"record": record, "path": str(staged)}) == ([{"invalid": "str"}], False)
     for value, error in (
         ("pdt_fixture_plugins:NOT_AN_ANALYZER", TypeError),
         ("pdt_fixture_broken:Anything", RuntimeError),
@@ -872,3 +874,93 @@ def test_windows_appcontainer_denies_a_hostile_plugin(tmp_path, plugins, monkeyp
         udp.close()
         tcp.close()
         sys.modules.pop("pdt_fixture_redteam", None)
+
+
+def test_host_findings_stop_at_the_response_frame_budget():
+    from project_discovery.analyzers.base import Analyzer
+    from project_discovery.models import FileRecord, Finding
+    from project_discovery.plugins import host as plugin_host
+    from project_discovery.plugins.protocol import MAX_RESPONSE_BYTES, encode_frame
+
+    class Bulky(Analyzer):
+        name = "bulky"
+
+        def supports(self, record):
+            return True
+
+        def analyze(self, path, record):
+            return [Finding("bulk", f"Finding {index}", "\u00e9" * 7000) for index in range(1000)]
+
+    request = {"record": FileRecord("a.txt", 1, ".txt", "Text").to_dict(), "path": "a.txt"}
+    findings, cut = plugin_host._analyze(Bulky(), request)
+    assert cut and 0 < len(findings) < 1000
+    assert len(encode_frame({"findings": findings, "id": 1, "ok": True, "truncated": "response_bytes"})) <= MAX_RESPONSE_BYTES
+
+
+def test_an_unencodable_finding_is_rejected_alone():
+    from project_discovery.analyzers.base import Analyzer
+    from project_discovery.models import FileRecord, Finding
+    from project_discovery.plugins import host as plugin_host
+
+    class OneBad(Analyzer):
+        name = "one-bad"
+
+        def supports(self, record):
+            return True
+
+        def analyze(self, path, record):
+            bad = Finding("ok", "Bad", "")
+            bad.evidence = [float("nan")]  # JSON has no NaN; the whole reply used to fail
+            return [Finding("ok", "Good", ""), bad]
+
+    request = {"record": FileRecord("a.txt", 1, ".txt", "Text").to_dict(), "path": "a.txt"}
+    findings, cut = plugin_host._analyze(OneBad(), request)
+    assert not cut
+    assert findings[0]["title"] == "Good"
+    assert list(findings[1]) == ["invalid"]
+
+
+def test_probe_paths_are_made_again_after_the_work_directory_is_removed(tmp_path):
+    # Regression: run_scan removes its plugin work directory after each scan; the cached
+    # probe paths of the first scan were reused, the probes hit FileNotFoundError, and a
+    # second scan into the same output refused every plugin as "could not deny reads".
+    import shutil
+
+    from project_discovery.plugins import isolation
+
+    work = tmp_path / "plugins"
+    work.mkdir()
+    first = isolation._probe_paths(work)
+    shutil.rmtree(work)
+    work.mkdir()
+    canary, writes = isolation._probe_paths(work)
+    assert Path(canary).is_file() and Path(writes).is_dir()
+    assert (canary, writes) != first
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX sandbox turns import paths into read rules")
+def test_sandbox_import_path_leaves_out_the_working_and_pythonpath_directories(tmp_path, monkeypatch):
+    # Regression: every sys.path entry became a read rule, so `python -m project_discovery`
+    # from a home directory made the whole directory readable to a sandboxed plugin.
+    from project_discovery.plugins import isolation
+
+    home = tmp_path / "home"
+    extra = tmp_path / "extra"
+    plugins = tmp_path / "plugins"
+    for directory in (home, extra, plugins):
+        directory.mkdir()
+    (plugins / "pdt_linked_plugin.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.chdir(home)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(extra), str(plugins)]))
+    for directory in (home, extra, plugins):
+        monkeypatch.syspath_prepend(str(directory))
+    link_root = tmp_path / "scratch" / "import-root"
+    link_root.parent.mkdir()
+    entries, _ = isolation._host_import_path([], plugin_value="pdt_linked_plugin:VALUE", link_root=link_root)
+    assert not {str(home), str(extra), str(plugins)} & set(entries)
+    assert str(link_root) in entries
+    assert (link_root / "pdt_linked_plugin.py").resolve() == (plugins / "pdt_linked_plugin.py").resolve()
+    # Process mode reads freely and keeps the whole import path.
+    entries, _ = isolation._host_import_path([])
+    assert {str(home), str(extra), str(plugins)} <= set(entries)
+    sys.modules.pop("pdt_linked_plugin", None)

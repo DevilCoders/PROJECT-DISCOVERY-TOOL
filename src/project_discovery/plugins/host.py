@@ -23,6 +23,7 @@ from ..core import source_utils  # noqa: F401  # imported before lock-down for p
 from ..models import FileRecord, Finding
 from . import sandbox as plugin_sandbox
 from .protocol import (
+    HEADER_BYTES,
     MAX_FINDINGS_PER_FILE,
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
@@ -141,14 +142,35 @@ def _supports(analyzer: Analyzer, item: dict):
         return {"error": _describe(exc)}
 
 
-def _analyze(analyzer: Analyzer, request: dict) -> list[dict]:
+# Room in a response frame for the reply envelope around the findings.
+_RESPONSE_BUDGET = MAX_RESPONSE_BYTES - 64 * 1024
+
+
+def _analyze(analyzer: Analyzer, request: dict) -> tuple[list[dict], bool]:
+    """The file's findings, and whether some were left out to fit one response frame.
+
+    Each finding is encoded as it arrives. One that would carry the reply past the frame
+    limit ends the list (PDT reports the truncation); before, the oversized reply was
+    replaced by an error and every finding for the file was lost. A finding that cannot
+    be encoded at all is passed on as invalid, so PDT rejects only that one.
+    """
     record = FileRecord(**request["record"])
     findings: list[dict] = []
+    size = 0
     for item in analyzer.analyze(Path(request["path"]), record):
         if len(findings) > MAX_FINDINGS_PER_FILE:
             break  # PDT reports the truncation
-        findings.append(item.to_dict() if isinstance(item, Finding) else {"invalid": type(item).__name__})
-    return findings
+        value = item.to_dict() if isinstance(item, Finding) else {"invalid": type(item).__name__}
+        try:
+            encoded = len(encode_frame(value)) - HEADER_BYTES + 1  # and a separating comma
+        except (TypeError, ValueError) as exc:
+            value = {"invalid": f"finding that cannot be encoded ({_describe(exc)})"[:300]}
+            encoded = len(encode_frame(value))
+        if size + encoded > _RESPONSE_BUDGET:
+            return findings, True
+        size += encoded
+        findings.append(value)
+    return findings, False
 
 
 def _serve(channel: _Channel, analyzer: Analyzer) -> None:
@@ -164,7 +186,10 @@ def _serve(channel: _Channel, analyzer: Analyzer) -> None:
             if operation == "supports":
                 reply = {"results": [_supports(analyzer, item) for item in request["records"]]}
             elif operation == "analyze":
-                reply = {"findings": _analyze(analyzer, request)}
+                findings, cut = _analyze(analyzer, request)
+                reply = {"findings": findings}
+                if cut:
+                    reply["truncated"] = "response_bytes"
             else:
                 raise ValueError(f"unknown request {operation!r}")
             reply.update(id=request.get("id"), ok=True)

@@ -80,6 +80,33 @@ class Leaky(Analyzer):
 
 class Impostor(Good):
     name = "secret-patterns"
+
+
+class Fields(Analyzer):
+    name = "fixture-fields"
+    version = "1.0"
+    description = "Decides on the record fields a scan fills in."
+
+    def supports(self, record):
+        return (record.size_bucket != "unknown" and record.permissions is not None
+                and record.mtime_ns is not None and record.is_hidden == record.path.startswith(".")
+                and record.file_type == ("source" if record.extension == ".py" else "text"))
+
+    def analyze(self, path, record):
+        return []
+
+
+class Huge(Analyzer):
+    name = "fixture-huge"
+    version = "1.0"
+    description = "Stays within every per-finding limit but not within one response frame."
+
+    def supports(self, record):
+        return True
+
+    def analyze(self, path, record):
+        # 7,000 characters of non-ASCII text encode as about 42 KB of JSON escapes.
+        return [Finding("bulk", "Finding %d" % index, "\u00e9" * 7000) for index in range(1000)]
 '''
 
 
@@ -161,3 +188,67 @@ def test_cli_exit_status_follows_the_result(fixtures, monkeypatch, capsys):
         cli.main()
     assert failed.value.code == 1
     assert "NOT conformant" in capsys.readouterr().out
+
+
+def test_plugin_check_hands_over_the_record_a_scan_builds(fixtures, tmp_path):
+    # Regression: plugin-check built a stub record (file type "text", size bucket
+    # "unknown", no permissions or modification time, never hidden), so a plugin that
+    # decides on those fields was checked against values no scan produces.
+    samples = tmp_path / "field-samples"
+    samples.mkdir()
+    (samples / "notes.txt").write_text("notes\n", encoding="utf-8")
+    (samples / ".hidden.txt").write_text("hidden\n", encoding="utf-8")
+    (samples / "tool.py").write_text("print(1)\n", encoding="utf-8")
+    report = check_plugin("pdt_conformance_fixtures:Fields", [samples], isolation="process")
+    assert {entry["path"]: entry["supported"] for entry in report.files} == {
+        ".hidden.txt": True, "notes.txt": True, "tool.py": True,
+    }
+
+
+def test_findings_beyond_one_response_frame_are_cut_not_all_lost(fixtures):
+    # Regression: 1,000 findings within every documented per-finding limit made a reply
+    # over the 16 MiB frame limit, and the host replaced it with an error: all were lost.
+    report = check_plugin("pdt_conformance_fixtures:Huge", [fixtures / "a.txt"], isolation="process")
+    assert 0 < report.files[0]["findings"] < 1000
+    assert any(problem.check == "findings" and "response limit" in problem.message for problem in report.problems)
+
+
+SNOOP = '''
+from pathlib import Path
+from project_discovery.analyzers.base import Analyzer
+
+
+class Snoop(Analyzer):
+    name = "fixture-snoop"
+    version = "1.0"
+    description = "Supports a file only while it cannot read the file next to its own module."
+
+    def supports(self, record):
+        try:
+            (Path(__file__).resolve().parent / "secret.txt").read_bytes()
+        except OSError:
+            return True
+        return False
+
+    def analyze(self, path, record):
+        return []
+'''
+
+
+def test_a_plugin_on_pythonpath_cannot_read_its_neighbours_under_the_sandbox(tmp_path, monkeypatch):
+    # Regression (Linux/macOS): every sys.path entry became a read rule, so a plugin
+    # imported from PYTHONPATH or the working directory could read everything beside it.
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "pdt_snoop_fixture.py").write_text(SNOOP, encoding="utf-8")
+    (modules / "secret.txt").write_text("not for plugins\n", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(modules))
+    monkeypatch.syspath_prepend(str(modules))
+    sample = tmp_path / "sample.txt"
+    sample.write_text("x\n", encoding="utf-8")
+    try:
+        report = check_plugin("pdt_snoop_fixture:Snoop", [sample])
+    finally:
+        sys.modules.pop("pdt_snoop_fixture", None)
+    assert report.ok, format_report(report)
+    assert report.files[0]["supported"] is True

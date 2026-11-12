@@ -37,7 +37,7 @@ Two things are not part of the API:
 
 ## Checking a plugin
 
-`pdt plugin-check` loads a plugin the way a scan does: in a host under the sandbox (or `--isolation process`), through the same protocol and the same validation. It then runs `supports()` and `analyze()` twice on each sample file.
+`pdt plugin-check` loads a plugin the way a scan does: in a host under the sandbox (or `--isolation process`), through the same protocol and the same validation. It then runs `supports()` and `analyze()` twice on each sample file, with the file record a scan builds: the same file type (from the file's signature), size bucket, hidden flag, permissions and modification time.
 
 ```bash
 pdt plugin-check my_package.analyzer:MyAnalyzer tests/samples/   # or an installed entry-point name
@@ -87,7 +87,7 @@ Before a host imports the plugin, it attempts each forbidden action: a write out
 | Mechanisms | Landlock, seccomp-bpf, no_new_privs, resource limits, parent-death signal | Seatbelt profile, resource limits | AppContainer without capabilities, job object, untrusted integrity level, process mitigation policies |
 | File writes | Denied everywhere | Denied (except `/dev/null`) | Denied everywhere, including the container's own folder and low-integrity folders such as LocalLow |
 | Mode, owner, time and xattr changes | Denied (seccomp) | Denied | Denied |
-| File reads | Only the Python runtime, system libraries, PDT, the plugin's package and the staged copies | Same | Only PDT's copy of the standard-library runtime, the staged PDT and plugin packages, the staged copies, and system folders Windows opens to every app container (such as `C:\Windows`) |
+| File reads | Only the Python runtime and its site-packages (with the directories their `.pth` files add), system libraries, PDT, the plugin's package and the staged copies. The current directory and `PYTHONPATH` directories are not readable; a plugin imported from one of them is reached through a link to its own package or module | Same | Only PDT's copy of the standard-library runtime, the staged PDT and plugin packages, the staged copies, and system folders Windows opens to every app container (such as `C:\Windows`) |
 | Network | Denied: no sockets except `socketpair`; TCP also denied by Landlock ABI 4+ | Denied | Denied, loopback included; names do not resolve |
 | Process creation | Denied (fork, clone and exec; Landlock also denies execute) | Denied | Denied (one-process job and the child-process policy) |
 | Other processes | No ptrace, memory access, signals or resource and scheduling changes | No signals to other processes | Cannot open other processes, so no termination and no memory access |
@@ -122,6 +122,7 @@ Hosts run in the per-user AppContainer profile `ProjectDiscoveryTool.PluginHost`
   | `evidence` | 64 items of up to 1,000 characters each |
   | `code_evidence` | 64 lines |
   | Findings per file | 5,000 |
+  | One file's findings as JSON | 16 MiB in total; non-ASCII text is sent as `\uXXXX` escapes, about 6 bytes per character. Findings past the limit are dropped and reported as an `UNKNOWN` coverage finding, and `plugin-check` reports an error |
   | File size handed to a plugin | 1 GiB |
 
 - `concurrent_safe` matters only with `--plugin-isolation off`, because isolated hosts never run requests in parallel.

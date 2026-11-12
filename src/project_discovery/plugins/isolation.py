@@ -11,6 +11,7 @@ host that crashes, hangs or breaks the protocol is killed and the file gets an
 from __future__ import annotations
 
 import atexit
+import importlib.util
 import os
 import queue
 import re
@@ -147,10 +148,16 @@ def _work_dir(policy: PluginPolicy) -> Path:
 
 
 def _probe_paths(work_dir: Path) -> tuple[str, str]:
-    """A canary file and a directory outside every host's allowlist, per process."""
+    """A canary file and a directory outside every host's allowlist, per process.
+
+    Cached per process and work directory, and made again when they are gone: run_scan
+    removes the work directory after each scan, and a stale entry made the next scan's
+    probes fail with FileNotFoundError, which reads as "not denied".
+    """
     key = (os.getpid(), str(work_dir))
     with _lock:
-        if key not in _probe_paths_cache:
+        cached = _probe_paths_cache.get(key)
+        if cached is None or not (os.path.isfile(cached[0]) and os.path.isdir(cached[1])):
             root = Path(tempfile.mkdtemp(prefix="probe-", dir=work_dir))
             canary = root / "canary"
             canary.write_bytes(os.urandom(16))
@@ -170,25 +177,85 @@ def _interpreter() -> str:
     return sys.executable
 
 
-def _host_import_path(excluded: Sequence[str]) -> tuple[list[str], list[str]]:
+def _inside(path: str, base: str) -> bool:
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _plugin_import_root(value: str) -> tuple[str, str] | None:
+    """(import-path directory, package directory or module file) of a plugin, located
+    without running its code; None for a namespace package or a spec without a file."""
+    top_level = value.split(":", 1)[0].strip().split(".", 1)[0]
+    try:
+        spec = importlib.util.find_spec(top_level)
+    except (ImportError, ValueError):
+        return None
+    if spec is None:
+        return None
+    locations = list(spec.submodule_search_locations or [])
+    if len(locations) == 1:
+        target = locations[0]
+    elif not locations and spec.origin and os.path.isabs(spec.origin):
+        target = spec.origin
+    else:
+        return None
+    return os.path.dirname(os.path.abspath(target)), os.path.abspath(target)
+
+
+def _host_import_path(
+    excluded: Sequence[str], *, plugin_value: str | None = None, link_root: Path | None = None,
+) -> tuple[list[str], list[str]]:
+    """(import path, site directories) for a plugin host.
+
+    With ``link_root`` (the POSIX sandbox, where every import-path entry becomes readable),
+    the current directory and PYTHONPATH directories are left out: a scan started from a
+    home directory made all of it readable to a sandboxed plugin. When the plugin itself is
+    imported from such a directory, a link to its package (or module) in ``link_root``
+    stands in for the directory, so the sandbox opens only the plugin, never its siblings.
+    """
     import project_discovery
 
     excluded = [os.path.normcase(os.path.realpath(item)) for item in excluded]
 
     def inside_excluded(path: str) -> bool:
         real = os.path.normcase(os.path.realpath(path))
-        return any(real == item or real.startswith(item.rstrip(os.sep) + os.sep) for item in excluded)
+        return any(_inside(real, item) for item in excluded)
 
-    # The PDT the coordinator runs comes first, so the host runs the same code.
-    entries = [os.path.dirname(os.path.dirname(os.path.abspath(project_discovery.__file__)))]
-    for entry in sys.path:
-        if entry and not inside_excluded(entry):
-            absolute = os.path.abspath(entry)
-            if absolute not in entries:
-                entries.append(absolute)
     site_dirs = [item for item in getattr(site, "getsitepackages", list)() if os.path.isdir(item)]
     if site.ENABLE_USER_SITE and os.path.isdir(site.getusersitepackages()):
         site_dirs.append(site.getusersitepackages())
+    transient: set[str] = set()
+    protected: list[str] = []
+    plugin_root = None
+    if link_root is not None:
+        transient.add(os.path.normcase(os.path.abspath(os.getcwd())))
+        transient.update(
+            os.path.normcase(os.path.abspath(item))
+            for item in os.environ.get("PYTHONPATH", "").split(os.pathsep) if item
+        )
+        protected = [
+            os.path.normcase(os.path.abspath(item))
+            for item in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix, *site_dirs)
+        ]
+        plugin_root = _plugin_import_root(plugin_value) if plugin_value else None
+    # The PDT the coordinator runs comes first, so the host runs the same code.
+    entries = [os.path.dirname(os.path.dirname(os.path.abspath(project_discovery.__file__)))]
+    for entry in sys.path:
+        if not entry or inside_excluded(entry):
+            continue
+        absolute = os.path.abspath(entry)
+        if absolute in entries:
+            continue
+        key = os.path.normcase(absolute)
+        if key in transient and not any(_inside(key, base) for base in protected):
+            if plugin_root is not None and os.path.normcase(plugin_root[0]) == key and link_root is not None:
+                link_root.mkdir(exist_ok=True)
+                link = link_root / os.path.basename(plugin_root[1])
+                if not os.path.lexists(link):
+                    os.symlink(plugin_root[1], link)
+                if str(link_root) not in entries:
+                    entries.append(str(link_root))
+            continue
+        entries.append(absolute)
     return entries, site_dirs
 
 
@@ -295,7 +362,13 @@ class PluginHost:
         self.scratch = Path(tempfile.mkdtemp(prefix="host-", dir=work_dir))
         (self.scratch / "readable.probe").write_bytes(b"ok")
         canary, write_dir = _probe_paths(work_dir)
-        sys_path, site_dirs = _host_import_path(policy.exclude_paths)
+        sys_path, site_dirs = _host_import_path(
+            policy.exclude_paths,
+            plugin_value=entry_point["value"] if entry_point else None,
+            # Only the POSIX sandbox turns import-path entries into read rules; process
+            # mode reads freely, and Windows stages a private site instead.
+            link_root=self.scratch / "import-root" if policy.isolation == "sandbox" and not _WINDOWS else None,
+        )
         config = {
             "mode": policy.isolation,
             "required": list(policy.required),
@@ -797,12 +870,17 @@ class IsolatedAnalyzer(Analyzer):
             except ValueError as exc:
                 rejected.append(str(exc))
         truncated = len(items) > MAX_FINDINGS_PER_FILE
-        if rejected or truncated:
+        cut = reply.get("truncated") == "response_bytes"
+        if rejected or truncated or cut:
             problems = []
             if rejected:
                 problems.append(f"{len(rejected):,} invalid finding(s) were discarded ({rejected[0]})")
             if truncated:
                 problems.append(f"findings beyond the first {MAX_FINDINGS_PER_FILE:,} were dropped")
+            if cut:
+                problems.append(
+                    f"findings beyond the {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB response limit were dropped"
+                )
             findings.append(Finding(
                 "analysis_coverage",
                 f"Plugin output rejected: {self.name}: {record.path}",
