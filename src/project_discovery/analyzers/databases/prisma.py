@@ -1,18 +1,36 @@
 """Prisma ORM schema inventory."""
 from __future__ import annotations
 
+import bisect
 import re
 from pathlib import Path
 
-from ...core.source_utils import describe_error, read_text_bounded
+from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
-_BLOCK = re.compile(
-    r"(?ms)^\s*(model|enum|datasource|generator)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)^\s*\}"
-)
-_FIELD = re.compile(r"(?m)^\s{2,}([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\[\])?(?:\?)?")
-_PROVIDER = re.compile(r'(?m)^\s*provider\s*=\s*"([^"]+)"')
+_HEADER = re.compile(r"(?m)^[ \t]*(model|enum|datasource|generator)[ \t]+([A-Za-z_][A-Za-z0-9_]*+)\s*\{")
+_CLOSE = re.compile(r"(?m)^[ \t]*\}")
+
+
+def _blocks(content: str):
+    """(kind, name, body start, body end, header start) of each block, in linear time.
+
+    A block ends at the first later line that starts with ``}``. The single regex
+    ``^model X {(.*?)^}`` scanned to the end of the file from every unclosed header.
+    """
+    closes = [match.start() for match in _CLOSE.finditer(content)]
+    position = 0
+    for header in _HEADER.finditer(content):
+        if header.start() < position:
+            continue  # inside the previous block
+        index = bisect.bisect_left(closes, header.end())
+        if index == len(closes):
+            break
+        yield header.group(1), header.group(2), header.end(), closes[index], header.start()
+        position = closes[index]
+_FIELD = re.compile(r"(?m)^[ \t]{2,}([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\[\])?(?:\?)?")
+_PROVIDER = re.compile(r'(?m)^[ \t]*provider\s*=\s*"([^"]+)"')
 
 
 class PrismaSchemaAnalyzer(Analyzer):
@@ -40,23 +58,22 @@ class PrismaSchemaAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
 
-        blocks = list(_BLOCK.finditer(content))
-        models = {match.group(2) for match in blocks if match.group(1) == "model"}
+        blocks = list(_blocks(content))
+        models = {name for kind, name, *_ in blocks if kind == "model"}
+        lines = LineIndex(content)
         model_fields: dict[str, int] = {}
         relations: list[tuple[str, str, str, int]] = []
         evidence: list[str] = []
         enums = []
-        for match in blocks:
-            kind, name, body = match.groups()
-            line = content.count("\n", 0, match.start()) + 1
+        for kind, name, body_start, body_end, start in blocks:
+            line = lines.line(start)
             if kind == "model":
                 fields = []
-                for field_match in _FIELD.finditer(body):
+                for field_match in _FIELD.finditer(content, body_start, body_end):
                     field_name, field_type = field_match.groups()
                     fields.append((field_name, field_type))
                     if field_type in models and field_type != name:
-                        field_line = line + body.count("\n", 0, field_match.start()) + 1
-                        relations.append((name, field_name, field_type, field_line))
+                        relations.append((name, field_name, field_type, lines.line(field_match.start(1))))
                 model_fields[name] = len(fields)
                 evidence.append(f"{record.path}:{line} model {name} ({len(fields)} fields)")
             elif kind == "enum":

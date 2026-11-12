@@ -174,7 +174,7 @@ IMPORT_NODE_TYPES = {
 _IMPORT_TARGET_PATTERNS = (
     re.compile(r"""(?i)\bfrom\s+["']?([\w./:@-]+)"""),
     re.compile(r"""(?i)\bimport\s+(?:static\s+)?["']?([\w./:@-]+)"""),
-    re.compile(r"""(?i)\b(?:require|include)\s*\(?\s*["']([\w./:@-]+)"""),
+    re.compile(r"""(?i)\b(?:require|include)\s*(?:\(\s*)?["']([\w./:@-]+)"""),
     re.compile(r"""(?i)#\s*include\s*[<"]([^>"]+)"""),
     re.compile(r"""(?i)\buse\s+([A-Za-z_][\w:.]*)"""),
     re.compile(r"""(?i)\busing\s+([A-Za-z_][\w.]*)"""),

@@ -16,6 +16,94 @@ from ...core.source_utils import describe_error, open_verified_binary, parse_pyt
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
 
+
+def _statement_end(line: str, start: int) -> int:
+    ends = [index for index in (line.find(";", start), line.find("\n", start)) if index != -1]
+    return min(ends) if ends else len(line)
+
+
+class _CallPattern:
+    """``head [^;\\n]* part [^;\\n]* part ...`` within one statement, in linear time.
+
+    One regex with these gaps rescans the rest of the statement from every head it finds,
+    which is quadratic on a line such as ``redirect(a,`` repeated, and cubic with two
+    gaps (the XXE rule took 2 s on 12,000 characters). Here each statement is scanned once
+    per part: when the first head of a statement has no match, no later head of the same
+    statement can have one, because its window is a suffix of the first one's.
+    """
+
+    def __init__(self, head: str, *parts: str, flags: int = 0) -> None:
+        self.head = re.compile(head, flags)
+        self.parts = tuple(re.compile(part, flags) for part in parts)
+
+    def search(self, line: str) -> bool:
+        position, length = 0, len(line)
+        while position <= length:
+            head = self.head.search(line, position)
+            if head is None:
+                return False
+            stop = _statement_end(line, head.end())
+            cursor = head.end()
+            for part in self.parts:
+                found = part.search(line, cursor, stop)
+                if found is None:
+                    break
+                cursor = found.end()
+            else:
+                return True
+            position = stop + 1
+        return False
+
+
+class _FirstArgumentThen:
+    """``head [^,]+ tail``: the first comma after the call must start ``tail``, in linear time."""
+
+    def __init__(self, head: str, tail: str, flags: int = 0) -> None:
+        self.head = re.compile(head, flags)
+        self.tail = re.compile(tail, flags)
+
+    def search(self, line: str) -> bool:
+        position = 0
+        while (head := self.head.search(line, position)) is not None:
+            comma = line.find(",", head.end())
+            if comma == -1:
+                return False
+            if comma > head.end() and self.tail.match(line, comma):
+                return True
+            position = comma + 1  # every head before this comma shares it
+        return False
+
+
+class _NearBefore:
+    """``keyword .{0,window}? call``, found from the (rare) calls backwards in linear time."""
+
+    def __init__(self, keyword: str, call: str, window: int, longest_keyword: int, flags: int = 0) -> None:
+        self.keyword = re.compile(keyword, flags)
+        self.call = re.compile(call, flags)
+        self.window = window
+        self.longest = longest_keyword
+
+    def search(self, line: str) -> bool:
+        for call in self.call.finditer(line):
+            low = max(0, call.start() - self.window - self.longest)
+            for keyword in self.keyword.finditer(line, low, call.start()):
+                if call.start() - keyword.end() <= self.window:
+                    return True
+        return False
+
+
+class _AnyOf:
+    def __init__(self, *patterns) -> None:
+        self.patterns = patterns
+
+    def search(self, line: str) -> bool:
+        return any(pattern.search(line) for pattern in self.patterns)
+
+
+_USER_INPUT = r"req(?:uest)?\.(?:query|params|body)|getParameter\s*\(|params\[|user_?input"
+
+# Every rule runs once per source line, so each must stay linear in the line's length:
+# minified bundles hold megabytes on one line.
 _PATTERNS = (
     (
         "dynamic_code_execution",
@@ -64,8 +152,8 @@ _PATTERNS = (
     ),
     (
         "dynamic_sql_query",
-        re.compile(
-            r"""(?i)\b(?:query|execute|execSQL|raw|createQuery)\s*\([^;\n]*(?:\+\s*[A-Za-z_$]|\.format\s*\(|\$\{)"""
+        _CallPattern(
+            r"\b(?:query|execute|execSQL|raw|createQuery)\s*\(", r"\+\s*[A-Za-z_$]|\.format\s*\(|\$\{", flags=re.I,
         ),
         "Potential dynamically constructed SQL query",
         "A query API receives a concatenated, formatted, or interpolated expression. "
@@ -73,8 +161,10 @@ _PATTERNS = (
     ),
     (
         "ssrf_user_controlled_url",
-        re.compile(
-            r"""(?i)\b(?:requests?\.(?:get|post|put|delete)|httpx\.(?:get|post)|axios\.(?:get|post)|fetch|http\.Get|GetAsync|sendAsync)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params|body)|getParameter\s*\(|params\[|user_?input)"""
+        _CallPattern(
+            r"\b(?:requests?\.(?:get|post|put|delete)|httpx\.(?:get|post)|axios\.(?:get|post)|fetch|http\.Get"
+            r"|GetAsync|sendAsync)\s*\(",
+            _USER_INPUT, flags=re.I,
         ),
         "Potential user-controlled outbound request",
         "An outbound HTTP client call appears to receive request-derived input. "
@@ -82,8 +172,9 @@ _PATTERNS = (
     ),
     (
         "path_traversal_user_controlled_path",
-        re.compile(
-            r"""(?i)\b(?:readFile|writeFile|FileInputStream|Paths\.get|Path\.Combine|sendFile|open)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params|body)|getParameter\s*\(|params\[|user_?input)"""
+        _CallPattern(
+            r"\b(?:readFile|writeFile|FileInputStream|Paths\.get|Path\.Combine|sendFile|open)\s*\(", _USER_INPUT,
+            flags=re.I,
         ),
         "Potential user-controlled filesystem path",
         "A filesystem API appears to receive request or user-derived path material. "
@@ -100,8 +191,9 @@ _PATTERNS = (
     ),
     (
         "jwt_verification_disabled",
-        re.compile(
-            r"""(?i)(?:algorithms\s*[:=]\s*\[\s*["']none["']|ignoreExpiration\s*[:=]\s*true|verify\s*\(\s*[^,]+,\s*false\s*\))"""
+        _AnyOf(
+            re.compile(r"""(?i)algorithms\s*[:=]\s*\[\s*["']none["']|ignoreExpiration\s*[:=]\s*true"""),
+            _FirstArgumentThen(r"verify\s*\(", r",\s*false\s*\)", flags=re.I),
         ),
         "JWT or token verification may be disabled",
         "A token verification configuration appears to accept an unsigned token or "
@@ -109,10 +201,12 @@ _PATTERNS = (
     ),
     (
         "insecure_random_for_secret",
-        re.compile(
-            # One lazy window keeps the cost per keyword at 130 steps; the former
-            # \w{0,30}.{0,100} pair overlapped and backtracked 31 x 101 times per keyword.
-            r"""(?i)(?:token|secret|session|nonce|api[_-]?key).{0,130}?(?:Math\.random\s*\(|new\s+Random\s*\(|\brand\s*\()"""
+        # A keyword at most 130 characters before a non-cryptographic random call. Calls
+        # are rare, so the search starts from them instead of from every keyword.
+        _NearBefore(
+            r"token|secret|session|nonce|api[_-]?key",
+            r"Math\.random\s*\(|new\s+Random\s*\(|\brand\s*\(",
+            window=130, longest_keyword=8, flags=re.I,
         ),
         "Potential non-cryptographic randomness for a secret",
         "A security-sensitive identifier appears to be derived from a non-cryptographic "
@@ -120,8 +214,9 @@ _PATTERNS = (
     ),
     (
         "open_redirect_user_controlled",
-        re.compile(
-            r"""(?i)\b(?:redirect|sendRedirect|Redirect)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params)|getParameter\s*\(|returnUrl|return_url|nextUrl|next_url)"""
+        _CallPattern(
+            r"\b(?:redirect|sendRedirect|Redirect)\s*\(",
+            r"req(?:uest)?\.(?:query|params)|getParameter\s*\(|returnUrl|return_url|nextUrl|next_url", flags=re.I,
         ),
         "Potential user-controlled redirect target",
         "A redirect API appears to consume request-derived destination data. "
@@ -129,8 +224,9 @@ _PATTERNS = (
     ),
     (
         "insecure_file_permissions",
-        re.compile(
-            r"""(?i)(?:\bchmod\s*\([^;\n]*(?:0o?777|511)|\bchmod\s+0?777\b|\bsetWritable\s*\(\s*true\s*\))"""
+        _AnyOf(
+            _CallPattern(r"\bchmod\s*\(", r"0o?777|511", flags=re.I),
+            re.compile(r"""(?i)\bchmod\s+0?777\b|\bsetWritable\s*\(\s*true\s*\)"""),
         ),
         "Potentially permissive filesystem permissions",
         "A source declaration appears to grant broad write permissions. Review the "
@@ -138,8 +234,9 @@ _PATTERNS = (
     ),
     (
         "unsafe_xml_external_entities",
-        re.compile(
-            r"""(?i)(?:setFeature\s*\([^;\n]*(?:external-general-entities|external-parameter-entities)[^;\n]*true|resolveExternals\s*=\s*true|DtdProcessing\s*[:=]\s*(?:DtdProcessing\.)?Parse)"""
+        _AnyOf(
+            _CallPattern(r"setFeature\s*\(", r"external-general-entities|external-parameter-entities", r"true", flags=re.I),
+            re.compile(r"""(?i)resolveExternals\s*=\s*true|DtdProcessing\s*[:=]\s*(?:DtdProcessing\.)?Parse"""),
         ),
         "Potential unsafe XML external-entity configuration",
         "The XML parser appears to permit external entities or DTD processing. "

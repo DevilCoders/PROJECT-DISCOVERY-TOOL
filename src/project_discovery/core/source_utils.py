@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import bisect
 import configparser
 import io
 import os
@@ -197,6 +198,29 @@ def describe_error(exc: BaseException) -> str:
             parts.append(f"line {lines}" if len(errors) == 1 else f"lines {lines}" + (", ..." if len(errors) > 5 else ""))
         return redact_source_excerpt(f"{name}" + (f" ({'; '.join(parts)})" if parts else ""))
     return redact_source_excerpt(f"{name}: {exc}")
+
+
+_NEWLINE = re.compile("\n")
+
+
+class LineIndex:
+    """1-based line numbers of offsets in one text, by bisecting its newline offsets.
+
+    ``text.count("\\n", 0, offset)`` for every match is linear per match, so a dense file
+    (a schema dump with one statement per line) cost minutes; the index is one pass over
+    the text, built on first use, and each lookup is logarithmic.
+    """
+
+    __slots__ = ("_text", "_newlines")
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._newlines: list[int] | None = None
+
+    def line(self, offset: int) -> int:
+        if self._newlines is None:
+            self._newlines = [match.start() for match in _NEWLINE.finditer(self._text)]
+        return bisect.bisect_left(self._newlines, offset) + 1
 
 
 _prefetch = threading.local()

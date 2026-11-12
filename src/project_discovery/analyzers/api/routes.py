@@ -45,7 +45,7 @@ _ROUTE_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"""(?m)^\s*(get|post|put|patch|delete|options|head)\s+['"]([^'"]+)['"]\s+do\b""",
+        r"""(?m)^[ \t]*(get|post|put|patch|delete|options|head)\s+['"]([^'"]+)['"]\s+do\b""",
         re.I,
     ),
     re.compile(

@@ -51,7 +51,7 @@ _HLSL_REGISTER = re.compile(
     r"[ \t]*+([tbsu])(\d{1,4}+)[ \t]*+(?:,[ \t]*+space(\d{1,3}+))?[ \t]*+\)"
 )
 _HLSL_NUMTHREADS = re.compile(r"\[numthreads[ \t]*+\([ \t]*+(\d{1,5}+)[ \t]*+,[ \t]*+(\d{1,5}+)[ \t]*+,[ \t]*+(\d{1,5}+)[ \t]*+\)[ \t]*+\]"
-                              r"[ \t\r\n]*+(?:\[[^\]\n]{0,100}+\][ \t\r\n]*+)*+\w{1,40}+[ \t]++(\w{1,80}+)[ \t]*+\(")
+                              r"[ \t\r\n]*+(?:\[[^\]\n]{0,100}+\][ \t\r\n]*+){0,8}+\w{1,40}+[ \t]++(\w{1,80}+)[ \t]*+\(")
 _HLSL_DXR = re.compile(r"\[shader[ \t]*+\([ \t]*+\"(\w{1,30}+)\"[ \t]*+\)[ \t]*+\][ \t\r\n]*+\w{1,40}+[ \t]++(\w{1,80}+)")
 _HLSL_PRAGMA = re.compile(r"(?m)^[ \t]*+#pragma[ \t]++(vertex|fragment|geometry|hull|domain|surface|kernel)[ \t]++(\w{1,80}+)")
 _HLSL_SEMANTIC_ENTRY = re.compile(r"(?<![\w$])\w{1,40}+[ \t]++(\w{1,80}+)[ \t]*+\([^()]{0,400}+\)[ \t\r\n]*+:[ \t]*+(SV_Target\d?|SV_Position|COLOR\d?)")
@@ -59,7 +59,7 @@ _WGSL_BINDING = re.compile(
     r"@(group|binding)[ \t]*+\([ \t]*+(\d{1,4}+)[ \t]*+\)[ \t\r\n]*+@(group|binding)[ \t]*+\([ \t]*+(\d{1,4}+)[ \t]*+\)"
     r"[ \t\r\n]*+var(?:[ \t]*+<[^<>;\n]{0,80}+>)?[ \t]++(\w{1,80}+)"
 )
-_WGSL_ENTRY = re.compile(r"@(vertex|fragment|compute)\b(?:[ \t\r\n]*+@\w{1,40}+(?:[ \t]*+\([^()\n]{0,80}+\))?)*+[ \t\r\n]*+fn[ \t]++(\w{1,80}+)")
+_WGSL_ENTRY = re.compile(r"@(vertex|fragment|compute)\b(?:[ \t\r\n]*+@\w{1,40}+(?:[ \t]*+\([^()\n]{0,80}+\))?){0,8}+[ \t\r\n]*+fn[ \t]++(\w{1,80}+)")
 _WGSL_WORKGROUP = re.compile(r"@workgroup_size[ \t]*+\(([^()\n]{1,80}+)\)")
 _METAL_ENTRY = re.compile(r"(?<![\w$])(kernel|vertex|fragment)[ \t]++[\w<>:, ]{1,120}?[ \t]++(\w{1,80}+)[ \t]*+\(")
 _METAL_BINDING = re.compile(r"(\w{1,80}+)[ \t]*+\[\[[ \t]*+(buffer|texture|sampler)[ \t]*+\([ \t]*+(\d{1,4}+)[ \t]*+\)")

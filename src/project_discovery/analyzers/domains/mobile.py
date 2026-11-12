@@ -283,7 +283,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
             )]
         if not re.search(r"(?m)^dependencies\s*:", source):
             return []
-        deps = re.findall(r"(?m)^\s{2}([A-Za-z0-9_]+)\s*:", source)
+        deps = re.findall(r"(?m)^[ \t]{2}([A-Za-z0-9_]+)\s*:", source)
         return [Finding(
             "mobile",
             f"Flutter project manifest: {record.path}",
@@ -303,8 +303,8 @@ class MobileIntelligenceAnalyzer(Analyzer):
                 describe_error(exc), confidence="UNKNOWN",
                 evidence=[record.path], analyzer=self.name,
             )]
-        platform = re.findall(r"(?im)^\s*platform\s*:ios\s*,\s*['\"]([^'\"]+)", source)
-        pods = re.findall(r"(?im)^\s*pod\s+['\"]([^'\"]+)", source)
+        platform = re.findall(r"(?im)^[ \t]*platform\s*:ios\s*,\s*['\"]([^'\"]+)", source)
+        pods = re.findall(r"(?im)^[ \t]*pod\s+['\"]([^'\"]+)", source)
         return [Finding(
             "mobile", f"iOS CocoaPods manifest: {record.path}",
             f"Detected iOS deployment target(s): {', '.join(platform) or 'unspecified'}; "

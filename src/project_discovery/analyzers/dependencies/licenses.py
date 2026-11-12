@@ -23,7 +23,7 @@ _HEADER_WINDOW_BYTES = 64 * 1024
 _MANIFESTS = {"package.json", "pyproject.toml", "cargo.toml", "composer.json"}
 _LICENSE_HINTS = (
     ("MIT", re.compile(r"(?i)\bMIT License\b")),
-    ("Apache-2.0", re.compile(r"(?i)Apache License\s*,?\s*Version 2\.0")),
+    ("Apache-2.0", re.compile(r"(?i)Apache License\s*(?:,\s*)?Version 2\.0")),
     ("GPL-3.0", re.compile(r"(?i)GNU GENERAL PUBLIC LICENSE\s+Version 3")),
     ("GPL-2.0", re.compile(r"(?i)GNU GENERAL PUBLIC LICENSE\s+Version 2")),
     ("BSD-3-Clause", re.compile(r"(?i)BSD 3-Clause License")),

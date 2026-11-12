@@ -27,8 +27,12 @@ _KNOWN_NAMES = {
 _LOCALE_STEM = re.compile(
     r"(?i)^[a-z]{2,3}(?:[-_](?:[a-z]{2}|[a-z0-9]{4}))?$"
 )
-_PO_MSGID = re.compile(r'^msgid\s+"((?:\\.|[^"])*)"$')
-_PO_MSGSTR = re.compile(r'^msgstr(?:\[\d+\])?\s+"((?:\\.|[^"])*)"$')
+# An escape is a backslash and the next character; any other character but a quote or a
+# backslash stands alone. "(?:\\.|[^"])*" let a backslash be either, which backtracks
+# exponentially on a run of backslashes without a closing quote (46 bytes took seconds).
+_PO_MSGID = re.compile(r'^msgid\s+"((?:\\.|[^"\\])*+)"$')
+_PO_MSGSTR = re.compile(r'^msgstr(?:\[\d+\])?\s+"((?:\\.|[^"\\])*+)"$')
+_STRINGS_PAIR = re.compile(r'(?m)^[ \t]*"((?:\\.|[^"\\])*+)"\s*=\s*"((?:\\.|[^"\\])*+)"\s*;')
 
 
 def _json_keys(data: Any) -> tuple[list[str], int]:
@@ -163,17 +167,14 @@ class LocalizationAnalyzer(Analyzer):
                 keys, untranslated = _xml_summary(source, extension)
                 format_name = "XML localization resource"
             elif extension == ".strings":
-                pairs = re.findall(
-                    r'(?m)^\s*"((?:\\.|[^"])*)"\s*=\s*"((?:\\.|[^"])*)"\s*;',
-                    source,
-                )
+                pairs = _STRINGS_PAIR.findall(source)
                 keys = [key for key, _ in pairs]
                 untranslated = sum(not value.strip() for _, value in pairs)
                 format_name = "Apple strings catalog"
             elif extension == ".properties":
                 keys = [
                     match.group(1).strip() for line in source.splitlines()
-                    if (match := re.match(r"^\s*([^#!\s][^=:]*?)\s*[=:]", line))
+                    if (match := re.match(r"^\s*+([^#!\s][^=:]*+)[=:]", line))
                 ]
                 format_name = "Java properties catalog"
             elif extension == ".ftl":

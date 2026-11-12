@@ -266,6 +266,14 @@ Findings and their status are in the second-round section of
 - Plugin findings are validated and redacted with `--plugin-isolation off` too (PDT-350), and
   `plugin-check` neutralizes and redacts plugin-supplied text (PDT-351).
 - Lines that name a credential field hide every quoted literal (PDT-352).
+- One crafted line or file no longer stalls a worker: the secure-code rules scan each statement
+  once (PDT-353); nginx directives, SQL `DROP COLUMN`, Liquibase ids, Terraform `cidr_blocks` and
+  Prisma blocks are linear scans (PDT-354); line numbers come from a shared index instead of
+  counting from the file start per match (PDT-355); PO and `.strings` patterns are no longer
+  exponential on backslashes (PDT-356).
+- `tests/test_regex_complexity.py` sees rule objects and patterns compiled inside functions and
+  builds backtracking witnesses from each pattern; the 86 more super-linear patterns it found are
+  fixed (PDT-357).
 
 ## 0.2.0 — 2026-11-05
 

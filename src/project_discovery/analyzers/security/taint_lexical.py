@@ -336,7 +336,7 @@ _GO = Rules(
         (_c(r"(?<![\w$.])(?:c|ctx)\.(?:ShouldBind\w*+|Bind\w*+)[ \t]*+\("), (0,)),
         (_c(r"(?<![\w$])json\.NewDecoder\([ \t]*+(?:r|req|request)\.Body[ \t]*+\)\.Decode[ \t]*+\("), (0,)),
     ),
-    assignment=_c(r"(?<![\w$.])(?:var[ \t]++)?(?P<names>[A-Za-z_]\w*+(?:[ \t]*+,[ \t]*+[A-Za-z_]\w*+)*+)"
+    assignment=_c(r"(?<![\w$.])(?:var[ \t]++)?(?P<names>[A-Za-z_]\w*+(?:[ \t]*+,[ \t]*+[A-Za-z_]\w*+){0,15}+)"
                   r"(?:[ \t]++[\w.*\[\]]{1,60}+)?[ \t]*+(?P<op>:=|\+=|=)(?!=)"),
     sinks=(
         Sink(_c(r"\.(?:Query|QueryRow|Exec|Raw|Prepare|MustExec|Queryx|QueryRowx|NamedExec|Where|Order|Group|"

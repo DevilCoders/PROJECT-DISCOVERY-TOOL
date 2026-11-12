@@ -159,14 +159,27 @@ def _xml_keys(content: str) -> list[str]:
     return keys
 
 
+_DIRECTIVE = re.compile(r"[ \t]*+([A-Za-z_][A-Za-z0-9_.-]*+)[ \t]++(?![=:])")
+
+
 def _directive_keys(content: str) -> list[str]:
-    pattern = re.compile(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s+(?![=:])([^;#]+?);?\s*$")
+    """Directive names of nginx- and sshd-style lines (``name value;``).
+
+    A directive is a name, whitespace and a value with no ``;`` or ``#`` except one
+    trailing ``;``. The former single regex let its whitespace and value runs trade
+    characters, which was cubic on a long line of spaces.
+    """
     keys: list[str] = []
     for line in io.StringIO(content, newline=None):
         if line.lstrip().startswith(("#", ";", "//")):
             continue
-        match = pattern.match(line)
-        if match:
+        match = _DIRECTIVE.match(line)
+        if not match:
+            continue
+        value = line[match.end():].rstrip()
+        if value.endswith(";"):
+            value = value[:-1]
+        if value.strip() and ";" not in value and "#" not in value:
             _append_key(keys, match.group(1))
     return keys
 

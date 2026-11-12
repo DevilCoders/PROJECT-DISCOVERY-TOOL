@@ -107,7 +107,7 @@ _PORT_KEY = re.compile(
 _HOST_PORT = re.compile(
     r"""(?i)(?:localhost|(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]+\])\s*:\s*(\d{1,5})\b"""
 )
-_BARE_PORT = re.compile(r"""(?im)^\s*(?:EXPOSE|listen)\s+(\d{1,5})\b""")
+_BARE_PORT = re.compile(r"""(?im)^[ \t]*(?:EXPOSE|listen)\s+(\d{1,5})\b""")
 # Matches start only where a dotted name begins (not after "label."), so a long dotted
 # run such as "a.a.a..." is tried once instead of once per label (quadratic).
 _DOMAIN = re.compile(

@@ -77,6 +77,26 @@ def _requirements_file(path: str) -> bool:
     return parts[-1].startswith("requirements") or (len(parts) > 1 and parts[-2] == "requirements")
 
 
+
+_REBAR_DEPS = re.compile(r"\{\s*deps\s*,\s*\[")
+_REBAR_DEPS_END = re.compile(r"\]\s*\}")
+_ROCKSPEC_DEPENDENCIES = re.compile(r"dependencies\s*=\s*\{")
+_CLOSE_BRACE = re.compile(r"\}")
+
+
+def _delimited(source: str, head: re.Pattern[str], close: re.Pattern[str]) -> str | None:
+    """The text between the first ``head`` and the next ``close``, in linear time.
+
+    ``head(.*?)close`` with DOTALL rescanned to the end of the file from every head that
+    nothing closes, which is quadratic. If the first head has no close after it, no later
+    head has one either.
+    """
+    start = head.search(source)
+    if start is None:
+        return None
+    end = close.search(source, start.end())
+    return None if end is None else source[start.end():end.start()]
+
 class DependencyManifestAnalyzer(Analyzer):
     """Extract explicitly declared dependencies from common project manifests."""
 
@@ -267,7 +287,7 @@ class DependencyManifestAnalyzer(Analyzer):
                         add(element.text.strip(), "unspecified", f"ROS {tag}")
         elif name in {"build.gradle", "build.gradle.kts"}:
             pattern = re.compile(
-                r"""(?m)^\s*(implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|classpath|kapt|annotationProcessor|debugImplementation|releaseImplementation)\s*(?:\(\s*)?["']([^"']+)["']"""
+                r"""(?m)^[ \t]*(implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|classpath|kapt|annotationProcessor|debugImplementation|releaseImplementation)\s*(?:\(\s*)?["']([^"']+)["']"""
             )
             for group, coordinate in pattern.findall(content):
                 parts = coordinate.split(":")
@@ -282,11 +302,11 @@ class DependencyManifestAnalyzer(Analyzer):
                 dep_name = explicit_name or url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
                 add(dep_name, constraint, "Package.swift")
         elif name == "gemfile":
-            pattern = re.compile(r"""(?m)^\s*gem\s+["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
+            pattern = re.compile(r"""(?m)^[ \t]*gem\s+["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
             for dep_name, constraint in pattern.findall(content):
                 add(dep_name, constraint or "unspecified", "Gemfile")
         elif name.endswith(".gemspec"):
-            pattern = re.compile(r"""(?m)\.add_(?:development_)?dependency\s*\(?\s*["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
+            pattern = re.compile(r"""(?m)\.add_(?:development_)?dependency\s*(?:\(\s*)?["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
             for dep_name, constraint in pattern.findall(content):
                 add(dep_name, constraint or "unspecified", "Ruby gemspec")
         elif name == "mix.exs":
@@ -298,7 +318,7 @@ class DependencyManifestAnalyzer(Analyzer):
                 import yaml
             except ImportError:
                 source = content
-                pattern = re.compile(r"""(?m)^\s{2}([A-Za-z0-9_.-]+):\s*([^\s#]+)\s*$""")
+                pattern = re.compile(r"""(?m)^[ \t]{2}([A-Za-z0-9_.-]+):\s*([^\s#]+)\s*$""")
                 for dep_name, constraint in pattern.findall(source):
                     add(dep_name, constraint, "YAML dependencies")
             else:
@@ -346,19 +366,19 @@ class DependencyManifestAnalyzer(Analyzer):
         elif name == "cmakelists.txt":
             source = content
             for dep_name, version in re.findall(
-                r"""(?im)^\s*find_package\s*\(\s*([A-Za-z0-9_.+-]+)(?:\s+([0-9][^\s)]+))?""",
+                r"""(?im)^[ \t]*find_package\s*\(\s*([A-Za-z0-9_.+-]+)(?:\s+([0-9][^\s)]+))?""",
                 source,
             ):
                 add(dep_name, version or "unspecified", "CMake find_package")
             for dep_name in re.findall(
-                r"""(?im)^\s*FetchContent_Declare\s*\(\s*([A-Za-z0-9_.+-]+)""",
+                r"""(?im)^[ \t]*FetchContent_Declare\s*\(\s*([A-Za-z0-9_.+-]+)""",
                 source,
             ):
                 add(dep_name, "FetchContent declaration", "CMake FetchContent")
         elif name in {"conanfile.txt", "conanfile.py"}:
             source = content
             for dep_name, version in re.findall(
-                r"""(?im)^\s*([A-Za-z0-9_.+-]+)/([A-Za-z0-9.*+_-]+)\s*$""", source
+                r"""(?im)^[ \t]*([A-Za-z0-9_.+-]+)/([A-Za-z0-9.*+_-]+)\s*$""", source
             ):
                 add(dep_name, version, "Conan [requires]")
             for coordinate in re.findall(
@@ -369,7 +389,9 @@ class DependencyManifestAnalyzer(Analyzer):
                     dep_name, version = coordinate.split("/", 1)
                     add(dep_name, version, "Conan requires")
         elif name == "deps.edn":
-            pattern = re.compile(r"""([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\{\s*:mvn/version\s+["']([^"']+)["']""")
+            pattern = re.compile(
+                r"""(?<![A-Za-z0-9_./-])([A-Za-z0-9_.-]++/[A-Za-z0-9_.-]++)\s+\{\s*:mvn/version\s+["']([^"']+)["']"""
+            )
             for dep_name, constraint in pattern.findall(content):
                 add(dep_name, constraint, "Clojure deps.edn")
         elif name == "project.clj":
@@ -383,7 +405,7 @@ class DependencyManifestAnalyzer(Analyzer):
             for group_id, artifact, constraint in pattern.findall(content):
                 add(f"{group_id}:{artifact}", constraint, "sbt libraryDependencies")
         elif name == "cpanfile":
-            pattern = re.compile(r"""(?im)^\s*requires\s+["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
+            pattern = re.compile(r"""(?im)^[ \t]*requires\s+["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
             for dep_name, constraint in pattern.findall(content):
                 add(dep_name, constraint or "unspecified", "cpanfile requires")
         elif name.endswith(".cabal"):
@@ -409,7 +431,7 @@ class DependencyManifestAnalyzer(Analyzer):
             ):
                 add(dep_name, constraint, "opam depends")
         elif name.endswith(".nimble"):
-            pattern = re.compile(r"""(?im)^\s*requires\s+["']([^"']+)["'](?:\s*,\s*["']([^"']+)["'])?""")
+            pattern = re.compile(r"""(?im)^[ \t]*requires\s+["']([^"']+)["'](?:\s*,\s*["']([^"']+)["'])?""")
             for dep_name, constraint in pattern.findall(content):
                 add(dep_name, constraint or "unspecified", "Nimble requires")
         elif name == "vcpkg.json":
@@ -433,11 +455,11 @@ class DependencyManifestAnalyzer(Analyzer):
                 add(dep_name, constraint, "Fortran fpm dependencies")
         elif name == "rebar.config":
             source = content
-            block = re.search(r"\{\s*deps\s*,\s*\[(.*?)\]\s*\}", source, re.S)
-            if block:
+            block = _delimited(source, _REBAR_DEPS, _REBAR_DEPS_END)
+            if block is not None:
                 for dep_name, constraint in re.findall(
                     r"""\{\s*([A-Za-z0-9_]+)\s*,\s*["']([^"']+)["']\s*\}""",
-                    block.group(1),
+                    block,
                 ):
                     add(dep_name, constraint, "rebar.config deps")
         elif name == "platformio.ini":
@@ -454,9 +476,9 @@ class DependencyManifestAnalyzer(Analyzer):
                             f"PlatformIO {section} lib_deps")
         elif name.endswith(".rockspec"):
             source = content
-            block = re.search(r"dependencies\s*=\s*\{(.*?)\}", source, re.S)
-            if block:
-                for item in re.findall(r"""["']([^"']+)["']""", block.group(1)):
+            block = _delimited(source, _ROCKSPEC_DEPENDENCIES, _CLOSE_BRACE)
+            if block is not None:
+                for item in re.findall(r"""["']([^"']+)["']""", block):
                     match = re.match(r"([A-Za-z0-9_.-]+)\s*(.*)", item)
                     if match:
                         add(match.group(1), match.group(2).strip() or "unspecified",

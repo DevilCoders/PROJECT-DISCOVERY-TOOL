@@ -188,6 +188,9 @@ class SecretPatternAnalyzer(Analyzer):
                     for pattern_name, pattern, anchors in patterns:
                         if anchors and not any(anchor in combined for anchor in anchors):
                             continue
+                        # Matches come in order, so newlines are counted from the previous
+                        # match instead of from the chunk start (quadratic on long lines).
+                        counted_to, counted_lines = 0, 0
                         for match in pattern.finditer(combined):
                             if match.end() <= prefix_length:
                                 continue
@@ -196,9 +199,9 @@ class SecretPatternAnalyzer(Analyzer):
                                 and _is_placeholder(_assignment_value(match))
                             ):
                                 continue
-                            line_number = (
-                                base_line + combined.count("\n", 0, match.start()) + 1
-                            )
+                            counted_lines += combined.count("\n", counted_to, match.start())
+                            counted_to = match.start()
+                            line_number = base_line + counted_lines + 1
                             key = (pattern_name, line_number)
                             if key in seen:
                                 continue

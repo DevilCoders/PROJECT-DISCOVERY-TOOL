@@ -19,16 +19,16 @@ _ASYNCAPI_NAMES = {"asyncapi.yaml", "asyncapi.yml", "asyncapi.json"}
 _OPENRPC_NAMES = {"openrpc.yaml", "openrpc.yml", "openrpc.json"}
 _WSDL_NAMES = {"service.wsdl", "services.wsdl", "definitions.wsdl"}
 _GRAPHQL_DEFINITION = re.compile(
-    r"(?m)^\s*(type|interface|input|enum|scalar|union|schema|directive)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?m)^[ \t]*(type|interface|input|enum|scalar|union|schema|directive)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 _GRAPHQL_OPERATION = re.compile(
-    r"(?m)^\s*(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?m)^[ \t]*(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 _PROTO_DECLARATION = re.compile(
     r"(?m)\b(service|rpc|message|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 _THRIFT_DECLARATION = re.compile(
-    r"(?m)^\s*(service|struct|exception|enum|typedef)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?m)^[ \t]*(service|struct|exception|enum|typedef)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 _HTTP_METHOD = re.compile(r"(?i)^\s{2,}(get|post|put|patch|delete|options|head|trace)\s*:")
 _PATH_LINE = re.compile(r"^\s{2,}(/[^\s:]+)\s*:")
@@ -330,7 +330,7 @@ class APIContractAnalyzer(Analyzer):
     def _raml(self, record: FileRecord, content: str) -> list[Finding]:
         routes = re.findall(r"(?m)^(/[^\s:]+)\s*:\s*$", content)
         methods = re.findall(
-            r"(?im)^\s{2,}(get|post|put|patch|delete|options|head)\s*:\s*$",
+            r"(?im)^[ \t]{2,}(get|post|put|patch|delete|options|head)\s*:\s*$",
             content,
         )
         evidence = (

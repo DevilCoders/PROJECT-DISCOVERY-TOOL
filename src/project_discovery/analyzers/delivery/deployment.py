@@ -1,13 +1,14 @@
 """Static container, orchestration, CI/CD and infrastructure manifest analysis."""
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from pathlib import Path
 from typing import Any
 
 from ...core.safe_parsers import safe_yaml_load_all
-from ...core.source_utils import describe_error, read_text_bounded
+from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -42,6 +43,28 @@ def _containers(pod_spec: dict[str, Any]) -> list[dict[str, Any]]:
     for key in ("containers", "initContainers", "ephemeralContainers"):
         result.extend(_mapping(item) for item in _items(pod_spec.get(key)))
     return result
+
+
+_TERRAFORM_BLOCK = re.compile(
+    r'(?m)^[ \t]*(resource|data|module|provider|variable|output)\s+"([^"\n]+)"(?:\s+"([^"\n]+)")?\s*\{'
+)
+_CIDR_BLOCKS = re.compile(r"(?i)cidr_blocks\s*=\s*\[")
+
+
+def _public_ingress(source: str):
+    """The first ``cidr_blocks = [ ... "0.0.0.0/0" ... ]`` (lists may span lines), in linear time.
+
+    ``cidr_blocks = \\[[^\\]]*"0.0.0.0/0"`` rescanned to the next ``]`` (or the end of the
+    file) from every list that never closes, which is quadratic.
+    """
+    position = 0
+    while (head := _CIDR_BLOCKS.search(source, position)) is not None:
+        close = source.find("]", head.end())
+        stop = len(source) if close == -1 else close
+        if source.find('"0.0.0.0/0"', head.end(), stop) != -1:
+            return head
+        position = stop + 1
+    return None
 
 
 class DeploymentIntelligenceAnalyzer(Analyzer):
@@ -184,10 +207,11 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 evidence=[record.path], analyzer=self.name,
             )]
         blocks = re.findall(
-            r'(?m)^\s*(resource|data|module|provider|variable|output)\s+"([^"]+)"(?:\s+"([^"]+)")?\s*\{',
+            r'(?m)^[ \t]*(resource|data|module|provider|variable|output)\s+"([^"]+)"(?:\s+"([^"]+)")?\s*\{',
             source,
         )
         findings = []
+        lines = LineIndex(source)
         if blocks:
             counts: dict[str, int] = {}
             for kind, _, _ in blocks:
@@ -200,25 +224,20 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 + ". HCL expressions and interpolation semantics are not evaluated.",
                 confidence="CONFIRMED",
                 evidence=[
-                    f"{record.path}:{source.count(chr(10), 0, match.start()) + 1} "
-                    f"({kind} {first} {second})"
-                    for match in re.finditer(
-                        r'(?m)^\s*(resource|data|module|provider|variable|output)\s+"([^"]+)"(?:\s+"([^"]+)")?\s*\{',
-                        source,
-                    )
+                    f"{record.path}:{lines.line(match.start(1))} ({kind} {first} {second})"
+                    for match in itertools.islice(_TERRAFORM_BLOCK.finditer(source), 100)
                     for kind, first, second in [match.groups()]
-                ][:100],
+                ],
                 analyzer=self.name,
             ))
         risks = (
-            ("public_ingress", r'(?is)cidr_blocks\s*=\s*\[[^\]]*"0\.0\.0\.0/0"'),
-            ("public_database", r'(?is)publicly_accessible\s*=\s*true'),
-            ("destructive_force_destroy", r'(?im)force_destroy\s*=\s*true'),
+            ("public_ingress", _public_ingress(source)),
+            ("public_database", re.search(r'(?is)publicly_accessible\s*=\s*true', source)),
+            ("destructive_force_destroy", re.search(r'(?im)force_destroy\s*=\s*true', source)),
         )
-        for label, pattern in risks:
-            match = re.search(pattern, source)
+        for label, match in risks:
             if match:
-                line = source.count("\n", 0, match.start()) + 1
+                line = lines.line(match.start())
                 findings.append(Finding(
                     "security",
                     f"Potential Terraform risk: {label}",
@@ -472,7 +491,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 evidence=[record.path], analyzer=self.name,
             )]
         stages = re.findall(r"""(?m)\bstage\s*\(\s*['"]([^'"]+)['"]\s*\)""", source)
-        agents = re.findall(r"(?m)^\s*agent\s+([A-Za-z_][A-Za-z0-9_]*)", source)
+        agents = re.findall(r"(?m)^[ \t]*agent\s+([A-Za-z_][A-Za-z0-9_]*)", source)
         return [Finding(
             "ci_cd", f"Jenkins pipeline: {record.path}",
             f"Detected {len(stages)} named stage(s) and {len(agents)} agent declaration(s). "

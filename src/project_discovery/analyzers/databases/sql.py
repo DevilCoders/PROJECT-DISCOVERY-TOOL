@@ -1,42 +1,70 @@
 """Static SQL schema, relationship and migration-risk inventory."""
 from __future__ import annotations
 
+import bisect
 import re
 from pathlib import Path
 
-from ...core.source_utils import describe_error, read_text_bounded
+from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
 _IDENTIFIER = r'[\w."]+'
 _OBJECT_PATTERNS = {
     "table": re.compile(
-        rf"(?im)^\s*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})"
     ),
     "view": re.compile(
-        rf"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+({_IDENTIFIER})"
     ),
     "index": re.compile(
-        rf"(?im)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})\s+ON\s+({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})\s+ON\s+({_IDENTIFIER})"
     ),
     "procedure": re.compile(
-        rf"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+({_IDENTIFIER})"
     ),
     "function": re.compile(
-        rf"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+({_IDENTIFIER})"
     ),
     "trigger": re.compile(
-        rf"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({_IDENTIFIER})"
     ),
 }
 _RELATION = re.compile(rf"(?im)\bREFERENCES\s+({_IDENTIFIER})")
 _DESTRUCTIVE = (
-    ("drop_table", re.compile(r"(?im)^\s*DROP\s+TABLE\b")),
-    ("drop_column", re.compile(r"(?im)^\s*ALTER\s+TABLE\b[^;]*?\bDROP\s+COLUMN\b")),
-    ("truncate_table", re.compile(r"(?im)^\s*TRUNCATE\s+(?:TABLE\s+)?")),
-    ("drop_database", re.compile(r"(?im)^\s*DROP\s+DATABASE\b")),
-    ("drop_schema", re.compile(r"(?im)^\s*DROP\s+SCHEMA\b")),
+    ("drop_table", re.compile(r"(?im)^[ \t]*DROP\s+TABLE\b")),
+    ("drop_column", None),  # _drop_column_statements
+    ("truncate_table", re.compile(r"(?im)^[ \t]*TRUNCATE\s+(?:TABLE\s+)?")),
+    ("drop_database", re.compile(r"(?im)^[ \t]*DROP\s+DATABASE\b")),
+    ("drop_schema", re.compile(r"(?im)^[ \t]*DROP\s+SCHEMA\b")),
 )
+
+
+_ALTER_TABLE = re.compile(r"(?im)^[ \t]*ALTER\s+TABLE\b")
+_DROP_COLUMN = re.compile(r"(?i)\bDROP\s+COLUMN\b")
+_SEMICOLON = re.compile(";")
+
+
+def _drop_column_statements(content: str) -> list[int]:
+    """Starts of ALTER TABLE statements that drop a column before their ``;``.
+
+    The single regex ``ALTER TABLE [^;]*? DROP COLUMN`` scanned to the end of the file from
+    every ALTER TABLE without a semicolon, which is quadratic; here every DROP COLUMN and
+    semicolon is found once and each statement is checked by bisection.
+    """
+    drops = [match.start() for match in _DROP_COLUMN.finditer(content)]
+    if not drops:
+        return []
+    semicolons = [match.start() for match in _SEMICOLON.finditer(content)]
+    starts = []
+    for head in _ALTER_TABLE.finditer(content):
+        index = bisect.bisect_left(drops, head.end())
+        if index == len(drops):
+            break
+        end = bisect.bisect_left(semicolons, head.end())
+        if drops[index] < (semicolons[end] if end < len(semicolons) else len(content)):
+            starts.append(head.start())
+    return starts
 
 
 def _clean_identifier(value: str) -> str:
@@ -68,18 +96,16 @@ class SQLSchemaAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
 
+        lines = LineIndex(content)
         objects: dict[str, list[tuple[str, int]]] = {}
         for kind, pattern in _OBJECT_PATTERNS.items():
-            matches = []
-            for match in pattern.finditer(content):
-                line = content.count("\n", 0, match.start()) + 1
-                matches.append((_clean_identifier(match.group(1)), line))
-            objects[kind] = matches
+            objects[kind] = [
+                (_clean_identifier(match.group(1)), lines.line(match.start())) for match in pattern.finditer(content)
+            ]
 
-        relations = []
-        for match in _RELATION.finditer(content):
-            line = content.count("\n", 0, match.start()) + 1
-            relations.append((_clean_identifier(match.group(1)), line))
+        relations = [
+            (_clean_identifier(match.group(1)), lines.line(match.start())) for match in _RELATION.finditer(content)
+        ]
 
         findings: list[Finding] = []
         object_count = sum(len(items) for items in objects.values())
@@ -106,8 +132,12 @@ class SQLSchemaAnalyzer(Analyzer):
             ))
 
         for risk_name, pattern in _DESTRUCTIVE:
-            for match in pattern.finditer(content):
-                line = content.count("\n", 0, match.start()) + 1
+            offsets = (
+                _drop_column_statements(content) if pattern is None
+                else [match.start() for match in pattern.finditer(content)]
+            )
+            for offset in offsets:
+                line = lines.line(offset)
                 findings.append(Finding(
                     "migration",
                     f"Potentially destructive SQL operation: {risk_name}",

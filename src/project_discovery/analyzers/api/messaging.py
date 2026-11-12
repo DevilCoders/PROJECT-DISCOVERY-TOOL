@@ -28,7 +28,7 @@ _IMPORT_PATTERNS = {
     "MQTT": re.compile(r"(?:from\s+paho|require\s*\(\s*['\"]mqtt['\"]|eclipse\.paho)", re.I),
     "ZeroMQ": re.compile(r"(?:import\s+zmq|require\s*\(\s*['\"]zeromq['\"]|zeromq)", re.I),
     "Celery": re.compile(r"(?:from\s+celery|import\s+celery|shared_task)", re.I),
-    "AWS SQS/SNS": re.compile(r"(?:boto3.*(?:sqs|sns)|@aws-sdk/client-sqs|@aws-sdk/client-sns|services\.sqs|services\.sns)", re.I),
+    "AWS SQS/SNS": re.compile(r"(?:boto3(?:(?!sqs|sns|boto3)[^\n])*+(?:sqs|sns)|@aws-sdk/client-sqs|@aws-sdk/client-sns|services\.sqs|services\.sns)", re.I),
     "Google Pub/Sub": re.compile(r"(?:google\.cloud\.pubsub|@google-cloud/pubsub)", re.I),
     "Azure Service Bus": re.compile(r"(?:azure\.servicebus|@azure/service-bus|com\.azure\.messaging\.servicebus)", re.I),
     "Apache Pulsar": re.compile(r"(?:pulsar|org\.apache\.pulsar)", re.I),

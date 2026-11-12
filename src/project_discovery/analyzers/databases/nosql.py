@@ -43,7 +43,7 @@ _TECHNOLOGIES = {
 _IMPORT_PATTERNS = {
     "MongoDB": re.compile(
         r"(?:from\s+(?:pymongo|motor|mongodb)|import\s+(?:pymongo|motor|mongodb)|"
-        r"(?:require|from)\s*\(?\s*['\"](?:mongoose|mongodb)['\"]|"
+        r"(?:require|from)\s*(?:\(\s*)?['\"](?:mongoose|mongodb)['\"]|"
         r"org\.mongodb|go\.mongodb\.org/mongo-driver)", re.I
     ),
     "Redis": re.compile(
@@ -54,12 +54,12 @@ _IMPORT_PATTERNS = {
     "Elasticsearch": re.compile(r"(?:from\s+elasticsearch|import\s+elasticsearch|org\.elasticsearch)", re.I),
     "OpenSearch": re.compile(r"(?:from\s+opensearch|import\s+opensearch|org\.opensearch)", re.I),
     "Cassandra": re.compile(r"(?:from\s+cassandra|import\s+cassandra|com\.datastax)", re.I),
-    "DynamoDB": re.compile(r"(?:boto3.*dynamodb|DynamoDB|dynamodb)", re.I),
+    "DynamoDB": re.compile(r"dynamodb", re.I),
     "Firestore": re.compile(r"(?:firebase_admin\.firestore|google\.cloud\.firestore|Firestore)", re.I),
     "CouchDB": re.compile(r"(?:import\s+couchdb|require\s*\(\s*['\"]nano['\"])", re.I),
     "InfluxDB": re.compile(r"(?:influxdb_client|influxdb-client)", re.I),
     "ClickHouse": re.compile(r"(?:clickhouse_connect|clickhouse_driver|clickhouse-jdbc)", re.I),
-    "Chroma": re.compile(r"""(?:from\s+chromadb|import\s+chromadb|(?:require|from)\s*\(?\s*['"]chromadb['"])""", re.I),
+    "Chroma": re.compile(r"""(?:from\s+chromadb|import\s+chromadb|(?:require|from)\s*(?:\(\s*)?['"]chromadb['"])""", re.I),
     "Qdrant": re.compile(r"(?:from\s+qdrant_client|import\s+qdrant_client|@qdrant/js-client-rest|github.com/qdrant/go-client)", re.I),
     "Pinecone": re.compile(r"(?:from\s+pinecone|import\s+pinecone|@pinecone-database/pinecone)", re.I),
     "Weaviate": re.compile(r"(?:from\s+weaviate|import\s+weaviate|weaviate-client|io.weaviate)", re.I),

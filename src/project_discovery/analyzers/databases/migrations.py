@@ -9,7 +9,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 from ...catalog.languages import source_extensions
-from ...core.source_utils import describe_error, read_text_bounded
+from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -20,9 +20,30 @@ _MIGRATION_DIRS = {
     "changelogs", "changeset", "changesets", "flyway", "liquibase", "drizzle",
 }
 _FLYWAY_NAME = re.compile(r"^(?P<identifier>(?:V\d+|R|U\d+)__.+)\.sql$", re.I)
-_REVISION = re.compile(r"(?m)^\s*revision\s*=\s*['\"]([^'\"]+)['\"]")
-_PARENT_REVISION = re.compile(r"""(?m)^\s*down_revision\s*=\s*['"]([^'"]+)['"]""")
-_CHANGESET_ID = re.compile(r"(?i)<changeSet\b[^>]*\bid\s*=\s*['\"]([^'\"]+)")
+_REVISION = re.compile(r"(?m)^[ \t]*revision\s*=\s*['\"]([^'\"]+)['\"]")
+_PARENT_REVISION = re.compile(r"""(?m)^[ \t]*down_revision\s*=\s*['"]([^'"]+)['"]""")
+_CHANGESET = re.compile(r"(?i)<changeSet\b")
+_ID_ATTRIBUTE = re.compile(r"""(?i)\bid\s*=\s*['"]""")
+_ATTRIBUTE_VALUE = re.compile(r"""[^'"]+""")
+
+
+def _changeset_id(content: str) -> str | None:
+    """The id of the first Liquibase ``<changeSet ... id="...">`` tag, in linear time.
+
+    ``<changeSet\\b[^>]*\\bid=`` rescanned to the next ``>`` (or the end of the file) from
+    every ``<changeSet``, which is quadratic on tags that never close.
+    """
+    position = 0
+    while (start := _CHANGESET.search(content, position)) is not None:
+        close = content.find(">", start.end())
+        stop = len(content) if close == -1 else close
+        attribute = _ID_ATTRIBUTE.search(content, start.end(), stop)
+        if attribute:
+            value = _ATTRIBUTE_VALUE.match(content, attribute.end())
+            if value:
+                return value.group(0)
+        position = stop + 1
+    return None
 _OPERATION_PATTERNS = (
     ("create_table", re.compile(
         r"(?i)(?:\bCREATE\s+(?:TEMPORARY\s+)?TABLE\b|\b(?:op\.)?create_table\s*\(|\b(?:pgTable|mysqlTable|sqliteTable)\s*\(|"
@@ -62,7 +83,7 @@ _OPERATION_PATTERNS = (
     ("drop_schema", re.compile(r"(?i)\bDROP\s+SCHEMA\b"), True),
 )
 _ROLLBACK_MARKER = re.compile(
-    r"(?im)^\s*(?:def\s+(?:downgrade|down)|(?:async\s+)?down\s*\(|"
+    r"(?im)^[ \t]*(?:def\s+(?:downgrade|down)|(?:async\s+)?down\s*\(|"
     r"exports\.down\s*=|function\s+downgrade\b|rollback\s*\()"
 )
 
@@ -122,9 +143,9 @@ def _migration_identifier(filename: str, content: str) -> str:
     revision = _REVISION.search(content)
     if revision:
         return revision.group(1)
-    changeset = _CHANGESET_ID.search(content)
+    changeset = _changeset_id(content)
     if changeset:
-        return changeset.group(1)
+        return changeset
     stem = PurePosixPath(filename).stem
     numeric = re.match(r"^(\d{8,14}|\d+)_", stem)
     return numeric.group(1) if numeric else stem
@@ -174,10 +195,10 @@ class MigrationIntelligenceAnalyzer(Analyzer):
         rollback_present = bool(_ROLLBACK_MARKER.search(content))
         parent_revision = _PARENT_REVISION.search(content)
         operations: list[tuple[str, int, bool]] = []
+        lines = LineIndex(content)
         for operation, pattern, destructive in _OPERATION_PATTERNS:
             for match in pattern.finditer(content):
-                line = content.count("\n", 0, match.start()) + 1
-                operations.append((operation, line, destructive))
+                operations.append((operation, lines.line(match.start()), destructive))
         operations.sort(key=lambda item: (item[1], item[0]))
 
         evidence = [

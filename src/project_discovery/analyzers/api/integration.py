@@ -131,6 +131,34 @@ def _opaque(segment: str) -> bool:
     )
 
 
+def _pom_identity_text(text: str) -> str:
+    """A pom.xml without its parent block, comments and everything from <dependencies> on.
+
+    Equivalent to ``re.sub(r"(?s)<parent>.*?</parent>|<dependencies>.*|<!--.*?-->", "")``,
+    which rescanned to the end of the text from every unclosed ``<parent>`` or ``<!--``.
+    """
+    kept, position = [], 0
+    closers = {"<parent>": "</parent>", "<!--": "-->"}
+    unclosed: set[str] = set()
+    while True:
+        starts = [(text.find(token, position), token) for token in ("<parent>", "<!--", "<dependencies>")]
+        starts = [(index, token) for index, token in starts if index != -1 and token not in unclosed]
+        if not starts:
+            break
+        index, token = min(starts)
+        if token == "<dependencies>":
+            kept.append(text[position:index])
+            return "".join(kept)
+        end = text.find(closers[token], index + len(token))
+        if end == -1:
+            unclosed.add(token)  # no later one closes either; it stays as text
+            continue
+        kept.append(text[position:index])
+        position = end + len(closers[token])
+    kept.append(text[position:])
+    return "".join(kept)
+
+
 def _normalize_url(url: str) -> tuple[str, str]:
     """(host, path template) with interpolations, numbers, UUIDs and credentials as ``{}``.
 
@@ -434,7 +462,7 @@ class IntegrationAnalyzer(Analyzer):
             if match:
                 found.append(("go", match.group(1)))
         elif name == "pom.xml":
-            body = re.sub(r"(?s)<parent>.*?</parent>|<dependencies>.*|<!--.*?-->", "", text[:200_000])
+            body = _pom_identity_text(text[:200_000])
             group = re.search(r"<groupId>([^<]{1,200}+)</groupId>", body)
             artifact = re.search(r"<artifactId>([^<]{1,200}+)</artifactId>", body)
             if artifact:

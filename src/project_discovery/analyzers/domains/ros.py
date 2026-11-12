@@ -95,7 +95,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
             return self._cpp(source, record)
         if name == "cmakelists.txt":
             matches = re.findall(
-                r"(?im)^\s*find_package\s*\(\s*(catkin|ament_cmake|rclcpp|roscpp|rosidl_default_generators)",
+                r"(?im)^[ \t]*find_package\s*\(\s*(catkin|ament_cmake|rclcpp|roscpp|rosidl_default_generators)",
                 source,
             )
             if matches:

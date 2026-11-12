@@ -252,7 +252,8 @@ Reports from older scans fall back to the endpoint evidence in their API finding
 
 ## 7. Precision checks
 
-* Every package regex is timed against adversarial inputs by `tests/test_regex_complexity.py`.
+* Every package regex, including the lexical rule patterns, is timed against adversarial inputs and
+  witnesses built from its own structure by `tests/test_regex_complexity.py`.
 * Self-scan of PDT: the new analyzers report no CRITICAL, HIGH or MEDIUM finding on PDT's own
   source (performance characterizations remain at LOW).
 * Each analyzer has tests that pin both detections and the cases that must not be reported

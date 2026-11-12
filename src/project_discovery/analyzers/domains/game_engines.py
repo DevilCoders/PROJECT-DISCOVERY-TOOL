@@ -28,21 +28,21 @@ _UNREAL_MARKERS = (
     (r"\b(?:AActor|UActorComponent|UObject)\b", "Unreal object type"),
 )
 _GODOT_MARKERS = (
-    (r"(?m)^\s*extends\s+", "base class"),
-    (r"(?m)^\s*class_name\s+", "global class"),
-    (r"(?m)^\s*signal\s+", "signal"),
+    (r"(?m)^[ \t]*extends\s+", "base class"),
+    (r"(?m)^[ \t]*class_name\s+", "global class"),
+    (r"(?m)^[ \t]*signal\s+", "signal"),
     (r"@export\b", "exported property"),
     (r"@onready\b", "onready property"),
-    (r"(?m)^\s*func\s+_(?:ready|process|physics_process)\s*\(", "engine lifecycle callback"),
+    (r"(?m)^[ \t]*func\s+_(?:ready|process|physics_process)\s*\(", "engine lifecycle callback"),
 )
 _GAMEMAKER_MARKERS = (
     (r"\bfunction\s+[A-Za-z_]\w*\s*\(", "function declaration"),
     (r"\b(?:instance_create_layer|instance_create_depth|room_goto|event_perform)\s*\(", "runtime API"),
 )
 _RENPY_MARKERS = (
-    (r"(?m)^\s*label\s+[A-Za-z_]\w*\s*:", "label"),
-    (r"(?m)^\s*screen\s+[A-Za-z_]\w*", "screen"),
-    (r"(?m)^\s*define\s+[A-Za-z_]\w*\s*=", "define"),
+    (r"(?m)^[ \t]*label\s+[A-Za-z_]\w*\s*:", "label"),
+    (r"(?m)^[ \t]*screen\s+[A-Za-z_]\w*", "screen"),
+    (r"(?m)^[ \t]*define\s+[A-Za-z_]\w*\s*=", "define"),
 )
 
 
@@ -367,7 +367,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
         source, error = self._read_text(path, record)
         if error:
             return [error]
-        if not re.search(r"(?m)^\s*bevy\s*=", source):
+        if not re.search(r"(?m)^[ \t]*bevy\s*=", source):
             return []
         return [Finding(
             "game_engine", f"Bevy project dependency: {record.path}",

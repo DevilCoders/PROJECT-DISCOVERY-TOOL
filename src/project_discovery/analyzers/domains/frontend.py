@@ -559,7 +559,7 @@ class FrontendAnalyzer(Analyzer):
         props: list[str] = []
         define = re.search(r"(?<![\w$.])defineProps[ \t]*+(?:<[ \t\r\n]*+\{([^{}]{0,2000}+)\}[ \t\r\n]*+>)?[ \t]*+\(", clean)
         if define and define.group(1):
-            props = re.findall(r"([A-Za-z_$][\w$]*+)[ \t]*+\??[ \t]*+:", define.group(1))
+            props = re.findall(r"(?<![\w$])([A-Za-z_$][\w$]*+)[ \t]*+\??[ \t]*+:", define.group(1))
         elif define:
             close = model.parens.get(define.end() - 1)
             if close is not None:

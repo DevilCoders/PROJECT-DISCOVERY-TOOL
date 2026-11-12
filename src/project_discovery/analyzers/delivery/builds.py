@@ -42,7 +42,7 @@ _BUILD_EXTENSIONS = {
 }
 _MAKE_TARGET = re.compile(r"(?m)^([A-Za-z0-9_.-]+)\s*:(?![=])")
 _CMAKE_TARGET = re.compile(r"(?i)\b(add_executable|add_library)\s*\(\s*([A-Za-z0-9_.-]+)")
-_DOCKER_INSTRUCTION = re.compile(r"(?mi)^\s*(FROM|RUN|COPY|ADD|WORKDIR|USER|EXPOSE|ENTRYPOINT|CMD)\b")
+_DOCKER_INSTRUCTION = re.compile(r"(?mi)^[ \t]*(FROM|RUN|COPY|ADD|WORKDIR|USER|EXPOSE|ENTRYPOINT|CMD)\b")
 
 
 def _local_name(tag: str) -> str:
@@ -118,7 +118,7 @@ class BuildManifestAnalyzer(Analyzer):
                 "module.bazel", "buck",
             } or record.extension == ".bzl":
                 rules = re.findall(
-                    r"(?im)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*name\s*=\s*['\"]([^'\"]+)['\"]",
+                    r"(?im)^[ \t]*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*name\s*=\s*['\"]([^'\"]+)['\"]",
                     content,
                 )
                 targets = [f"{kind}: {target}" for kind, target in rules]
@@ -178,7 +178,7 @@ class BuildManifestAnalyzer(Analyzer):
             elif record.extension in {".pro", ".pri"}:
                 targets = [
                     f"{key.lower()}: {value.strip()}" for key, value in re.findall(
-                        r"(?m)^\s*(TARGET|TEMPLATE)\s*=\s*(.+?)\s*$", content
+                        r"(?m)^[ \t]*(TARGET|TEMPLATE)\s*=\s*(.+?)\s*$", content
                     )
                 ]
                 metadata.append("QMake project manifest")
@@ -192,7 +192,7 @@ class BuildManifestAnalyzer(Analyzer):
             elif record.path.startswith(".github/workflows/"):
                 targets = [
                     f"job: {job}" for job in re.findall(
-                        r"(?m)^\s{2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$", content
+                        r"(?m)^[ \t]{2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$", content
                     )
                 ]
                 metadata.append("GitHub Actions workflow")
@@ -201,7 +201,7 @@ class BuildManifestAnalyzer(Analyzer):
                 "bitbucket-pipelines.yml", ".travis.yml", "appveyor.yml",
             }:
                 ci_jobs = re.findall(
-                    r"(?m)^\s*-\s*job:\s*([A-Za-z0-9_.-]+)\s*$", content
+                    r"(?m)^[ \t]*-\s*job:\s*([A-Za-z0-9_.-]+)\s*$", content
                 )
                 ci_jobs.extend(re.findall(
                     r"(?m)^([A-Za-z0-9_.-]+):\s*$", content
@@ -218,14 +218,14 @@ class BuildManifestAnalyzer(Analyzer):
             elif name in {"taskfile.yml", "taskfile.yaml"}:
                 targets = [
                     f"task: {task}" for task in re.findall(
-                        r"(?m)^\s{2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$", content
+                        r"(?m)^[ \t]{2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$", content
                     )
                 ]
                 metadata.append("Taskfile task runner manifest")
             elif name in {"makefile.am", "configure.ac", "configure.in"}:
                 targets = [
                     f"build macro: {macro}" for macro in re.findall(
-                        r"(?m)^\s*(AC_INIT|AM_INIT_AUTOMAKE|AC_CONFIG_FILES|AC_PROG_[A-Z_]+)\s*\(",
+                        r"(?m)^[ \t]*(AC_INIT|AM_INIT_AUTOMAKE|AC_CONFIG_FILES|AC_PROG_[A-Z_]+)\s*\(",
                         content,
                     )
                 ]
@@ -256,7 +256,7 @@ class BuildManifestAnalyzer(Analyzer):
                 task_patterns = (
                     r"""(?m)\btasks?\s*\.\s*(?:register|create|named)\s*(?:<[^>]+>\s*)?\(\s*['"]([^'"]+)['"]""",
                     r"""(?m)\btask\s*\(\s*['"]([^'"]+)['"]""",
-                    r"(?m)^\s*task\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+                    r"(?m)^[ \t]*task\s+([A-Za-z_][A-Za-z0-9_]*)\b",
                 )
                 task_names = []
                 for pattern in task_patterns:
@@ -274,7 +274,7 @@ class BuildManifestAnalyzer(Analyzer):
                 if name in {"gemfile", "rakefile"}:
                     targets = [
                         f"dependency/task: {item}" for item in re.findall(
-                            r"(?m)^\s*(?:gem|task)\s+['\"]([^'\"]+)", content
+                            r"(?m)^[ \t]*(?:gem|task)\s+['\"]([^'\"]+)", content
                         )
                     ]
                 elif name == "mix.exs":
