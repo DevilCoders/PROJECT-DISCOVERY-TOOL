@@ -144,18 +144,31 @@ def _symbols(context: _Context) -> tuple[dict, list[Finding]]:
         by_language[language][kind] = count
         total += count
     files = db.execute("SELECT COUNT(DISTINCT path) FROM code_symbols").fetchone()[0]
-    value = {"symbol_count": total, "files_with_symbols": files, "by_language": dict(by_language)}
+    # Which backend modelled each file: python-ast, tree-sitter (a provisioned grammar) or
+    # lexical. Results differ by backend, so reports say which one each language got.
+    models: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for backend, detail in db.execute("SELECT name, detail FROM code_facts WHERE kind = 'code_model'"):
+        language = json.loads(detail).get("language", "unknown") if detail else "unknown"
+        models[backend][language] += 1
+    value = {
+        "symbol_count": total, "files_with_symbols": files, "by_language": dict(by_language),
+        "models": {backend: dict(sorted(languages.items())) for backend, languages in sorted(models.items())},
+    }
     if not total:
         return value, []
     summary = "; ".join(
         f"{language}: " + ", ".join(f"{count:,} {kind}" for kind, count in sorted(kinds.items()))
         for language, kinds in sorted(by_language.items(), key=lambda item: -sum(item[1].values()))[:12]
     )
+    backends = ", ".join(
+        f"{sum(languages.values()):,} {backend}" for backend, languages in sorted(models.items())
+    ) or "none recorded"
     return value, [Finding(
         "symbol_index", "Symbol index",
-        f"{total:,} definitions in {files:,} files. {summary}. Python symbols come from the "
-        "syntax tree; other languages from PDT's structural lexer. Query the index with "
-        "`pdt query OUTPUT --symbol NAME`.",
+        f"{total:,} definitions in {files:,} files. {summary}. Files modelled by backend: "
+        f"{backends}. Python symbols come from the syntax tree; other languages from a "
+        "Tree-sitter grammar where one is provisioned, else from PDT's structural lexer. "
+        "Query the index with `pdt query OUTPUT --symbol NAME`.",
         confidence="CONFIRMED", analyzer="code-index",
     )]
 

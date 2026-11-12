@@ -1045,6 +1045,17 @@ def capabilities_report() -> dict:
     loaded = load_analyzers()
     loaded.close()  # metadata only; no analysis runs here
     domains = analyzer_domain_catalog()
+    from .intelligence.model.tree_sitter_model import MODEL_GRAMMARS, model_grammar
+
+    # Languages whose code model a provisioned grammar refines (else the lexer models them).
+    code_model = {
+        language: {
+            "grammar": grammar,
+            "backend": "tree-sitter" if grammars and grammar in grammars and model_grammar(language, "")
+            else "lexical",
+        }
+        for language, grammar in sorted(MODEL_GRAMMARS.items())
+    }
     return {
         "pdt_version": __version__,
         "python": platform.python_version(),
@@ -1054,6 +1065,7 @@ def capabilities_report() -> dict:
         "optional_integrations": {
             "tree-sitter-language-pack": version_of("tree-sitter-language-pack"),
             "provisioned_grammars": grammars,
+            "code_model": code_model,
             "pypdf": version_of("pypdf"),
             "python-docx": version_of("python-docx"),
             "PyYAML": version_of("PyYAML"),
@@ -1585,6 +1597,13 @@ def main() -> None:
             for name, value in report["optional_integrations"].items():
                 if name == "provisioned_grammars":
                     value = "n/a" if value is None else f"{len(value)} grammar(s) provisioned locally"
+                elif name == "code_model":
+                    refined = sorted(language for language, item in value.items() if item["backend"] == "tree-sitter")
+                    value = (
+                        f"Tree-sitter for {len(refined)} of {len(value)} languages ({', '.join(refined)})"
+                        if refined else f"structural lexer (no grammar provisioned for {len(value)} languages)"
+                    )
+                    name = "Code model"
                 table.add_row(name, str(value) if value else "not installed")
             table.add_row("Analyzers", f"{len(report['analyzers'])} loaded")
             table.add_row("Plugin sandbox", escape(_sandbox_summary(report["plugin_sandbox"])))

@@ -19,6 +19,13 @@ methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architec
   and a polyglot module graph (JavaScript/TypeScript, C/C++, JVM, Go, Rust, PHP, Dart).
 - `pdt query OUTPUT --symbol|--callers|--callees|--references NAME [--json]`.
 
+- A Tree-sitter-backed code model: where a grammar is provisioned, the syntax tree supplies the
+  symbols and calls of C, C++, CUDA, Arduino, Java, C#, Kotlin, Scala, Swift, JavaScript,
+  TypeScript, Go, Rust, PHP and Solidity files (exact nesting, method containers, constructors,
+  interface members, expression-bodied members), with the lexer as fallback for unprovisioned
+  grammars, broken or pathologically deep files, and `PDT_CODE_MODEL=lexical`.
+  `metrics.code_index.symbols.models` reports which backend modelled each language.
+
 ### Added: analyzers
 - `performance-hotspots`, `concurrency`, `resource-management` and `type-systems`.
 - `dataflow`: taint from web requests, sockets and stdin to SQL, command, code,

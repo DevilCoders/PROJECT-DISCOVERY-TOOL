@@ -4,12 +4,15 @@ Many analyzers need the same structure: definitions, call sites, imports and the
 identifiers a file references. :func:`model_for` builds it once per file and analysis
 thread and serves it to every analyzer of that file.
 
-Two backends exist. Python uses the standard-library ``ast`` parser, so symbols, calls
+Three backends exist. Python uses the standard-library ``ast`` parser, so symbols, calls
 and their resolution through imports and ``self`` are semantic. About 25 brace-language
 families (C, C++, Java, C#, JavaScript/TypeScript, Go, Rust, Kotlin, Swift, PHP and
 others) use a linear-time structural lexer: comments and string contents are blanked
 while offsets are kept, braces are matched, and definitions, calls and imports are read
-from the cleaned text. Lexical results are approximations and are reported as INFERRED.
+from the cleaned text. Where a Tree-sitter grammar for the language is provisioned
+locally, ``tree_sitter_model`` replaces the lexer's symbols and calls with ones read from
+the syntax tree and keeps the rest of the lexical model. Lexical and Tree-sitter results
+carry no type resolution and are reported as INFERRED.
 """
 from __future__ import annotations
 
@@ -38,8 +41,10 @@ class Symbol:
     is_async: bool = False
     decorators: tuple[str, ...] = ()
     params: tuple[str, ...] = ()
-    # Lexical backend: [start, end) offsets of the body in ``FileModel.clean``.
+    # Lexical and Tree-sitter backends: offsets of the body's ``{`` and ``}`` in ``FileModel.clean``.
     body: tuple[int, int] | None = None
+    # Lexical and Tree-sitter backends: offset of the name in the text (-1 when unknown).
+    offset: int = -1
 
 
 @dataclass(slots=True)
@@ -83,6 +88,8 @@ class FileModel:
     # Python backend only: class types of names (``python_types.TypeTable``), shared with taint.
     types: object | None = None
     _line_starts: list[int] | None = None
+    # Lexical backend: occurrences of each identifier in ``clean`` (the Tree-sitter refinement reuses them).
+    _identifier_counts: dict[str, int] | None = None
 
     def line_of(self, offset: int) -> int:
         if self._line_starts is None:
@@ -171,11 +178,18 @@ def _build(path: Path, record: FileRecord) -> FileModel | None:
             )
             return build_python_model(record.path, source)
         from .lexical import build_lexical_model
+        from .tree_sitter_model import model_grammar
 
         source = read_text_bounded(
             path, MAX_MODEL_BYTES, errors="replace", expected_identity=record.analysis_identity,
         )
-        return build_lexical_model(record.path, record.language, source)
+        model = build_lexical_model(record.path, record.language, source)
+        grammar = model_grammar(record.language, record.path)
+        if grammar is not None:
+            from .tree_sitter_model import refine
+
+            model = refine(model, grammar)
+        return model
     except (OSError, SourceBudgetExceeded, UnicodeDecodeError, LookupError, SyntaxError,
             ValueError, RecursionError, MemoryError):
         return None

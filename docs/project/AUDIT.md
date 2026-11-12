@@ -309,3 +309,28 @@ At the owner's request the findings were not independently verified by further a
 - Process-mode tests now kill a real worker process (`os._exit`) to exercise pool recovery end to end.
 
 The open findings are worked through in severity order. The release gates in §5 are unchanged.
+
+## 13. Tree-sitter code model
+
+**Date:** 2026-11-12 · **Scope:** the next step named in §8: Tree-sitter-backed models where grammars are provisioned. An earlier session had left `intelligence/model/tree_sitter_model.py` written but untested and uncommitted; this section records how it was finished.
+
+### What changed
+
+- For C, C++, C/C++ headers, CUDA, Arduino, Java, C#, Kotlin, Scala, Swift, JavaScript, TypeScript/TSX, Go, Rust, PHP and Solidity, `model_for` parses the file with the provisioned grammar and replaces the lexer's symbols and calls with ones read from the grammar's tags query, plus patterns PDT adds where a bundled query has gaps. The cleaned text, brace pairs, strings, imports and macros stay the lexer's, so every analyzer keeps one contract. Details are in [CODE_INTELLIGENCE.md](../architecture/CODE_INTELLIGENCE.md).
+- Defects in the unfinished draft, found by testing it against real grammars: Swift extension methods lost their container; Solidity library and interface functions, and constructors, were missed; abstract members were inconsistent across grammars (Scala traits and Go interfaces now count, as Java and TypeScript already did); and the docstring stated a 5% error threshold where the code used 20%.
+- **A hang.** Tree-sitter's query cursor slows down quadratically once a tree nests deeper than 32,767 levels: 300 KB of nested calls took 180 s, and 64,000 levels took 66 s for the match alone. Neither `match_limit` nor a progress callback helps, and in py-tree-sitter 0.26.1 on Windows a `matches()` progress callback crashed the interpreter with an access violation. Trees deeper than 4,096 levels now keep the lexical model. The check is a cursor walk, run only when the tree has more nodes than that; it cost about 5% of parse plus match time on 1.76 million nodes.
+- `metrics.code_index.symbols.models` counts the files each backend modelled, per language; the language catalog's `model_grammar` names the refining grammar; `pdt capabilities` shows which languages a provisioned grammar refines; `PDT_CODE_MODEL=lexical` forces the lexer.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Unit tests | `tests/intelligence/test_tree_sitter_model.py`: containers and definitions the lexer misses (C# namespaces and expression-bodied members, Swift `init` and extensions, Solidity libraries, Kotlin trailing lambdas), no definitions or calls from prototypes, declarations or initializers, JavaScript object and export definitions, correct lines and bodies after multibyte text, macro regions, hostile and broken input falling back within 10 s, and `model_for` integration. The no-download guarantee is tested without grammars. |
+| Real corpus | 1,124 JavaScript files of npm (6.5 MB): Tree-sitter found 10,866 definitions where the lexer found 8,074. Refinement took 2.24 s on top of 3.38 s for the lexer, with a median of 0.78 ms per file. The slowest file, an 88 KB minified bundle, took 68 ms. |
+| Whole suite with grammars | Windows 10, Py 3.12: the full suite passes with 17 grammars provisioned, so every analyzer that uses the code model ran on Tree-sitter models; CI's optional-integrations job now provisions the same grammars. |
+
+### Limits
+
+- Results stay structural: no types, overloads or macro expansion, and every result is `INFERRED`.
+- Grammars are versioned with `tree-sitter-language-pack`, and bundled tags queries change between releases. A pattern that a grammar version does not support is dropped, not fatal; the affected definitions then come from the lexer's rules only where the tree has no structure.
+- The refinement costs roughly as much as building the lexical model (about +65% model time on the npm corpus).

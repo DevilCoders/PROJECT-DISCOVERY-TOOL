@@ -49,6 +49,7 @@ class CodeIndexAnalyzer(Analyzer):
         model = model_for(path, record)
         if model is None:
             return []
+        code_facts.emit_fact("code_model", model.backend, language=model.language)
         for symbol in model.symbols:
             # Decorated Python functions are registered by frameworks, so count them as used.
             exported = symbol.exported or bool(symbol.decorators)

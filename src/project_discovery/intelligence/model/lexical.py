@@ -699,14 +699,7 @@ def build_lexical_model(path: str, language: str, text: str) -> FileModel:
     braces, parens = _pairs(clean)
     model = FileModel(path, language, "lexical", text, clean=clean, strings=strings,
                       braces=braces, parens=parens)
-    exported_names: set[str] = set()
-    if family == "js":
-        exported_names = {match.group(1) for match in _JS_EXPORTS.finditer(clean)}
-        for match in _JS_EXPORT_LIST.finditer(clean):
-            for item in match.group(1).split(","):
-                words = item.split()
-                if words:
-                    exported_names.add(words[0])
+    exported_names = js_exported_names(clean) if family == "js" else set()
 
     definitions = _type_definitions(clean, spec, braces)
     if family == "rust":
@@ -767,7 +760,7 @@ def build_lexical_model(path: str, language: str, text: str) -> FileModel:
             kind, item.name, qualified, model.line_of(item.name_offset),
             model.line_of(item.body[1]) if item.body else model.line_of(item.name_offset),
             container, _exported(family, item.name, prefix, kind, exported_names),
-            is_async="async" in prefix.split(), body=item.body,
+            is_async="async" in prefix.split(), body=item.body, offset=item.name_offset,
         ))
         if item.body:
             stack.append((item.body[1], qualified, kind))
@@ -777,20 +770,56 @@ def build_lexical_model(path: str, language: str, text: str) -> FileModel:
         for match in _MACRO.finditer(clean):
             model.symbols.append(Symbol(
                 "macro", match.group(1), match.group(1), model.line_of(match.start(1)),
-                model.line_of(match.start(1)), "", True,
+                model.line_of(match.start(1)), "", True, offset=match.start(1),
             ))
 
     _calls(model, clean, ordered, function_bodies)
-    counts = Counter(_IDENTIFIER.findall(clean))
-    for item in ordered:
-        counts[item.name] -= 1
-    for word, count in counts.items():
-        if count > 0 and word not in _NOT_NAMES:
-            model.references.add(word)
-            if len(model.references) >= _MAX_REFERENCES:
-                break
+    model._identifier_counts = Counter(_IDENTIFIER.findall(clean))
+    model.references = identifier_references(model._identifier_counts, (item.name for item in ordered))
     _imports(model, family)
     return model
+
+
+def js_exported_names(clean: str) -> set[str]:
+    """Names a JavaScript/TypeScript file exports through ``exports.x =`` or ``export { x }``."""
+    names = {match.group(1) for match in _JS_EXPORTS.finditer(clean)}
+    for match in _JS_EXPORT_LIST.finditer(clean):
+        for item in match.group(1).split(","):
+            words = item.split()
+            if words:
+                names.add(words[0])
+    return names
+
+
+def identifier_references(counts: dict[str, int], definitions) -> set[str]:
+    """Identifiers used beyond one occurrence per name in ``definitions``.
+
+    ``counts`` holds each identifier's occurrences in the cleaned text; it is not changed.
+    """
+    defined = Counter(definitions)
+    references: set[str] = set()
+    for word, count in counts.items():
+        if count > defined.get(word, 0) and word not in _NOT_NAMES:
+            references.add(word)
+            if len(references) >= _MAX_REFERENCES:
+                break
+    return references
+
+
+def call_receiver(clean: str, offset: int) -> str:
+    """The receiver of the call whose name starts at ``offset``.
+
+    The word before ``.``, ``->`` or ``::`` (``<expression>`` when that is not a name,
+    as in ``f().g()``), ``new`` for a constructor call, else "".
+    """
+    previous, previous_start = _previous_token(clean, offset)
+    if previous == "." or (
+        previous in {">", ":"} and clean[previous_start - 1:previous_start + 1] in {"->", "::"}
+    ):
+        chain_end = previous_start - (0 if previous == "." else 1)
+        token, _ = _previous_token(clean, chain_end)
+        return token if token.replace("$", "_").isidentifier() else "<expression>"
+    return "new" if previous == "new" else ""
 
 
 def _calls(model: FileModel, clean: str, ordered, function_bodies) -> None:
@@ -811,18 +840,8 @@ def _calls(model: FileModel, clean: str, ordered, function_bodies) -> None:
             next_body += 1
         while open_bodies and open_bodies[-1][0] < offset:
             open_bodies.pop()
-        previous, previous_start = _previous_token(clean, offset)
-        receiver = ""
-        if previous == "." or (
-            previous in {">", ":"} and clean[previous_start - 1:previous_start + 1] in {"->", "::"}
-        ):
-            chain_end = previous_start - (0 if previous == "." else 1)
-            token, _ = _previous_token(clean, chain_end)
-            receiver = token if token.replace("$", "_").isidentifier() else "<expression>"
-        elif previous == "new":
-            receiver = "new"
         caller = open_bodies[-1][1] if open_bodies else "<module>"
-        model.calls.append(Call(caller, name, receiver, "", model.line_of(offset), offset))
+        model.calls.append(Call(caller, name, call_receiver(clean, offset), "", model.line_of(offset), offset))
 
 
 def _imports(model: FileModel, family: str) -> None:

@@ -23,7 +23,9 @@ read its exit codes and performance data.
    The pack keeps grammars in a per-user cache. To provision them once for a shared or
    offline host, set `TREE_SITTER_LANGUAGE_PACK_CACHE_DIR` to the same directory for the
    download and for scans. Grammar names are the pack's (C# is `csharp`).
-   Unprovisioned grammars are reported as `UNKNOWN`.
+   Unprovisioned grammars are reported as `UNKNOWN`. With grammars provisioned, the shared
+   code model of 16 brace languages comes from the syntax tree instead of the structural
+   lexer; set `PDT_CODE_MODEL=lexical` to keep the lexer (for example to compare results).
 
 ## Scan modes
 

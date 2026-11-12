@@ -179,6 +179,7 @@ def language_catalog() -> list[dict[str, str | None]]:
     """Return recognition and parser integration metadata."""
     from ..analyzers.code.tree_sitter_syntax import GRAMMARS
     from ..intelligence.model.lexical import LEXICAL_LANGUAGES
+    from ..intelligence.model.tree_sitter_model import MODEL_GRAMMARS
 
     result = []
     for spec in _SPECS:
@@ -203,6 +204,9 @@ def language_catalog() -> list[dict[str, str | None]]:
             "structural_model": (
                 "ast" if spec.name == "Python" else "lexical" if spec.name in LEXICAL_LANGUAGES else None
             ),
+            # The Tree-sitter grammar that refines the lexical model when it is provisioned
+            # (``metrics.code_index.symbols.models`` shows which backend each scan used).
+            "model_grammar": MODEL_GRAMMARS.get(spec.name),
         })
     return result
 
