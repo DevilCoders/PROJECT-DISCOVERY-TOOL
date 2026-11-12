@@ -116,3 +116,47 @@ def test_python_security_analyzer_honors_pep263_source_encoding_cookie(tmp_path:
     assert any("dynamic_code_execution" in item.title for item in findings)
     assert all(item.confidence != "UNKNOWN" for item in findings)
 
+
+
+def test_sql_built_only_from_structure_is_not_dynamic():
+    # Regression (self-scan precision): f-strings that interpolate only a placeholder
+    # list or constant table names were reported as dynamic SQL (HIGH), although the
+    # values travel as parameters. Parameters, rebound names and shadowing stay dynamic.
+    import ast
+    import textwrap
+
+    from project_discovery.analyzers.security.secure_code import python_security_matches
+
+    source = textwrap.dedent('''
+        TABLES = {"code_symbols": "CREATE ...", "code_calls": "CREATE ..."}
+        KINDS = ("function", "method")
+        NAME = "x"
+        NAME = input()
+
+        def _placeholders(values):
+            return ",".join("?" for _ in values)
+
+        def safe_loop(db):
+            for table in TABLES:
+                db.execute(f"DELETE FROM {table}")              # 10 safe
+
+        def safe_placeholders(db, ids):
+            marks = _placeholders(ids)
+            db.execute(f"SELECT * FROM t WHERE id IN ({marks})", ids)   # 14 safe
+            db.execute(f"SELECT 1 WHERE k IN ({','.join('?' * len(ids))})", ids)   # 15 safe
+            db.execute("SELECT * FROM " + "t" + " WHERE x = ?", ids)   # 16 safe
+
+        def unsafe(db, name, TABLES):
+            db.execute(f"SELECT * FROM users WHERE name = '{name}'")   # 19 unsafe: parameter
+            db.execute(f"DELETE FROM {TABLES}")                       # 20 unsafe: shadowed
+            value = name
+            db.execute("SELECT * FROM t WHERE v = " + value)          # 22 unsafe
+            db.execute(f"SELECT {NAME}")                              # 23 unsafe: rebound
+            mixed = "a"
+            mixed = name
+            db.execute(f"SELECT {mixed}")                             # 26 unsafe: two bindings
+            db.execute("SELECT {}".format(name))                      # 27 unsafe
+    ''')
+    lines = sorted(line for rule, line, _ in python_security_matches(ast.parse(source))
+                   if rule == "possible_sql_injection")
+    assert lines == [21, 22, 24, 25, 28, 29]

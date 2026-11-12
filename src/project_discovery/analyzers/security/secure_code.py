@@ -243,12 +243,168 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
-def _dynamic_sql_argument(node: ast.AST) -> bool:
-    if isinstance(node, (ast.BinOp, ast.JoinedStr)):
-        return True
+def _dynamic_sql_argument(
+    node: ast.AST, structure: "_SqlStructure | None" = None, call: ast.AST | None = None,
+) -> bool:
+    """Whether a query argument is built at run time from values that could carry data.
+
+    Interpolating only structure (a parameter-placeholder list, or constant table and
+    column names) is not dynamic: ``f"... IN ({placeholders})"`` with the values passed
+    as parameters is the standard safe idiom.
+    """
+    structure = structure or _SqlStructure()
+
+    def safe(value: ast.AST) -> bool:
+        return structure.safe(value, call)
+
+    if isinstance(node, ast.JoinedStr):
+        return not all(safe(part.value) for part in node.values if isinstance(part, ast.FormattedValue))
+    if isinstance(node, ast.BinOp):
+        return not (safe(node.left) and safe(node.right))
     if isinstance(node, ast.Call):
-        return isinstance(node.func, ast.Attribute) and node.func.attr == "format"
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "format"):
+            return False
+        arguments = [*node.args, *(item.value for item in node.keywords)]
+        return not (arguments and all(safe(item) for item in arguments))
     return False
+
+
+def _literal(node: ast.AST) -> bool:
+    """A constant, or a tuple/list/set/dict built only of constants (dict values may vary)."""
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(_literal(item) for item in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(key is not None and _literal(key) for key in node.keys)
+    return False
+
+
+def _placeholder_join(node: ast.AST) -> bool:
+    """``",".join("?" for _ in x)``, ``", ".join(["%s"] * n)`` and ``",".join("?" * n)``."""
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "join" and isinstance(node.func.value, ast.Constant)
+            and len(node.args) == 1 and not node.keywords):
+        return False
+    argument = node.args[0]
+    if isinstance(argument, (ast.GeneratorExp, ast.ListComp)):
+        return isinstance(argument.elt, ast.Constant)
+    if isinstance(argument, ast.BinOp) and isinstance(argument.op, ast.Mult):
+        return any(_literal(side) for side in (argument.left, argument.right))
+    return False
+
+
+class _SqlStructure:
+    """Names whose every binding is SQL structure: constants and placeholder lists.
+
+    Module level: names assigned only literals, and functions that only return a
+    placeholder join. Per function: locals assigned only such values, and loop variables
+    over constant collections. Flow-insensitive and conservative: one other binding of a
+    name, or any parameter, makes it data.
+    """
+
+    def __init__(self, module: ast.AST | None = None) -> None:
+        self.constants: set[str] = set()
+        self.helpers: set[str] = set()
+        # id(call) -> (structural local names, every name bound in the call's function)
+        self.scopes: dict[int, tuple[set[str], set[str]]] = {}
+        if module is None:
+            return
+        for statement in getattr(module, "body", []):
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                returns = [item for item in statement.body if not isinstance(item, ast.Expr)]
+                if (len(returns) == 1 and isinstance(returns[0], ast.Return)
+                        and returns[0].value is not None and _placeholder_join(returns[0].value)):
+                    self.helpers.add(statement.name)
+        # Any non-literal binding of a name anywhere in the module disqualifies it.
+        rejected: set[str] = set()
+        for name, value in _bindings(ast.walk(module), loops=True):
+            (self.constants if value is not None and _literal(value) else rejected).add(name)
+        self.constants -= rejected
+        functions = [node for node in ast.walk(module) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for function in functions:   # breadth-first: an inner function's scope wins
+            scope = self._function_scope(function)
+            for node in ast.walk(function):
+                if isinstance(node, ast.Call):
+                    self.scopes[id(node)] = scope
+
+    def _function_scope(self, function: ast.AST) -> tuple[set[str], set[str]]:
+        arguments = function.args
+        bound = {item.arg for item in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+        bound |= {item.arg for item in (arguments.vararg, arguments.kwarg) if item is not None}
+        candidates: dict[str, bool] = {}
+        for name, value in _bindings(ast.walk(function), loops=True):
+            # A local is structure when its value is: a literal, or concatenations and
+            # f-strings of constants, placeholder lists and module constants (no locals,
+            # so this stays one pass).
+            ok = value is not None and (_literal(value) or self.safe(value))
+            candidates[name] = candidates.get(name, True) and ok
+        safe = {name for name, ok in candidates.items() if ok and name not in bound}
+        return safe, bound | set(candidates)
+
+    def _helper_call(self, node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in self.helpers)
+
+    def safe(self, node: ast.AST, call: ast.AST | None = None) -> bool:
+        """Whether ``node``, as seen from ``call``'s function, is SQL structure only.
+
+        Concatenations and nested f-strings are safe when every part is; an explicit stack
+        keeps very long concatenation chains from exhausting the recursion limit.
+        """
+        safe, bound = self.scopes.get(id(call), (set(), set()))
+        pending = [node]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, ast.BinOp):
+                # Concatenation, or arithmetic such as ``LIMIT {MAX // 2}``: safe when both
+                # sides are (``"%s" % value`` still carries ``value``).
+                pending.extend((item.left, item.right))
+            elif isinstance(item, ast.UnaryOp):
+                pending.append(item.operand)
+            elif isinstance(item, ast.JoinedStr):
+                pending.extend(part.value for part in item.values if isinstance(part, ast.FormattedValue))
+            elif isinstance(item, ast.Name):
+                # A local binding (a parameter included) shadows a module constant.
+                if not (item.id in safe if item.id in bound else item.id in self.constants):
+                    return False
+            elif not (isinstance(item, ast.Constant) or _placeholder_join(item) or self._helper_call(item)):
+                return False
+        return True
+
+
+def _bindings(nodes, *, loops: bool = False):
+    """(name, value) for each simple binding; value is None when it is not one expression.
+
+    With ``loops``, a ``for`` target over a constant collection yields the collection's
+    name (or literal) as its value, so iterating constant table names stays structural.
+    """
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    yield target.id, node.value
+                else:
+                    for item in ast.walk(target):
+                        if isinstance(item, ast.Name):
+                            yield item.id, None
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name):
+            yield node.target.id, node.value if isinstance(node, ast.AnnAssign) else None
+        elif loops and isinstance(node, (ast.For, ast.AsyncFor)):
+            if isinstance(node.target, ast.Name):
+                yield node.target.id, node.iter if _literal(node.iter) or isinstance(node.iter, ast.Name) else None
+            else:
+                for item in ast.walk(node.target):
+                    if isinstance(item, ast.Name):
+                        yield item.id, None
+        elif loops and isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    for name in ast.walk(item.optional_vars):
+                        if isinstance(name, ast.Name):
+                            yield name.id, None
+        elif loops and isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            yield node.target.id, node.value
 
 
 def _import_aliases(tree: ast.AST) -> dict[str, str]:
@@ -307,7 +463,9 @@ PYTHON_RULE_CATEGORIES = {
 }
 
 
-def _python_call_rule(node: ast.Call, name: str, aliases: dict[str, str]) -> str | None:
+def _python_call_rule(
+    node: ast.Call, name: str, aliases: dict[str, str], structure: "_SqlStructure | None" = None,
+) -> str | None:
     if name in {"eval", "exec", "builtins.eval", "builtins.exec"}:
         return "dynamic_code_execution"
     if name in {"os.system", "os.popen", "commands.getoutput", "commands.getstatusoutput"}:
@@ -339,7 +497,8 @@ def _python_call_rule(node: ast.Call, name: str, aliases: dict[str, str]) -> str
     if name == "tempfile.mktemp":
         return "insecure_temporary_file"
     if name.rsplit(".", 1)[-1] in {"execute", "executemany"} and node.args:
-        return "possible_sql_injection" if _dynamic_sql_argument(node.args[0]) else None
+        dynamic = _dynamic_sql_argument(node.args[0], structure, node)
+        return "possible_sql_injection" if dynamic else None
     if _is_constant(_keyword(node, "verify"), False) and (
         name.rsplit(".", 1)[-1] in _HTTP_VERBS
         or name.rsplit(".", 1)[-1] in {"Client", "AsyncClient", "Session"}
@@ -355,6 +514,7 @@ def python_security_matches(tree: ast.AST) -> list[tuple[str, int, str]]:
     ``import subprocess as sp; sp.run(cmd, shell=True)`` are recognized.
     """
     aliases = _import_aliases(tree)
+    structure = _SqlStructure(tree)
     matches: list[tuple[str, int, str]] = []
     seen: set[tuple[str, int]] = set()
 
@@ -366,7 +526,7 @@ def python_security_matches(tree: ast.AST) -> list[tuple[str, int, str]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = _resolve(_dotted(node.func), aliases)
-            rule = _python_call_rule(node, name, aliases)
+            rule = _python_call_rule(node, name, aliases, structure)
             if rule:
                 add(rule, node.lineno, name)
         elif isinstance(node, ast.Assign):

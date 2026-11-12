@@ -129,6 +129,12 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   `UNKNOWN` coverage gap, and `npm:` aliases resolve to the real package (PDT-241).
 - With `--plugin-isolation off`, process workers load exactly the coordinator's plugins
   (PDT-242).
+- Code model: JavaScript/TypeScript regex literals no longer blank the code after them
+  (`/\//g` read as a comment dropped the rest of a minified bundle); keyword-prefixed names
+  (`function_exists`, `funcs`) are not definitions; calls inside `if (a() && b(x)) {` are not
+  typed definitions; Rust `impl Trait for Type {` is not a loop (PDT-243 to PDT-246).
+- Python SQL built only from placeholder lists or constant table names is no longer reported as
+  dynamically constructed; parameters and rebound names still are (PDT-247).
 
 ## 0.2.0 — 2026-11-05
 

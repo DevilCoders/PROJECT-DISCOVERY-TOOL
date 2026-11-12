@@ -64,14 +64,60 @@ def test_javascript_expression_is_not_mistaken_for_an_arrow_function():
     assert "f.x" not in names and "f.n" not in names
 
 
+def test_javascript_regular_expressions_do_not_hide_the_code_after_them():
+    # Regression: a regex literal holding "//" was read as a line comment, which blanked
+    # the rest of the line (the rest of the file in a minified bundle), losing its code.
+    source = 'var strip=p=>p.replace(/\\//g,"").replace(/[/*]/,"");function after(){return run()}\n'
+    model = build_lexical_model("a.js", "JavaScript", source)
+    assert "after" in {symbol.name for symbol in model.symbols}
+    assert ("after", "run") in {(call.caller, call.callee) for call in model.calls}
+    assert clean_source("a=/\\//g;b()", "js")[0] == "a=/  / ;b()"
+    # Divisions stay code, and JSX closing tags are not regular expressions.
+    assert clean_source("x = a / b / c; y()", "js")[0] == "x = a / b / c; y()"
+    assert clean_source("t = <p>a</p>; f()", "js")[0] == "t = <p>a</p>; f()"
+
+
+def test_keyword_prefixed_identifiers_are_not_definitions():
+    # Regression: `function_exists`, `funcs` and similar names matched a keyword followed
+    # by a name with nothing between them, inventing definitions that swallowed calls.
+    php = build_lexical_model("a.php", "PHP", (
+        "<?php\nif (function_exists('x')) { definitions(); }\nfunction real() { return 1; }\n"
+    ))
+    assert {symbol.name for symbol in php.symbols} == {"real"}
+    go = build_lexical_model("a.go", "Go", "package a\nfunc main() {\n  funcs := 1\n  funds(funcs)\n}\n")
+    assert {symbol.name for symbol in go.symbols} == {"main"}
+    assert ("main", "funds") in {(call.caller, call.callee) for call in go.calls}
+
+
+def test_calls_in_conditions_are_not_c_style_definitions():
+    # Regression: in `if (ready() && work(x)) {` the call before `) {` was taken for a
+    # typed definition, which removed the call, or (C#) nested a phantom method.
+    model = build_lexical_model("a.c", "C", (
+        "int main(void) {\n  if (ready() && work(x)) {\n    run();\n  }\n  return 0;\n}\n"
+    ))
+    assert {symbol.name for symbol in model.symbols} == {"main"}
+    assert {("main", "ready"), ("main", "work"), ("main", "run")} <= {
+        (call.caller, call.callee) for call in model.calls
+    }
+    csharp = build_lexical_model("A.cs", "C#", (
+        "class A {\n  void M() {\n    if (Ok() && Go(1)) {\n      Run();\n    }\n  }\n}\n"
+    ))
+    assert {symbol.qualified for symbol in csharp.symbols} == {"A", "A.M"}
+    assert ("A.M", "Run") in {(call.caller, call.callee) for call in csharp.calls}
+    # Member-initializer lists keep balanced parentheses, so constructors still count.
+    cpp = build_lexical_model("a.cpp", "C++", "class Box {\n public:\n  Box(int w) : w_(w) {}\n  int w_;\n};\n")
+    assert ("constructor", "Box.Box") in {(symbol.kind, symbol.qualified) for symbol in cpp.symbols}
+
+
 def test_lexer_stays_linear_on_hostile_input():
     hostile = {
         "c": "'\\'" * 40_000 + "/*" * 20_000 + '"' * 20_000,
         "js": "`${" * 30_000 + "/'" * 30_000,
         "cpp": 'R"x(' * 30_000 + "{" * 30_000,
         "go": "func (" * 20_000 + "`" * 10_001,
+        "js-regex": "=/[" * 100_000 + "a/" * 100_000 + "return /x" * 30_000,
     }
-    languages = {"c": "C", "js": "JavaScript", "cpp": "C++", "go": "Go"}
+    languages = {"c": "C", "js": "JavaScript", "cpp": "C++", "go": "Go", "js-regex": "JavaScript"}
     for family, text in hostile.items():
         started = time.perf_counter()
         build_lexical_model(f"x.{family}", languages[family], text)

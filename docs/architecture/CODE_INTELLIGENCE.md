@@ -19,7 +19,7 @@ always generated or minified, and the code-index analyzer reports them as `UNKNO
 | Backend | Languages | Method |
 |---|---|---|
 | Syntax tree | Python | Standard-library `ast`. Symbols carry qualified names (`Class.method`), decorators, parameters and async markers. Call targets are resolved through `import`/`from ... import` aliases (including relative imports), `self`/`cls`, module-level definitions, and the class of the receiver when the code states it (see below). |
-| Structural lexer | C, C++, C/C++ headers, Objective-C/C++, CUDA, OpenCL, GLSL, HLSL, Metal, WGSL, Java, Kotlin, Scala, Groovy, C#, Swift, Dart, JavaScript, TypeScript, Vue, Svelte, Go, Rust, PHP, Solidity, Zig, Arduino | A linear-time cleaner blanks comments and string contents while keeping every offset, so braces and parentheses are paired exactly. Definitions come from type keywords, function keywords and C-style typed signatures, nested by brace containment; calls carry their receiver; imports are read per family. |
+| Structural lexer | C, C++, C/C++ headers, Objective-C/C++, CUDA, OpenCL, GLSL, HLSL, Metal, WGSL, Java, Kotlin, Scala, Groovy, C#, Swift, Dart, JavaScript, TypeScript, Vue, Svelte, Go, Rust, PHP, Solidity, Zig, Arduino | A linear-time cleaner blanks comments, string contents and (JavaScript/TypeScript) regular-expression literals while keeping every offset, so braces and parentheses are paired exactly. Definitions come from type keywords, function keywords and C-style typed signatures, nested by brace containment; calls carry their receiver; imports are read per family. |
 
 **Python receiver types** (`intelligence.model.python_types`). A call on an object resolves to
 its class's method when the code states the class: a constructor call (`repo = Repo()`), an

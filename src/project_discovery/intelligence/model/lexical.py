@@ -2,8 +2,10 @@
 
 1. **Clean.** One pass finds each comment or string opener and consumes the construct
    with a bounded rule: a line comment ends at the newline, a block comment at ``*/``
-   (or end of file), a quoted string at its closing quote on the same line. Comments
-   and string contents become spaces in ``FileModel.clean``, so offsets and line
+   (or end of file), a quoted string at its closing quote on the same line. In
+   JavaScript/TypeScript a ``/`` after an operator, punctuator or keyword such as
+   ``return`` starts a regular-expression literal, which ends on the same line. Comments
+   and string and regex contents become spaces in ``FileModel.clean``, so offsets and line
    numbers are preserved and code inside comments or strings is never mistaken for
    code. An unterminated multi-line construct ends the scan instead of being retried,
    which keeps hostile input linear.
@@ -26,6 +28,8 @@ from . import Call, FileModel, Import, Symbol
 
 _MAX_STRINGS = 50_000
 _MAX_REFERENCES = 10_000
+# Blank characters a backward token scan crosses before it gives up.
+_MAX_GAP = 1024
 _SIGNATURE_LOOKAHEAD = 400
 _NON_NEWLINE = re.compile(r"[^\n]")
 _TERMINATOR = re.compile(r"[{;}]")
@@ -50,6 +54,7 @@ class LexicalSpec:
     untyped_methods: bool = False     # ``name(...) {`` methods inside class bodies (JS/TS)
     nested_functions: bool = False
     bodiless_types: bool = False      # Kotlin/Scala ``data class P(val x: Int)``
+    regex_literals: bool = False      # JavaScript ``/re/flags``
 
 
 _C_TYPES = (("struct", "struct"), ("union", "union"), ("enum", "enum"))
@@ -87,7 +92,7 @@ _SPECS = {
                                        ("extension", "extension"))),
     "js": LexicalSpec("js", string_quotes="\"'", char_quote=False, backtick="template",
                       typed_functions=False, untyped_methods=True, nested_functions=True,
-                      function_keywords=("function",),
+                      regex_literals=True, function_keywords=("function",),
                       type_keywords=(("class", "class"), ("interface", "interface"),
                                      ("enum", "enum"), ("namespace", "namespace"))),
     "go": LexicalSpec("go", backtick="raw", typed_functions=False, nested_functions=True,
@@ -146,13 +151,14 @@ _CALL = re.compile(
     r"(?<![\w$])([A-Za-z_$][\w$]*+)[ \t\r\n]*+(?:<[^<>(){};\n]{0,120}+>[ \t]*+)?\("
 )
 _BRACKETS = re.compile(r"[{}()]")
+_PARENTHESES = re.compile(r"[()]")
 _FUNCTION_EXPRESSION = re.compile(
     r"(?<![\w$])(?:const|let|var)[ \t\r\n]++([A-Za-z_$][\w$]*+)[ \t\r\n]*+"
     r"(?::[^=;\n]{0,200}+)?=[ \t\r\n]*+(?:async[ \t\r\n]++)?(?=function\b|\(|[A-Za-z_$][\w$]*+[ \t]*+=>)"
 )
 # After a parenthesised parameter list: optional return type, then the arrow.
 _ARROW_AFTER = re.compile(r"[ \t\r\n]*+(?::[^=;{}\n]{0,200}+)?=>")
-_GO_FUNC = re.compile(r"(?<![\w$])func[ \t]*+(?:\(([^()]{0,200}+)\)[ \t]*+)?([A-Za-z_]\w*+)")
+_GO_FUNC = re.compile(r"(?<![\w$])func(?![\w$])[ \t]*+(?:\(([^()]{0,200}+)\)[ \t]*+)?([A-Za-z_]\w*+)")
 _GO_TYPE = re.compile(
     r"(?<![\w$])type[ \t]++([A-Za-z_]\w*+)[ \t]++(?:\[[^\]\n]{0,200}+\][ \t]*+)?(struct|interface)\b"
 )
@@ -200,7 +206,7 @@ def _function_pattern(keyword: str) -> re.Pattern:
     # Optional generics before the name (Kotlin ``fun <T> f``) and a receiver type
     # (Kotlin extension ``fun String.ext``), which arrives in group 2.
     return re.compile(
-        rf"(?<![\w$.]){keyword}[ \t\r\n]*+(?:<[^<>{{}}();\n]{{0,120}}+>[ \t\r\n]*+)?\*?[ \t\r\n]*+&?"
+        rf"(?<![\w$.]){keyword}(?![\w$])[ \t\r\n]*+(?:<[^<>{{}}();\n]{{0,120}}+>[ \t\r\n]*+)?\*?[ \t\r\n]*+&?"
         r"([A-Za-z_$][\w$]*+)(?:\.([A-Za-z_$][\w$]*+))?"
     )
 
@@ -233,6 +239,8 @@ def _openers(spec: LexicalSpec) -> re.Pattern:
     alternatives.extend(re.escape(token) for token in spec.line_comments)
     if spec.block_comments:
         alternatives.append(r"/\*")
+    if spec.regex_literals:
+        alternatives.append(r"/(?![/*])")
     quotes = spec.string_quotes + ("'" if spec.char_quote and "'" not in spec.string_quotes else "")
     if spec.backtick:
         quotes += "`"
@@ -251,6 +259,41 @@ _CHAR_LITERAL = re.compile(
 _TEMPLATE = re.compile(r"`(?:[^`\\]|\\[\s\S])*+`")
 _RAW_BACKTICK = re.compile(r"`[^`]*+`")
 _VERBATIM = re.compile(r'(?:[^"]|"")*+"')
+# A JavaScript regular-expression literal on one line: escapes, and ``/`` inside a
+# ``[...]`` class, do not end it. The flags follow the closing slash.
+_REGEX_LITERAL = re.compile(r"/(?:[^/\\\[\n]|\\[^\n]|\[(?:[^\]\\\n]|\\[^\n])*+\])++/")
+_REGEX_FLAGS = re.compile(r"[A-Za-z]*+")
+# A ``/`` starts a regular expression, not a division, after these characters and words.
+# ``<`` and ``>`` are left out so JSX closing tags (``</div>``) are never read as one.
+_REGEX_AFTER_CHARS = frozenset("(,=:[!&|?{};+-*%~^")
+_REGEX_AFTER_WORDS = frozenset(
+    "return typeof instanceof in of new delete void throw case do else yield await".split()
+)
+
+
+def _regex_allowed(text: str, start: int) -> bool:
+    """Whether a ``/`` at ``start`` begins a regular-expression literal (JavaScript rules).
+
+    Reads at most a short window before ``start``, so the check costs constant time.
+    """
+    index = start - 1
+    floor = max(start - 256, 0)
+    while index >= floor and text[index] in " \t\r\n":
+        index -= 1
+    if index < floor:
+        return index < 0   # the start of the file, else too far to tell: a division
+    char = text[index]
+    if char in _REGEX_AFTER_CHARS:
+        return True
+    if char == ">":
+        return index > 0 and text[index - 1] == "="   # ``=> /x/``
+    if char.isalnum() or char in "_$":
+        end = index + 1
+        while index >= 0 and end - index <= 12 and (text[index].isalnum() or text[index] in "_$"):
+            index -= 1
+        word = text[index + 1:end]
+        return word in _REGEX_AFTER_WORDS and not (index >= 0 and text[index] in ".$")
+    return False
 
 
 def clean_source(text: str, family: str) -> tuple[str, list[tuple[int, int]]]:
@@ -288,6 +331,25 @@ def clean_source(text: str, family: str) -> tuple[str, list[tuple[int, int]]]:
         start, token = match.start(), match.group()
         if token in _QUOTED and unterminated.get(token, -1) > start:
             position = start + 1
+            continue
+        if token == "/":
+            # A regular expression (JavaScript), or a division. Once a candidate fails to
+            # close on its line, later ones on that line are divisions (keeps it linear).
+            found = None
+            if unterminated.get("/", -1) <= start and _regex_allowed(text, start):
+                found = _REGEX_LITERAL.match(text, start)
+                if found is None:
+                    end = text.find("\n", start)
+                    unterminated["/"] = length if end == -1 else end
+            if found is None:
+                position = start + 1
+                continue
+            # Both slashes stay; the body and the flags become spaces.
+            flags = _REGEX_FLAGS.match(text, found.end())
+            emit(start, found.end(), 1)
+            pieces.append(text[copied:found.end()])
+            pieces.append(" " * (flags.end() - found.end()))
+            copied = position = flags.end()
             continue
         if token in spec.line_comments:
             end = text.find("\n", start)
@@ -369,9 +431,16 @@ def _pairs(clean: str) -> tuple[dict[int, int], dict[int, int]]:
 
 
 def _previous_token(clean: str, offset: int) -> tuple[str, int]:
-    """The word or single non-space character ending before ``offset``, and its start."""
+    """The word or single non-space character ending before ``offset``, and its start.
+
+    More than ``_MAX_GAP`` blank characters (a long comment or blanked region) count as
+    no previous token, so the backward scan is bounded.
+    """
     index = offset - 1
+    floor = offset - _MAX_GAP
     while index >= 0 and clean[index] in " \t\r\n":
+        if index < floor:
+            return "", -1
         index -= 1
     if index < 0:
         return "", -1
@@ -566,6 +635,19 @@ def _keyword_functions(clean: str, spec: LexicalSpec, braces, parens) -> list[_D
     return found
 
 
+def _closes_outer_paren(clean: str, start: int, end: int) -> bool:
+    """Whether ``clean[start:end]`` holds a ``)`` without its ``(`` in the same span."""
+    depth = 0
+    for match in _PARENTHESES.finditer(clean, start, end):
+        if match.group() == "(":
+            depth += 1
+        elif depth == 0:
+            return True
+        else:
+            depth -= 1
+    return False
+
+
 def _typed_functions(clean: str, spec: LexicalSpec, braces, parens, class_bodies) -> list[_Definition]:
     """C-style ``Type name(...) {`` definitions, and untyped methods in JS/TS classes.
 
@@ -582,7 +664,7 @@ def _typed_functions(clean: str, spec: LexicalSpec, braces, parens, class_bodies
         if close is None:
             continue
         body = _body_after(clean, close + 1, braces)
-        if body is None:
+        if body is None or _closes_outer_paren(clean, close + 1, body[0]):
             continue
         previous, previous_start = _previous_token(clean, match.start())
         qualifier = ""

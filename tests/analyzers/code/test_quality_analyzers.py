@@ -170,3 +170,15 @@ def test_type_checker_configuration(tmp_path: Path):
     nullable, _ = run(TypeSystemAnalyzer(), tmp_path, "App.csproj",
                       "<Project><PropertyGroup><Nullable>disable</Nullable></PropertyGroup></Project>")
     assert nullable["C# nullable reference types"][0] == "LOW"
+
+
+def test_rust_trait_impls_are_not_loops(tmp_path: Path):
+    # Regression: `impl Trait for Type {` was read as a `for` loop around every method, so
+    # each query in a trait implementation became "Database query inside a loop".
+    issues, _ = run(PerformanceHotspotAnalyzer(), tmp_path, "repo.rs", (
+        "impl<T: Send> Repository for Store<T> {\n    fn find(&self, id: i64) -> Row {\n"
+        "        self.conn.query(\"SELECT 1\", &[&id])\n    }\n}\n"
+        "fn bound<F>(f: F) where F: for<'a> Fn(&'a str) {\n    f(\"x\");\n}\n"
+        "fn real(ids: &[i64], conn: &Conn) {\n    for id in ids {\n        conn.query(\"SELECT 2\", &[id]);\n    }\n}\n"
+    ))
+    assert issues["Database query inside a loop"][1] == [11]

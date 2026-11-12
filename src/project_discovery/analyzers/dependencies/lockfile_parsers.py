@@ -65,8 +65,8 @@ def normalize_version(value: Any, *, strip_prefix: bool = False) -> str:
 
 # Lockfile "versions" that name a source instead of a registry release: git and local
 # dependencies, tarball URLs and workspace links. npm v1 lockfiles write them as the
-# version itself ("git+https://user:token@host/repo.git#sha", "file:../lib"), and they can
-# carry credentials and local paths. Registry versions never contain "/", "\", "@" or
+# version itself (a git+https URL that can embed a user and token, or "file:../lib"),
+# so they can carry credentials and local paths. Registry versions never contain "/", "\", "@" or
 # whitespace (pnpm peer suffixes are stripped before this point).
 _NON_REGISTRY_VERSION = re.compile(
     r"(?i)^(?:git|github|gitlab|bitbucket|gist|file|link|portal|patch|workspace|exec|https?|ssh)[+:]"

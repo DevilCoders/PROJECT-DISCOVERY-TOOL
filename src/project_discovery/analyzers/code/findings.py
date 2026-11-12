@@ -10,6 +10,7 @@ from ...models import CodeEvidence, Finding
 MAX_LOCATIONS = 25
 MAX_CODE_LINES = 5
 _LOOP_KEYWORD = re.compile(r"(?<![\w$.])(for|while|foreach|loop)\b")
+_RUST_IMPL = re.compile(r"(?<![\w$])impl\b")
 
 
 def code_finding(
@@ -32,13 +33,18 @@ def code_finding(
 
 def loop_bodies(model: FileModel) -> list[tuple[int, int]]:
     """[start, end) brace bodies of for/while/foreach/loop statements in a lexical model."""
-    from ...intelligence.model.lexical import _body_after
+    from ...intelligence.model.lexical import LEXICAL_LANGUAGES, _body_after, _statement_prefix
 
     clean, braces, parens = model.clean, model.braces, model.parens
+    rust = LEXICAL_LANGUAGES.get(model.language) == "rust"
     bodies = []
     for match in _LOOP_KEYWORD.finditer(clean):
         position = match.end()
         following = clean[position:position + 50].lstrip()
+        if rust and match.group(1) == "for" and (
+            following.startswith("<") or _RUST_IMPL.search(_statement_prefix(clean, match.start()))
+        ):
+            continue  # ``impl Trait for Type {`` and ``for<'a>`` bounds are not loops
         if following.startswith("("):
             paren = clean.find("(", position)
             close = parens.get(paren)
