@@ -317,7 +317,8 @@ def _remote_coverage_findings(source_metadata: dict) -> list[Finding]:
                 " The referenced content was not analyzed."
             ),
             confidence="UNKNOWN",
-            evidence=[f"source: {location}", f"count: {item.get('count', 0)}"],
+            evidence=[f"source: {location}", f"count: {item.get('count', 0)}"]
+            + [f"path: {path}" for path in (item.get("samples") or [])[:20] if isinstance(path, str)],
             analyzer="remote-source",
             severity="LOW" if incomplete else "INFO",
         ))
@@ -502,7 +503,8 @@ def run_scan(
         _status(
             console, "INFO",
             f"Read-only discovery: {display_root or source_metadata.get('url', 'remote source')} "
-            "(temporary read-only checkout)", "cyan",
+            + ("(provider API, nothing downloaded)" if source_metadata.get("acquisition") == "api"
+               else "(temporary read-only checkout)"), "cyan",
         )
     else:
         _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
@@ -1293,7 +1295,7 @@ def _run_remote_targets(
     remote_options = dict(remote_options or {})
     allow_insecure = bool(remote_options.get("allow_insecure_transport", False))
     multiple = len(targets) > 1 if batch is None else batch
-    base_output = output
+    base_output = output.expanduser().resolve() if output is not None else None
     if multiple and base_output is None:
         base_output = Path.cwd() / "pdt-remote-reports"
     console = Console(
@@ -1344,6 +1346,7 @@ def _run_remote_targets(
                     source.open()
                     entry["revision"] = source.metadata.get("revision")
                     entry["acquisition"] = "api"
+                    entry["transport_insecure"] = bool(source.metadata.get("transport_insecure"))
                     code = run_scan(
                         source.virtual_root, target_output, formats, max_file_mb,
                         source_metadata=source.metadata, display_root=target.clone_url,
@@ -1392,6 +1395,8 @@ def _run_remote_targets(
             finally:
                 entry["finished_at"] = now()
                 entry["seconds"] = round(time.monotonic() - started, 3)
+                if entry.get("exit_code") is None:
+                    entry["report_directory"] = None  # the target produced no report
     except KeyboardInterrupt:
         for index, target in enumerate(targets[len(results):], len(results) + 1):
             results.append(_remote_target_entry(index, target, report_directory(target), "not_started"))

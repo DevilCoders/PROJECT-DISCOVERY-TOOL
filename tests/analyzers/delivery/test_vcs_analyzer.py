@@ -255,3 +255,18 @@ def test_files_without_a_handler_are_not_claimed():
                      "CVS/Repository", "CVS/Entries", ".hg/store/requires", ".jj/repo/op_store/type"):
         assert analyzer.supports(FileRecord(relative, 1, "", "Metadata")) is False, relative
     assert analyzer.supports(FileRecord(".git/worktrees/feature/gitdir", 1, "", "Metadata"))
+
+
+def test_git_config_valueless_keys_remote_heads_nested_files_and_codeberg(tmp_path: Path):
+    # Regressions: a valueless Git boolean ("logallrefupdates") made the whole config one
+    # UNKNOWN read error; refs/remotes/origin/HEAD was a second checkout HEAD; nested
+    # .gitmodules were ignored; codeberg.org was "Self-hosted or unclassified".
+    findings = _scan(tmp_path, ".git/config", (
+        "[core]\n\tlogallrefupdates\n[remote \"origin\"]\n\turl = https://codeberg.org/acme/app.git\n"
+    ))
+    host = next(item for item in findings if item.category == "hosting_providers")
+    assert host.title == "Git remote provider: Forgejo"
+    remote_head = _scan(tmp_path, ".git/refs/remotes/origin/HEAD", "ref: refs/remotes/origin/main\n")
+    assert remote_head[0].title.startswith("Git remote default branch")
+    nested = _scan(tmp_path, "vendor/lib/.gitmodules", '[submodule "x"]\n\tpath = x\n\turl = https://github.com/a/x\n')
+    assert "1 submodule" in nested[0].detail

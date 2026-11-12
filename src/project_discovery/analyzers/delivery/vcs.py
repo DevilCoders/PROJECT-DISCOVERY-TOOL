@@ -144,7 +144,7 @@ def _hosting_provider(host: str | None) -> str:
         return "AWS CodeCommit"
     if "gitea" in host:
         return "Gitea"
-    if "forgejo" in host:
+    if "forgejo" in host or host == "codeberg.org" or host.endswith(".codeberg.org"):
         return "Forgejo"
     if "gerrit" in host:
         return "Gerrit"
@@ -189,7 +189,7 @@ class VCSHostingAnalyzer(Analyzer):
             return inner in _CONTROL_FILES[root_name]
         if file_name in _MARKER_FILES or file_name == "HEAD":
             return True  # HEAD: a bare repository is recognized from its siblings
-        if name in _CI_FILES or relative_lower in {".gitmodules", ".gitattributes", ".p4config"}:
+        if name in _CI_FILES or name in {".gitmodules", ".gitattributes"} or relative_lower == ".p4config":
             return True
         if any(relative_lower.startswith(prefix + "/") for prefix in _CI_PATHS):
             return True
@@ -224,9 +224,9 @@ class VCSHostingAnalyzer(Analyzer):
                 "A version-control metadata marker file is present; it is not opened.",
                 confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
             )]
-        if relative == ".gitmodules":
+        if file_name == ".gitmodules":  # at any depth: vendored and nested repositories have their own
             return self._gitmodules(path, record)
-        if relative == ".gitattributes":
+        if file_name == ".gitattributes":
             return self._gitattributes(path, record)
         if name == ".p4config":
             return [Finding(
@@ -281,7 +281,9 @@ class VCSHostingAnalyzer(Analyzer):
         )]
 
     def _git_config(self, record: FileRecord, text: str, label: str) -> list[Finding]:
-        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser = configparser.ConfigParser(
+            interpolation=None, strict=False, allow_no_value=True, inline_comment_prefixes=("#", ";"),
+        )
         try:
             parser.read_string(text)
         except configparser.Error as exc:
@@ -383,6 +385,14 @@ class VCSHostingAnalyzer(Analyzer):
             return self._git_config(record, text, "Git repository configuration")
         if root_name == ".jj" and inner == "repo/store/git/config":
             return self._git_config(record, text, "Jujutsu Git backend configuration")
+        if root_name == ".git" and name == "head" and inner.startswith("refs/"):
+            # refs/remotes/origin/HEAD names the remote's default branch, not the checkout.
+            stripped = text.strip()
+            return [Finding(
+                "vcs", f"Git remote default branch: {inner.rsplit('/', 1)[0]}",
+                f"{inner} references {stripped.partition(':')[2].strip() or stripped[:64]}.",
+                confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
+            )] if stripped else []
         if root_name == ".git" and name == "head":
             stripped = text.strip()
             if stripped.startswith("ref:"):
@@ -493,7 +503,9 @@ class VCSHostingAnalyzer(Analyzer):
         content, error = _read_text(path, record.analysis_identity)
         if error:
             return [self._unknown(record, error)]
-        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser = configparser.ConfigParser(
+            interpolation=None, strict=False, allow_no_value=True, inline_comment_prefixes=("#", ";"),
+        )
         try:
             parser.read_string(content or "")
         except configparser.Error as exc:

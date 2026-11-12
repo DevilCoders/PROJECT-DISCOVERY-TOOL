@@ -438,7 +438,8 @@ def test_a_url_file_with_one_repository_is_still_a_batch(lines, tmp_path: Path, 
     summary = json.loads((output / "batch-summary.json").read_text(encoding="utf-8"))
     assert [item["status"] for item in summary["targets"]] == ["failed"]
     assert summary["targets"][0]["error"] == "not found"
-    assert Path(summary["targets"][0]["report_directory"]).parent == output
+    # A target that produced no report names no report directory.
+    assert summary["targets"][0]["report_directory"] is None
     assert (output / "batch-summary.md").is_file()
 
 

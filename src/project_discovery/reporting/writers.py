@@ -97,7 +97,9 @@ def scan_summary(metrics: dict[str, Any]) -> dict[str, Any]:
         remote_summary["acquisition"] = acquisition
         remote_summary["url"] = public_url(remote.get("url"))
         remote_summary["coverage_gap_count"] = len(remote.get("coverage_gaps") or [])
-    if online is not None and online.get("coverage") != "skipped":
+    requests = online.get("requests") if online is not None and isinstance(online.get("requests"), dict) else {}
+    if online is not None and online.get("coverage") != "skipped" and int(requests.get("requests") or 0) > 0:
+        # Only services that were contacted: a lookup with no lockfile sends nothing.
         network.append("osv.dev")
         network.extend(sorted(str(item) for item in online.get("enrichment") or []))
     sources = vulnerabilities.get("sources")
@@ -740,7 +742,9 @@ def _write_markdown_source(line, metrics: dict[str, Any], summary: dict[str, Any
         line(f"- Branch: {_md(remote['branch'])}")
     transport = remote.get("transport") or "unknown"
     if remote.get("transport_insecure"):
-        line(f"- Transport: {_md(transport)} — **not encrypted** (accepted with --allow-insecure-transport)")
+        line(f"- Transport: {_md(transport)} — **not encrypted**" + (
+            " (a loopback API)" if remote.get("acquisition") == "api"
+            else " (accepted with --allow-insecure-transport)"))
     else:
         line(f"- Transport: {_md(transport)} (encrypted)")
     if remote.get("acquired_at"):
@@ -902,8 +906,8 @@ def write_remote_batch_summary(
         for status, count in sorted(totals.items()):
             stream.write(f"- {_md(status)}: {count:,}\n")
         stream.write(
-            "\n| # | Status | Provider | Repository | VCS | Ref | Revision | Report | Error |\n"
-            "|---|---|---|---|---|---|---|---|---|\n"
+            "\n| # | Status | Provider | Repository | VCS | Ref | Revision | Report | Error | Cleanup error |\n"
+            "|---|---|---|---|---|---|---|---|---|---|\n"
         )
         for item in targets:
             cells = [
@@ -911,7 +915,7 @@ def write_remote_batch_summary(
                 str(item.get("provider") or ""), str(item.get("url") or ""),
                 str(item.get("vcs") or ""), str(item.get("ref") or ""),
                 str(item.get("revision") or ""), str(item.get("report_directory") or ""),
-                str(item.get("error") or item.get("cleanup_error") or ""),
+                str(item.get("error") or ""), str(item.get("cleanup_error") or ""),
             ]
             stream.write("| " + " | ".join(_md(cell) for cell in cells) + " |\n")
     return [json_path, markdown_path]

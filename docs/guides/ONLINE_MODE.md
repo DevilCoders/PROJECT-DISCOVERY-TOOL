@@ -37,7 +37,9 @@ A browser URL is normalized to the repository: `https://github.com/owner/repo/tr
 `--url FILE` reads a UTF-8 text file with one repository per line:
 
 ```text
-# Blank lines and lines starting with # are ignored; duplicate targets are removed.
+# Blank lines and lines starting with # are ignored; duplicate targets are removed,
+# including equivalent spellings (default ports, a user name, and on GitHub, GitLab,
+# Bitbucket, Gitea/Forgejo and Azure Repos a trailing .git or different case).
 https://github.com/owner/project-a
 https://github.com/owner/project-a ref=v1.4.0          # a second target: the release tag
 https://gitlab.com/group/subgroup/project-b
@@ -207,7 +209,7 @@ At most twice `--api-workers` file contents are in memory at once. A file that a
 
 Parallel reads reserve their bytes before they start, so `--api-max-mb` holds with any number of `--api-workers`. GitLab's tree listing has no file sizes, so a GitLab file's size stays unknown until its content arrives. Until then it is in the `unknown` size bucket, outside `total_bytes`, and counted in `metrics.size_unknown_count`. Files never fetched are listed in a `sizes_unknown` coverage note. For such files, `--skip`/`--max-file-mb` and the per-file and byte budgets are applied while reading. A `Content-Length` above the limit refuses the file before its body is transferred. A response cut off at a limit counts what it transferred (`bytes_discarded`) against `--api-max-mb`.
 
-Everything that works on a local tree works here: all built-in analyzers, the Python import graph, the code index, architecture views, `--inventory-only` (one tree listing, no contents), `--exclude-dir`, `--skip`/`--max-file-mb`, `--fail-on`, `--strict` and `--vuln-online` (lockfiles are kept in memory for the lookup, up to 256 MiB in total). Two exceptions: third-party plugins are not run, because their sandbox receives a file copy on disk (reported as a `plugins_not_run` coverage gap when plugins are installed), and `--resume` is not available.
+Everything that works on a local tree works here: all built-in analyzers, the Python import graph, the code index, architecture views, `--inventory-only` (the tree listing and one request per symlink to read its target, no file contents), `--exclude-dir`, `--skip`/`--max-file-mb`, `--fail-on`, `--strict` and `--vuln-online` (lockfiles are kept in memory for the lookup, up to 256 MiB in total). Two exceptions: third-party plugins are not run, because their sandbox receives a file copy on disk (reported as a `plugins_not_run` coverage gap when plugins are installed), and `--resume` is not available.
 
 Reports record `acquisition: "api"`, `written_to_disk: false`, the API provider and URL, revision, branch and default branch, `private`, `credential_source`, the budgets, `files_fetched`, `bytes_fetched`, `bytes_discarded`, `content_requests`, `api_requests` and per-host request statistics under `metrics.source.remote`, and `scan.network_access: ["provider-api"]`.
 

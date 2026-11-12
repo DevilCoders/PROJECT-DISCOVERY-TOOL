@@ -478,3 +478,49 @@ def test_live_no_download_scan(url: str, tmp_path: Path, monkeypatch):
     assert remote["acquisition"] == "api" and len(remote["revision"]) == 40
     assert report["files"] and remote["files_fetched"] >= 1
     assert remote["api_requests"] <= 60
+
+
+def test_failed_requests_group_by_cause_with_sample_paths(tmp_path: Path, monkeypatch):
+    # Regression: each failed file had its own reason (the request path was part of it),
+    # so one systematic failure became one UNKNOWN finding per file.
+    from project_discovery.online import memory_scan
+    from project_discovery.online.http import NetworkError
+
+    original = memory_scan.NoDownloadSource._fetch
+
+    def failing(self, record):
+        if record.path.endswith(".py"):
+            reason, reservation = self._reserve(record)
+            self._settle(reservation, 0)
+            cause = "HTTP 404"
+            return None, f"content request failed ({cause} from {self._api_host})"
+        return original(self, record)
+
+    monkeypatch.setattr(memory_scan.NoDownloadSource, "_fetch", failing)
+    with RunningProviders(ProviderService()) as running:
+        _main(monkeypatch, "scan", PROVIDERS["github"][0], "--no-download", "--api-url",
+              running.url + "/github", "--output", str(tmp_path / "out"), "--quiet", "--format", "json")
+    report = _report(tmp_path / "out")
+    gaps = [item for item in report["metrics"]["source"]["remote"]["coverage"] if "HTTP 404" in item["detail"]]
+    assert len(gaps) == 1 and gaps[0]["count"] >= 3 and gaps[0]["samples"]
+    assert NetworkError  # imported for the shape of the real failure
+
+
+def test_a_rate_limit_while_listing_keeps_the_listed_entries(tmp_path: Path, monkeypatch):
+    # Regression: a budget or rate limit during a tree walk failed the whole repository.
+    from project_discovery.online import providers
+    from project_discovery.online.http import NetworkError
+
+    def partial_tree(self, revision):
+        self._listed.append(providers.TreeEntry("README.md", "file", 10, "1" * 40, False))
+        raise NetworkError("rate limited", kind="rate_limit", retry_after=3600)
+
+    monkeypatch.setattr(providers.GitHubClient, "tree", partial_tree)
+    with RunningProviders(ProviderService()) as running:
+        code = _main(monkeypatch, "scan", PROVIDERS["github"][0], "--no-download", "--api-url",
+                     running.url + "/github", "--output", str(tmp_path / "out"), "--quiet", "--format", "json")
+    assert code == cli.EXIT_OK
+    report = _report(tmp_path / "out")
+    assert [item["path"] for item in report["files"]] == ["README.md"]
+    kinds = {item["kind"]: item for item in report["metrics"]["source"]["remote"]["coverage"]}
+    assert "stopped early" in kinds["tree_truncated"]["detail"]

@@ -414,3 +414,12 @@ def test_scan_result_to_dict_writes_the_schema_it_stamps():
 
     data = ScanResult("/r", "start", "end", metrics={"source": {"mode": "local"}}).to_dict()
     assert data["scan"]["source"] == "local"
+
+
+def test_an_online_lookup_that_sent_nothing_is_not_network_use():
+    from project_discovery.reporting.writers import scan_summary
+
+    idle = {"vulnerability_intelligence": {"online": {"coverage": "not_applicable", "requests": {"requests": 0}}}}
+    assert scan_summary(idle)["mode"] == "local"
+    used = {"vulnerability_intelligence": {"online": {"coverage": "complete", "requests": {"requests": 3}}}}
+    assert scan_summary(used)["network_access"] == ["osv.dev"]

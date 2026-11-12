@@ -238,6 +238,14 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   constructors resolves uniquely (PDT-324); nested functions no longer inflate complexity
   (PDT-325); Rust `use crate::` paths resolve and PHP function/trait imports are read
   correctly (PDT-326); Go locks need a deferred release (PDT-327).
+- No-download: failures group by cause with sample paths (PDT-330), and a limit hit while
+  listing keeps a truncated inventory (PDT-331); API scans are described as such (PDT-332).
+- Git metadata: valueless config keys, remote HEADs, nested `.gitmodules`/`.gitattributes`,
+  Codeberg (PDT-333).
+- Batch summaries: absolute or null report directories, no clone progress, separate cleanup
+  errors (PDT-334); equivalent repository spellings are scanned once (PDT-335); Git over
+  `http://` works with `--allow-insecure-transport` (PDT-336); `.cmd`/`.bat` wrappers are
+  not reported as available (PDT-337); a lookup that sent no request is not online (PDT-338).
 
 ## 0.2.0 — 2026-11-05
 

@@ -146,10 +146,14 @@ def remote_vcs_capabilities() -> dict[str, dict[str, str | bool | list[str] | No
             resolved = shutil.which(name)
             if resolved:
                 break
+        wrapper = bool(resolved) and _WINDOWS and resolved.lower().endswith((".cmd", ".bat"))
         capabilities[backend] = {
-            "available": resolved is not None,
+            # A .cmd/.bat wrapper (Scoop installs some clients that way) cannot be started
+            # without cmd.exe, which would re-parse repository URLs: it is not available.
+            "available": resolved is not None and not wrapper,
             "executable": resolved,
             "alternatives": list(executable_names),
+            **({"note": "only a .cmd/.bat wrapper was found; install the client's .exe"} if wrapper else {}),
         }
     return capabilities
 
@@ -205,6 +209,23 @@ class _Coverage:
             "coverage": list(self.items),
             "warnings": [item["detail"] for item in self.items] + list(self.notes),
         }
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80, "ssh": 22, "git": 9418}
+# Hosts whose repository paths ignore case and accept an optional ``.git`` suffix.
+_CASE_INSENSITIVE_PROVIDERS = frozenset({
+    "GitHub", "GitHub Enterprise", "GitLab", "GitLab self-managed", "Bitbucket", "Gitea", "Forgejo",
+    "Azure Repos",
+})
+
+
+def _identity_path(path: str, folded: bool) -> str:
+    path = path.rstrip("/")
+    if folded:
+        path = path.casefold()
+        if path.endswith(".git"):
+            path = path[:-4]
+    return path
 
 
 def is_remote_target(value: str) -> bool:
@@ -363,8 +384,8 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto", ref: str | None = No
         parsed = urlsplit(clone_url)
         scheme = parsed.scheme.lower()
         allowed_schemes = {
-            "git": {"https", "ssh", "git"},
-            "jj": {"https", "ssh", "git"},
+            "git": {"https", "http", "ssh", "git"},
+            "jj": {"https", "http", "ssh", "git"},
             "hg": {"https", "ssh", "http"},
             "svn": {"https", "ssh", "svn", "http"},
             "bzr": {"https", "ssh", "bzr"},
@@ -436,8 +457,10 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto", ref: str | None = No
     if scp and selected_vcs not in {"git", "jj"}:
         raise RemoteScanError("SCP-style URLs are supported only for Git and Jujutsu remotes.")
 
-    if selected_vcs == "git" and scheme not in {"https", "ssh", "git"}:
-        raise RemoteScanError("Git repository transport must use HTTPS, SSH or git://.")
+    if selected_vcs == "git" and scheme not in {"https", "http", "ssh", "git"}:
+        # http:// and git:// are plain text: check_transport_policy refuses them unless
+        # --allow-insecure-transport is given.
+        raise RemoteScanError("Git repository transport must use HTTPS, SSH, git:// or http://.")
     if selected_vcs == "svn" and scheme == "git":
         raise RemoteScanError("Subversion does not support the git:// transport.")
     if selected_vcs == "hg" and scheme == "git":
@@ -447,12 +470,18 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto", ref: str | None = No
     path_for_name = path.rstrip("/").split("/")[-1] or host
     repository_name = path_for_name[:-4] if path_for_name.lower().endswith(".git") else path_for_name
     repository_name = repository_name or host
+    # Equivalent spellings share an identity (and so are scanned once): no default port or
+    # user name, and on the large hosts no ``.git`` suffix and no case in the path.
+    folded = provider in _CASE_INSENSITIVE_PROVIDERS
     if scp:
-        safe_identity = f"ssh://{host}/{path.lstrip('/')}"
+        safe_identity = f"ssh://{host.lower()}/{_identity_path(path.lstrip('/'), folded)}"
     else:
         normalized = urlsplit(clone_url)
+        identity_host = (normalized.hostname or "").lower()
+        if normalized.port is not None and normalized.port != _DEFAULT_PORTS.get(scheme.lower()):
+            identity_host += f":{normalized.port}"
         safe_identity = urlunsplit((
-            scheme.lower(), (normalized.netloc or "").lower(), normalized.path, "", "",
+            scheme.lower(), identity_host, _identity_path(normalized.path, folded), "", "",
         ))
     identity_source = f"{selected_vcs}|{safe_identity}"
     if selected_ref is not None:
@@ -1151,7 +1180,7 @@ def _git_checkout(
     else:
         clone_command = [
             "git", *config,
-            "clone", "--no-checkout", "--depth", "1", "--single-branch", "--no-tags",
+            "clone", "--quiet", "--no-checkout", "--depth", "1", "--single-branch", "--no-tags",
             "--no-recurse-submodules", "--template", str(template),
             "--separate-git-dir", str(git_dir),
         ]

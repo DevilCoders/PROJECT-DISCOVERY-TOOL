@@ -93,7 +93,8 @@ def test_remote_target_preserves_ssh_user_and_case_sensitive_repository_path():
 
     assert ssh.clone_url == "ssh://git@github.com/Acme/Project.git"
     assert scp.clone_url == "git@github.com:Acme/Project.git"
-    assert ssh.identity != lower.identity
+    # GitHub paths ignore case: one repository, one identity; the clone URL stays as written.
+    assert ssh.identity == lower.identity
     assert ssh.repository_name == "Project"
 
 
@@ -103,7 +104,6 @@ def test_remote_target_preserves_ssh_user_and_case_sensitive_repository_path():
         "https://token:secret@github.com/acme/project.git",
         "https://github.com/acme/project.git?access_token=secret",
         "https://github.com/acme/project.git?private_token=secret",
-        "http://github.com/acme/project.git",
         "file:///tmp/project.git",
         "ftp://example.com/project.git",
     ],
@@ -164,8 +164,9 @@ def test_url_file_supports_mixed_providers_comments_and_deduplication(tmp_path: 
 
     targets = remote.load_remote_targets(url_file)
 
+    # Acme/Project and acme/project are one GitHub repository (paths ignore case).
     assert [item.provider for item in targets] == [
-        "GitHub", "GitLab", "Bitbucket", "GitHub", "GitHub",
+        "GitHub", "GitLab", "Bitbucket", "GitHub",
     ]
     assert len({item.identity for item in targets}) == len(targets)
     assert targets[0].clone_url == "https://github.com/acme/widgets"
@@ -707,3 +708,30 @@ def _symlinks_supported(directory: Path) -> bool:
         return False
     probe.unlink()
     return True
+
+
+def test_equivalent_repository_spellings_share_an_identity():
+    # Regression: owner/repo, owner/repo.git, Owner/Repo and :443 were four targets.
+    spellings = (
+        "https://github.com/acme/app", "https://github.com/acme/app.git",
+        "https://github.com/Acme/App", "https://github.com:443/acme/app",
+    )
+    assert len({remote.parse_remote_target(url).identity for url in spellings}) == 1
+    # Elsewhere case and .git can name different repositories.
+    generic = ("https://git.example.net/acme/app", "https://git.example.net/acme/App")
+    assert len({remote.parse_remote_target(url).identity for url in generic}) == 2
+
+
+def test_git_over_http_is_accepted_only_as_an_insecure_transport():
+    target = remote.parse_remote_target("http://git.internal.example/team/app.git")
+    assert target.vcs == "git" and target.insecure_transport is True
+    with pytest.raises(remote.RemoteScanError):
+        remote.check_transport_policy(target, allow_insecure=False)
+    remote.check_transport_policy(target, allow_insecure=True)
+
+
+def test_windows_script_wrappers_are_not_reported_as_available(monkeypatch):
+    monkeypatch.setattr(remote, "_WINDOWS", True)
+    monkeypatch.setattr(remote.shutil, "which", lambda name: f"C:\\scoop\\shims\\{name}.cmd")
+    capabilities = remote.remote_vcs_capabilities()
+    assert capabilities["hg"]["available"] is False and "wrapper" in capabilities["hg"]["note"]

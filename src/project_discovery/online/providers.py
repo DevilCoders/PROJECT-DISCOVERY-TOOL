@@ -159,6 +159,19 @@ def _link_next(headers) -> str | None:
 
 class ProviderClient:
     name = ""
+    _listed: list = []  # replaced per listing; tree() appends to it as it goes
+
+    def listing(self, revision: "ResolvedRevision") -> tuple[list["TreeEntry"], bool, "NetworkError | None"]:
+        """tree(), keeping the entries listed so far when the request budget or the rate
+        limit runs out: the inventory is then truncated, not the whole target failed."""
+        self._listed = []
+        try:
+            entries, truncated = self.tree(revision)
+        except NetworkError as exc:
+            if exc.kind not in {"budget", "rate_limit"}:
+                raise
+            return list(self._listed), True, exc
+        return entries, truncated, None
 
     def __init__(
         self, http: HttpClient, *, api_url: str, repository: str, host: str,
@@ -283,6 +296,7 @@ class GitHubClient(ProviderClient):
             return self._entries(payload), False
         # Very large trees: walk directory by directory (one request per directory).
         entries: list[TreeEntry] = []
+        self._listed = entries  # kept when the listing stops early (see listing())
         pending = [("", revision.tree_id)]
         while pending:
             prefix, sha = pending.pop()
@@ -332,6 +346,7 @@ class GitLabClient(ProviderClient):
 
     def tree(self, revision):
         entries: list[TreeEntry] = []
+        self._listed = entries  # kept when the listing stops early (see listing())
         url = (f"{self._project()}/repository/tree?ref={urllib.parse.quote(revision.revision, safe='')}"
                "&recursive=true&per_page=100&pagination=keyset")
         pages = 0
@@ -390,6 +405,7 @@ class BitbucketClient(ProviderClient):
 
     def tree(self, revision):
         entries: list[TreeEntry] = []
+        self._listed = entries  # kept when the listing stops early (see listing())
         url = f"{self._repo()}/src/{revision.revision}/?max_depth=1000&pagelen=100"
         pages = 0
         while url:
@@ -463,6 +479,7 @@ class GiteaClient(ProviderClient):
 
     def tree(self, revision):
         entries: list[TreeEntry] = []
+        self._listed = entries  # kept when the listing stops early (see listing())
         page = 1
         while True:
             payload, _ = self._json(

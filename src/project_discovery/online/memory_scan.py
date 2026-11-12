@@ -19,6 +19,7 @@ import secrets
 import tempfile
 import threading
 import time
+import urllib.parse
 from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -125,6 +126,7 @@ class NoDownloadSource:
             credential=self.credential, budget=self.budget,
         )
         self.virtual_root = _virtual_root(target.identity)
+        self._api_host = urllib.parse.urlsplit(self.api_url).hostname or "the provider API"
         self.revision: ResolvedRevision | None = None
         self.entries: dict[str, TreeEntry] = {}
         self.lockfiles: dict[str, str] = {}
@@ -138,6 +140,7 @@ class NoDownloadSource:
         self._skip_bytes: int | None = None
         self._stop_reason: str | None = None
         self._stop_kind: str | None = None
+        self._listing_cause: str | None = None
         self.counters: Counter[str] = Counter()
         self.skipped: dict[str, list[str]] = {}
         self.started = time.monotonic()
@@ -199,7 +202,10 @@ class NoDownloadSource:
         assert self.revision is not None, "open() must be called first"
         # A file whose size the listing lacks (GitLab) is checked against --skip when read.
         self._skip_bytes = max_file_bytes if skip_oversized else None
-        entries, truncated = self.client.tree(self.revision)
+        entries, truncated, listing_error = self.client.listing(self.revision)
+        if listing_error is not None:
+            # Content requests would hit the same exhausted limit: stop them now.
+            self._listing_cause = self._stop_for(listing_error)
         excluded = {item.replace("\\", "/").strip("/").casefold() for item in ignores or () if item.strip("/")}
         stats: Counter[str] = Counter()
         store.clear()
@@ -429,7 +435,9 @@ class NoDownloadSource:
                 return None, cap_reason
             if exc.kind in {"rate_limit", "budget"}:
                 return None, self._stop_for(exc)
-            return None, f"content request failed ({exc.kind}: {exc})"
+            # The cause without the file's path: one coverage gap per cause, with samples.
+            cause = f"HTTP {exc.status}" if exc.status else exc.kind
+            return None, f"content request failed ({cause} from {self._api_host})"
         finally:
             self._settle(reservation, used)
         with self._lock:
@@ -490,17 +498,23 @@ class NoDownloadSource:
         """Record coverage, request use and timing; returns the source metadata."""
         coverage = []
 
-        def add(kind: str, count: int, detail: str, incomplete: bool) -> None:
+        def add(kind: str, count: int, detail: str, incomplete: bool, samples=None) -> None:
             if count:
-                coverage.append({"kind": kind, "count": count, "detail": detail, "incomplete": incomplete})
+                item = {"kind": kind, "count": count, "detail": detail, "incomplete": incomplete}
+                if samples:
+                    item["samples"] = samples
+                coverage.append(item)
 
         add("tree_truncated", self.counters["tree_truncated"],
-            "The provider returned a truncated tree listing; some paths are missing from the inventory.", True)
+            (f"The tree listing stopped early ({self._listing_cause}); some paths are missing from the inventory."
+             if self._listing_cause else
+             "The provider returned a truncated tree listing; some paths are missing from the inventory."), True)
         add("paths_not_materialized", self.counters["invalid_tree_paths"],
             f"{self.counters['invalid_tree_paths']:,} tree path(s) were malformed or unsafe and were not inventoried.", True)
         for reason, paths in sorted(self.skipped.items()):
             add("content_not_fetched", len(paths),
-                f"{len(paths):,} file(s) were inventoried but their content was not fetched: {reason}.", True)
+                f"{len(paths):,} file(s) were inventoried but their content was not fetched: {reason}.", True,
+                samples=sorted(paths)[:20])
         add("sizes_unknown", self.counters["sizes_unknown"],
             f"{self.counters['sizes_unknown']:,} file(s) have no size in the provider's tree listing and "
             "were not fetched; size totals and buckets leave them out (bucket 'unknown').", False)
