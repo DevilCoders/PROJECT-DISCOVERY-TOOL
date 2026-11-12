@@ -216,6 +216,13 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   (PDT-300).
 - Malformed advisory records are skipped at import and never crash matching (PDT-301); an
   advisory confirmed by any of its affected entries is confirmed (PDT-302).
+- Skipped lockfiles count as unchecked, online and offline, and incomplete lookups name their
+  cause (PDT-303); advisory cache entries are scoped to their endpoint (PDT-304); enrichment
+  adds CVE/GHSA aliases (PDT-305).
+- License analysis reads workspace, Poetry and `LICENSE-*` declarations (PDT-306) and SPDX
+  headers in any encoding and size, from comments only (PDT-307).
+- Dependency manifests tolerate empty sections and read more declaration forms (PDT-308);
+  Cabal fields and go.mod comments are no longer dependencies (PDT-309).
 
 ## 0.2.0 — 2026-11-05
 

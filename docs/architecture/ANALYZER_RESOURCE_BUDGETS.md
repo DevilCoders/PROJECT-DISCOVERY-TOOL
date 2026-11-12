@@ -23,6 +23,7 @@ These are per-analyzer safety limits, not a global scan-size policy. They are cu
 | Coverage artifact parsing | 64 MiB per file | Bounded UTF-8 read before JSON/XML/LCOV parsing | UNKNOWN on oversize/growth/parse failure |
 | Generic lockfile inventory | 128 MiB per lockfile; 250,000 retained package/version entries | Bounded one-buffer read; JSON/TOML objects parsed in memory; text formats iterated from bounded in-memory content | UNKNOWN on byte or entry-count limit |
 | Local vulnerability lockfiles | 128 MiB per lockfile; 250,000 retained package/version entries | Bounded one-buffer read; JSON/TOML objects parsed in memory; text formats iterated from bounded in-memory content | UNKNOWN on byte or entry-count limit |
+| License headers and declarations | First 64 KiB of each source or license file (lenient decoding); 8 MiB per package manifest | Bounded prefix read through a verified descriptor | Files are checked within the header window; an unparsable manifest is an UNKNOWN finding |
 | Text/HTML/RST documents | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
 | Markdown | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
 | PDF/DOCX documents | 16 MiB compressed input; PDF 5,000 pages; extracted text 16 MiB; DOCX 10,000 entries and 32 MiB total declared uncompressed data | Bounded bytes; DOCX ZIP metadata/ratio checks before python-docx | UNKNOWN on input, page, text, package entry or uncompressed-byte budget stop |

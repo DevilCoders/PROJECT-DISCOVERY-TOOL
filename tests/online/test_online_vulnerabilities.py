@@ -704,3 +704,36 @@ def test_nvd_records_with_null_lists_are_read_as_empty():
     record = normalize_nvd_cve({"id": "CVE-2026-0001", "weaknesses": None, "references": None,
                                 "descriptions": None, "metrics": None})
     assert record is not None and record["cwes"] == []
+
+
+def test_cache_keys_are_scoped_to_their_endpoint(tmp_path):
+    # Regression: keys omitted the service URL, so a second mirror within the TTL got the
+    # first mirror's answers under its own name.
+    from project_discovery.online.cache import endpoint_key
+
+    first = endpoint_key("https://osv-a.example/", "osv:query:npm\x1flodash\x1f4.17.20")
+    second = endpoint_key("https://osv-b.example", "osv:query:npm\x1flodash\x1f4.17.20")
+    assert first != second
+    cache = ResponseCache(tmp_path / "cache.sqlite3", ttl_seconds=3600)
+    try:
+        cache.put(first, ["GHSA-1"])
+        assert cache.get(second) is None and cache.get(first) == ["GHSA-1"]
+    finally:
+        cache.close()
+
+
+def test_enriched_identifiers_become_aliases():
+    from project_discovery.online.vulnerabilities import _enriched_identifiers
+
+    advisory = {"id": "GHSA-35jh-r3h4-6jhm", "aliases": []}
+    details = {"GHSA-35jh-r3h4-6jhm": {"cve_id": "CVE-2021-23337", "identifiers": ["GHSA-35jh-r3h4-6jhm", "CVE-2021-23337"]}}
+    assert _enriched_identifiers(advisory, details) == {"CVE-2021-23337"}
+
+
+def test_incomplete_online_lookups_name_their_cause():
+    from project_discovery.reporting.writers import online_gap_text
+
+    assert online_gap_text({"advisory_details_unavailable": 2}) == "2 advisory record(s) could not be loaded"
+    assert online_gap_text({"lockfiles_content_skipped": 1, "packages_failed": 3}) == (
+        "3 package(s) could not be checked; 1 lockfile(s) were skipped by --skip"
+    )

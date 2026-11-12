@@ -377,6 +377,11 @@ def _run_online_vulnerability_lookup(
     status = result.status
     if skipped:
         status["lockfiles_content_skipped"] = len(skipped)
+        # A lockfile skipped by --skip is a lockfile not checked: the lookup is partial,
+        # never "not applicable" (no lockfiles) or complete.
+        status["lockfiles"] = int(status.get("lockfiles", 0)) + len(skipped)
+        if status.get("coverage") in {"not_applicable", "complete"}:
+            status["coverage"] = "partial"
         finding_store.append_finding(Finding(
             "vulnerabilities",
             f"Lockfile(s) not checked online because of --skip: {len(skipped):,}",
@@ -830,6 +835,23 @@ def run_scan(
                 memory_metadata = memory_source.finalize()
                 finding_store.extend_diagnostics(memory_metadata.get("coverage_gaps", []))
                 finding_store.extend_findings(_remote_coverage_findings(memory_metadata))
+            if vulnerability_db is not None and not inventory_only:
+                skipped_lockfiles = [
+                    record.path for record in records
+                    if record.content_skipped_reason and Path(record.path).name.lower() in LOCKFILE_NAMES
+                ]
+                if skipped_lockfiles:
+                    # The offline matcher never sees these: say so, as the online lookup does.
+                    vulnerability_db_status["lockfiles_content_skipped"] = len(skipped_lockfiles)
+                    finding_store.append_finding(Finding(
+                        "vulnerabilities",
+                        f"Lockfile(s) not checked against the local advisory database: {len(skipped_lockfiles):,}",
+                        f"{len(skipped_lockfiles):,} lockfile(s) were skipped by --skip/--max-file-mb, so their "
+                        "packages were not matched. This is not evidence that they are free of known "
+                        "vulnerabilities.",
+                        confidence="UNKNOWN", evidence=skipped_lockfiles[:20],
+                        analyzer="local-vulnerability-intelligence", severity="LOW",
+                    ))
             if online_vulnerabilities is not None:
                 # Coordinator only: worker processes never touch the network.
                 vulnerability_db_status["online"] = _run_online_vulnerability_lookup(

@@ -30,6 +30,15 @@ CREATE INDEX IF NOT EXISTS idx_responses_expiry ON responses(expires_at);
 """
 
 
+def endpoint_key(base_url: str, key: str) -> str:
+    """A cache key scoped to the service that answers it.
+
+    Without the endpoint, a run against another mirror within the TTL reused the first
+    mirror's answers and named the new endpoint as their source.
+    """
+    return f"{base_url.rstrip('/')}\x1e{key}"
+
+
 def default_cache_path() -> Path:
     return Path.home() / ".pdt" / "online-vulnerability-cache.sqlite3"
 

@@ -10,7 +10,7 @@ import re
 import urllib.parse
 from typing import Any
 
-from .cache import ResponseCache
+from .cache import ResponseCache, endpoint_key
 from .http import HttpClient, NetworkError, RateLimiter, validate_service_url
 
 NVD_API_URL = "https://services.nvd.nist.gov"
@@ -57,7 +57,7 @@ class NvdClient:
     def cve(self, cve_id: str) -> dict[str, Any] | None:
         if not is_cve_id(cve_id):
             raise NetworkError("invalid CVE identifier", kind="protocol")
-        key = f"nvd:cve:{cve_id}"
+        key = endpoint_key(self.base_url, f"nvd:cve:{cve_id}")
         cached = self.cache.get(key)
         if isinstance(cached, dict):
             return None if cached.get("_pdt_missing") else cached
@@ -156,7 +156,7 @@ class GhsaClient:
     def advisory(self, ghsa_id: str) -> dict[str, Any] | None:
         if not is_ghsa_id(ghsa_id):
             raise NetworkError("invalid GHSA identifier", kind="protocol")
-        key = f"ghsa:advisory:{ghsa_id}"
+        key = endpoint_key(self.base_url, f"ghsa:advisory:{ghsa_id}")
         cached = self.cache.get(key)
         if isinstance(cached, dict):
             return None if cached.get("_pdt_missing") else cached

@@ -105,6 +105,14 @@ $("source-notes").textContent=sourceNotes.length?"Notes: "+sourceNotes.map(Strin
 
 const vulnMeta=metrics.vulnerability_intelligence||{enabled:false};
 const onlineMeta=(vulnMeta.online&&typeof vulnMeta.online==="object")?vulnMeta.online:null;
+// Why an online lookup is incomplete, from its actual gap counters (as the Markdown report).
+function onlineGaps(meta){
+ const parts=[["packages_failed","package(s) could not be checked"],["packages_not_queried","package(s) beyond the query limit were not checked"],
+  ["lockfiles_unreadable","lockfile(s) could not be read"],["lockfiles_content_skipped","lockfile(s) were skipped by --skip"],
+  ["advisory_details_unavailable","advisory record(s) could not be loaded"]].filter(function(pair){return Number(meta[pair[0]]||0)>0;})
+  .map(function(pair){return number(meta[pair[0]])+" "+pair[1];});
+ return parts.length?parts.join("; "):"see the UNKNOWN findings for the cause";
+}
 const allFindings=REPORT.findings||[];
 // Complete per-category counts and dedicated samples; older payloads lack them.
 const categoryTotals=(totals.categories&&typeof totals.categories==="object")?totals.categories:null;
@@ -147,7 +155,7 @@ keyValues($("vuln-provenance"),onlineMeta?(onlineMeta.coverage==="skipped"?[["On
 const onlineIncomplete=Boolean(onlineMeta&&(onlineMeta.coverage==="partial"||onlineMeta.coverage==="unavailable"));
 const coverageWarning=$("vuln-coverage-warning");
 coverageWarning.textContent=onlineIncomplete
- ? "Online vulnerability lookup is "+String(onlineMeta.coverage)+": "+number(onlineMeta.packages_failed||0)+" package(s) could not be checked and "+number(onlineMeta.lockfiles_unreadable||0)+" lockfile(s) could not be read. This is not a vulnerability-free result; see the UNKNOWN findings."
+ ? "Online vulnerability lookup is "+String(onlineMeta.coverage)+": "+onlineGaps(onlineMeta)+". This is not a vulnerability-free result; see the UNKNOWN findings."
  : "";
 coverageWarning.classList.toggle("hidden",!onlineIncomplete);
 $("vuln-db-updated").textContent=vulnMeta.last_imported_at

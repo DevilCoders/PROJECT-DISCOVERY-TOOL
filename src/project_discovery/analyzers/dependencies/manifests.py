@@ -15,7 +15,21 @@ from ...models import FileRecord, Finding
 from ..base import Analyzer
 
 _REQUIREMENT = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
-_GO_REQUIRE = re.compile(r"^\s*([A-Za-z0-9._~+/-]+)\s+(v?[^\s]+)")
+# A module path starts with a letter or digit: a "// Web stack" comment is not a module.
+_GO_REQUIRE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._~+/-]*+)\s+(v?[^\s]+)")
+# Another field of a Cabal stanza ("hs-source-dirs:") ends a build-depends continuation.
+_CABAL_FIELD = re.compile(r"^\s+[A-Za-z][A-Za-z0-9-]*+\s*:")
+
+
+def _table(data: Any, key: str) -> dict:
+    """``data[key]`` when it is a table; {} for a missing or empty section (``dev_dependencies:``)."""
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _array(data: Any, key: str) -> list:
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, list) else []
 
 
 def _constraint(value: Any) -> str:
@@ -35,18 +49,32 @@ def _constraint(value: Any) -> str:
 
 def _python_requirement(value: str) -> tuple[str, str] | None:
     text = value.strip()
-    if not text or text.startswith("#") or text.startswith("-"):
+    if not text or text.startswith("#"):
         return None
+    text = text.removesuffix("\\").strip()  # pip-compile ``pkg==1.0 \`` hash continuations
+    if text.startswith(("-e ", "--editable ")):
+        text = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
     if "#egg=" in text:
         name = text.split("#egg=", 1)[1].split("&", 1)[0]
         return (name, "direct URL") if name else None
+    if not text or text.startswith("-"):
+        return None
     match = _REQUIREMENT.match(text)
     if not match:
         return None
-    return match.group(1), text[match.end():].strip() or "unspecified"
+    rest = text[match.end():].strip()
+    if rest.startswith("@"):  # PEP 508 ``name @ https://...`` direct reference
+        return match.group(1), "direct URL"
+    return match.group(1), rest or "unspecified"
 
 
 _MAX_DEPENDENCY_MANIFEST_BYTES = 32 * 1024 * 1024
+
+
+def _requirements_file(path: str) -> bool:
+    """requirements*.txt anywhere, and every .txt under a requirements/ directory."""
+    parts = path.replace("\\", "/").lower().split("/")
+    return parts[-1].startswith("requirements") or (len(parts) > 1 and parts[-2] == "requirements")
 
 
 class DependencyManifestAnalyzer(Analyzer):
@@ -62,13 +90,14 @@ class DependencyManifestAnalyzer(Analyzer):
         "cpanfile", "cmakelists.txt", "conanfile.txt", "conanfile.py",
         "platformio.ini", "description", "package.xml", "vcpkg.json",
         "dub.json", "haxelib.json", "shard.yml", "fpm.toml",
+        "packages.config", "directory.packages.props",
     }
 
     def supports(self, record: FileRecord) -> bool:
         name = Path(record.path).name.lower()
         return record.error is None and (
             name in self._supported_names
-            or (name.startswith("requirements") and record.extension == ".txt")
+            or (_requirements_file(record.path) and record.extension == ".txt")
             or name.endswith((".csproj", ".fsproj", ".vbproj", ".gemspec", ".cabal", ".opam", ".nimble", ".rockspec"))
         )
 
@@ -128,25 +157,31 @@ class DependencyManifestAnalyzer(Analyzer):
 
         if name == "pyproject.toml":
             data = tomllib.loads(content)
-            project = data.get("project", {})
-            for item in project.get("dependencies", []):
-                parsed = _python_requirement(item)
+            project = _table(data, "project")
+            for item in _array(project, "dependencies"):
+                parsed = _python_requirement(item) if isinstance(item, str) else None
                 if parsed:
                     add(parsed[0], parsed[1], "project.dependencies")
-            for group, items in project.get("optional-dependencies", {}).items():
-                for item in items:
-                    parsed = _python_requirement(item)
+            for group, items in _table(project, "optional-dependencies").items():
+                for item in items if isinstance(items, list) else []:
+                    parsed = _python_requirement(item) if isinstance(item, str) else None
                     if parsed:
                         add(parsed[0], parsed[1], f"project.optional-dependencies.{group}")
-            poetry = data.get("tool", {}).get("poetry", {})
-            for group, dependencies in [("poetry.dependencies", poetry.get("dependencies", {}))]:
-                for dep_name, constraint in dependencies.items():
+            # PEP 735 dependency groups; an {include-group = ...} entry names another group.
+            for group, items in _table(data, "dependency-groups").items():
+                for item in items if isinstance(items, list) else []:
+                    parsed = _python_requirement(item) if isinstance(item, str) else None
+                    if parsed:
+                        add(parsed[0], parsed[1], f"dependency-groups.{group}")
+            poetry = _table(_table(data, "tool"), "poetry")
+            for group, key in (("poetry.dependencies", "dependencies"), ("poetry.dev-dependencies", "dev-dependencies")):
+                for dep_name, constraint in _table(poetry, key).items():
                     if dep_name.lower() != "python":
                         add(dep_name, constraint, group)
-            for group_name, group_data in poetry.get("group", {}).items():
-                for dep_name, constraint in group_data.get("dependencies", {}).items():
+            for group_name, group_data in _table(poetry, "group").items():
+                for dep_name, constraint in _table(group_data, "dependencies").items():
                     add(dep_name, constraint, f"tool.poetry.group.{group_name}")
-        elif name.startswith("requirements") and path.suffix.lower() == ".txt":
+        elif _requirements_file(record.path) and path.suffix.lower() == ".txt":
             for line in content.splitlines():
                 parsed = _python_requirement(line.split(" #", 1)[0])
                 if parsed:
@@ -158,16 +193,18 @@ class DependencyManifestAnalyzer(Analyzer):
                 if name == "package.json" else ("require", "require-dev")
             )
             for group in groups:
-                for dep_name, constraint in data.get(group, {}).items():
+                for dep_name, constraint in _table(data, group).items():
                     add(dep_name, constraint, group)
         elif name == "cargo.toml":
             data = tomllib.loads(content)
             for group in ("dependencies", "dev-dependencies", "build-dependencies"):
-                for dep_name, constraint in data.get(group, {}).items():
+                for dep_name, constraint in _table(data, group).items():
                     add(dep_name, constraint, group)
-            for target, target_data in data.get("target", {}).items():
+            for dep_name, constraint in _table(_table(data, "workspace"), "dependencies").items():
+                add(dep_name, constraint, "workspace.dependencies")
+            for target, target_data in _table(data, "target").items():
                 for group in ("dependencies", "dev-dependencies", "build-dependencies"):
-                    for dep_name, constraint in target_data.get(group, {}).items():
+                    for dep_name, constraint in _table(target_data, group).items():
                         add(dep_name, constraint, f"target.{target}.{group}")
         elif name == "go.mod":
             lines = content.splitlines()
@@ -180,7 +217,9 @@ class DependencyManifestAnalyzer(Analyzer):
                 if in_require_block and stripped == ")":
                     in_require_block = False
                     continue
-                candidate = stripped
+                candidate = stripped.split("//", 1)[0].strip()
+                if not candidate:
+                    continue
                 if candidate.startswith("require "):
                     candidate = candidate[len("require "):]
                 elif not in_require_block:
@@ -273,18 +312,18 @@ class DependencyManifestAnalyzer(Analyzer):
                     ("dependency_overrides", "dependency_overrides"),
                 )
                 for group, key in groups:
-                    for dep_name, constraint in data.get(key, {}).items():
+                    for dep_name, constraint in _table(data, key).items():
                         if dep_name not in {"flutter", "sdk"}:
                             add(dep_name, constraint, group)
         elif name == "pipfile":
             data = tomllib.loads(content)
             for group in ("packages", "dev-packages"):
-                for dep_name, constraint in data.get(group, {}).items():
+                for dep_name, constraint in _table(data, group).items():
                     add(dep_name, constraint, f"Pipfile [{group}]")
         elif name == "project.toml":
             data = tomllib.loads(content)
-            dependencies = data.get("deps", {})
-            compatibility = data.get("compat", {})
+            dependencies = _table(data, "deps")
+            compatibility = _table(data, "compat")
             for dep_name, uuid in dependencies.items():
                 add(dep_name, compatibility.get(dep_name, f"uuid:{uuid}"), "Julia Project.toml [deps]")
         elif name == "description":
@@ -353,7 +392,7 @@ class DependencyManifestAnalyzer(Analyzer):
                 if re.match(r"^\s*(?:build-depends|library|executable|test-suite)\s*:", line, re.I):
                     active = True
                     value = line.split(":", 1)[1]
-                elif active and line[:1].isspace():
+                elif active and line[:1].isspace() and not _CABAL_FIELD.match(line):
                     value = line.strip()
                 else:
                     active = False
@@ -373,30 +412,24 @@ class DependencyManifestAnalyzer(Analyzer):
             pattern = re.compile(r"""(?im)^\s*requires\s+["']([^"']+)["'](?:\s*,\s*["']([^"']+)["'])?""")
             for dep_name, constraint in pattern.findall(content):
                 add(dep_name, constraint or "unspecified", "Nimble requires")
-        elif name == "package.xml":
-            root = safe_xml_fromstring(content)
-            for element in root.iter():
-                tag = element.tag.rsplit("}", 1)[-1].lower()
-                if tag in {"depend", "build_depend", "buildtool_depend", "exec_depend", "test_depend"} and element.text:
-                    add(element.text.strip(), "unspecified", f"ROS {tag}")
         elif name == "vcpkg.json":
             data = json.loads(content)
-            for dependency in data.get("dependencies", []):
+            for dependency in _array(data, "dependencies"):
                 if isinstance(dependency, str):
                     add(dependency, "baseline/unspecified", "vcpkg dependencies")
                 elif isinstance(dependency, dict) and dependency.get("name"):
                     add(dependency["name"], dependency.get("version>=", dependency.get("version", "unspecified")), "vcpkg dependencies")
         elif name == "dub.json":
             data = json.loads(content)
-            for dep_name, constraint in data.get("dependencies", {}).items():
+            for dep_name, constraint in _table(data, "dependencies").items():
                 add(dep_name, constraint, "DUB dependencies")
         elif name == "haxelib.json":
             data = json.loads(content)
-            for dep_name, constraint in data.get("dependencies", {}).items():
+            for dep_name, constraint in _table(data, "dependencies").items():
                 add(dep_name, constraint, "Haxelib dependencies")
         elif name == "fpm.toml":
             data = tomllib.loads(content)
-            for dep_name, constraint in data.get("dependencies", {}).items():
+            for dep_name, constraint in _table(data, "dependencies").items():
                 add(dep_name, constraint, "Fortran fpm dependencies")
         elif name == "rebar.config":
             source = content

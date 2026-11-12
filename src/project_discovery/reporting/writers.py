@@ -39,6 +39,22 @@ _REMOTE_SUMMARY_KEYS = (
 )
 
 
+def online_gap_text(online: dict[str, Any]) -> str:
+    """Why an online lookup is incomplete, from its actual gap counters."""
+    parts = [
+        f"{int(online.get(key) or 0):,} {label}"
+        for key, label in (
+            ("packages_failed", "package(s) could not be checked"),
+            ("packages_not_queried", "package(s) beyond the query limit were not checked"),
+            ("lockfiles_unreadable", "lockfile(s) could not be read"),
+            ("lockfiles_content_skipped", "lockfile(s) were skipped by --skip"),
+            ("advisory_details_unavailable", "advisory record(s) could not be loaded"),
+        )
+        if online.get(key)
+    ]
+    return "; ".join(parts) or "see the UNKNOWN findings for the cause"
+
+
 def public_url(value: Any) -> str:
     """Return a URL without passwords, query strings or fragments (SSH user names kept)."""
     text = str(value or "")
@@ -804,8 +820,7 @@ def _write_markdown_vulnerabilities(line, result: ScanResult, meta: dict[str, An
         line(f"- Coverage: {_md(coverage)}")
         if coverage in {"partial", "unavailable"}:
             line(
-                f"- **Incomplete:** {online.get('packages_failed', 0):,} package(s) could not be checked and "
-                f"{online.get('lockfiles_unreadable', 0):,} lockfile(s) could not be read. "
+                f"- **Incomplete:** {_md(online_gap_text(online))}. "
                 "This is not a vulnerability-free result; see the UNKNOWN findings."
             )
         line(f"- Lockfiles: {online.get('lockfiles', 0):,}; unique packages: {online.get('unique_packages', 0):,}; "

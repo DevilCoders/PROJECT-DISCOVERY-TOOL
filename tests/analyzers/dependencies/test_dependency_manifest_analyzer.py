@@ -205,3 +205,47 @@ def test_dependency_manifest_reports_oversized_and_growing_source_as_unknown(tmp
     findings = DependencyManifestAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "grew beyond" in findings[0].detail
+
+
+def _names(findings):
+    return {item.title.removeprefix("Declared dependency: ") for item in findings if item.title.startswith("Declared dependency: ")}
+
+
+def test_empty_sections_and_more_declaration_forms(tmp_path: Path):
+    # Regression: an empty ``dev_dependencies:`` raised AttributeError and lost the file;
+    # Poetry dev-dependencies, Cargo [workspace.dependencies], PEP 735 groups, -e and
+    # ``name @ url`` lines, requirements/*.txt and packages.config were not extracted.
+    pubspec = _analyze(tmp_path, "pubspec.yaml", "name: app\ndependencies:\n  http: ^1.2.0\ndev_dependencies:\n")
+    assert _names(pubspec) == {"http"}
+    pyproject = _analyze(tmp_path, "pyproject.toml", (
+        '[dependency-groups]\ntest = ["pytest>=8"]\n'
+        '[tool.poetry.dev-dependencies]\nblack = "^24"\n'
+    ))
+    assert _names(pyproject) == {"pytest", "black"}
+    cargo = _analyze(tmp_path, "Cargo.toml", '[workspace.dependencies]\nserde = "1"\n')
+    assert _names(cargo) == {"serde"}
+    (tmp_path / "requirements").mkdir()
+    requirements = _analyze(tmp_path, "requirements/base.txt", (
+        "requests==2.31.0 \\\n    --hash=sha256:abc\n-e git+https://github.com/acme/tool.git#egg=tool\n"
+        "lib @ https://example.com/lib-1.0.tar.gz\n"
+    ))
+    constraints = {item.title.removeprefix("Declared dependency: "): item.detail for item in requirements}
+    assert set(constraints) == {"Declared dependency: requests".removeprefix("Declared dependency: "), "tool", "lib"}
+    assert "\\" not in constraints["requests"]
+    nuget = _analyze(tmp_path, "packages.config", '<packages><package id="Newtonsoft.Json" version="13.0.3" /></packages>')
+    assert _names(nuget) == {"Newtonsoft.Json"}
+
+
+def test_cabal_fields_and_go_comments_are_not_dependencies(tmp_path: Path):
+    # Regression: fields after build-depends (hs-source-dirs, default-language) and a
+    # "// Web stack" comment in a go.mod require block were CONFIRMED dependencies.
+    cabal = _analyze(tmp_path, "app.cabal", (
+        "library\n  build-depends:    base >=4 && <5,\n                    text\n"
+        "  hs-source-dirs:   src\n  default-language: Haskell2010\n"
+    ))
+    assert _names(cabal) == {"base", "text"}
+    gomod = _analyze(tmp_path, "go.mod", (
+        "module example.com/app\n\nrequire (\n\t// Web stack\n\tgithub.com/gin-gonic/gin v1.9.1\n"
+        "\tgolang.org/x/net v0.20.0 // indirect\n)\n"
+    ))
+    assert _names(gomod) == {"github.com/gin-gonic/gin", "golang.org/x/net"}

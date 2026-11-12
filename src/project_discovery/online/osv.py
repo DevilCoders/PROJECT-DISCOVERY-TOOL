@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ..analyzers.dependencies.lockfile_parsers import normalize_version
-from .cache import ResponseCache
+from .cache import ResponseCache, endpoint_key
 from .http import HttpClient, NetworkError, RateLimiter, validate_service_url
 
 OSV_API_URL = "https://api.osv.dev"
@@ -83,7 +83,7 @@ class OsvClient:
         failures: dict[PackageQuery, NetworkError] = {}
         pending: list[PackageQuery] = []
         for package in packages:
-            cached = self.cache.get(package.cache_key)
+            cached = self.cache.get(endpoint_key(self.base_url, package.cache_key))
             if isinstance(cached, list) and all(valid_vulnerability_id(item) for item in cached):
                 results[package] = cached
             else:
@@ -101,7 +101,7 @@ class OsvClient:
                     failures[package] = error
                     continue
                 results[package] = ids
-                self.cache.put(package.cache_key, ids)
+                self.cache.put(endpoint_key(self.base_url, package.cache_key), ids)
         return results, failures
 
     def _post_batch(self, queries: list[dict[str, Any]]) -> list[Any]:
@@ -160,7 +160,7 @@ class OsvClient:
         """Fetch one full OSV record (cached); None when OSV.dev no longer has it."""
         if not valid_vulnerability_id(vulnerability_id):
             raise NetworkError("invalid vulnerability ID", kind="protocol")
-        key = f"osv:vuln:{vulnerability_id}"
+        key = endpoint_key(self.base_url, f"osv:vuln:{vulnerability_id}")
         cached = self.cache.get(key)
         if isinstance(cached, dict):
             return None if cached.get("_pdt_missing") else cached

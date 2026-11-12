@@ -179,6 +179,17 @@ def _enrichment_lines(advisory: dict[str, Any], details: dict[str, dict[str, Any
     return lines
 
 
+def _enriched_identifiers(advisory: dict[str, Any], details: dict[str, dict[str, Any]]) -> set[str]:
+    found: set[str] = set()
+    for identifier in [advisory["id"], *advisory.get("aliases", [])]:
+        record = details.get(identifier) or {}
+        for value in [record.get("cve_id"), *(record.get("identifiers") or [])]:
+            text = value.get("value") if isinstance(value, dict) else value
+            if isinstance(text, str) and text and text != advisory["id"]:
+                found.add(text)
+    return found
+
+
 def _enrichment_severity(advisory: dict[str, Any], details: dict[str, dict[str, Any]]) -> str | None:
     from ..vulnerabilities.cvss import qualitative_severity
 
@@ -329,6 +340,9 @@ class OnlineVulnerabilityLookup:
             if not advisories:
                 continue
             for advisory in advisories:
+                # GHSA and NVD records name the vulnerability's other IDs (CVE, GHSA):
+                # they are aliases, used for grouping and listed in the finding.
+                advisory["aliases"] = sorted(set(advisory.get("aliases") or []) | _enriched_identifiers(advisory, enrichment))
                 extra = _enrichment_lines(advisory, enrichment)
                 if extra:
                     advisory["evidence_extra"] = extra
