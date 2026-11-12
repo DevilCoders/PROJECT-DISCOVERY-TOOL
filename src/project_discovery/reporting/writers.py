@@ -49,6 +49,8 @@ def public_url(value: Any) -> str:
         host = parts.hostname or ""
         port = parts.port
     except ValueError:
+        # Unparseable (a port out of range, a malformed IPv6 host): still never keep userinfo.
+        text = re.sub(r"^([A-Za-z][A-Za-z0-9+.-]{0,31}+://)[^/@\s]{0,1024}+@", r"\1", text)
         return text.split("?", 1)[0].split("#", 1)[0]
     netloc = f"[{host}]" if ":" in host else host
     if port is not None:

@@ -476,3 +476,28 @@ def test_record_iteration_holds_no_read_snapshot_between_pages(tmp_path):
     assert busy == 0
     paths = [item["path"] for item in first + rest]
     assert len(paths) == 1000 and paths == sorted(paths, key=str.casefold)
+
+
+def test_unreadable_databases_are_moved_aside_and_rebuilt(tmp_path):
+    # Regression: a damaged .pdt-cache database made every later scan into that output
+    # exit 2 with "file is not a database", naming no path.
+    import json
+
+    from project_discovery.cli import run_scan
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("print(1)\n", encoding="utf-8")
+    output = tmp_path / "out"
+    cache = output / ".pdt-cache"
+    cache.mkdir(parents=True)
+    for name in ("inventory.sqlite3", "fingerprints.sqlite3"):
+        (cache / name).write_bytes(b"this is not a database" * 64)
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    moved = sorted(path.name.split(".corrupt-")[0] for path in cache.iterdir() if ".corrupt-" in path.name)
+    assert moved == ["fingerprints.sqlite3", "inventory.sqlite3"]
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    assert sum("could not be read and was moved" in error for error in report["errors"]) == 2
+    # --resume with an unreadable inventory starts a fresh scan.
+    (cache / "inventory.sqlite3").write_bytes(b"garbage" * 64)
+    assert run_scan(project, output, {"json"}, 1, quiet=True, resume=True) == 0

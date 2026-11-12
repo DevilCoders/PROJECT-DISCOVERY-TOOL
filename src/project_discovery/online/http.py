@@ -156,11 +156,19 @@ class _SameHostRedirects(urllib.request.HTTPRedirectHandler):
                 f"{original.hostname} redirected to another host ({target.hostname}); refused",
                 kind="redirect", status=code,
             )
+        if req.get_method() not in {"GET", "HEAD"}:
+            # urllib turns a redirected POST into a GET without its body (and with the
+            # POST's Content-Length, so servers wait for a body that never comes).
+            raise NetworkError(
+                f"{original.hostname} redirected a {req.get_method()} request (HTTP {code}); refused",
+                kind="redirect", status=code,
+            )
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is not None:
-            # Same host: keep the (unredirected) credential headers.
+            # Same host: keep the credential headers, never Host or the body's length/type.
             for name, value in req.unredirected_hdrs.items():
-                redirected.add_unredirected_header(name, value)
+                if name.lower() not in {"host", "content-length", "content-type"}:
+                    redirected.add_unredirected_header(name, value)
         return redirected
 
 

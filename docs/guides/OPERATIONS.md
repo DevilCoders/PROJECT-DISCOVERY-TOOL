@@ -65,6 +65,9 @@ when that inventory finished traversal for the same root. Files already hashed a
 skipped; the rest are analyzed, then the import graph, architecture layout and reports are
 rebuilt. Files added or removed after the original traversal are not picked up: run a fresh
 scan for a current view. When no resumable inventory exists, PDT warns and starts a fresh scan.
+An inventory or fingerprint database that SQLite cannot read (a damaged file) is moved aside as
+`NAME.corrupt-<timestamp>` with a warning and a scan diagnostic, and the scan rebuilds it; a
+locked database is never treated as damaged.
 
 ## Code index and `pdt query`
 

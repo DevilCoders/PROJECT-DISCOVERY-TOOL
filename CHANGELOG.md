@@ -210,6 +210,12 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   are modelled; a reference cut is reported and called functions are never dead code
   (PDT-295); loop containment is logarithmic (PDT-296); the Python dependency graph names
   modules by import name and resolves namespace packages (PDT-297).
+- Credentials without a scheme are redacted from client errors, and report URLs never keep
+  userinfo (PDT-298); a redirected POST fails at once instead of hanging (PDT-299).
+- A damaged `.pdt-cache` database is moved aside and rebuilt instead of failing every scan
+  (PDT-300).
+- Malformed advisory records are skipped at import and never crash matching (PDT-301); an
+  advisory confirmed by any of its affected entries is confirmed (PDT-302).
 
 ## 0.2.0 — 2026-11-05
 

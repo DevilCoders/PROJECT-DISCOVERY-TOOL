@@ -80,6 +80,10 @@ class NvdClient:
         return record
 
 
+def _list(value) -> list:
+    return value if isinstance(value, list) else []
+
+
 def normalize_nvd_cve(cve: Any) -> dict[str, Any] | None:
     if not isinstance(cve, dict) or not isinstance(cve.get("id"), str):
         return None
@@ -107,14 +111,15 @@ def normalize_nvd_cve(cve: Any) -> dict[str, Any] | None:
                 "source": _text(metric.get("source"), 200),
                 "type": _text(metric.get("type"), 20),
             })
+    # NVD answers are untrusted: a null or non-list field reads as empty, never raises.
     cwes = sorted({
         str(detail.get("value"))
-        for weakness in cve.get("weaknesses", []) if isinstance(weakness, dict)
-        for detail in weakness.get("description", []) if isinstance(detail, dict)
+        for weakness in _list(cve.get("weaknesses")) if isinstance(weakness, dict)
+        for detail in _list(weakness.get("description")) if isinstance(detail, dict)
         and _CWE_ID.match(str(detail.get("value", "")))
     })
     references = [
-        str(item.get("url")) for item in cve.get("references", [])[:_MAX_REFERENCES]
+        str(item.get("url")) for item in _list(cve.get("references"))[:_MAX_REFERENCES]
         if isinstance(item, dict) and isinstance(item.get("url"), str)
     ] if isinstance(cve.get("references"), list) else []
     return {

@@ -129,6 +129,8 @@ _ANSI_ESCAPE = re.compile(
 )
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 _URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,31}+://)[^/\s@]{1,512}+@")
+# ``user:secret@host`` without a scheme, as git prints it ("unable to look up user:pw@host").
+_BARE_USERINFO = re.compile(r"(?<![\w/])[^\s/@:'\"]{1,256}+:[^\s/@'\"]{1,512}+@(?=[A-Za-z0-9\[])")
 
 
 class RemoteScanError(ValueError):
@@ -556,6 +558,7 @@ def sanitize_client_output(raw: bytes | str, *, max_chars: int = MAX_ERROR_DETAI
     text = _ANSI_ESCAPE.sub("", text)
     text = _CONTROL_CHARACTERS.sub("", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
+    text = _BARE_USERINFO.sub("<redacted>@", text)
     text = ANY_TOKEN.sub("[REDACTED_TOKEN]", text)
     text = text.strip()
     if len(text) > max_chars:

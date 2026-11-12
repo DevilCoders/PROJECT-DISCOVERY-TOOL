@@ -398,3 +398,12 @@ def test_findings_stream_most_severe_first(tmp_path: Path):
         store.flush()
         order = [finding.severity for finding in store.iter_findings()]
     assert order == ["CRITICAL", "HIGH", "LOW", "INFO"]
+
+
+def test_public_url_drops_credentials_even_when_the_url_does_not_parse():
+    # Regression: when urlsplit or the port lookup failed, the fallback kept user:password.
+    from project_discovery.reporting.writers import public_url
+
+    for value in ("https://user:secret@example.com:99999/repo?token=x", "https://user:secret@[::1/repo#frag"):
+        cleaned = public_url(value)
+        assert "secret" not in cleaned and "token" not in cleaned and "frag" not in cleaned, cleaned

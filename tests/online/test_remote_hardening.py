@@ -1051,3 +1051,17 @@ def test_git_extraction_never_merges_directories_that_differ_only_in_case(tmp_pa
     else:
         assert (checkout / "src" / "b.py").read_bytes() == b"b\n"
         assert counts["omitted_tree_path_count"] == 0
+
+
+@pytest.mark.parametrize("message", [
+    "fatal: unable to look up user:hunter2pass@git.example.net (port 9418)",
+    "ssh: Could not resolve hostname deploy:s3cr3t-value@build.example.org: Name or service not known",
+])
+def test_client_output_redacts_userinfo_without_a_scheme(message):
+    # Regression: only scheme://user:pass@ was redacted; git prints some destinations
+    # without a scheme, and a credential from an insteadOf rule reached reports.
+    cleaned = remote.sanitize_client_output(message)
+    assert "hunter2pass" not in cleaned and "s3cr3t-value" not in cleaned
+    assert "<redacted>@" in cleaned
+    # scp-style user names and ordinary text are untouched.
+    assert remote.sanitize_client_output("git@github.com:acme/app.git at 12:30") == "git@github.com:acme/app.git at 12:30"

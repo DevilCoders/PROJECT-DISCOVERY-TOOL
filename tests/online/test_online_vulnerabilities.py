@@ -664,3 +664,43 @@ def test_a_corrupt_cache_fails_before_the_scan_starts(tmp_path: Path):
     with RunningService(_service()) as running:
         with pytest.raises(ValueError, match="unusable"):
             _scan(_project(tmp_path), tmp_path / "out", _options(running, tmp_path))
+
+
+def test_a_redirected_post_fails_fast_instead_of_hanging(tmp_path):
+    # Regression: a 302 to a POST became a GET that still announced the POST's
+    # Content-Length, so the server waited for a body and the client hung until timeout.
+    import http.server
+    import threading
+    import time
+
+    from project_discovery.online.http import HttpClient, NetworkError
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", "/elsewhere")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = HttpClient(timeout=20, retries=0)
+        started = time.monotonic()
+        with pytest.raises(NetworkError) as error:
+            client.post_json(f"http://127.0.0.1:{server.server_port}/v1/querybatch", {"queries": []})
+        assert error.value.kind == "redirect"
+        assert time.monotonic() - started < 10
+    finally:
+        server.shutdown()
+
+
+def test_nvd_records_with_null_lists_are_read_as_empty():
+    from project_discovery.online.advisories import normalize_nvd_cve
+
+    record = normalize_nvd_cve({"id": "CVE-2026-0001", "weaknesses": None, "references": None,
+                                "descriptions": None, "metrics": None})
+    assert record is not None and record["cwes"] == []

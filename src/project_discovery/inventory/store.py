@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from itertools import islice
 from pathlib import Path
@@ -95,6 +96,35 @@ def _payload_json(value: Any) -> str:
     return text
 
 
+def set_aside_unreadable_database(path: Path) -> Path | None:
+    """Move an unreadable SQLite database (and its WAL files) aside; return where it went.
+
+    The per-output inventory and fingerprint databases are rebuilt by a fresh scan, so a
+    damaged file costs nothing, but it made every later scan into that output fail with
+    "file is not a database". A locked database is not unreadable and stays.
+    """
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        connection = sqlite3.connect(path, timeout=5.0)
+        try:
+            connection.execute("PRAGMA schema_version").fetchone()
+        finally:
+            connection.close()
+        return None
+    except sqlite3.OperationalError:
+        return None  # locked or busy, not damaged
+    except sqlite3.DatabaseError:
+        pass
+    target = path.with_name(f"{path.name}.corrupt-{time.strftime('%Y%m%dT%H%M%S')}")
+    os.replace(path, target)
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = path.with_name(path.name + suffix)
+        if sidecar.exists():
+            os.replace(sidecar, target.with_name(target.name + suffix))
+    return target
+
+
 def prepare_private_database(path: Path) -> None:
     """Create a SQLite database file readable only by the current account (POSIX).
 
@@ -140,6 +170,15 @@ class InventoryStore:
         self._directory_pending: dict[str, tuple[int, int, int, str | None]] = {}
         self._closed = False
         self.db = sqlite3.connect(self.path, timeout=30.0)
+        try:
+            self._initialize()
+        except BaseException:
+            # A file that is not a database fails here: never leave its handle open, or
+            # Windows refuses to move the damaged file aside.
+            self.db.close()
+            raise
+
+    def _initialize(self) -> None:
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")

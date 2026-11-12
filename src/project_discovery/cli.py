@@ -59,6 +59,7 @@ from .inventory.store import (
     StoredFileRecords,
     StoredFindingRecords,
     StoredRecordSequence,
+    set_aside_unreadable_database,
 )
 from .models import DirectoryRecord, Finding, ScanResult, SpecialEntryRecord, SymlinkRecord
 from .online.cache import default_cache_path as default_vulnerability_cache_path
@@ -236,14 +237,17 @@ def _resumable_walk_stats(inventory_path: Path, root: Path) -> dict | None:
     """Return the stored walk statistics when an inventory for ``root`` can be resumed."""
     if not inventory_path.is_file():
         return None
-    with InventoryStore(inventory_path) as store:
-        if (
-            store.get_metadata("root") != str(root)
-            or not store.get_metadata("traversal_finished", False)
-            or store.get_metadata("inventory_status") not in {"complete", "partial"}
-        ):
-            return None
-        stats = store.get_metadata("walk_stats")
+    try:
+        with InventoryStore(inventory_path) as store:
+            if (
+                store.get_metadata("root") != str(root)
+                or not store.get_metadata("traversal_finished", False)
+                or store.get_metadata("inventory_status") not in {"complete", "partial"}
+            ):
+                return None
+            stats = store.get_metadata("walk_stats")
+    except sqlite3.DatabaseError:
+        return None  # an unreadable inventory has nothing to resume; a fresh scan replaces it
     return stats if isinstance(stats, dict) else None
 
 
@@ -500,6 +504,7 @@ def run_scan(
     started = now()
     timer = PhaseTimer()
     inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
+    storage_notes: list[str] = []  # moved-aside databases, recorded as diagnostics
     walk_stats = _resumable_walk_stats(inventory_path, root) if resume else None
     resumed = walk_stats is not None
     if resume and not resumed:
@@ -516,6 +521,12 @@ def run_scan(
         symlinks = StoredRecordSequence(inventory_path, "symlink", SymlinkRecord)
         special_entries = StoredRecordSequence(inventory_path, "special", SpecialEntryRecord)
     else:
+        moved = set_aside_unreadable_database(inventory_path)
+        if moved is not None:
+            note = (f"The inventory database {inventory_path} could not be read and was moved to "
+                    f"{moved.name}; this scan rebuilds it.")
+            storage_notes.append(note)
+            _status(console, "WARNING", note, "yellow")
         with InventoryStore(inventory_path) as inventory_store, console.status(
             "Inventorying filesystem entries…", spinner="dots",
         ):
@@ -592,10 +603,18 @@ def run_scan(
         analyzer_load.close()
         raise
     _report_plugins(console, plugin_policy, analyzer_load)
+    if source_metadata is None:
+        moved = set_aside_unreadable_database(cache_path)
+        if moved is not None:
+            note = (f"The fingerprint cache {cache_path} could not be read and was moved to {moved.name}; "
+                    "files are rehashed.")
+            storage_notes.append(note)
+            _status(console, "WARNING", note, "yellow")
     fingerprint_cache = ScanCache(cache_path) if source_metadata is None else _EphemeralScanCache()
     try:
         with InventoryStore(inventory_path) as finding_store, fingerprint_cache as cache:
             finding_store.extend_diagnostics(analyzer_load.diagnostics)
+            finding_store.extend_diagnostics(storage_notes)
             if source_metadata is not None and memory_source is None:
                 # Missing content makes the scan incomplete (--strict); notes such as
                 # "history not imported" stay report metadata only.

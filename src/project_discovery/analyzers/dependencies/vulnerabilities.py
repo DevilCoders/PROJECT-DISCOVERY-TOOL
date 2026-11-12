@@ -102,6 +102,8 @@ def _affected_version(
         if _normalise_version(version) in normalized:
             return True, "explicit affected-version list"
     ranges = affected.get("ranges", [])
+    if not isinstance(ranges, list):
+        return None, "advisory range data is malformed"
     if not ranges:
         if isinstance(versions, list) and versions:
             return False, "version not present in explicit affected-version list"
@@ -194,14 +196,23 @@ def advisory_findings(
     """
     if not matches:
         return []
-    by_id = {advisory["id"]: (advisory, confirmed, reason) for advisory, confirmed, reason in matches}
+    # One row per affected entry: an advisory can list a package in several entries, and
+    # any entry that confirms the version confirms the advisory (keeping only the last
+    # one turned a CRITICAL confirmed match into a LOW unknown).
+    rows_by_id: dict[str, list[tuple[dict[str, Any], bool, str]]] = {}
+    for row in matches:
+        rows_by_id.setdefault(row[0]["id"], []).append(row)
     return [
         _advisory_group_finding(
-            lockfile_path, package, [by_id[item["id"]] for item in group],
+            lockfile_path, package, [row for item in group for row in rows_by_id[item["id"]]],
             analyzer=analyzer, source_label=source_label,
         )
-        for group in _alias_groups([advisory for advisory, _, _ in matches])
+        for group in _alias_groups([rows[0][0] for rows in rows_by_id.values()])
     ]
+
+
+def _list(value: Any) -> list:
+    return value if isinstance(value, list) else []
 
 
 def _advisory_group_finding(
@@ -216,15 +227,17 @@ def _advisory_group_finding(
         (item for item in group if item[1]), group[0],
     )
     confirmed = any(item[1] for item in group)
-    ids = [advisory["id"] for advisory, _, _ in group]
+    ids = list(dict.fromkeys(advisory["id"] for advisory, _, _ in group))
     aliases = sorted({
         alias for advisory, _, _ in group for alias in advisory["aliases"]
     } - set(ids))
+    # The fix boundary comes from the entries that confirm the version, when any do.
+    fix_rows = [item for item in group if item[1]] or group
     fix_versions = sorted({
         str(event["fixed"])
-        for advisory, _, _ in group
-        for range_item in advisory["affected"].get("ranges", []) if isinstance(range_item, dict)
-        for event in range_item.get("events", []) if isinstance(event, dict) and event.get("fixed")
+        for advisory, _, _ in fix_rows
+        for range_item in _list(advisory["affected"].get("ranges")) if isinstance(range_item, dict)
+        for event in _list(range_item.get("events")) if isinstance(event, dict) and event.get("fixed")
     })
     fixed = ", ".join(fix_versions) or "not specified"
     known = [

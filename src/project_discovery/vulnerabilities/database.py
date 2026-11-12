@@ -173,6 +173,23 @@ def _file_sha256(path: Path) -> str:
 STALE_SNAPSHOT_DAYS = 30
 
 
+def _items(value: Any) -> list:
+    """A list field of an advisory, or [] (a string would iterate as characters)."""
+    return value if isinstance(value, list) else []
+
+
+def _malformed_affected(entry: Any) -> bool:
+    """An affected entry the matchers cannot read: wrong types where OSV has lists/objects."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("package"), dict):
+        return True
+    if "versions" in entry and not isinstance(entry["versions"], list):
+        return True
+    ranges = entry.get("ranges", [])
+    if not isinstance(ranges, list):
+        return True
+    return any(not isinstance(item, dict) or not isinstance(item.get("events", []), list) for item in ranges)
+
+
 def read_only_uri(path: PurePath) -> str:
     """A read-only SQLite URI for an absolute path, including Windows UNC shares.
 
@@ -326,6 +343,12 @@ class VulnerabilityDatabase:
                     skipped += 1
                     errors.append(f"{relative}: not a supported OSV vulnerability record")
                     continue
+                malformed = [entry for entry in data["affected"] if _malformed_affected(entry)]
+                if malformed:
+                    # Matching would raise on these; the record's valid entries still count.
+                    errors.append(f"{relative}: {len(malformed)} malformed affected entr"
+                                  f"{'y' if len(malformed) == 1 else 'ies'} skipped")
+                    data = {**data, "affected": [entry for entry in data["affected"] if not _malformed_affected(entry)]}
                 try:
                     affected_count += self._store_advisory(data, relative)
                     imported += 1
@@ -357,10 +380,10 @@ class VulnerabilityDatabase:
     def _store_advisory(self, data: dict[str, Any], relative: str) -> int:
         advisory_id = str(data["id"])
         aliases = sorted({
-            str(item) for item in data.get("aliases", []) if isinstance(item, str) and item
+            str(item) for item in _items(data.get("aliases")) if isinstance(item, str) and item
         })
         references = sorted({
-            str(item.get("url")) for item in data.get("references", [])
+            str(item.get("url")) for item in _items(data.get("references"))
             if isinstance(item, dict) and item.get("url")
         })
         rows = []
