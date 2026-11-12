@@ -61,7 +61,7 @@ The baseline is not production-ready:
 - Windows hidden attributes are captured by the native walker and Python fallback, but system attributes, ACLs and ownership metadata still need cross-platform validation;
 - archive index inspection is substantive only for ZIP/TAR; other recognized formats are detection-only;
 - ZIP central-directory preflight, archive entry-count/member-byte caps and cooperative ZIP/TAR wall-time budgets now exist; nested-depth, configurable budget policies, comprehensive metadata bounds and adversarial testing remain;
-- some domain analyzers are lexical/heuristic; symbols, calls and data flow are now resolved semantically for Python and structurally for the lexically modelled languages, but types are not inferred and framework semantics are pattern-based;
+- some domain analyzers are lexical/heuristic; symbols, calls and data flow are now resolved semantically for Python and structurally for the lexically modelled languages, Python receiver classes are inferred where the code states them (annotations, constructors, assignments), other types are not, and framework semantics are pattern-based;
 - report and CLI have a working first-pass command-center design, but still need completeness, scale, accessibility and usability gates.
 
 ## Phase 0 — Documentation and capability governance

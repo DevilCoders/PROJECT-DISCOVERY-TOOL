@@ -7,6 +7,7 @@ of likely cost, not measurements: a call in a loop may be cheap or batched elsew
 from __future__ import annotations
 
 import ast
+import bisect
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -287,10 +288,19 @@ def _lexical_hotspots(model: FileModel) -> tuple[dict[str, list[int]], list[tupl
         elif call.callee in _SLEEPS and receiver in {"", "Thread", "time", "this_thread", "std", "TimeUnit"}:
             issues["sleep_in_loop"].append(call.line)
     functions = []
+    spans = sorted({symbol.body for symbol in model.symbols if symbol.kind in FUNCTION_KINDS and symbol.body})
+    starts = [start for start, _ in spans]
     for symbol in model.symbols:
         if symbol.kind in FUNCTION_KINDS and symbol.body:
-            body = model.clean[symbol.body[0]:symbol.body[1]]
-            complexity = 1 + len(_DECISIONS.findall(body))
+            start, end = symbol.body
+            # Decisions inside nested functions and closures count for them, not here.
+            pieces, cursor = [], start
+            for nested_start, nested_end in spans[bisect.bisect_right(starts, start):bisect.bisect_left(starts, end)]:
+                if nested_start >= cursor:
+                    pieces.append(model.clean[cursor:nested_start])
+                    cursor = max(cursor, nested_end)
+            pieces.append(model.clean[cursor:end])
+            complexity = 1 + sum(len(_DECISIONS.findall(piece)) for piece in pieces)
             functions.append((symbol.qualified, symbol.line, complexity, symbol.end_line - symbol.line + 1))
     return issues, functions
 

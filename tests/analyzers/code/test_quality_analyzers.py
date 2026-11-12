@@ -200,3 +200,30 @@ def test_dict_values_bound_by_a_loop_are_not_http_clients(tmp_path):
     findings = PerformanceHotspotAnalyzer().analyze(path, record)
     http = [item for item in findings if item.title.startswith("HTTP request inside a loop")]
     assert len(http) == 1 and "table.py:6" in " ".join(http[0].evidence)
+
+
+def test_nested_functions_count_for_themselves_and_go_locks_need_defer(tmp_path):
+    from project_discovery.analyzers.code.concurrency import ConcurrencyAnalyzer
+    from project_discovery.analyzers.code.performance import _lexical_hotspots
+    from project_discovery.intelligence.model.lexical import build_lexical_model
+    from project_discovery.models import FileRecord
+
+    # Regression: a factory's complexity included every nested function's decisions.
+    model = build_lexical_model("v.js", "JavaScript", (
+        "function createValidators() {\n"
+        "  function isEmail(v) { if (v) { return v.includes('@') && v.length > 3; } return false; }\n"
+        "  function isName(v) { return v && v.length > 0 ? true : false; }\n"
+        "  return { isEmail, isName };\n}\n"
+    ))
+    complexity = {name: value for name, _line, value, _length in _lexical_hotspots(model)[1]}
+    assert complexity["createValidators"] == 1
+    # Regression: a mutex released on one path but leaked on an early return passed.
+    path = tmp_path / "store.go"
+    path.write_text(
+        "package store\n\nfunc (s *Store) Get(k string) string {\n\ts.mu.Lock()\n"
+        "\tif k == \"\" {\n\t\treturn \"\"\n\t}\n\ts.mu.Unlock()\n\treturn k\n}\n",
+        encoding="utf-8",
+    )
+    record = FileRecord("store.go", path.stat().st_size, ".go", "Go", mtime_ns=path.stat().st_mtime_ns)
+    findings = ConcurrencyAnalyzer().analyze(path, record)
+    assert any("release" in item.title.lower() for item in findings)

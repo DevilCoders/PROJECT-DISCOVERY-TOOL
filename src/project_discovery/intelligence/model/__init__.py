@@ -5,9 +5,9 @@ identifiers a file references. :func:`model_for` builds it once per file and ana
 thread and serves it to every analyzer of that file.
 
 Three backends exist. Python uses the standard-library ``ast`` parser, so symbols, calls
-and their resolution through imports and ``self`` are semantic. About 25 brace-language
-families (C, C++, Java, C#, JavaScript/TypeScript, Go, Rust, Kotlin, Swift, PHP and
-others) use a linear-time structural lexer: comments and string contents are blanked
+and their resolution through imports and ``self`` are semantic. Sixteen brace-language
+families, about 28 languages (C, C++, Java, C#, JavaScript/TypeScript, Go, Rust, Kotlin,
+Swift, PHP and others), use a linear-time structural lexer: comments and string contents are blanked
 while offsets are kept, braces are matched, and definitions, calls and imports are read
 from the cleaned text. Where a Tree-sitter grammar for the language is provisioned
 locally, ``tree_sitter_model`` replaces the lexer's symbols and calls with ones read from

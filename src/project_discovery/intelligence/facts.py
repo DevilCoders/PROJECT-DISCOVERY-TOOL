@@ -20,8 +20,6 @@ MAX_SYMBOLS_PER_FILE = 5_000
 MAX_CALLS_PER_FILE = 20_000
 MAX_REFERENCES_PER_FILE = 10_000
 MAX_FACTS_PER_FILE = 5_000
-# Scan-wide ceiling on stored rows; later files are not indexed and reports say so.
-MAX_INDEXED_ROWS = 20_000_000
 
 
 @dataclass(slots=True)
@@ -40,9 +38,6 @@ class FileFacts:
 
     def __bool__(self) -> bool:
         return bool(self.symbols or self.calls or self.references or self.facts)
-
-    def row_count(self) -> int:
-        return len(self.symbols) + len(self.calls) + len(self.facts) + (1 if self.references else 0)
 
 
 _collector = threading.local()

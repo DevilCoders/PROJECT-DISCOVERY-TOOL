@@ -369,7 +369,7 @@ The work prioritizes correctness and scale over adding catalog labels. Done on t
 1. Finish online mode end to end, including online vulnerability sources and a no-download path (in progress).
 2. Reorganize `src/` into a nested package layout.
 3. Archives: nested-archive traversal under a shared budget, and metadata readers for 7z, RAR, CAB and ISO.
-4. Deeper semantics: inference of classes the code does not state, and HDL elaboration of `generate` blocks and parameters. (Inter-procedural taint outside Python and Tree-sitter-backed code models are implemented; see the changelog.)
+4. Deeper semantics: inference of classes the code does not state, and HDL elaboration of `generate` blocks and parameters. (Lexical inter-procedural taint and Tree-sitter-backed code models are implemented; see the changelog.)
 5. Chunked offline HTML rendering for result sets larger than the embedded bounds.
 6. GPU-present, GPU-absent, OpenCL-failure and CPU/GPU parity tests on supported hardware.
 7. Benchmark 2 GB/10 GB/50 GB/100 GB+ corpora and tune worker and GPU thresholds using wall time, throughput and peak RSS.

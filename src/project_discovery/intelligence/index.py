@@ -338,7 +338,7 @@ def _call_graph(context: _Context) -> tuple[dict, list[Finding]]:
     # Lexical calls: resolve by name within each language group.
     db.execute(
         f"""CREATE TEMP TABLE lex_names AS
-            SELECT s.name AS name, f.grp AS grp, COUNT(*) AS n, MIN(s.path) AS path,
+            SELECT s.name AS name, f.grp AS grp, COUNT(DISTINCT s.path) AS n, MIN(s.path) AS path,
                    MIN(s.qualified) AS qualified
             FROM code_symbols s JOIN files f ON f.path = s.path
             WHERE f.language != 'Python' AND s.kind IN ({kinds}) GROUP BY s.name, f.grp""",
@@ -589,6 +589,40 @@ def _module_graph(context: _Context) -> tuple[dict, list[Finding]]:
         # Prefer the candidate that shares the longest directory prefix with the importer.
         return max(candidates, key=lambda item: (len(posixpath.commonprefix([item, origin_dir])), -len(item)))
 
+    def rust_module(target: str, origin: str) -> str | None:
+        """The module file a ``use`` path names: its longest prefix that is a module file."""
+        parts = [part for part in target.split("::") if part]
+        if not parts or parts[0] not in {"crate", "self", "super"}:
+            return None  # another crate, or the standard library
+        stem = posixpath.splitext(posixpath.basename(origin))[0]
+        directory = posixpath.dirname(origin)
+        # The directory holding the current module's children.
+        module_dir = directory if stem in {"mod", "lib", "main"} else posixpath.join(directory, stem)
+        if parts[0] == "crate":
+            base = None
+            probe = directory
+            while True:  # the crate root: the nearest lib.rs or main.rs above the file
+                if exists(posixpath.join(probe, "lib.rs") if probe else "lib.rs") or exists(
+                        posixpath.join(probe, "main.rs") if probe else "main.rs"):
+                    base = probe
+                    break
+                if not probe:
+                    break
+                probe = posixpath.dirname(probe)
+            if base is None:
+                return None
+        else:
+            base = module_dir
+            for _ in parts[:1] if parts[0] == "super" else ():
+                base = posixpath.dirname(base)
+        names = [part for part in parts[1:] if part.isidentifier()]
+        for end in range(len(names), 0, -1):
+            stem_path = posixpath.join(base, *names[:end]) if base else posixpath.join(*names[:end])
+            for candidate in (stem_path + ".rs", posixpath.join(stem_path, "mod.rs")):
+                if exists(candidate):
+                    return candidate
+        return None
+
     for target, path, detail in db.execute(
         "SELECT name, path, detail FROM code_facts WHERE kind = 'import' ORDER BY path"
     ):
@@ -639,6 +673,8 @@ def _module_graph(context: _Context) -> tuple[dict, list[Finding]]:
                     if exists(candidate):
                         found = candidate
                         break
+            else:  # ``use crate::a::b::Item``, ``use self::x``, ``use super::y``
+                found = rust_module(target, path)
             package = "" if found or target.startswith(("crate", "self", "super")) else target.split("::")[0]
         elif language == "PHP":
             stem = target.replace("\\", "/")

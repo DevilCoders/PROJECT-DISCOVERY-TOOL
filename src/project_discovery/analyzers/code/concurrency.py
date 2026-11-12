@@ -219,7 +219,8 @@ def _lexical_concurrency(model: FileModel) -> tuple[dict[str, list[int]], Counte
             for match in _GO_LOCK.finditer(body):
                 receiver, kind = match.groups()  # receiver keeps its trailing dot
                 unlock = f"{receiver}{'RUnlock' if kind == 'RLock' else 'Unlock'}()"
-                if unlock not in body:
+                # Only ``defer mu.Unlock()`` releases on every path, early returns included.
+                if not re.search(r"defer[ \t]++" + re.escape(unlock), body):
                     issues["lock_without_release"].append(model.line_of(symbol.body[0] + match.start()))
         for match in _GO_WAITGROUP_ADD_IN_GOROUTINE.finditer(clean):
             issues["waitgroup_add_in_goroutine"].append(model.line_of(match.start()))

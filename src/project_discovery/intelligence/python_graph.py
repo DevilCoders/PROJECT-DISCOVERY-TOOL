@@ -200,6 +200,15 @@ def analyze_python_dependencies(
             module_paths[module] = [record.path]
             module_path_counts[module] = 1
             eligible[module] = record
+        elif (
+            module_path_counts[module] == 1
+            and PurePosixPath(paths[0]).with_suffix("").as_posix() == PurePosixPath(record.path).with_suffix("").as_posix()
+            and {PurePosixPath(paths[0]).suffix, record.extension} == {".py", ".pyi"}
+        ):
+            # mod.py with its inline stub mod.pyi is one module: the source is the module.
+            if record.extension == ".py":
+                module_paths[module] = [record.path]
+                eligible[module] = record
         else:
             module_path_counts[module] += 1
             if len(paths) < MAX_DUPLICATE_MODULE_PATHS:

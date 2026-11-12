@@ -2,8 +2,9 @@
 
 Python is analysed on its syntax tree: a file, socket, connection, child process or
 temporary file bound to a name, outside ``with``, that the same function neither
-closes, returns nor stores. C/C++, Go, Java, C#, Rust and JavaScript/TypeScript use the
-structural lexer's function bodies with the same rule. Ownership can move to other
+closes, returns nor stores. C/C++, Go, Java and C# use the structural lexer's function
+bodies with the same rule; the Rust and JavaScript/TypeScript checks are file-level
+patterns (``mem::forget``/``unsafe`` counts, ``setInterval``/``useEffect`` without cleanup). Ownership can move to other
 functions in ways a per-function view cannot see, so findings are INFERRED.
 """
 from __future__ import annotations

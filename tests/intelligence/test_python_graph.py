@@ -320,3 +320,18 @@ def test_package_aliases_shared_by_several_subprojects_are_ambiguous(tmp_path: P
     assert not [edge for edge in graph["edges"] if edge["source"] == "app"]
     ambiguous = [item for item in graph["unresolved_imports"] if item["reason"] == "ambiguous_package_alias"]
     assert ambiguous and ambiguous[0]["candidates"] == ["one.pkgx.mod", "two.pkgx.mod"]
+
+
+def test_a_module_with_its_stub_stays_in_the_graph(tmp_path: Path):
+    # Regression: pkg/fast.py and pkg/fast.pyi were an "ambiguous duplicate", so the module
+    # left the graph and every import of it was unresolved.
+    records = _write(tmp_path, {
+        "pkg/__init__.py": "",
+        "pkg/fast.py": "def run():\n    return 1\n",
+        "pkg/fast.pyi": "def run() -> int: ...\n",
+        "app.py": "from pkg import fast\nimport pkg.fast\n",
+    })
+    graph, _ = analyze_python_dependencies(tmp_path, records)
+    assert {item["path"] for item in graph["modules"] if item["name"] == "pkg.fast"} == {"pkg/fast.py"}
+    assert {edge["target_path"] for edge in graph["edges"] if edge["source"] == "app"} >= {"pkg/fast.py"}
+    assert not graph["duplicate_modules"]

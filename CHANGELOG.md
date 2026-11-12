@@ -234,6 +234,10 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
 - `--resume` lists run-scoped diagnostics once (PDT-319); advisory matches have their own
   Markdown heading (PDT-320); Windows entries report no synthesized mode bits in either walker
   (PDT-321); `--resume` documents that failed files are not retried (PDT-322).
+- Code index: a module and its `.pyi` stub are one module (PDT-323); a class with explicit
+  constructors resolves uniquely (PDT-324); nested functions no longer inflate complexity
+  (PDT-325); Rust `use crate::` paths resolve and PHP function/trait imports are read
+  correctly (PDT-326); Go locks need a deferred release (PDT-327).
 
 ## 0.2.0 — 2026-11-05
 

@@ -192,3 +192,23 @@ def test_calls_through_a_namespace_package_resolve(tmp_path: Path):
     graph = report["metrics"]["code_index"]["call_graph"]
     assert graph["python"]["resolved"] == 1
     assert {"calls": 1, "target": "pkg.mod.run"} in graph["top_fan_in"]
+
+
+def test_class_constructors_rust_use_paths_and_php_imports(tmp_path: Path):
+    # Regressions: a Java class with an explicit constructor was two symbols named Foo, so
+    # new Foo() from another file was "ambiguous"; Rust ``use crate::...`` never resolved;
+    # PHP ``use function`` and trait ``use`` were external packages "function"/"HasFactory".
+    report, _ = _scan(tmp_path, {
+        "java/Foo.java": "class Foo {\n    Foo(int size) {\n        init();\n    }\n    void init() {}\n}\n",
+        "java/Main.java": "class Main {\n    void run() {\n        Foo foo = new Foo(1);\n    }\n}\n",
+        "src/lib.rs": "mod net;\nmod util;\n",
+        "src/util.rs": "pub fn helper() {}\n",
+        "src/net.rs": "use crate::util::helper;\npub fn send() { helper(); }\n",
+        "app/User.php": "<?php\nuse function App\\Support\\format_name;\nclass User {\n    use HasFactory, Notifiable;\n}\n",
+    })
+    index = report["metrics"]["code_index"]
+    assert index["call_graph"]["lexical"].get("ambiguous", 0) == 0
+    graph = index["module_graph"]
+    packages = {item["package"] for item in graph["external_packages"]}
+    assert not packages & {"function", "HasFactory", "Notifiable"}
+    assert "src/util.rs" in {item["module"] for item in graph["most_imported"]}

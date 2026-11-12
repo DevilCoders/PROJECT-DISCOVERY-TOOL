@@ -196,7 +196,7 @@ _IMPORTS = {
     "go": [(re.compile(r"(?m)^[ \t]*+import[ \t]++(?:[\w.]+[ \t]++)?(?=\")"), None)],
     "rust": [(re.compile(r"(?m)^[ \t]*+(?:pub(?:\([^)\n]{0,40}\))?[ \t]++)?use[ \t]++([\w:]+)"), 1),
              (re.compile(r"(?m)^[ \t]*+(?:pub[ \t]++)?mod[ \t]++(\w+)[ \t]*+;"), 1)],
-    "php": [(re.compile(r"(?m)^[ \t]*+use[ \t]++([\w\\]+)"), 1),
+    "php": [(re.compile(r"(?m)^[ \t]*+use[ \t]++(?:(?:function|const)[ \t]++)?([\w\\]+)"), 1),
             (re.compile(r"(?<![\w$])(?:require|include)(?:_once)?[ \t(]*+(?=['\"])"), None)],
     "solidity": [(re.compile(r"(?m)^[ \t]*+import[ \t]++(?:[^;'\"]{0,200}?from[ \t]++)?(?=['\"])"), None)],
     "zig": [(re.compile(r"@import[ \t]*+\([ \t]*+(?=\")"), None)],
@@ -986,8 +986,15 @@ def _calls(model: FileModel, clean: str, ordered, function_bodies) -> None:
 
 def _imports(model: FileModel, family: str) -> None:
     clean = model.clean
+    # PHP ``use Trait;`` inside a class body adds a trait, not an import.
+    type_bodies = [
+        symbol.body for symbol in model.symbols
+        if family == "php" and symbol.body and symbol.kind in {"class", "trait", "interface", "enum"}
+    ]
     for pattern, group in _IMPORTS.get("c" if family == "cpp" else family, []):
         for match in pattern.finditer(clean):
+            if type_bodies and group is not None and any(start < match.start() < end for start, end in type_bodies):
+                continue
             if group is not None:
                 target = match.group(group)
             else:
