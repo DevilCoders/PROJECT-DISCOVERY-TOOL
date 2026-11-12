@@ -252,3 +252,17 @@ def test_a_plugin_on_pythonpath_cannot_read_its_neighbours_under_the_sandbox(tmp
         sys.modules.pop("pdt_snoop_fixture", None)
     assert report.ok, format_report(report)
     assert report.files[0]["supported"] is True
+
+
+def test_samples_beyond_the_limit_are_reported(fixtures, tmp_path, monkeypatch):
+    # Regression: sample files beyond the 200th were dropped without a word.
+    from project_discovery.plugins import conformance
+
+    monkeypatch.setattr(conformance, "MAX_SAMPLE_FILES", 2)
+    samples = tmp_path / "many"
+    samples.mkdir()
+    for index in range(5):
+        (samples / f"s{index}.txt").write_text("TODO\n", encoding="utf-8")
+    report = check_plugin("pdt_conformance_fixtures:Good", [samples], isolation="process")
+    assert len(report.files) == 2
+    assert any(problem.check == "samples" and "3 were not" in problem.message for problem in report.problems)

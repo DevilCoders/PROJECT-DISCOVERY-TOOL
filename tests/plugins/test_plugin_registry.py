@@ -99,3 +99,28 @@ def test_builtin_registry_metadata_is_well_formed():
                 isinstance(item, str) and (len(item) > 1 or item in {"C", "D", "R", "V"})
                 for item in value
             ), analyzer.name
+
+
+def test_in_process_plugin_findings_carry_the_plugin_name(tmp_path):
+    # Regression: with --plugin-isolation off, a plugin's findings kept whatever analyzer
+    # they named ("core" by default, or a built-in such as "secret-patterns").
+    from project_discovery.analyzers.base import Analyzer
+    from project_discovery.engine.executor import FileOutcome, _run_analyzers
+    from project_discovery.models import FileRecord, Finding
+
+    class Poser(Analyzer):
+        name = "poser"
+
+        def supports(self, record):
+            return True
+
+        def analyze(self, path, record):
+            return [Finding("x", "plain", ""), Finding("x", "posing", "", analyzer="secret-patterns")]
+
+    plugin = Poser()
+    plugin._pdt_in_process_plugin = True
+    outcome = FileOutcome()
+    path = tmp_path / "a.txt"
+    path.write_text("x", encoding="utf-8")
+    _run_analyzers([plugin], {}, FileRecord("a.txt", 1, ".txt", "Text"), path, outcome)
+    assert {finding.analyzer for finding in outcome.findings} == {"poser"}

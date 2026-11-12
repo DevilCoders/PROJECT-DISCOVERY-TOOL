@@ -625,6 +625,25 @@ class InventoryStore:
         key = f"{sequence:020d}"
         self.append("diagnostic", {"path": key, "message": message})
 
+    def extend_run_diagnostics(self, messages: Iterable[str]) -> int:
+        """Persist run-scoped messages (plugin loading, online lookups) once per store.
+
+        A resumed scan reuses its store, where the interrupted run's copy already is;
+        appending again listed N copies after N resumes. Per-file diagnostics stay
+        append-only (extend_diagnostics).
+        """
+        from ..core.source_utils import neutralize_controls
+
+        existing = set(self.iter_diagnostics())
+        count = 0
+        for message in messages:
+            if neutralize_controls(message) in existing:
+                continue
+            self.append_diagnostic(message)
+            existing.add(neutralize_controls(message))
+            count += 1
+        return count
+
     def extend_diagnostics(self, messages: Iterable[str]) -> int:
         """Persist diagnostic messages from an iterable without retaining it."""
         count = 0

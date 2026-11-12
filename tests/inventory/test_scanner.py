@@ -693,3 +693,24 @@ def test_posix_byte_names_and_backslashes_round_trip(tmp_path: Path, monkeypatch
         paths = sorted(record.path for record in files)
         assert paths == sorted([r"back\slash.txt", os.fsdecode(b"bad\xffname.py")])
         assert all((tmp_path / path).is_file() for path in paths)
+
+
+def test_debian_packages_are_classified_as_debian_packages():
+    # Regression: the generic ar signature matched first, so archive/deb was unreachable.
+    from project_discovery.inventory.scanner import _classify_head
+
+    head = b"!<arch>\ndebian-binary   1342943816  0     0     100644  4         `\n2.0\n"
+    assert _classify_head(head, "pkg_1.0_amd64.deb") == "archive/deb"
+    assert _classify_head(b"!<arch>\nfoo.o/          0           0     0     644     8         `\n", "libx.a") == "archive/ar"
+
+
+def test_both_walkers_report_windows_modes_and_dot_names_alike(tmp_path):
+    # Regression: on Windows the Rust walker reported no mode while the fallback and the
+    # root record reported synthesized 0o666/0o444/0o777 bits.
+    import os
+
+    from project_discovery.inventory.scanner import _mode
+
+    (tmp_path / "file.txt").write_text("x", encoding="utf-8")
+    info = (tmp_path / "file.txt").stat()
+    assert _mode(info) == (None if os.name == "nt" else info.st_mode & 0o7777)

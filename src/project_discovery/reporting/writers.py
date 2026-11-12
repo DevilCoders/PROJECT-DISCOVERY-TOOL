@@ -838,6 +838,11 @@ def _write_markdown_vulnerabilities(line, result: ScanResult, meta: dict[str, An
         for failure in online.get("failures") or []:
             line(f"- Failure: {_md(failure.get('reason'))} ({failure.get('packages', 0):,} package(s))")
         line(f"- Data sent: {_md(online.get('data_sent', 'package coordinates'))}")
+    if findings:
+        # Local and online matches alike: not under the online lookup's heading.
+        line()
+        line("### Advisory matches")
+        line()
     for item in findings:
         line(f"- [{item.severity}][{item.confidence}] {_md(item.title)} ({_md(item.analyzer)})")
         line(f"  - {_md(item.detail)}")

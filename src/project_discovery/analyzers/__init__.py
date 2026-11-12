@@ -180,6 +180,12 @@ def load_analyzers(*, plugin_policy=None, plugin_specs=None) -> AnalyzerLoadResu
             if candidate.name in names:
                 raise ValueError(f"duplicate analyzer name: {candidate.name}")
             names.add(candidate.name)
+            try:
+                # The engine sets this plugin's name on its findings, as isolated modes do:
+                # an in-process plugin never reports as "core" or as a built-in analyzer.
+                candidate._pdt_in_process_plugin = True
+            except AttributeError:  # __slots__ without room for the marker
+                raise TypeError("plugin analyzer instances must accept attributes") from None
             analyzers.append(candidate)
             loaded_points.append(point)
             statuses.append({

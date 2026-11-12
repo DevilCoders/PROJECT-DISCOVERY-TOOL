@@ -229,6 +229,11 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   `--callees`, and warns and exits 3 on a scan without a code index (PDT-312).
 - No HTTP-in-loop finding for dict values bound by a loop (PDT-313); `ScanResult.to_dict()`
   writes the schema 1.7 `scan` block (PDT-314); README report claims corrected (PDT-315).
+- `pdt plugin-check` reports samples beyond its limit (PDT-316); in-process plugins are
+  attributed to their own name (PDT-317); Debian packages classify as `archive/deb` (PDT-318).
+- `--resume` lists run-scoped diagnostics once (PDT-319); advisory matches have their own
+  Markdown heading (PDT-320); Windows entries report no synthesized mode bits in either walker
+  (PDT-321); `--resume` documents that failed files are not retried (PDT-322).
 
 ## 0.2.0 — 2026-11-05
 

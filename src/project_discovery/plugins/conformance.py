@@ -103,7 +103,7 @@ def _sample_files(samples: Sequence[Path]) -> list[tuple[Path, str]]:
             files.append((sample, sample.name))
         else:
             raise ValueError(f"sample not found: {sample}")
-    return files[:MAX_SAMPLE_FILES]
+    return files  # check_plugin checks the first MAX_SAMPLE_FILES and reports the rest
 
 
 def _record(path: Path, relative: str) -> FileRecord:
@@ -157,6 +157,11 @@ def check_plugin(target: str, samples: Sequence[Path] = (), *, isolation: str = 
         files = _sample_files(samples)
         if not files:
             report.warning("samples", "no sample files were given, so supports() and analyze() were not run")
+        if len(files) > MAX_SAMPLE_FILES:
+            # Never a silent omission: say how many sample files were not checked.
+            report.warning("samples", f"only the first {MAX_SAMPLE_FILES:,} of {len(files):,} sample files "
+                           f"were checked; {len(files) - MAX_SAMPLE_FILES:,} were not")
+            files = files[:MAX_SAMPLE_FILES]
         for path, relative in files:
             _check_file(host, metadata["name"], path, relative, report)
         if files and not any(entry["supported"] for entry in report.files):

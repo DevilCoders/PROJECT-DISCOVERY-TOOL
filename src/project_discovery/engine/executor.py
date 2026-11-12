@@ -80,7 +80,13 @@ def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: Fi
             lock = locks.get(id(analyzer))
             with lock if lock is not None else nullcontext():
                 if analyzer.supports(record):
-                    outcome.findings.extend(analyzer.analyze(path, record))
+                    produced = analyzer.analyze(path, record)
+                    if getattr(analyzer, "_pdt_in_process_plugin", False):
+                        produced = list(produced)
+                        for finding in produced:
+                            if isinstance(finding, Finding):
+                                finding.analyzer = analyzer.name
+                    outcome.findings.extend(produced)
                     outcome.analyzed = True
         except Exception as exc:
             message = redact_source_excerpt(f"{type(exc).__name__}: {exc}")

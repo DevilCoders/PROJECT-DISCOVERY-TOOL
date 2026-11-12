@@ -373,7 +373,7 @@ def _run_online_vulnerability_lookup(
         _lockfile_sources(root, records, skipped, memory_source),
     )
     finding_store.extend_findings(result.findings)
-    finding_store.extend_diagnostics(result.diagnostics)
+    finding_store.extend_run_diagnostics(result.diagnostics)
     status = result.status
     if skipped:
         status["lockfiles_content_skipped"] = len(skipped)
@@ -618,8 +618,9 @@ def run_scan(
     fingerprint_cache = ScanCache(cache_path) if source_metadata is None else _EphemeralScanCache()
     try:
         with InventoryStore(inventory_path) as finding_store, fingerprint_cache as cache:
-            finding_store.extend_diagnostics(analyzer_load.diagnostics)
-            finding_store.extend_diagnostics(storage_notes)
+            # Run-scoped messages: once per report, also across --resume.
+            finding_store.extend_run_diagnostics(analyzer_load.diagnostics)
+            finding_store.extend_run_diagnostics(storage_notes)
             if source_metadata is not None and memory_source is None:
                 # Missing content makes the scan incomplete (--strict); notes such as
                 # "history not imported" stay report metadata only.
@@ -1583,7 +1584,8 @@ def main() -> None:
     scan.add_argument(
         "--resume", action="store_true",
         help="Continue an interrupted scan of the same root into the same --output: reuse its "
-             "inventory and stored findings and analyze only files not yet processed",
+             "inventory and stored findings and analyze only files not yet processed (files that "
+             "failed are not retried; a fresh scan retries them)",
     )
     scan.add_argument(
         "--inventory-only", action="store_true",

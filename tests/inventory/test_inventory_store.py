@@ -501,3 +501,18 @@ def test_unreadable_databases_are_moved_aside_and_rebuilt(tmp_path):
     # --resume with an unreadable inventory starts a fresh scan.
     (cache / "inventory.sqlite3").write_bytes(b"garbage" * 64)
     assert run_scan(project, output, {"json"}, 1, quiet=True, resume=True) == 0
+
+
+def test_run_scoped_diagnostics_are_stored_once(tmp_path):
+    # Regression: --resume reused the store and appended the plugin-load and online-lookup
+    # messages again, so each resume added another copy to every report.
+    from project_discovery.inventory.store import InventoryStore
+
+    with InventoryStore(tmp_path / "inventory.sqlite3") as store:
+        store.extend_run_diagnostics(["plugin x failed to load"])
+        store.extend_run_diagnostics(["plugin x failed to load", "online lookup partial"])
+        store.extend_diagnostics(["a.py: per-file error", "a.py: per-file error"])
+        store.flush()
+        assert list(store.iter_diagnostics()) == [
+            "plugin x failed to load", "online lookup partial", "a.py: per-file error", "a.py: per-file error",
+        ]

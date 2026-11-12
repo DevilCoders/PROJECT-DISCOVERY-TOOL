@@ -81,6 +81,15 @@ def _size_bucket(size: int) -> str:
     return "over_100_mib"
 
 
+def _mode(info: os.stat_result) -> int | None:
+    """POSIX permission bits; None on Windows, as the Rust walker reports.
+
+    Windows has no permission bits: Python derives 0o666/0o444/0o777 from the read-only
+    attribute, so the two backends (and the root record) disagreed for one tree.
+    """
+    return None if os.name == "nt" else stat.S_IMODE(info.st_mode)
+
+
 def _is_hidden(name: str, info: os.stat_result) -> bool:
     """Recognize dot-hidden entries and the Windows FILE_ATTRIBUTE_HIDDEN bit."""
     if name.startswith("."):
@@ -145,11 +154,17 @@ def _read_signature_sample(
     return _read_verified_sample(path, expected_info)[0]
 
 
+def _is_deb(head: bytes, relative_path: str) -> bool:
+    return head.startswith(b"!<arch>\ndebian-binary") or relative_path.lower().endswith((".deb", ".udeb"))
+
+
 def _classify_head(head: bytes, relative_path: str) -> str | None:
     """Classify common binary formats from a bounded signature sample."""
     if not head:
         return None
     native_type = native_detect_signature(head)
+    if native_type == "archive/ar" and _is_deb(head, relative_path):
+        return "archive/deb"
     if native_type:
         return native_type
 
@@ -171,7 +186,8 @@ def _classify_head(head: bytes, relative_path: str) -> str | None:
     if head.startswith(b"MSCF"):
         return "archive/cab"
     if head.startswith(b"!<arch>"):
-        return "archive/ar"
+        # A Debian package is an ar archive whose first member is debian-binary.
+        return "archive/deb" if _is_deb(head, relative_path) else "archive/ar"
     if head.startswith(b"\xed\xab\xee\xdb"):
         return "archive/rpm"
     if len(head) >= 262 and head[257:262] == b"ustar":
@@ -223,8 +239,6 @@ def _classify_head(head: bytes, relative_path: str) -> str | None:
     lower = relative_path.lower()
     if lower.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")):
         return "archive/tar-or-compressed-tar"
-    if lower.endswith(".deb") and head.startswith(b"!<arch>"):
-        return "archive/deb"
     if lower.endswith(".iso"):
         return "archive/iso-detected-by-extension"
     if native_count_byte(head, 0) > 0:
@@ -392,6 +406,9 @@ def _discover_with_rust(
         # a legal POSIX file-name character, so only Windows separators are rewritten.
         if os.sep == "\\":
             relative = relative.replace("\\", "/")
+        # The Rust walker reports hidden=false for entries it could not stat; a dot name is
+        # hidden either way, as in the fallback walker.
+        hidden = bool(hidden) or relative.rsplit("/", 1)[-1].startswith(".")
         if kind == "directory_error":
             message = error or "Directory read failed"
             if store is None:
@@ -563,7 +580,7 @@ def discover_inventory(
     stats: Counter[str] = Counter()
     try:
         root_info = root.stat()
-        root_mode = stat.S_IMODE(root_info.st_mode)
+        root_mode = _mode(root_info)
         root_hidden = _is_hidden(root.name, root_info) if root.name else False
     except OSError:
         root_mode, root_hidden = None, False
@@ -646,7 +663,7 @@ def discover_inventory(
                     scope, state = _symlink_scope(root, Path(entry.path), target), "unverified"
                 link_record = SymlinkRecord(
                     relative, target, scope, target_state=state, is_hidden=hidden,
-                    permissions=stat.S_IMODE(info.st_mode),
+                    permissions=_mode(info),
                 )
                 if store is None:
                     symlinks.append(link_record)
@@ -665,7 +682,7 @@ def discover_inventory(
                     relative,
                     depth + 1,
                     is_hidden=hidden,
-                    permissions=stat.S_IMODE(info.st_mode),
+                    permissions=_mode(info),
                     development_marker=marker,
                     pruned=exclusion is not None,
                     prune_reason=exclusion,
@@ -708,7 +725,7 @@ def discover_inventory(
                     file_type=file_type,
                     size_bucket=_size_bucket(size),
                     is_hidden=hidden,
-                    permissions=stat.S_IMODE(info.st_mode),
+                    permissions=_mode(info),
                     mtime_ns=info.st_mtime_ns,
                     analysis_identity=opened_identity or stat_identity(info),
                 )
@@ -742,7 +759,7 @@ def discover_inventory(
                 relative,
                 kind,
                 is_hidden=hidden,
-                permissions=stat.S_IMODE(info.st_mode),
+                permissions=_mode(info),
                 size_bytes=getattr(info, "st_size", 0),
             )
             if store is None:

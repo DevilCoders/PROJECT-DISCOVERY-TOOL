@@ -63,7 +63,8 @@ persisted is kept.
 `--resume` reuses the stored inventory and findings in `OUTPUT/.pdt-cache/inventory.sqlite3`
 when that inventory finished traversal for the same root. Files already hashed and analyzed are
 skipped; the rest are analyzed, then the import graph, architecture layout and reports are
-rebuilt. Files added or removed after the original traversal are not picked up: run a fresh
+rebuilt. Files whose analysis failed in the interrupted run (for example a sharing violation or a
+terminated worker) keep their error and are not retried; run a fresh scan to retry them. Files added or removed after the original traversal are not picked up: run a fresh
 scan for a current view. When no resumable inventory exists, PDT warns and starts a fresh scan.
 An inventory or fingerprint database that SQLite cannot read (a damaged file) is moved aside as
 `NAME.corrupt-<timestamp>` with a warning and a scan diagnostic, and the scan rebuilds it; a
