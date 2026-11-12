@@ -471,6 +471,21 @@ def run_scan(
         cache_location = online_vulnerabilities.cache_path.expanduser().resolve()
         if cache_location == root or root in cache_location.parents:
             raise ValueError("The online vulnerability cache must be outside the analyzed project.")
+        # Fail before the walk, not after a full analysis, when the cache file is unusable.
+        from .online.cache import ResponseCache
+
+        try:
+            # A TTL of 0 disables the cache: nothing is opened or created then.
+            with ResponseCache(cache_location, ttl_seconds=online_vulnerabilities.cache_ttl_seconds) as probe:
+                if probe._connection is not None:
+                    status = probe._connection.execute("PRAGMA quick_check").fetchone()
+                    if status is None or status[0] != "ok":
+                        raise sqlite3.DatabaseError(f"integrity check failed: {status}")
+        except sqlite3.Error as exc:
+            raise ValueError(
+                f"The online vulnerability cache {cache_location} is unusable ({exc}); "
+                "delete it or choose another --vuln-cache."
+            ) from exc
 
     _render_banner(console)
     if source_metadata is not None:
@@ -989,7 +1004,9 @@ def run_scan(
     summary.add_row("Peak coordinator memory", f"{rss / 1024 / 1024:,.0f} MiB" if rss else "unavailable")
     summary.add_row(
         "Local vulnerability advisories",
-        str(vulnerability_db_status.get("advisory_count", 0))
+        (f"{vulnerability_db_status.get('advisory_count', 0)}"
+         + (f" (STALE: snapshot {vulnerability_db_status.get('snapshot_age_days')} days old)"
+            if vulnerability_db_status.get("stale") else ""))
         if vulnerability_db_status["enabled"] else "not configured",
     )
     online_status = vulnerability_db_status.get("online")
@@ -1567,6 +1584,8 @@ def main() -> None:
     try:
         if args.command == "vuln-db":
             if args.vuln_action == "import":
+                # Validate the source before the database (and its directories) is created.
+                args.source.expanduser().resolve(strict=True)
                 with VulnerabilityDatabase(args.db) as database:
                     imported = database.import_osv(args.source)
                 print(
@@ -1576,14 +1595,27 @@ def main() -> None:
                 )
                 for error in imported["errors"][:20]:
                     print("[ WARNING ] " + error)
+                if not imported["imported_advisories"]:
+                    print("[ ERROR ] No advisory was imported; the snapshot's provenance is unchanged.")
+                    raise SystemExit(EXIT_USAGE)
                 raise SystemExit(0 if imported["skipped_records"] == 0 else 1)
-            with VulnerabilityDatabase(args.db) as database:
+            if not args.db.expanduser().is_file():
+                # Reading status must never create an empty database at a mistyped path.
+                raise FileNotFoundError(f"Advisory database not found: {args.db}")
+            with VulnerabilityDatabase(args.db, read_only=True) as database:
                 status = database.status()
             print("[ VULNERABILITY DATABASE ]")
             print(f"[ INFO ] Database: {status['database']}")
             print(f"[ INFO ] Advisories: {status['advisory_count']}")
             print(f"[ INFO ] Affected package records: {status['affected_package_records']}")
             print(f"[ INFO ] Last import: {status.get('last_imported_at', 'never')}")
+            if status.get("snapshot_age_days") is not None:
+                print(f"[ INFO ] Snapshot age: {status['snapshot_age_days']} day(s)")
+            if status.get("last_source_name"):
+                print(f"[ INFO ] Snapshot source: {status['last_source_name']}")
+            if status.get("stale"):
+                print(f"[ WARNING ] The snapshot is older than {status['stale_after_days']} days; "
+                      "advisories published since are missing.")
             for ecosystem, count in status["ecosystems"].items():
                 print(f"[ ECOSYSTEM ] {ecosystem}: {count}")
             raise SystemExit(0)

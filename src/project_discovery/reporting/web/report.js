@@ -152,7 +152,10 @@ coverageWarning.textContent=onlineIncomplete
 coverageWarning.classList.toggle("hidden",!onlineIncomplete);
 $("vuln-db-updated").textContent=vulnMeta.last_imported_at
  ? "Last local import: "+vulnMeta.last_imported_at
+   +(vulnMeta.last_source_name?" from "+String(vulnMeta.last_source_name):"")
+   +(vulnMeta.stale?" — STALE: "+number(vulnMeta.snapshot_age_days||0)+" days old; advisories published since are missing":"")
  : "No local advisory snapshot metadata";
+$("vuln-db-updated").className=vulnMeta.stale?"badge insecure":"muted";
 const vulnTarget=$("vulnerability-findings");
 for(const item of vulnFindings){
  const card=document.createElement("article");card.className="finding";

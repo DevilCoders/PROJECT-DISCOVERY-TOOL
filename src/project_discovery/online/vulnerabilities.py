@@ -29,7 +29,7 @@ from ..analyzers.dependencies.lockfile_parsers import (
     ResolvedPackage,
     parse_lockfile,
 )
-from ..analyzers.dependencies.vulnerabilities import advisory_findings
+from ..analyzers.dependencies.vulnerabilities import _affected_version, advisory_findings
 from ..core.source_utils import SourceBudgetExceeded, redact_source_excerpt
 from ..models import Finding
 from ..vulnerabilities.database import osv_record_to_advisories
@@ -314,6 +314,10 @@ class OnlineVulnerabilityLookup:
                     status["withdrawn_skipped"] += 1
                     continue
                 rows = osv_record_to_advisories(record, query.ecosystem, query.name, source="OSV.dev")
+                # A record has one affected entry per release line (fixes 7.5.2, 6.3.1, 5.7.2):
+                # the entry whose ranges hold this version gives the right fixed boundary.
+                matching = [row for row in rows if _affected_version(query.version, row.get("affected") or {}, query.ecosystem)[0]]
+                rows = matching or rows
                 advisory = rows[0] if rows else {
                     **_placeholder_advisory(identifier, query, str(record.get("summary") or identifier)),
                     "aliases": sorted(str(item) for item in record.get("aliases", []) if isinstance(item, str))
@@ -335,7 +339,8 @@ class OnlineVulnerabilityLookup:
             matches = [(advisory, True, "OSV.dev reported this version as affected") for advisory in advisories]
             status["vulnerable_packages"] += 1
             status["advisories"] += len(advisories)
-            for lockfile in sorted(paths_by_package[query])[:_MAX_EVIDENCE_LOCKFILES]:
+            # Every lockfile gets its findings, as offline (the cap is for evidence lists).
+            for lockfile in sorted(paths_by_package[query]):
                 for finding in advisory_findings(
                     lockfile, package, matches,
                     analyzer=ONLINE_ANALYZER_NAME, source_label="OSV.dev advisory",

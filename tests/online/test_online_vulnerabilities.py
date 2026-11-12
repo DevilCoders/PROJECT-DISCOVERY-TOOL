@@ -614,3 +614,53 @@ def test_live_osv_nvd_and_github_lookups(tmp_path: Path, monkeypatch):
     titles = [finding.title for finding in result.findings if finding.confidence == "CONFIRMED"]
     assert any(title.startswith(LODASH_GHSA) for title in titles), titles
     assert result.status["requests"]["osv_querybatch"] == 1
+
+
+def test_online_fix_boundary_comes_from_the_matching_release_line(tmp_path: Path):
+    # Regression: only the record's first affected entry was used, so semver 6.3.0 was told
+    # to upgrade to 7.5.2 (another release line) instead of 6.3.1.
+    service = AdvisoryService()
+    service.affected[("npm", "semver", "6.3.0")] = ["GHSA-c2qf-rxjj-qqgw"]
+    record = ghsa_record("GHSA-c2qf-rxjj-qqgw", "npm", "semver", fixed="7.5.2")
+    record["affected"] = [
+        {"package": {"ecosystem": "npm", "name": "semver"},
+         "ranges": [{"type": "SEMVER", "events": [{"introduced": introduced}, {"fixed": fixed}]}]}
+        for introduced, fixed in (("7.0.0", "7.5.2"), ("6.0.0", "6.3.1"), ("0", "5.7.2"))
+    ]
+    service.records["GHSA-c2qf-rxjj-qqgw"] = record
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"name": "app"}, "node_modules/semver": {"version": "6.3.0"},
+    }}), encoding="utf-8")
+    with RunningService(service) as running:
+        _, report = _scan(project, tmp_path / "out", _options(running, tmp_path))
+    [finding] = _online_findings(report)
+    text = json.dumps(finding)
+    assert "6.3.1" in text and "7.5.2" not in finding["recommendation"]
+
+
+def test_every_lockfile_sharing_a_vulnerable_package_gets_its_finding(tmp_path: Path):
+    # Regression: findings were built for the first 20 lockfiles only, silently.
+    project = tmp_path / "project"
+    for index in range(25):
+        folder = project / f"service-{index:02}"
+        folder.mkdir(parents=True)
+        (folder / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {
+            "": {"name": f"service-{index}"}, "node_modules/lodash": {"version": "4.17.20"},
+        }}), encoding="utf-8")
+    with RunningService(_service()) as running:
+        _, report = _scan(project, tmp_path / "out", _options(running, tmp_path))
+    lockfiles = {item["evidence"][0] for item in _online_findings(report)}
+    assert len(lockfiles) == 25
+
+
+def test_a_corrupt_cache_fails_before_the_scan_starts(tmp_path: Path):
+    # Regression: the cache was first opened after the whole analysis, so a damaged file
+    # aborted the scan at the end and no report was written.
+    cache = tmp_path / "cache" / "online.sqlite3"
+    cache.parent.mkdir()
+    cache.write_bytes(b"this is not a database" * 100)
+    with RunningService(_service()) as running:
+        with pytest.raises(ValueError, match="unusable"):
+            _scan(_project(tmp_path), tmp_path / "out", _options(running, tmp_path))

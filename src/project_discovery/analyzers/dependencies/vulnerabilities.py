@@ -107,9 +107,16 @@ def _affected_version(
             return False, "version not present in explicit affected-version list"
         return None, "advisory does not contain a comparable affected range"
     unknown = False
-    for item in ranges:
+    # GIT ranges name commits. When the entry also has a comparable range or a version
+    # list (OSV enumerates a GIT range's tagged releases into "versions"), they decide
+    # nothing for a release version and must not turn the verdict into UNKNOWN.
+    git_type = [isinstance(item, dict) and str(item.get("type", "")).upper() == "GIT" for item in ranges]
+    other_evidence = (isinstance(versions, list) and bool(versions)) or not all(git_type)
+    for item, is_git in zip(ranges, git_type, strict=True):
         if not isinstance(item, dict):
             unknown = True
+            continue
+        if is_git and other_evidence:
             continue
         matched = _event_range_contains(version, item, ecosystem)
         if matched is True:
@@ -357,6 +364,18 @@ class LocalVulnerabilityAnalyzer(Analyzer):
         findings = []
         try:
             with VulnerabilityDatabase(self.database_path, read_only=True) as database:
+                ecosystem = packages[0].ecosystem if packages else None
+                if ecosystem is not None and not database.covers(ecosystem):
+                    # An npm-only snapshot cannot clear a PyPI lockfile: no match is no evidence.
+                    return [Finding(
+                        "vulnerabilities",
+                        f"Ecosystem not covered by the local advisory snapshot: {record.path}",
+                        f"The local advisory database holds no {ecosystem} advisories, so the "
+                        f"{len(packages):,} {ecosystem} packages of this lockfile were not checked. "
+                        "Import an OSV snapshot that includes this ecosystem.",
+                        confidence="UNKNOWN", evidence=[record.path, f"ecosystem: {ecosystem}"],
+                        analyzer=self.name, severity="LOW",
+                    )]
                 for package in packages:
                     findings.extend(self._package_findings(database, record, package))
         except (OSError, ValueError, sqlite3.Error) as exc:

@@ -79,9 +79,21 @@ def _semver_comparator(*, natural: bool = False, casefold: bool = False) -> Comp
 
 
 compare_semver = _semver_comparator()
-# NuGet labels are case-insensitive; Composer stabilities such as beta10 sort naturally.
-_compare_nuget = _semver_comparator(natural=True, casefold=True)
-_compare_composer = _semver_comparator(natural=True, casefold=True)
+# NuGet compares numeric labels numerically and the others ordinally, ignoring case
+# (beta10 < beta9), as SemVer 2.0 does.
+_compare_nuget = _semver_comparator(natural=False, casefold=True)
+
+# Composer's VersionParser: up to four numeric parts, then one stability suffix with an
+# optional number. Stabilities order dev < alpha < beta < RC < stable < patch, so the
+# Magento patch release 2.4.6-p3 sorts after 2.4.6.
+_COMPOSER = re.compile(
+    r"^[vV]?(\d{1,18})(?:\.(\d{1,18}))?(?:\.(\d{1,18}))?(?:\.(\d{1,18}))?"
+    r"(?:[-_.]?(stable|beta|b|rc|alpha|a|patch|pl|p|dev)[-_.]?(\d{0,18}))?$",
+    re.IGNORECASE,
+)
+_COMPOSER_RANK = {
+    "dev": 0, "alpha": 1, "a": 1, "beta": 2, "b": 2, "rc": 3, "stable": 4, "patch": 5, "pl": 5, "p": 5,
+}
 
 
 def _strip_composer(value: str) -> str:
@@ -90,8 +102,20 @@ def _strip_composer(value: str) -> str:
     return value.split("@", 1)[0].split(" as ", 1)[-1]
 
 
+def _parse_composer(value: str):
+    match = _COMPOSER.match(value.strip())
+    if not match:
+        return None  # branch versions (dev-main) and other forms are not ordered
+    release = tuple(int(part) if part else 0 for part in match.group(1, 2, 3, 4))
+    stability = (match.group(5) or "stable").lower()
+    return release, _COMPOSER_RANK[stability], int(match.group(6)) if match.group(6) else 0
+
+
 def compare_composer(left: str, right: str) -> int | None:
-    return _compare_composer(_strip_composer(left), _strip_composer(right))
+    a, b = _parse_composer(_strip_composer(left)), _parse_composer(_strip_composer(right))
+    if a is None or b is None:
+        return None
+    return _cmp(a, b)
 
 
 def _gem_segments(value: str) -> list[int | str] | None:

@@ -68,19 +68,24 @@ def normalize_version(value: Any, *, strip_prefix: bool = False) -> str:
 # version itself (a git+https URL that can embed a user and token, or "file:../lib"),
 # so they can carry credentials and local paths. Registry versions never contain "/", "\", "@" or
 # whitespace (pnpm peer suffixes are stripped before this point).
-_NON_REGISTRY_VERSION = re.compile(
-    r"(?i)^(?:git|github|gitlab|bitbucket|gist|file|link|portal|patch|workspace|exec|https?|ssh)[+:]"
-    r"|^[a-z][a-z0-9+.-]{0,20}+://|[/\\@\s]"
+# The project's own code: workspace members, local paths and links.
+_LOCAL_SPECIFIER = re.compile(r"(?i)^(?:file|link|portal|workspace|exec):|^\.{1,2}[/\\]|^~[/\\]|^[/\\]|^[a-z]:[/\\]")
+# Third-party code from outside a registry: git, tarball URLs, ``user/repo#ref`` shorthands.
+_REMOTE_SPECIFIER = re.compile(
+    r"(?i)^(?:git|github|gitlab|bitbucket|gist|https?|ssh)[+:]|^[a-z][a-z0-9+.-]{0,20}+://|[/\\@\s]"
 )
 
 
 class ParsedLockfile(list):
-    """Resolved registry packages, plus the names of dependencies that resolve elsewhere.
+    """Resolved registry packages, plus the names of entries that resolve elsewhere.
 
-    ``non_registry`` holds names whose lockfile entry points at git, a path, a URL or a
-    workspace link. They have no registry version, so they are not matched to advisories.
+    ``local`` holds the project's own packages: the root project, workspace members and
+    path or linked packages. ``non_registry`` holds third-party dependencies taken from
+    git or a URL. Neither has a registry version, so neither is looked up or matched
+    against advisories; only ``non_registry`` is a coverage gap.
     """
 
+    local: list[str]
     non_registry: list[str]
 
 
@@ -89,6 +94,7 @@ class _Collector:
         self.ecosystem = ecosystem
         self.max_entries = max_entries
         self.packages: set[ResolvedPackage] = set()
+        self.local_names: set[str] = set()
         self.non_registry: set[str] = set()
 
     def add(self, name: Any, version: Any) -> None:
@@ -100,10 +106,12 @@ class _Collector:
             real, _, aliased = text[4:].rpartition("@")
             if real and aliased:
                 name, text = real, aliased
-        if _NON_REGISTRY_VERSION.search(text):
-            # Only the name is kept: the specifier can hold credentials or local paths.
-            if name and len(self.non_registry) < self.max_entries:
-                self.non_registry.add(name)
+        # Only the name is kept: a specifier can hold credentials or local paths.
+        if _LOCAL_SPECIFIER.search(text):
+            self.local(name)
+            return
+        if _REMOTE_SPECIFIER.search(text):
+            self.remote(name)
             return
         package = ResolvedPackage(self.ecosystem, name, text)
         if not package.name or not package.version or package in self.packages:
@@ -114,6 +122,16 @@ class _Collector:
             )
         self.packages.add(package)
 
+    def local(self, name: Any) -> None:
+        """Record one of the project's own packages (never sent anywhere or matched)."""
+        if name and len(self.local_names) < self.max_entries:
+            self.local_names.add(str(name).strip())
+
+    def remote(self, name: Any) -> None:
+        """Record a third-party dependency taken from git or a URL (a coverage gap)."""
+        if name and len(self.non_registry) < self.max_entries:
+            self.non_registry.add(str(name).strip())
+
 
 def _npm_lock(data: Any, out: _Collector) -> None:
     if not isinstance(data, dict):
@@ -121,10 +139,14 @@ def _npm_lock(data: Any, out: _Collector) -> None:
     packages = data.get("packages")
     if isinstance(packages, dict):
         for item_path, item in packages.items():
-            # The "" key is the root project; linked workspaces carry no resolved version.
-            if not item_path or not isinstance(item, dict) or item.get("link"):
+            if not isinstance(item, dict):
                 continue
             name = item.get("name") or item_path.rsplit("node_modules/", 1)[-1]
+            # "" is the root project; keys outside node_modules/ are workspace members,
+            # and links point at them: the project's own code.
+            if not item_path or "node_modules/" not in item_path or item.get("link"):
+                out.local(name or item_path)
+                continue
             out.add(name, item.get("version"))
     if out.packages or not isinstance(data.get("dependencies"), dict):
         return
@@ -157,8 +179,17 @@ def _yarn_lock(source: str, out: _Collector) -> None:
             names = []
             for selector in line[:-1].split(","):
                 match = _YARN_SELECTOR.match(selector.strip().strip("\"'"))
-                if match:
-                    names.append(match.group(1))
+                if not match:
+                    continue
+                name, specifier = match.group(1), match.group(2)
+                if specifier.startswith("npm:"):
+                    # Alias ("lodash4@npm:lodash@^4.17.15"): the real package is "lodash".
+                    real = specifier[4:].rpartition("@")[0]
+                    name = real or name
+                elif specifier.split(":", 1)[0] in {"workspace", "portal", "link", "file"}:
+                    out.local(name)   # a Berry workspace member or local package
+                    continue
+                names.append(name)
             continue
         if names:
             match = _YARN_VERSION.match(line)
@@ -204,24 +235,62 @@ def _pnpm_lock(source: str, out: _Collector) -> None:
                 out.add(*parsed)
 
 
-def _toml_packages(source: str, out: _Collector) -> None:
+def _toml_packages(source: str, out: _Collector, *, cargo: bool = False) -> None:
     data = tomllib.loads(source)
     for item in data.get("package", []):
-        if isinstance(item, dict):
-            out.add(item.get("name"), item.get("version"))
+        if not isinstance(item, dict):
+            continue
+        origin = item.get("source")
+        if isinstance(origin, str) or cargo:
+            # Cargo: crates.io and other registries are registry+/sparse+; no source is
+            # the project's own crate or a workspace or path member.
+            if not origin:
+                out.local(item.get("name"))
+                continue
+            if not origin.startswith(("registry+", "sparse+")):
+                out.remote(item.get("name"))
+                continue
+        elif isinstance(origin, dict):
+            # uv: {registry = ...} or editable/virtual/path/directory/git/url;
+            # poetry: [package.source] with type directory/file/git/url (legacy = an index).
+            kind = origin.get("type") or next(iter(origin), "")
+            if kind in {"editable", "virtual", "path", "directory", "file"}:
+                out.local(item.get("name"))
+                continue
+            if kind in {"git", "url"}:
+                out.remote(item.get("name"))
+                continue
+        elif item.get("path") or item.get("editable"):
+            out.local(item.get("name"))   # pdm: a local or editable package
+            continue
+        elif item.get("git") or item.get("url"):
+            out.remote(item.get("name"))
+            continue
+        out.add(item.get("name"), item.get("version"))
 
 
 def _composer_lock(data: Any, out: _Collector) -> None:
     for group in ("packages", "packages-dev"):
         for item in data.get(group, []) if isinstance(data, dict) else []:
-            if isinstance(item, dict):
-                out.add(item.get("name"), item.get("version"))
+            if not isinstance(item, dict):
+                continue
+            dist = item.get("dist") if isinstance(item.get("dist"), dict) else {}
+            if dist.get("type") == "path":
+                out.local(item.get("name"))   # a path repository: the project's own code
+                continue
+            out.add(item.get("name"), item.get("version"))
 
 
 def _pipfile_lock(data: Any, out: _Collector) -> None:
     for group in ("default", "develop"):
         entries = data.get(group, {}) if isinstance(data, dict) else {}
         for name, item in entries.items() if isinstance(entries, dict) else ():
+            if isinstance(item, dict) and (item.get("path") or item.get("file") or item.get("editable")):
+                out.local(name)
+                continue
+            if isinstance(item, dict) and item.get("git"):
+                out.remote(name)
+                continue
             version = item.get("version") if isinstance(item, dict) else item
             out.add(name, version)
 
@@ -230,17 +299,21 @@ _GEM_SPEC = re.compile(r"^ {4}([A-Za-z0-9_.-]+) \(([^)]+)\)\s*$")
 
 
 def _gemfile_lock(source: str, out: _Collector) -> None:
-    in_specs = False
+    in_specs, section = False, ""
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if line.strip() == "specs:":
             in_specs = True
             continue
         if line and not line.startswith(" "):
-            in_specs = False
+            in_specs, section = False, line.strip()
         if in_specs:
             match = _GEM_SPEC.match(line)
-            if match:
+            if match and section == "PATH":
+                out.local(match.group(1))     # a gem from the project's own tree
+            elif match and section == "GIT":
+                out.remote(match.group(1))
+            elif match:
                 # Platform gems are locked as "1.15.4-x86_64-linux"; gem versions never contain "-".
                 out.add(match.group(1), match.group(2).split("-", 1)[0])
 
@@ -256,20 +329,26 @@ def _go_sum(source: str, out: _Collector) -> None:
             out.add(match.group(1), match.group(2))
 
 
-_MIX_PACKAGE = re.compile(r'^\s*"([^"]+)":\s*\{:[^,]+,\s*:[^,]+,\s*"([^"]+)"')
+# "key": {:hex, :package_atom, "version", ...}; the key can differ from the package.
+_MIX_PACKAGE = re.compile(r'^\s*"([^"]+)":\s*\{:(\w+),\s*(?::(\w+)\s*,\s*"([^"]+)")?')
 
 
 def _mix_lock(source: str, out: _Collector) -> None:
     for raw_line in io.StringIO(source, newline=None):
         match = _MIX_PACKAGE.match(raw_line)
-        if match:
-            out.add(match.group(1), match.group(2))
+        if not match:
+            continue
+        if match.group(2) == "hex" and match.group(3):
+            out.add(match.group(3), match.group(4))
+        elif match.group(2) in {"git", "path"}:
+            (out.local if match.group(2) == "path" else out.remote)(match.group(1))
 
 
 def _swift_identity(item: dict[str, Any]) -> str | None:
     location = item.get("location") or item.get("repositoryURL")
     if isinstance(location, str) and location:
         value = re.sub(r"^[a-z][a-z0-9+.-]*://", "", location.strip(), flags=re.I)
+        value = re.sub(r"^[^/@:]+@(?=[^/]+/)", "", value)   # ssh://git@host/... -> host/...
         value = re.sub(r"^git@([^:]+):", r"\1/", value)
         return value.removesuffix("/").removesuffix(".git")
     return item.get("identity") or item.get("package")
@@ -290,16 +369,21 @@ def _nuget_lock(data: Any, out: _Collector) -> None:
     frameworks = data.get("dependencies", {}) if isinstance(data, dict) else {}
     for packages in frameworks.values() if isinstance(frameworks, dict) else ():
         for name, item in packages.items() if isinstance(packages, dict) else ():
-            if isinstance(item, dict) and item.get("type") != "Project":
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "Project":
+                out.local(name)   # a project reference in the same solution
+            else:
                 out.add(name, item.get("resolved"))
 
 
 _PUB_PACKAGE = re.compile(r"^ {2}([A-Za-z0-9_]+):\s*$")
 _PUB_VERSION = re.compile(r"""^ {4}version:\s*["']?([^"'\s]+)""")
+_PUB_SOURCE = re.compile(r"""^ {4}source:\s*["']?(\w+)""")
 
 
 def _pubspec_lock(source: str, out: _Collector) -> None:
-    in_packages, current = False, None
+    in_packages, current, origin = False, None, "hosted"
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if line and not line[0].isspace():
@@ -309,11 +393,20 @@ def _pubspec_lock(source: str, out: _Collector) -> None:
             continue
         package = _PUB_PACKAGE.match(line)
         if package:
-            current = package.group(1)
+            current, origin = package.group(1), "hosted"
+            continue
+        source_line = _PUB_SOURCE.match(line)
+        if current and source_line:
+            origin = source_line.group(1)
             continue
         version = _PUB_VERSION.match(line)
         if current and version:
-            out.add(current, version.group(1))
+            if origin in {"path", "sdk"}:
+                out.local(current)
+            elif origin == "git":
+                out.remote(current)
+            else:
+                out.add(current, version.group(1))
             current = None
 
 
@@ -322,8 +415,9 @@ def parse_lockfile(
 ) -> ParsedLockfile:
     """Return de-duplicated resolved registry packages in deterministic order.
 
-    Dependencies resolved from git, paths, URLs or workspaces are listed by name only in
-    the result's ``non_registry`` attribute.
+    The project's own packages (root, workspace and path members) are listed by name in
+    the result's ``local`` attribute, third-party dependencies from git or a URL in
+    ``non_registry``.
 
     Raises ValueError subclasses (including JSON/TOML decode errors and
     LockfileEntryBudgetExceeded) for malformed or over-budget input.
@@ -340,7 +434,7 @@ def parse_lockfile(
     elif name == "pnpm-lock.yaml":
         _pnpm_lock(source, out)
     elif name in {"cargo.lock", "poetry.lock", "uv.lock", "pdm.lock"}:
-        _toml_packages(source, out)
+        _toml_packages(source, out, cargo=name == "cargo.lock")
     elif name == "composer.lock":
         _composer_lock(json.loads(source), out)
     elif name == "pipfile.lock":
@@ -358,5 +452,7 @@ def parse_lockfile(
     elif name == "pubspec.lock":
         _pubspec_lock(source, out)
     result = ParsedLockfile(sorted(out.packages, key=lambda p: (p.name.casefold(), p.name, p.version)))
-    result.non_registry = sorted(out.non_registry - {package.name for package in out.packages})
+    registry_names = {package.name for package in out.packages}
+    result.local = sorted(out.local_names - registry_names)
+    result.non_registry = sorted(out.non_registry - registry_names - out.local_names)
     return result

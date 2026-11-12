@@ -153,6 +153,19 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   local path; `pdt catalog-remove URL` removes every ref (PDT-252).
 - Reports of `--inventory-only` scans say that no contents were analyzed, and a local advisory
   database is recorded as skipped rather than as a clean result (PDT-253).
+- Lockfile entries are classified by source. The project's own packages (root, workspace and
+  path members) are listed as local and never sent to OSV.dev or matched; git and URL
+  dependencies are an `UNKNOWN` coverage gap. Aliased dependencies (yarn `npm:` aliases,
+  `mix.lock` keys, `ssh://` Swift URLs) match under the real package (PDT-254, PDT-255).
+- Advisory matching: GIT commit ranges no longer turn decidable versions into `UNKNOWN`
+  (PDT-256); Composer orders patch releases and stabilities as Composer does, NuGet labels
+  ordinally (PDT-257); online findings cover every lockfile and take the fixed version from
+  the matching release line (PDT-258).
+- `vuln-db import` refuses unsupported sources and keeps the snapshot's provenance when it
+  imports nothing (PDT-259). Reports flag snapshots older than 30 days, show the snapshot's
+  source and ecosystems, and report an uncovered lockfile ecosystem as `UNKNOWN` (PDT-260).
+- A corrupt `--vuln-cache` file is detected before the scan (PDT-261), and `--vuln-db` opens
+  databases on Windows UNC shares (PDT-262).
 
 ## 0.2.0 — 2026-11-05
 

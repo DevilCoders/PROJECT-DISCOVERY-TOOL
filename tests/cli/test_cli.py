@@ -753,3 +753,40 @@ def test_capabilities_report_includes_remote_vcs_client_status(monkeypatch):
 
     assert report["remote_vcs_clients"]["git"]["available"] is True
     assert report["remote_vcs_clients"]["fossil"]["available"] is False
+
+
+def test_local_snapshot_gaps_are_reported_not_read_as_clean(tmp_path: Path):
+    # Regression (a ticked ROADMAP item that did not exist): a snapshot without the
+    # lockfile's ecosystem cleared it silently, and an old snapshot was never flagged.
+    import json
+    import sqlite3
+
+    from project_discovery.vulnerabilities.database import VulnerabilityDatabase
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"name": "app"}, "node_modules/demo-lib": {"version": "1.9.0"},
+    }}), encoding="utf-8")
+    feed = tmp_path / "feed"
+    feed.mkdir()
+    (feed / "pypi.json").write_text(json.dumps({
+        "id": "PYSEC-2099-1", "summary": "PyPI only",
+        "affected": [{"package": {"ecosystem": "PyPI", "name": "demo"},
+                      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.0"}]}]}],
+    }), encoding="utf-8")
+    database = tmp_path / "advisories.sqlite3"
+    with VulnerabilityDatabase(database) as store:
+        store.import_osv(feed)
+    connection = sqlite3.connect(database)
+    connection.execute("UPDATE metadata SET value = '2020-01-01T00:00:00+00:00' WHERE key = 'last_imported_at'")
+    connection.commit()
+    connection.close()
+    assert run_scan(project, tmp_path / "out", {"json", "markdown"}, 1, quiet=True,
+                    vulnerability_db=database, strict=True) == 3
+    report = _json_report(tmp_path / "out")
+    gaps = [item for item in report["findings"] if item["title"].startswith("Ecosystem not covered")]
+    assert gaps and gaps[0]["confidence"] == "UNKNOWN"
+    assert report["metrics"]["vulnerability_intelligence"]["stale"] is True
+    markdown = (tmp_path / "out" / "discovery-report.md").read_text(encoding="utf-8")
+    assert "**Stale snapshot:**" in markdown and "- Ecosystems: PyPI (1)" in markdown

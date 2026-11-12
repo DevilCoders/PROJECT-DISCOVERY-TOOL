@@ -59,6 +59,44 @@ def test_composer_ordering_is_natural_and_case_insensitive():
     assert compare_composer("1.0.0-RC1", "1.0.0-beta2") == 1
 
 
+def test_composer_orders_stabilities_and_patch_releases_like_composer():
+    # Regression: Magento patch releases (2.4.6-p3) were ordered as prereleases, so the
+    # range [2.4.6, 2.4.6-p6) missed every vulnerable patch release.
+    assert compare_composer("2.4.6-p3", "2.4.6") == 1
+    assert compare_composer("2.4.6-p3", "2.4.6-p6") == -1
+    assert compare_composer("2.4.6-patch1", "2.4.6-p1") == 0
+    assert compare_composer("1.0.0-dev", "1.0.0-alpha1") == -1
+    assert compare_composer("1.0.0-alpha1", "1.0.0-beta1") == -1
+    assert compare_composer("1.0.0-rc1", "1.0.0") == -1
+    assert compare_composer("1.0", "1.0.0.0") == 0
+    assert compare_composer("dev-main", "1.0.0") is None
+
+
+def test_nuget_compares_alphanumeric_labels_ordinally():
+    nuget = comparator_for("NuGet", "ECOSYSTEM")
+    assert nuget("1.0.0-beta10", "1.0.0-beta9") == -1
+    assert nuget("1.0.0-BETA.2", "1.0.0-beta.10") == -1
+    assert nuget("1.0.0-beta", "1.0.0") == -1
+
+
+def test_git_ranges_do_not_make_decidable_versions_unknown():
+    # Regression: PyPA records carry a GIT commit range next to the ECOSYSTEM range, and
+    # the uncomparable GIT range turned every patched version into an UNKNOWN match.
+    from project_discovery.analyzers.dependencies.vulnerabilities import _affected_version
+
+    affected = {
+        "ranges": [
+            {"type": "GIT", "repo": "https://github.com/psf/requests", "events": [{"introduced": "0"}, {"fixed": "abc123"}]},
+            {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.20.0"}]},
+        ],
+        "versions": ["2.19.0", "2.19.1"],
+    }
+    assert _affected_version("2.31.0", affected, "PyPI")[0] is False
+    assert _affected_version("2.19.1", affected, "PyPI")[0] is True
+    git_only = {"ranges": [{"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "abc123"}]}]}
+    assert _affected_version("2.31.0", git_only, "PyPI")[0] is None
+
+
 def test_osv_range_types_select_the_right_comparator():
     assert comparator_for("PyPI", "SEMVER") is compare_semver
     assert comparator_for("PyPI", "ECOSYSTEM") is compare_pep440

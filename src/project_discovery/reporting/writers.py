@@ -771,6 +771,17 @@ def _write_markdown_vulnerabilities(line, result: ScanResult, meta: dict[str, An
         line(f"- Local advisory snapshot imported: {_md(meta.get('last_imported_at', 'unknown'))}")
         if meta.get("snapshot_age_days") is not None:
             line(f"- Snapshot age: {meta['snapshot_age_days']:,} day(s)")
+        if meta.get("last_source_name") or meta.get("last_source_sha256"):
+            line(f"- Snapshot source: {_md(meta.get('last_source_name', 'unknown'))}"
+                 + (f" (SHA-256 {_md_code(str(meta['last_source_sha256']))})" if meta.get("last_source_sha256") else ""))
+        ecosystems = meta.get("ecosystems") if isinstance(meta.get("ecosystems"), dict) else {}
+        if ecosystems:
+            line("- Ecosystems: " + ", ".join(f"{_md(name)} ({count:,})" for name, count in sorted(ecosystems.items())))
+        if meta.get("stale"):
+            line()
+            line(f"> **Stale snapshot:** {meta['snapshot_age_days']:,} days old (older than "
+                 f"{meta.get('stale_after_days', 30)}). Advisories published since its import are "
+                 "missing; refresh it with `pdt vuln-db import`.")
     line()
     line("### Online Advisory Lookup")
     line()

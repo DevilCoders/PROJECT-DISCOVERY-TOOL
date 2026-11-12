@@ -7,8 +7,9 @@ import os
 import re
 import sqlite3
 import zipfile
+from urllib.parse import quote
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Iterator
 
 from .cvss import base_score, qualitative_severity
@@ -168,6 +169,26 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+# A local advisory snapshot older than this is reported as stale in every report format.
+STALE_SNAPSHOT_DAYS = 30
+
+
+def read_only_uri(path: PurePath) -> str:
+    """A read-only SQLite URI for an absolute path, including Windows UNC shares.
+
+    SQLite accepts only an empty or ``localhost`` URI authority, so a UNC path
+    (``\\\\server\\share\\...``) is written ``file:////server/share/...``, not the
+    ``file://server/share/...`` that ``as_uri()`` produces. Built from ``as_posix()``:
+    ``PurePath.as_uri()`` is deprecated (Python 3.14).
+    """
+    if not path.is_absolute():
+        raise ValueError(f"advisory database path must be absolute: {path}")
+    posix = quote(path.as_posix(), safe="/:")
+    if posix.startswith("//"):
+        return f"file://{posix}?mode=ro"          # UNC: file: + // + //server/share/...
+    return f"file://{'' if posix.startswith('/') else '/'}{posix}?mode=ro"
+
+
 class VulnerabilityDatabase:
     """SQLite-backed local advisory store. This class never performs network I/O.
 
@@ -181,8 +202,7 @@ class VulnerabilityDatabase:
         if read_only:
             if not self.path.is_file():
                 raise FileNotFoundError(f"Local vulnerability database is not a file: {self.path}")
-            uri = self.path.absolute().as_uri() + "?mode=ro"
-            self.connection = sqlite3.connect(uri, uri=True)
+            self.connection = sqlite3.connect(read_only_uri(self.path.absolute()), uri=True)
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.connection = sqlite3.connect(self.path)
@@ -280,6 +300,9 @@ class VulnerabilityDatabase:
         if self.read_only:
             raise PermissionError("advisory database was opened read-only")
         source = source.expanduser().resolve(strict=True)
+        if source.is_file() and source.suffix.lower() not in {".json", ".zip"}:
+            # Anything else would import nothing yet look like a successful refresh.
+            raise ValueError(f"Unsupported advisory source (expected a .json file, an OSV .zip or a directory): {source}")
         imported = 0
         skipped = 0
         errors: list[str] = []
@@ -314,7 +337,9 @@ class VulnerabilityDatabase:
                     self.connection.execute("COMMIT")
                     self.connection.execute("BEGIN")
                     pending = 0
-            self._write_import_metadata(source, imported)
+            if imported:
+                # A no-op import must not refresh the snapshot's provenance and age.
+                self._write_import_metadata(source, imported)
             self.connection.execute("COMMIT")
         except BaseException:
             self.connection.execute("ROLLBACK")
@@ -468,6 +493,16 @@ class VulnerabilityDatabase:
             try:
                 age = datetime.now(timezone.utc) - datetime.fromisoformat(imported_at)
                 result["snapshot_age_days"] = max(0, age.days)
+                # Advisories published since the import are missing from a stale snapshot.
+                result["stale_after_days"] = STALE_SNAPSHOT_DAYS
+                result["stale"] = result["snapshot_age_days"] > STALE_SNAPSHOT_DAYS
             except ValueError:
                 pass
         return result
+
+    def covers(self, ecosystem: str) -> bool:
+        """Whether the snapshot holds any advisory for this ecosystem."""
+        row = self.connection.execute(
+            "SELECT 1 FROM affected_packages WHERE ecosystem = ? LIMIT 1", (ecosystem,),
+        ).fetchone()
+        return row is not None

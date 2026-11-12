@@ -32,7 +32,8 @@ def test_package_lock_extracts_resolved_versions(tmp_path: Path):
 def test_cargo_lock_extracts_packages(tmp_path: Path):
     findings = _scan(
         tmp_path, "Cargo.lock",
-        'version = 3\n[[package]]\nname = "serde"\nversion = "1.0.0"\n',
+        'version = 3\n[[package]]\nname = "serde"\nversion = "1.0.0"\n'
+        'source = "registry+https://github.com/rust-lang/crates.io-index"\n',
     )
     assert "serde==1.0.0" in findings[0].evidence
 

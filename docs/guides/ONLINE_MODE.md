@@ -230,7 +230,7 @@ Without `--vuln-online` PDT never contacts an advisory service: local scans stay
 | NVD CVE API 2.0 (`--vuln-enrich nvd`) | `GET /rest/json/cves/2.0?cveId=…` | CVE IDs of matched advisories |
 | GitHub Advisory Database (`--vuln-enrich ghsa`) | `GET /advisories/{ghsa_id}` | GHSA IDs of matched advisories |
 
-File contents, file paths, lockfile names and project or repository names are never sent. Package names are: if your lockfiles name private packages, those names reach OSV.dev. The `User-Agent` is `PDT/<version> (project-discovery-tool; +https://github.com/DevilCoders/PROJECT-DISCOVERY-TOOL)`.
+File contents, file paths, lockfile names and project or repository names are never sent; the project's own packages (root, workspace and path members) are not looked up, and only plain registry versions are. Package names are: if your lockfiles name private packages, those names reach OSV.dev. The `User-Agent` is `PDT/<version> (project-discovery-tool; +https://github.com/DevilCoders/PROJECT-DISCOVERY-TOOL)`.
 
 Supported lockfiles are those of the offline matcher: `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `poetry.lock`, `Pipfile.lock`, `uv.lock`, `pdm.lock`, `composer.lock`, `Gemfile.lock`, `go.sum`, `mix.lock`, `Package.resolved`, `packages.lock.json` and `pubspec.lock`. Each is read once in the scan coordinator (bounded to 128 MiB and 250,000 packages, pinned to the inventoried file identity); worker processes never use the network.
 

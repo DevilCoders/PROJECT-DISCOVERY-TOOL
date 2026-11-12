@@ -89,15 +89,27 @@ class LockfileAnalyzer(Analyzer):
             ] or [record.path],
             analyzer=self.name,
         )]
+        local = getattr(packages, "local", [])
+        if local:
+            findings.append(Finding(
+                "dependency",
+                f"Local and workspace packages: {record.path}",
+                f"{len(local)} entries are the project's own code (the root project, workspace "
+                "members, path or linked packages). They are not registry releases, so they are "
+                "neither looked up online nor matched against registry advisories.",
+                confidence="CONFIRMED",
+                evidence=[record.path, *local[:_MAX_INVENTORY_EVIDENCE]],
+                analyzer=self.name,
+            ))
         non_registry = getattr(packages, "non_registry", [])
         if non_registry:
-            # Their specifiers (git URLs, paths) can hold credentials: only names are listed.
+            # Their specifiers (git URLs) can hold credentials: only names are listed.
             findings.append(Finding(
                 "dependency",
                 f"Dependencies outside a package registry: {record.path}",
-                f"{len(non_registry)} dependencies resolve to git, a local path, a URL or a "
-                "workspace link instead of a registry release. They have no registry version, "
-                "so they are not matched against vulnerability advisories.",
+                f"{len(non_registry)} third-party dependencies come from git or a URL instead of "
+                "a registry release. They have no registry version, so they are not matched "
+                "against vulnerability advisories.",
                 confidence="UNKNOWN",
                 evidence=[record.path, *non_registry[:_MAX_INVENTORY_EVIDENCE]],
                 analyzer=self.name,
