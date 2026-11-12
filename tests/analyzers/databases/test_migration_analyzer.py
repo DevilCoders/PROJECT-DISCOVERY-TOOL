@@ -162,3 +162,32 @@ def test_diesel_migration_is_discovered(tmp_path: Path):
     )
     assert "Diesel" in findings[0].detail
     assert any("Potentially destructive" in item.title for item in findings)
+
+
+def test_generator_output_of_claimed_frameworks(tmp_path: Path):
+    # Regressions: annotated Alembic revisions were unread, rollback drops were HIGH, Rails
+    # calls without parentheses were not operations, and Laravel ids were cut to the year.
+    alembic = _scan(tmp_path, "migrations/versions/3c8f_add_users.py", (
+        'revision: str = "3c8f1d2a9b7e"\ndown_revision: Union[str, None] = "1a2b"\n'
+        "def upgrade() -> None:\n    op.create_table('users')\n"
+        "def downgrade() -> None:\n    op.drop_table('users')\n"
+    ))
+    assert "Framework: Alembic; identifier: 3c8f1d2a9b7e" in alembic[0].detail
+    assert "parent revision: 1a2b" in alembic[0].evidence
+    assert not any(item.title.startswith("Potentially destructive") for item in alembic)
+    rails = _scan(tmp_path, "db/migrate/20260101120000_create_products.rb", (
+        "class CreateProducts < ActiveRecord::Migration[7.1]\n  def change\n"
+        "    create_table :products do |t|\n      t.string :name\n    end\n    add_index :products, :name\n  end\nend\n"
+    ))
+    assert "2 schema/data operations" in rails[0].detail
+    laravel = _scan(tmp_path, "database/migrations/2026_01_13_120000_create_flights_table.php", (
+        "<?php\nreturn new class extends Migration {\n    public function up(): void\n    {\n"
+        "        Schema::create('flights', function ($t) {});\n    }\n    public function down(): void\n    {\n"
+        "        Schema::dropIfExists('flights');\n    }\n};\n"
+    ))
+    assert "identifier: 2026_01_13_120000" in laravel[0].detail
+    assert not any(item.title.startswith("Potentially destructive") for item in laravel)
+    forward = _scan(tmp_path, "migrations/versions/9f_drop_legacy.py", (
+        "def upgrade():\n    op.drop_table('legacy')\ndef downgrade():\n    op.create_table('legacy')\n"
+    ))
+    assert any(item.title == "Potentially destructive migration operation: drop_table" for item in forward)

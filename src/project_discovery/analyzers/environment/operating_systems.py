@@ -21,6 +21,8 @@ _TARGET_MARKERS = {
     "Embedded/RTOS": re.compile(r"(?i)\b(?:freertos|zephyr|threadx|rt-thread|bare.?metal|yocto|buildroot)\b"),
 }
 _MAX_LINE_CHARS = 256 * 1024
+_MAX_OS_FILE_CHARS = 64 * 1024 * 1024
+_MAX_OS_EVIDENCE_LINES = 20
 
 
 class OperatingSystemAnalyzer(Analyzer):
@@ -44,7 +46,12 @@ class OperatingSystemAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        line_hits: dict[str, set[int]] = {}
+        # A count and the first lines per platform; every line number of a large file
+        # made memory grow about five times the file size.
+        line_hits: dict[str, list[int]] = {}
+        line_counts: dict[str, int] = {}
+        characters = 0
+        budget_reached = False
         try:
             with open_verified_text(
                 path, encoding="utf-8", errors="replace",
@@ -55,30 +62,47 @@ class OperatingSystemAnalyzer(Analyzer):
                     line = stream.readline(_MAX_LINE_CHARS)
                     if not line:
                         break
+                    characters += len(line)
+                    if characters > _MAX_OS_FILE_CHARS:
+                        budget_reached = True
+                        break
                     current_line = line_number
                     for os_name, pattern in _TARGET_MARKERS.items():
                         if pattern.search(line):
-                            line_hits.setdefault(os_name, set()).add(current_line)
+                            hits = line_hits.setdefault(os_name, [])
+                            if hits[-1:] != [current_line]:
+                                line_counts[os_name] = line_counts.get(os_name, 0) + 1
+                                if len(hits) < _MAX_OS_EVIDENCE_LINES:
+                                    hits.append(current_line)
                     if line.endswith(("\n", "\r")):
                         line_number += 1
         except OSError as exc:
             return [Finding(
                 "platform", f"Platform analysis unavailable: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
+        findings = []
+        if budget_reached:
+            findings.append(Finding(
+                "platform", f"Platform analysis resource limit: {record.path}",
+                f"Analysis stopped after {_MAX_OS_FILE_CHARS:,} characters. This is not a clean result "
+                "for the rest of the file.",
+                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name, severity="LOW",
+            ))
         if not line_hits:
-            return []
+            return findings
         names = sorted(line_hits)
         evidence = [
             f"{record.path}:{line} ({name} indicator)"
             for name, lines in sorted(line_hits.items())
-            for line in sorted(lines)[:20]
+            for line in lines
         ]
-        return [Finding(
+        findings.insert(0, Finding(
             "platform",
             f"Target operating-system indicators: {record.path}",
-            "Observed platform markers: " + ", ".join(names)
+            "Observed platform markers: " + ", ".join(f"{name} ({line_counts[name]:,} lines)" for name in names)
             + ". These are target/build-context hints; they do not identify the current host OS.",
             confidence="INFERRED", evidence=evidence[:100], analyzer=self.name,
-        )]
+        ))
+        return findings

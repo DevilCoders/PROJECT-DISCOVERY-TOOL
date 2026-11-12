@@ -18,8 +18,10 @@ _OPENAPI_NAMES = {"openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml",
 _ASYNCAPI_NAMES = {"asyncapi.yaml", "asyncapi.yml", "asyncapi.json"}
 _OPENRPC_NAMES = {"openrpc.yaml", "openrpc.yml", "openrpc.json"}
 _WSDL_NAMES = {"service.wsdl", "services.wsdl", "definitions.wsdl"}
+# SDL writes "schema {" and "directive @name", and "extend type X" extends a type.
 _GRAPHQL_DEFINITION = re.compile(
-    r"(?m)^[ \t]*(type|interface|input|enum|scalar|union|schema|directive)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?m)^[ \t]*(?:extend[ \t]+)?(?:(type|interface|input|enum|scalar|union)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"|(schema)\s*\{|(directive)\s+@([A-Za-z_][A-Za-z0-9_]*))"
 )
 _GRAPHQL_OPERATION = re.compile(
     r"(?m)^[ \t]*(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)"
@@ -27,6 +29,27 @@ _GRAPHQL_OPERATION = re.compile(
 _PROTO_DECLARATION = re.compile(
     r"(?m)\b(service|rpc|message|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
+def _without_comments(text: str) -> str:
+    """``text`` with // and /* */ comments blanked (line breaks kept), in linear time."""
+    pieces, position = [], 0
+    while True:
+        line_comment, block_comment = text.find("//", position), text.find("/*", position)
+        candidates = [index for index in (line_comment, block_comment) if index != -1]
+        if not candidates:
+            pieces.append(text[position:])
+            return "".join(pieces)
+        start = min(candidates)
+        pieces.append(text[position:start])
+        if start == line_comment:
+            end = text.find("\n", start)
+            end = len(text) if end == -1 else end
+        else:
+            end = text.find("*/", start + 2)
+            end = len(text) if end == -1 else end + 2
+        pieces.append("".join("\n" if character == "\n" else " " for character in text[start:end]))
+        position = end
+
+
 _THRIFT_DECLARATION = re.compile(
     r"(?m)^[ \t]*(service|struct|exception|enum|typedef)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
@@ -112,7 +135,8 @@ class APIContractAnalyzer(Analyzer):
             if record.extension in {".graphql", ".gql"}:
                 return self._graphql(record, content)
             if record.extension == ".proto":
-                return self._declarations(record, content, _PROTO_DECLARATION, "Protocol Buffers")
+                # Comments describe declarations ("// The greeting service definition.").
+                return self._declarations(record, _without_comments(content), _PROTO_DECLARATION, "Protocol Buffers")
             return self._declarations(record, content, _THRIFT_DECLARATION, "Thrift")
         except SourceBudgetExceeded as exc:
             return [Finding(
@@ -125,7 +149,7 @@ class APIContractAnalyzer(Analyzer):
                 "api",
                 f"API contract parse error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]
@@ -347,7 +371,10 @@ class APIContractAnalyzer(Analyzer):
         )]
 
     def _graphql(self, record: FileRecord, content: str) -> list[Finding]:
-        definitions = _GRAPHQL_DEFINITION.findall(content)
+        definitions = [
+            (kind or schema or directive, name or directive_name or "")
+            for kind, name, schema, directive, directive_name in _GRAPHQL_DEFINITION.findall(content)
+        ]
         operations = _GRAPHQL_OPERATION.findall(content)
         return [Finding(
             "api",

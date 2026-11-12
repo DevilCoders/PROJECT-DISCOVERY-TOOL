@@ -291,14 +291,20 @@ def _slow(origin: str, pattern: re.Pattern[str], lead: str, unit: str, suffix: s
             elapsed = min(elapsed, _scan(origin, pattern, _text(lead, unit, suffix, size)))
             if elapsed > SMALL_LIMIT_SECONDS:
                 return f"{elapsed:.2f}s on {size} characters (exponential)"
+    def slow(medium: float, large: float) -> bool:
+        return large > ABSOLUTE_LIMIT_SECONDS or (large > GROWTH_FLOOR_SECONDS and large > GROWTH_LIMIT * medium)
+
     medium = _scan(origin, pattern, _text(lead, unit, suffix, MEDIUM))
     large = _scan(origin, pattern, _text(lead, unit, suffix, LARGE))
-    for _ in range(2):  # confirm to rule out a scheduling hiccup on a busy CI runner
-        if large > ABSOLUTE_LIMIT_SECONDS or (large > GROWTH_FLOOR_SECONDS and large > GROWTH_LIMIT * medium):
-            medium = min(medium, _scan(origin, pattern, _text(lead, unit, suffix, MEDIUM)))
-            large = min(large, _scan(origin, pattern, _text(lead, unit, suffix, LARGE)))
-        else:
+    # Millisecond timings are noisy (a collection or a scheduling hiccup on a busy runner), so
+    # a suspicious pair is measured again, keeping the fastest run, and judged after each.
+    for _ in range(3):
+        if not slow(medium, large):
             return None
+        medium = min(medium, _scan(origin, pattern, _text(lead, unit, suffix, MEDIUM)))
+        large = min(large, _scan(origin, pattern, _text(lead, unit, suffix, LARGE)))
+    if not slow(medium, large):
+        return None
     return f"{large:.3f}s on {LARGE:,} characters, x{large / max(medium, 1e-9):.0f} from {MEDIUM:,}"
 
 

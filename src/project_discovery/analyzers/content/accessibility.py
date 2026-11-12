@@ -123,7 +123,7 @@ class AccessibilityAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             return [Finding(
                 "accessibility", f"Markup accessibility scan error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
 

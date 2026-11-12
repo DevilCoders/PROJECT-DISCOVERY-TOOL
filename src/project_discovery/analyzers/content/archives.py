@@ -431,7 +431,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 "archive",
                 f"ZIP metadata read error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]
@@ -595,7 +595,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 "archive",
                 f"TAR metadata read error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

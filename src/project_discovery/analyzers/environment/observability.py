@@ -78,7 +78,7 @@ class ObservabilityAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "observability", f"Observability scan unavailable: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
 

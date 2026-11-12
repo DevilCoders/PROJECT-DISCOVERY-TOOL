@@ -103,7 +103,7 @@ class LicenseAnalyzer(Analyzer):
                 "license",
                 f"License inspection error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

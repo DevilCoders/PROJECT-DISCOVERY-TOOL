@@ -129,7 +129,7 @@ class PythonSecurityAnalyzer(Analyzer):
                 "security",
                 f"Python security analysis unavailable: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

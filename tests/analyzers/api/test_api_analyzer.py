@@ -175,3 +175,16 @@ def test_webhook_secrets_never_reach_integration_paths():
         "api.example.com", "/v1/oauth2-callback/users/{}",
     )
     assert _normalize_url("https://api.example.com/keys/sk_live_" + "Ab12" * 6) == ("api.example.com", "/keys/{}")
+
+
+def test_proto_comments_and_graphql_sdl_forms(tmp_path: Path):
+    proto = _scan(tmp_path, "helloworld.proto", (
+        'syntax = "proto3";\n// The greeting service definition.\nservice Greeter {\n  rpc SayHello (HelloRequest) returns (HelloReply);\n}\n'
+        "// The request message containing the user's name.\nmessage HelloRequest {}\n/* message Old {} */\nmessage HelloReply {}\n"
+    ))
+    assert "Detected 2 message, 1 rpc, 1 service" in proto[0].detail
+    graphql = _scan(tmp_path, "schema.graphql", (
+        "schema {\n  query: Query\n}\ndirective @auth(requires: Role) on FIELD_DEFINITION\n"
+        "type Query { me: User }\nextend type Query { books: [Book] }\n"
+    ))
+    assert graphql[0].evidence[:4] == ["schema ", "directive auth", "type Query", "type Query"]

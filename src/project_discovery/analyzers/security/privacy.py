@@ -217,7 +217,7 @@ class DataExposureAnalyzer(Analyzer):
             return [Finding(
                 "privacy", f"Data exposure scan unavailable: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
+                confidence="UNKNOWN", severity="LOW", evidence=[record.path], analyzer=self.name,
             )]
 
         findings: list[Finding] = []

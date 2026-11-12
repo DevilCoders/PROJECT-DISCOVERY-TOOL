@@ -20,8 +20,9 @@ _MIGRATION_DIRS = {
     "changelogs", "changeset", "changesets", "flyway", "liquibase", "drizzle",
 }
 _FLYWAY_NAME = re.compile(r"^(?P<identifier>(?:V\d+|R|U\d+)__.+)\.sql$", re.I)
-_REVISION = re.compile(r"(?m)^[ \t]*revision\s*=\s*['\"]([^'\"]+)['\"]")
-_PARENT_REVISION = re.compile(r"""(?m)^[ \t]*down_revision\s*=\s*['"]([^'"]+)['"]""")
+# Current Alembic templates annotate: revision: str = "...", down_revision: Union[...] = "...".
+_REVISION = re.compile(r"(?m)^[ \t]*revision\s*+(?::[^=\n]{1,200}+)?=\s*['\"]([^'\"]+)['\"]")
+_PARENT_REVISION = re.compile(r"""(?m)^[ \t]*down_revision\s*+(?::[^=\n]{1,200}+)?=\s*['"]([^'"]+)['"]""")
 _CHANGESET = re.compile(r"(?i)<changeSet\b")
 _ID_ATTRIBUTE = re.compile(r"""(?i)\bid\s*=\s*['"]""")
 _ATTRIBUTE_VALUE = re.compile(r"""[^'"]+""")
@@ -46,46 +47,84 @@ def _changeset_id(content: str) -> str | None:
     return None
 _OPERATION_PATTERNS = (
     ("create_table", re.compile(
-        r"(?i)(?:\bCREATE\s+(?:TEMPORARY\s+)?TABLE\b|\b(?:op\.)?create_table\s*\(|\b(?:pgTable|mysqlTable|sqliteTable)\s*\(|"
+        r"(?i)(?:\bCREATE\s+(?:TEMPORARY\s+)?TABLE\b|\b(?:op\.)?create_table\s*(?:\(|:)|\b(?:pgTable|mysqlTable|sqliteTable)\s*\(|"
         r"\bSchema::create\s*\(|\bcreateTable\s*\(|\bCreateTable\s*\(|"
         r"<\s*createTable\b|\bmigrations\.CreateModel\b)"
     ), False),
     ("drop_table", re.compile(
-        r"(?i)(?:\bDROP\s+TABLE\b|\b(?:op\.)?drop_table\s*\(|"
+        r"(?i)(?:\bDROP\s+TABLE\b|\b(?:op\.)?drop_table\s*(?:\(|:)|"
         r"\bSchema::drop(?:IfExists)?\s*\(|\bdropTable\s*\(|"
         r"\bDropTable\s*\(|<\s*dropTable\b|\bmigrations\.DeleteModel\b)"
     ), True),
     ("add_column", re.compile(
-        r"(?i)(?:\bADD\s+COLUMN\b|\b(?:op\.)?add_column\s*\(|"
+        r"(?i)(?:\bADD\s+COLUMN\b|\b(?:op\.)?add_column\s*(?:\(|:)|"
         r"\baddColumn\s*\(|\bAddColumn\s*\(|<\s*addColumn\b|"
         r"\bmigrations\.AddField\b)"
     ), False),
     ("drop_column", re.compile(
         r"(?i)(?:\bDROP\s+COLUMN\b|\b(?:op\.)?drop_column\s*\(|"
-        r"\b(?:remove_column|dropColumn|DropColumn)\s*\(|<\s*dropColumn\b|"
+        r"\bremove_column\s*(?:\(|:)|\b(?:dropColumn|DropColumn)\s*\(|<\s*dropColumn\b|"
         r"\bmigrations\.RemoveField\b)"
     ), True),
     ("rename_column", re.compile(
-        r"(?i)(?:\bRENAME\s+COLUMN\b|\brename_column\s*\(|"
+        r"(?i)(?:\bRENAME\s+COLUMN\b|\brename_column\s*(?:\(|:)|"
         r"\brenameColumn\s*\(|\bRenameColumn\s*\(|<\s*renameColumn\b|"
         r"\bmigrations\.RenameField\b)"
     ), False),
     ("create_index", re.compile(
-        r"(?i)(?:\bCREATE\s+(?:UNIQUE\s+)?INDEX\b|\bcreate_index\s*\(|"
+        r"(?i)(?:\bCREATE\s+(?:UNIQUE\s+)?INDEX\b|\b(?:create_index|add_index)\s*(?:\(|:)|"
         r"\bcreateIndex\s*\(|\bCreateIndex\s*\(|<\s*createIndex\b)"
     ), False),
     ("drop_index", re.compile(
-        r"(?i)(?:\bDROP\s+INDEX\b|\bdrop_index\s*\(|"
+        r"(?i)(?:\bDROP\s+INDEX\b|\b(?:drop_index|remove_index)\s*(?:\(|:)|"
         r"\bdropIndex\s*\(|\bDropIndex\s*\(|<\s*dropIndex\b)"
     ), True),
     ("truncate", re.compile(r"(?i)\bTRUNCATE\s+(?:TABLE\s+)?"), True),
     ("drop_database", re.compile(r"(?i)\bDROP\s+DATABASE\b"), True),
     ("drop_schema", re.compile(r"(?i)\bDROP\s+SCHEMA\b"), True),
 )
-_ROLLBACK_MARKER = re.compile(
-    r"(?im)^[ \t]*(?:def\s+(?:downgrade|down)|(?:async\s+)?down\s*\(|"
-    r"exports\.down\s*=|function\s+downgrade\b|rollback\s*\()"
+# Where a migration's reverse direction starts (Alembic downgrade(), Rails def down,
+# knex exports.down, TypeORM and Laravel down(), EF Core Down(MigrationBuilder), Goose and
+# dbmate SQL sections, Liquibase <rollback>), and where the forward direction resumes.
+_DOWN_MARKER = re.compile(
+    r"(?im)^[ \t]*(?:(?:async\s+)?def\s+(?:downgrade|down)\b"
+    r"|(?:(?:public|protected|private|static|override|async|export|function|void)\s+){0,4}down\s*\("
+    r"|exports\.down\s*=|function\s+downgrade\b|rollback\s*\(|--\s*\+goose\s+down\b|--\s*migrate:down\b)"
+    r"|<rollback\b"
 )
+_UP_MARKER = re.compile(
+    r"(?im)^[ \t]*(?:(?:async\s+)?def\s+(?:upgrade|up)\b"
+    r"|(?:(?:public|protected|private|static|override|async|export|function|void)\s+){0,4}up\s*\("
+    r"|exports\.up\s*=|function\s+upgrade\b|--\s*\+goose\s+up\b|--\s*migrate:up\b)"
+    r"|</rollback\s*>"
+)
+_ROLLBACK_MARKER = _DOWN_MARKER
+
+
+def down_regions(content: str) -> list[tuple[int, int]]:
+    """Spans of a migration's rollback code: from each down marker to the next up marker.
+
+    A rollback of a create-table migration drops the table; reporting it as a destructive
+    forward operation made every reversible schema history a list of HIGH findings.
+    """
+    markers = sorted(
+        [(match.start(), True) for match in _DOWN_MARKER.finditer(content)]
+        + [(match.start(), False) for match in _UP_MARKER.finditer(content)]
+    )
+    regions, start = [], None
+    for offset, down in markers:
+        if down and start is None:
+            start = offset
+        elif not down and start is not None:
+            regions.append((start, offset))
+            start = None
+    if start is not None:
+        regions.append((start, len(content)))
+    return regions
+
+
+def in_regions(offset: int, regions: list[tuple[int, int]]) -> bool:
+    return any(start <= offset < end for start, end in regions)
 
 
 def _migration_context(path: str) -> tuple[str, ...]:
@@ -147,7 +186,8 @@ def _migration_identifier(filename: str, content: str) -> str:
     if changeset:
         return changeset
     stem = PurePosixPath(filename).stem
-    numeric = re.match(r"^(\d{8,14}|\d+)_", stem)
+    # Laravel names migrations YYYY_MM_DD_HHMMSS_name.
+    numeric = re.match(r"^(\d{4}_\d{2}_\d{2}_\d{6}|\d{8,14}|\d+)_", stem)
     return numeric.group(1) if numeric else stem
 
 
@@ -184,7 +224,7 @@ class MigrationIntelligenceAnalyzer(Analyzer):
                 "migration",
                 f"Migration file read error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]
@@ -196,9 +236,12 @@ class MigrationIntelligenceAnalyzer(Analyzer):
         parent_revision = _PARENT_REVISION.search(content)
         operations: list[tuple[str, int, bool]] = []
         lines = LineIndex(content)
+        rollback = down_regions(content)
         for operation, pattern, destructive in _OPERATION_PATTERNS:
             for match in pattern.finditer(content):
-                operations.append((operation, lines.line(match.start()), destructive))
+                # A drop in rollback code reverses a forward operation; it is not destructive.
+                operations.append((operation, lines.line(match.start()),
+                                   destructive and not in_regions(match.start(), rollback)))
         operations.sort(key=lambda item: (item[1], item[0]))
 
         evidence = [

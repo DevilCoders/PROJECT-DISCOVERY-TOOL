@@ -283,6 +283,20 @@ Findings and their status are in the second-round section of
   elided examples are placeholders (PDT-365); archive members use the file scanners' rules
   (PDT-366); Python gets the JWT, permission, XXE, randomness and redirect rules (PDT-367);
   `setWritable`, `chmodSync`, `chmod -R` and `exec "$@"` are judged by meaning (PDT-368).
+- `--strict` fails on files an analyzer could not read or parse (PDT-369). Clover reports give
+  the project's totals (PDT-370); MySQL, SQL Server and PostgreSQL DDL is inventoried and dump
+  guards and rollback code are not destructive (PDT-371, PDT-375); migration generators are read
+  correctly (PDT-376).
+- Kubernetes Pods and CronJobs, every container's context, workflow trigger forms and job
+  permissions (PDT-372); GitLab and Azure jobs, Dockerfile flags, stages and continuations, and
+  Ansible playbooks (PDT-377).
+- Routes for JAX-RS, Spring, NestJS, Echo and Rails (PDT-373); lookups and client interfaces are
+  not served endpoints and the fact cap is reported (PDT-374); RxJS is not an event API
+  (PDT-382); boto3, Celery, node-redis and whole-word broker names (PDT-383); proto, GraphQL and
+  Prisma counts (PDT-384).
+- Risky settings in quoted and framework syntaxes (PDT-378), configuration files parsed by name
+  (PDT-379), network indicators without keys, versions and invalid hosts (PDT-380), and a bounded
+  operating-system analyzer (PDT-381).
 
 ## 0.2.0 — 2026-11-05
 

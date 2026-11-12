@@ -2,7 +2,7 @@
 
 The configuration analyzer inventories key paths from JSON (including JSON5 and JSONC), TOML, INI/CFG/CNF, `.env`/`.envrc`, YAML, HCL/Terraform, Nix, Java properties, XML (for example `web.config` and property lists), systemd units, desktop entries, server configurations (nginx, sshd, Redis, PHP, MySQL) and container files (Dockerfile, Containerfile, Compose). It intentionally does not place configuration values in findings.
 
-A conservative set of security-sensitive settings is flagged as INFERRED for manual review: debug mode, disabled TLS verification, wildcard CORS, privileged containers, privilege escalation, root-user allowances and host networking.
+A conservative set of security-sensitive settings is flagged as INFERRED for manual review: debug mode, disabled TLS verification, wildcard CORS, privileged containers, privilege escalation, root-user allowances and host networking. Keys and values may be quoted (pretty-printed JSON, YAML, TOML), wildcard CORS covers `allowed-origins` and nginx's `add_header Access-Control-Allow-Origin *`, and the wildcard must be the whole value. Files whose format their extension does not tell are parsed by name: `haproxy.cfg`, `nginx.conf` and `sshd_config` as directives, `cloud.cfg` as YAML, `tsconfig*.json` and editor settings as JSON with comments, and INI files without `[section]` headers (`pyvenv.cfg`) as `key = value` lines.
 
 YAML/HCL/properties extraction is lexical and intentionally shallow in this first pass. It does not claim complete parsing or effective configuration resolution across includes, templates, environment overlays, Helm, Terraform modules or runtime defaults. Malformed structured formats produce UNKNOWN findings.
 

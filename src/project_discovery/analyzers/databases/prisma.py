@@ -29,7 +29,8 @@ def _blocks(content: str):
             break
         yield header.group(1), header.group(2), header.end(), closes[index], header.start()
         position = closes[index]
-_FIELD = re.compile(r"(?m)^[ \t]{2,}([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\[\])?(?:\?)?")
+# Any indentation, tabs included.
+_FIELD = re.compile(r"(?m)^[ \t]++([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(?:\[\])?(?:\?)?")
 _PROVIDER = re.compile(r'(?m)^[ \t]*provider\s*=\s*"([^"]+)"')
 
 
@@ -53,7 +54,7 @@ class PrismaSchemaAnalyzer(Analyzer):
                 "database",
                 f"Prisma schema read error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]
@@ -82,7 +83,12 @@ class PrismaSchemaAnalyzer(Analyzer):
             else:
                 evidence.append(f"{record.path}:{line} {kind} {name}")
 
-        providers = _PROVIDER.findall(content)
+        # Only a datasource's provider names a database (a generator's names a client).
+        providers = [
+            match.group(1)
+            for kind, _, body_start, body_end, _ in blocks if kind == "datasource"
+            for match in _PROVIDER.finditer(content, body_start, body_end)
+        ]
         details = [
             f"{len(models)} models",
             f"{len(enums)} enums",

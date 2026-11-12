@@ -7,18 +7,22 @@ from pathlib import Path
 
 from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
+from .migrations import down_regions, in_regions
 from ..base import Analyzer
 
-_IDENTIFIER = r'[\w."]+'
+# Plain, "quoted", `backtick` (MySQL, mysqldump) and [bracket] (SQL Server) segments.
+_SEGMENT = r'(?:"[^"\n]{1,128}+"|`[^`\n]{1,128}+`|\[[^\]\n]{1,128}+\]|\w++)'
+_IDENTIFIER = rf"{_SEGMENT}(?:\.{_SEGMENT})*+"
 _OBJECT_PATTERNS = {
     "table": re.compile(
-        rf"(?im)^[ \t]*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:(?:GLOBAL|LOCAL)\s+)?(?:TEMP(?:ORARY)?\s+|UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})"
     ),
     "view": re.compile(
-        rf"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})"
     ),
     "index": re.compile(
-        rf"(?im)^[ \t]*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})\s+ON\s+({_IDENTIFIER})"
+        rf"(?im)^[ \t]*CREATE\s+(?:UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\s+(?:CONCURRENTLY\s+)?"
+        rf"(?:IF\s+NOT\s+EXISTS\s+)?({_IDENTIFIER})\s+ON\s+(?:ONLY\s+)?({_IDENTIFIER})"
     ),
     "procedure": re.compile(
         rf"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+({_IDENTIFIER})"
@@ -32,7 +36,7 @@ _OBJECT_PATTERNS = {
 }
 _RELATION = re.compile(rf"(?im)\bREFERENCES\s+({_IDENTIFIER})")
 _DESTRUCTIVE = (
-    ("drop_table", re.compile(r"(?im)^[ \t]*DROP\s+TABLE\b")),
+    ("drop_table", re.compile(rf"(?im)^[ \t]*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({_IDENTIFIER})")),
     ("drop_column", None),  # _drop_column_statements
     ("truncate_table", re.compile(r"(?im)^[ \t]*TRUNCATE\s+(?:TABLE\s+)?")),
     ("drop_database", re.compile(r"(?im)^[ \t]*DROP\s+DATABASE\b")),
@@ -68,7 +72,7 @@ def _drop_column_statements(content: str) -> list[int]:
 
 
 def _clean_identifier(value: str) -> str:
-    return value.strip().strip('"[]')
+    return re.sub(r'[`"\[\]]', "", value.strip())
 
 
 class SQLSchemaAnalyzer(Analyzer):
@@ -91,7 +95,7 @@ class SQLSchemaAnalyzer(Analyzer):
                 "database",
                 f"SQL file read error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]
@@ -131,12 +135,22 @@ class SQLSchemaAnalyzer(Analyzer):
                 analyzer=self.name,
             ))
 
+        # A dump drops each table just before creating it again (DROP TABLE IF EXISTS
+        # guards in mysqldump and pg_dump output), and rollback sections of migrations
+        # reverse forward operations; neither destroys data the file keeps.
+        created = {_clean_identifier(name).lower() for name, _ in objects["table"]}
+        rollback = down_regions(content)
         for risk_name, pattern in _DESTRUCTIVE:
-            offsets = (
-                _drop_column_statements(content) if pattern is None
-                else [match.start() for match in pattern.finditer(content)]
-            )
+            if pattern is None:
+                offsets = _drop_column_statements(content)
+            else:
+                offsets = [
+                    match.start() for match in pattern.finditer(content)
+                    if not (risk_name == "drop_table" and _clean_identifier(match.group(1)).lower() in created)
+                ]
             for offset in offsets:
+                if in_regions(offset, rollback):
+                    continue
                 line = lines.line(offset)
                 findings.append(Finding(
                     "migration",

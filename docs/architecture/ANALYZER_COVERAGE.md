@@ -24,7 +24,7 @@ The built-in observability analyzer inventories static logging, metrics, tracing
 
 ## Implemented coverage artifact slice
 
-The coverage analyzer reads LCOV, Cobertura, JaCoCo, Clover, OpenCover, Go cover profiles and Istanbul/coverage JSON. It extracts recorded line, statement, function and branch counters where the format provides them. The report does not prove which source revision was tested, that all tests ran, or that coverage instrumentation was complete.
+The coverage analyzer reads LCOV, Cobertura, JaCoCo, Clover (the project's own `<metrics>`, which php-code-coverage writes after every class and file), OpenCover, Go cover profiles and Istanbul/coverage JSON. It extracts recorded line, statement, function and branch counters where the format provides them. The report does not prove which source revision was tested, that all tests ran, or that coverage instrumentation was complete.
 
 
 ## Implemented accessibility markup slice

@@ -72,3 +72,16 @@ def test_dictionary_and_cache_calls_are_not_rest_markers(tmp_path: Path):
     )
     record = FileRecord("config.py", path.stat().st_size, ".py", "Python", file_type="source")
     assert APITypeAnalyzer().analyze(path, record) == []
+
+
+def test_rxjs_and_store_subscriptions_are_not_event_driven_apis(tmp_path: Path):
+    def styles(name, source):
+        path = tmp_path / name
+        path.write_text(source, encoding="utf-8")
+        record = FileRecord(name, path.stat().st_size, path.suffix, "Source")
+        return " ".join(item.detail for item in APITypeAnalyzer().analyze(path, record))
+
+    assert "Event-driven" not in styles("hero.component.ts", (
+        "this.route.paramMap.subscribe(params => this.load(params));\nthis.sub.unsubscribe();\nstore.subscribe(render);\n"
+    ))
+    assert "Event-driven" in styles("producer.js", "await producer.publish('orders.created', payload);\n")

@@ -106,7 +106,7 @@ def _python_evidence(
             "machine_learning",
             f"AI/ML source analysis unavailable: {relative}",
             describe_error(exc),
-            confidence="UNKNOWN",
+            confidence="UNKNOWN", severity="LOW",
             evidence=[relative],
             analyzer="ai-ml-intelligence",
         )]
@@ -277,7 +277,7 @@ class AIMLIntelligenceAnalyzer(Analyzer):
                     "model_artifacts",
                     f"Model metadata parse error: {record.path}",
                     describe_error(exc),
-                    confidence="UNKNOWN",
+                    confidence="UNKNOWN", severity="LOW",
                     evidence=[record.path],
                     analyzer=self.name,
                 )]

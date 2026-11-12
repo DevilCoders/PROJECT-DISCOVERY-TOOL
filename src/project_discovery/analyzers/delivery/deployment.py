@@ -38,6 +38,98 @@ def _items(value: Any) -> list[Any]:
     return []
 
 
+def _pod_spec(kind: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """A workload's pod spec: a Pod's own spec, a CronJob's job template's pod template, and
+    the pod template of every other workload kind."""
+    if kind == "Pod":
+        return spec
+    if kind == "CronJob":
+        job = _mapping(_mapping(spec.get("jobTemplate")).get("spec"))
+        return _mapping(_mapping(job.get("template")).get("spec"))
+    return _mapping(_mapping(spec.get("template")).get("spec"))
+
+
+def _workflow_triggers(root: dict[str, Any]) -> set[str]:
+    """Event names of a GitHub workflow's ``on`` (a string, a list or a mapping).
+
+    YAML 1.1 reads the key ``on`` as True, so both keys are tried.
+    """
+    value = root.get("on", root.get(True))
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        return {str(item) for item in value}
+    if isinstance(value, dict):
+        return {str(key) for key in value}
+    return set()
+
+
+def _writes(permissions: Any) -> bool:
+    return permissions == "write-all" or (
+        isinstance(permissions, dict) and any(str(value).lower() == "write" for value in permissions.values())
+    )
+
+
+# Top-level GitLab CI keys that configure the pipeline rather than name a job.
+_GITLAB_RESERVED = frozenset({
+    "stages", "variables", "default", "include", "workflow", "image", "services", "before_script",
+    "after_script", "cache", "types",
+})
+
+
+def _gitlab_jobs(root: dict[str, Any]) -> list[str]:
+    """Jobs are top-level mappings with a script, trigger or stage; hidden (.name) keys are templates."""
+    return [
+        str(name) for name, value in root.items()
+        if isinstance(name, str) and not name.startswith(".") and name not in _GITLAB_RESERVED
+        and isinstance(value, dict) and ({"script", "trigger", "stage", "extends", "needs", "run"} & set(value))
+    ]
+
+
+def _azure_jobs(root: dict[str, Any]) -> list[str]:
+    """Jobs of stages[].jobs[], a top-level jobs list, or the single implicit job of steps."""
+    jobs = []
+    for stage in _items(root.get("stages")):
+        jobs.extend(_items(_mapping(stage).get("jobs")))
+    jobs.extend(_items(root.get("jobs")))
+    names = [
+        str(_mapping(job).get("job") or _mapping(job).get("deployment") or _mapping(job).get("template") or "job")
+        for job in jobs if isinstance(job, dict)
+    ]
+    if not names and root.get("steps"):
+        names = ["(implicit job)"]
+    return names
+
+
+def _logical_lines(lines: list[str]) -> list[tuple[int, str]]:
+    """Dockerfile instructions with backslash continuations joined, by starting line."""
+    logical: list[tuple[int, str]] = []
+    pending, start = "", 0
+    for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith("#") or (not pending and not stripped):
+            continue
+        if not pending:
+            start = number
+        if stripped.endswith("\\"):
+            pending += stripped[:-1] + " "
+            continue
+        logical.append((start, pending + stripped))
+        pending = ""
+    if pending:
+        logical.append((start, pending))
+    return logical
+
+
+def _from_image(value: str) -> tuple[str, str | None]:
+    """(image, stage name) of a FROM instruction; --platform and other flags are skipped."""
+    tokens = [token for token in value.split() if not token.startswith("--")]
+    if not tokens:
+        return "", None
+    stage = tokens[2] if len(tokens) >= 3 and tokens[1].lower() == "as" else None
+    return tokens[0], stage
+
+
 def _containers(pod_spec: dict[str, Any]) -> list[dict[str, Any]]:
     result = []
     for key in ("containers", "initContainers", "ephemeralContainers"):
@@ -61,7 +153,7 @@ def _public_ingress(source: str):
     while (head := _CIDR_BLOCKS.search(source, position)) is not None:
         close = source.find("]", head.end())
         stop = len(source) if close == -1 else close
-        if source.find('"0.0.0.0/0"', head.end(), stop) != -1:
+        if source.find('"0.0.0.0/0"', head.end(), stop) != -1 or source.find('"::/0"', head.end(), stop) != -1:
             return head
         position = stop + 1
     return None
@@ -125,7 +217,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 "deployment",
                 f"Deployment manifest unavailable: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )
@@ -139,15 +231,14 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "containers", f"Dockerfile read error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         instructions: dict[str, list[tuple[int, str]]] = {}
-        for number, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or " " not in stripped:
+        for number, text in _logical_lines(lines):
+            if " " not in text:
                 continue
-            key, value = stripped.split(None, 1)
+            key, value = text.split(None, 1)
             instructions.setdefault(key.upper(), []).append((number, value.strip()))
         bases = instructions.get("FROM", [])
         ports = [value for _, value in instructions.get("EXPOSE", [])]
@@ -162,13 +253,21 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             f"Detected {len(bases)} build stage(s), {len(instructions.get('RUN', []))} RUN "
             f"instruction(s), {len(ports)} exposed-port declaration(s), and "
             f"{len(instructions)} instruction types. Base images: "
-            + (", ".join(value.split()[0] for _, value in bases) or "not declared"),
+            + (", ".join(_from_image(value)[0] for _, value in bases) or "not declared"),
             confidence="CONFIRMED",
             evidence=evidence,
             analyzer=self.name,
         )]
+        stages: set[str] = set()
         for line, value in bases:
-            if ":" not in value.split()[0] or value.split()[0].endswith(":latest"):
+            image, stage = _from_image(value)
+            # Earlier build stages, scratch and ARG-supplied images are not registry tags.
+            mutable = bool(image) and image.lower() not in stages and image != "scratch" and "$" not in image and (
+                ":" not in image.rsplit("/", 1)[-1] or image.endswith(":latest")
+            ) and "@" not in image
+            if stage:
+                stages.add(stage.lower())
+            if mutable:
                 findings.append(Finding(
                     "supply_chain",
                     f"Mutable container base image reference: {record.path}",
@@ -203,7 +302,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "infrastructure", f"Terraform file read error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         blocks = re.findall(
@@ -256,7 +355,9 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         root = _mapping(documents[0] if documents else {})
         if not root:
             return []
-        jobs = _mapping(root.get("jobs"))
+        name = Path(record.path).name.lower()
+        github = record.path.lower().replace("\\", "/").startswith(".github/workflows/")
+        jobs = _mapping(root.get("jobs")) if github else {}
         steps = []
         for job_name, job_value in jobs.items():
             job = _mapping(job_value)
@@ -264,7 +365,12 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 step = _mapping(step)
                 if step.get("uses"):
                     steps.append((str(job_name), str(step["uses"])))
-        job_names = list(jobs)
+        if name == ".gitlab-ci.yml":
+            job_names = _gitlab_jobs(root)
+        elif name == "azure-pipelines.yml":
+            job_names = _azure_jobs(root)
+        else:
+            job_names = list(jobs)
         findings = [Finding(
             "ci_cd",
             f"CI/CD workflow: {record.path}",
@@ -275,12 +381,9 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             + [f"action: {job} -> {uses}" for job, uses in steps[:100]],
             analyzer=self.name,
         )]
-        permissions = root.get("permissions")
-        if permissions == "write-all" or (
-            isinstance(permissions, dict) and any(
-                str(value).lower() == "write" for value in permissions.values()
-            )
-        ):
+        if github and any(_writes(scope) for scope in (
+            root.get("permissions"), *(_mapping(job).get("permissions") for job in jobs.values())
+        )):
             findings.append(Finding(
                 "security",
                 f"Broad CI workflow permissions: {record.path}",
@@ -290,7 +393,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 evidence=[record.path],
                 analyzer=self.name,
             ))
-        if root.get("on", root.get(True)) == "pull_request_target":
+        if github and "pull_request_target" in _workflow_triggers(root):
             findings.append(Finding(
                 "security",
                 f"Privileged pull_request_target workflow: {record.path}",
@@ -336,14 +439,6 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 findings.extend(self._kubernetes(root, record, index))
             elif "Resources" in root and isinstance(root["Resources"], dict):
                 findings.extend(self._cloudformation(root, record))
-            elif name_is_ansible(record.path, root):
-                findings.append(Finding(
-                    "infrastructure",
-                    f"Ansible playbook: {record.path}",
-                    f"Detected {len(_items(root))} top-level play item(s). Tasks and module "
-                    "arguments are not executed or evaluated.",
-                    confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
-                ))
         return findings
 
     def _compose(self, root: dict[str, Any], record: FileRecord) -> list[Finding]:
@@ -385,13 +480,10 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
     def _kubernetes(self, root: dict[str, Any], record: FileRecord, index: int) -> list[Finding]:
         metadata = _mapping(root.get("metadata"))
         spec = _mapping(root.get("spec"))
-        template = _mapping(spec.get("template"))
-        pod_spec = _mapping(template.get("spec")) or _mapping(spec.get("jobTemplate"))
-        if "spec" in pod_spec:
-            pod_spec = _mapping(pod_spec.get("spec"))
+        kind = str(root.get("kind"))
+        pod_spec = _pod_spec(kind, spec)
         containers = _containers(pod_spec)
         name = str(metadata.get("name", "unnamed"))
-        kind = str(root.get("kind"))
         evidence = [record.path, f"document: {index + 1}"]
         for container in containers:
             if container.get("image"):
@@ -407,15 +499,18 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             "No cluster connection or manifest application was attempted.",
             confidence="CONFIRMED", evidence=evidence[:100], analyzer=self.name,
         )]
-        security_context = _mapping(pod_spec.get("securityContext"))
-        for container in containers:
-            security_context.update(_mapping(container.get("securityContext")))
+        # Each container's effective context (pod defaults, container overrides): a later
+        # unprivileged container no longer hides a privileged one.
+        pod_context = _mapping(pod_spec.get("securityContext"))
+        contexts = [
+            {**pod_context, **_mapping(container.get("securityContext"))} for container in containers
+        ] or [pod_context]
         risky = []
-        if security_context.get("privileged") is True:
+        if any(context.get("privileged") is True for context in contexts):
             risky.append("privileged container")
-        if security_context.get("allowPrivilegeEscalation") is True:
+        if any(context.get("allowPrivilegeEscalation") is True for context in contexts):
             risky.append("privilege escalation allowed")
-        if security_context.get("runAsNonRoot") is False:
+        if any(context.get("runAsNonRoot") is False for context in contexts):
             risky.append("runAsNonRoot disabled")
         if spec.get("hostNetwork") is True or pod_spec.get("hostNetwork") is True:
             risky.append("host network enabled")
@@ -471,7 +566,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return [Finding(
                 "infrastructure", f"Deployment JSON parse error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         if "Resources" in root and isinstance(root["Resources"], dict):
@@ -487,7 +582,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "ci_cd", f"Jenkinsfile read error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         stages = re.findall(r"""(?m)\bstage\s*\(\s*['"]([^'"]+)['"]\s*\)""", source)
@@ -502,10 +597,13 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         )]
 
 
-def name_is_ansible(path: str, root: dict[str, Any]) -> bool:
-    parts = {part.lower() for part in Path(path).parts}
-    return (
-        bool(parts & {"ansible", "playbooks"})
-        or any(isinstance(item, dict) and ("hosts" in item or "tasks" in item)
-               for item in _items(root))
-    )
+def name_is_ansible(path: str, root: Any) -> bool:
+    """Whether a YAML document is an Ansible playbook: a list of plays.
+
+    A play is a mapping with ``hosts`` (or a playbook import). A mapping document is never a
+    playbook, so configuration whose values hold ``hosts`` (filebeat.yml) is not one.
+    """
+    plays = root.get("plays") if isinstance(root, dict) and set(root) == {"plays"} else root
+    if not isinstance(plays, list) or not plays or not all(isinstance(item, dict) for item in plays):
+        return False
+    return any({"hosts", "import_playbook", "ansible.builtin.import_playbook"} & set(item) for item in plays)

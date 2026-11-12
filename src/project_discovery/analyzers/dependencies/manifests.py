@@ -148,7 +148,7 @@ class DependencyManifestAnalyzer(Analyzer):
                 "configuration",
                 "Dependency manifest parse error",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

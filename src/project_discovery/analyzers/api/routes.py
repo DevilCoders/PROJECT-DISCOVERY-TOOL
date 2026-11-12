@@ -21,31 +21,39 @@ _SOURCE_EXTENSIONS = source_extensions()
 MAX_PYTHON_ENDPOINT_AST_BYTES = 16 * 1024 * 1024
 MAX_SOURCE_ENDPOINT_SCAN_BYTES = 32 * 1024 * 1024
 MAX_ENDPOINT_LINE_CHARS = 256 * 1024
+MAX_ENDPOINT_FACTS = 500
+# JAX-RS method annotations take no arguments; the path is a separate @Path annotation.
+_JAXRS_METHOD = re.compile(r"@(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b(?!\s*\()")
+_JAXRS_PATH = re.compile(r"""@Path\s*\(\s*(?:value\s*=\s*)?["']([^"']*)["']""")
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
+# Each pattern yields (method, route); "ANY" when the declaration names no method.
+# Receivers are whole identifiers (user.get('name') and header.get(...) are lookups) and the
+# route must look like one ("/..." or "*"), so a dictionary read is never a served endpoint.
 _ROUTE_PATTERNS = (
     re.compile(
-        r"""(?:app|router|server|fastify|r|mux)\s*\.\s*(get|post|put|patch|delete|options|head)\s*\(\s*['"]([^'"]+)['"]""",
+        r"""(?<![\w$])(?:app|router|server|fastify|r|mux|e|g|api|group|engine)\s*\.\s*"""
+        r"""(get|post|put|patch|delete|options|head)\s*\(\s*['"]((?:/|\*)[^'"]*)['"]""",
         re.I,
     ),
     re.compile(
         r"""Route\s*::\s*(get|post|put|patch|delete|options|head)\s*\(\s*['"]([^'"]+)['"]""",
         re.I,
     ),
+    # Spring: @GetMapping, @GetMapping("/x"), @GetMapping(value = "/x"), @RequestMapping(path = "/x").
     re.compile(
-        r"""@(Get|Post|Put|Patch|Delete|PatchMapping|GetMapping|PostMapping|PutMapping|DeleteMapping)\s*\(\s*['"]([^'"]*)['"]""",
-        re.I,
+        r"""@(Get|Post|Put|Patch|Delete|Request)Mapping\b(?:\s*+\(\s*+(?:(?:value|path)\s*+=\s*+)?\{?\s*+["']([^"']*)["'])?"""
     ),
-    re.compile(
-        r"""@(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s*\(\s*['"]?([^'")\s]+)?""",
-        re.I,
-    ),
+    # NestJS and Micronaut: @Get(), @Get(':id'). Retrofit and Feign's @GET("...") declare
+    # calls a client makes, not endpoints the project serves.
+    re.compile(r"""@(Get|Post|Put|Patch|Delete|Options|Head|All)\(\s*(?:['"]([^'"]*)['"])?"""),
     re.compile(
         r"""\[\s*Http(Get|Post|Put|Patch|Delete|Options|Head)(?:\s*\(\s*['"]([^'"]*)['"]\s*\))?\s*\]""",
         re.I,
     ),
+    # Sinatra (get '/x' do) and Rails routes (get 'x', to: 'c#a' / get 'x' => 'c#a').
     re.compile(
-        r"""(?m)^[ \t]*(get|post|put|patch|delete|options|head)\s+['"]([^'"]+)['"]\s+do\b""",
+        r"""(?m)^[ \t]*(get|post|put|patch|delete|options|head)\s+['"]([^'"]+)['"]\s*(?:do\b|,\s*to:|=>)""",
         re.I,
     ),
     re.compile(
@@ -128,6 +136,8 @@ class APIEndpointAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         routes: list[tuple[str, str, int]] = []
+        jaxrs_methods: list[tuple[str, int]] = []
+        jaxrs_paths: list[tuple[str, int]] = []
         truncated = False
         if record.extension in {".py", ".pyi"}:
             if record.size_bytes > MAX_PYTHON_ENDPOINT_AST_BYTES:
@@ -180,12 +190,14 @@ class APIEndpointAnalyzer(Analyzer):
                         if not line:
                             break
                         bytes_scanned += len(line.encode("utf-8", errors="replace"))
+                        for match in _JAXRS_METHOD.finditer(line):
+                            jaxrs_methods.append((match.group(1).upper(), line_number))
+                        for match in _JAXRS_PATH.finditer(line):
+                            jaxrs_paths.append((match.group(1), line_number))
                         for pattern in _ROUTE_PATTERNS:
                             for match in pattern.finditer(line):
                                 groups = match.groups()
-                                if pattern.pattern.startswith(r"""@(?:GET"""):
-                                    method, route = "ANY", groups[0] or ""
-                                elif pattern.pattern.startswith(r"""\[\s*Http"""):
+                                if pattern.pattern.startswith(r"""\[\s*Http"""):
                                     method = groups[0].upper()
                                     route = groups[1] or ""
                                 elif pattern.pattern.startswith(r"""(?:app|group|router)"""):
@@ -193,7 +205,9 @@ class APIEndpointAnalyzer(Analyzer):
                                 elif pattern.pattern.startswith(r"""\b(?:http\.)?HandleFunc""") or pattern.pattern.startswith(r"""\bCROW_ROUTE"""):
                                     method, route = "ANY", groups[1]
                                 elif len(groups) >= 2:
-                                    method, route = groups[0].upper().removesuffix("MAPPING"), groups[1]
+                                    method = groups[0].upper()
+                                    method = "ANY" if method in {"REQUEST", "ALL"} else method
+                                    route = groups[1] or ""
                                 else:
                                     continue
                                 routes.append((method, route, line_number))
@@ -202,12 +216,16 @@ class APIEndpointAnalyzer(Analyzer):
             except OSError as exc:
                 return [Finding(
                     "api", f"API endpoint scan unavailable: {record.path}",
-                    describe_error(exc), confidence="UNKNOWN",
+                    describe_error(exc), confidence="UNKNOWN", severity="LOW",
                     evidence=[record.path], analyzer=self.name,
                 )]
 
+        # JAX-RS: @GET and its @Path on neighbouring lines (either order).
+        for method, line in jaxrs_methods:
+            near = sorted((abs(path_line - line), path) for path, path_line in jaxrs_paths if abs(path_line - line) <= 3)
+            routes.append((method, near[0][1] if near else "", line))
         unique = sorted(set(routes), key=lambda item: (item[2], item[0], item[1]))
-        for method, route, line in unique[:500]:
+        for method, route, line in unique[:MAX_ENDPOINT_FACTS]:
             # Provided endpoints, for the scan's integration summary and cross-project maps.
             code_facts.emit_fact("api_endpoint", f"{str(method).upper()} {route}", line=line)
         findings: list[Finding] = []
@@ -224,6 +242,17 @@ class APIEndpointAnalyzer(Analyzer):
                     for method, route, line in unique[:150]
                 ],
                 analyzer=self.name,
+            ))
+        if len(unique) > MAX_ENDPOINT_FACTS:
+            findings.append(Finding(
+                "api",
+                f"API endpoint facts truncated: {record.path}",
+                f"Only the first {MAX_ENDPOINT_FACTS:,} of {len(unique):,} endpoint declarations feed the "
+                "integration summary and pdt compare.",
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
             ))
         if truncated:
             findings.append(Finding(

@@ -132,3 +132,76 @@ def test_ansible_playbook_list_is_inventoried(tmp_path: Path):
         path, _record(path, "ansible/playbooks/site.yml")
     )
     assert any(item.title.startswith("Ansible playbook:") for item in findings)
+
+
+def _deploy(tmp_path: Path, relative: str, content: str):
+    path = tmp_path / relative.replace("/", "_")
+    path.write_text(content, encoding="utf-8")
+    return DeploymentIntelligenceAnalyzer().analyze(path, _record(path, relative))
+
+
+def test_pods_cronjobs_and_every_container_are_checked(tmp_path: Path):
+    # Regressions: a bare Pod and a CronJob showed 0 containers and were never checked, and a
+    # later unprivileged container hid a privileged one.
+    pod = _deploy(tmp_path, "pod.yaml", (
+        "apiVersion: v1\nkind: Pod\nmetadata: {name: shell}\nspec:\n  hostNetwork: true\n"
+        "  containers:\n  - name: c\n    image: busybox:1.36\n    securityContext: {privileged: true}\n"
+    ))
+    titles = [item.title for item in pod]
+    assert "Kubernetes Pod: shell" in titles and "Potential Kubernetes risk: privileged container" in titles
+    assert "1 container declaration(s)" in pod[0].detail
+    cron = _deploy(tmp_path, "cron.yaml", (
+        "apiVersion: batch/v1\nkind: CronJob\nmetadata: {name: backup}\nspec:\n  schedule: '0 1 * * *'\n"
+        "  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n"
+        "          - name: b\n            image: backup:2.1\n            securityContext: {allowPrivilegeEscalation: true}\n"
+    ))
+    assert "Potential Kubernetes risk: privilege escalation allowed" in [item.title for item in cron]
+    two = _deploy(tmp_path, "web.yaml", (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web}\nspec:\n  template:\n    spec:\n"
+        "      containers:\n      - {name: agent, image: agent:1, securityContext: {privileged: true}}\n"
+        "      - {name: app, image: app:1, securityContext: {privileged: false}}\n"
+    ))
+    assert "Potential Kubernetes risk: privileged container" in [item.title for item in two]
+
+
+def test_workflow_triggers_permissions_and_other_ci_providers(tmp_path: Path):
+    for on in ("[push, pull_request_target]", "\n  pull_request_target:\n    types: [opened]"):
+        findings = _deploy(tmp_path, ".github/workflows/ci.yml", f"on: {on}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: []\n")
+        assert any("pull_request_target" in item.title for item in findings), on
+    job_scope = _deploy(tmp_path, ".github/workflows/rel.yml", (
+        "on: push\njobs:\n  release:\n    permissions: {contents: write}\n    runs-on: ubuntu-latest\n    steps: []\n"
+    ))
+    assert any(item.title.startswith("Broad CI workflow permissions") for item in job_scope)
+    gitlab = _deploy(tmp_path, ".gitlab-ci.yml", (
+        "stages: [build, test]\nvariables: {A: b}\n.template: {script: [x]}\n"
+        "build: {stage: build, script: [make]}\ntest: {stage: test, script: [make test]}\n"
+    ))
+    assert "Detected 2 job(s)" in gitlab[0].detail
+    azure = _deploy(tmp_path, "azure-pipelines.yml", (
+        "stages:\n- stage: Build\n  jobs:\n  - job: compile\n    steps: [{script: make}]\n"
+        "  - deployment: ship\n    environment: prod\n"
+    ))
+    assert "Detected 2 job(s)" in azure[0].detail
+
+
+def test_dockerfile_flags_stages_scratch_and_continuations(tmp_path: Path):
+    findings = _deploy(tmp_path, "Dockerfile", (
+        "FROM --platform=$BUILDPLATFORM golang:1.22 AS build\nRUN apt-get update \\\n    && apt-get install -y git\n"
+        "FROM build AS test\nFROM scratch\nCOPY --from=build /out /\n"
+    ))
+    recipe = findings[0]
+    assert "Base images: golang:1.22, build, scratch" in recipe.detail
+    assert "&&" not in repr(recipe.evidence)
+    assert not any(item.title.startswith("Mutable container base image") for item in findings)
+
+
+def test_only_lists_of_plays_are_ansible_playbooks(tmp_path: Path):
+    filebeat = _deploy(tmp_path, "filebeat.yml", "output.elasticsearch:\n  hosts: ['es:9200']\n")
+    assert not any("Ansible" in item.title for item in filebeat)
+    playbook = _deploy(tmp_path, "site.yml", "- hosts: web\n  tasks:\n  - name: ping\n    ping: {}\n")
+    assert any(item.title == "Ansible playbook: site.yml" for item in playbook)
+
+
+def test_ipv6_any_is_public_ingress(tmp_path: Path):
+    findings = _deploy(tmp_path, "sg.tf", 'resource "aws_security_group" "web" {\n  ipv6_cidr_blocks = ["::/0"]\n}\n')
+    assert any(item.title == "Potential Terraform risk: public_ingress" for item in findings)

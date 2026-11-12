@@ -161,7 +161,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return None, Finding(
                 "game_engine", f"Game project file read error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )
 
@@ -217,7 +217,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return [Finding(
                 "game_engine", f"Game project JSON parse error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         if not isinstance(data, dict):
@@ -320,7 +320,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
         except (OSError, ValueError, ET.ParseError) as exc:
             return [Finding(
                 "game_engine", f"Roblox model parse error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         classes = {}

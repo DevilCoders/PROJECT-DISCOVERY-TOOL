@@ -125,3 +125,48 @@ def test_python_api_ast_detects_source_growth_after_inventory(tmp_path: Path, mo
     findings = APIEndpointAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
     assert "grew beyond" in findings[0].detail
+
+
+def _routes(tmp_path: Path, filename: str, source: str) -> list[str]:
+    findings = _scan(tmp_path, filename, filename, source)
+    return [item.split(" ", 1)[1] for finding in findings if finding.title.startswith("API route declarations")
+            for item in finding.evidence]
+
+
+def test_framework_route_forms_the_docs_list(tmp_path: Path):
+    # Regressions: JAX-RS yielded nothing, Spring needed a string literal first argument and
+    # had no @RequestMapping, NestJS @Get(':id') was recorded twice, and Echo and Rails
+    # routes were not recognized.
+    jaxrs = _routes(tmp_path, "FruitResource.java", (
+        '@Path("/fruits")\npublic class FruitResource {\n    @GET\n    public List<Fruit> list() {}\n'
+        '    @GET\n    @Path("/{id}")\n    public Fruit get() {}\n}\n'
+    ))
+    assert "GET /{id}" in jaxrs and len(jaxrs) == 2
+    spring = _routes(tmp_path, "UserController.java", (
+        '@RequestMapping(path = "/api/users")\nclass C {\n  @GetMapping\n  List<User> all() {}\n'
+        '  @PostMapping(value = "/new")\n  User add() {}\n}\n'
+    ))
+    assert spring == ["ANY /api/users", "GET ", "POST /new"]
+    nest = _routes(tmp_path, "cats.controller.ts", "@Get(':id')\nfindOne() {}\n@Post()\ncreate() {}\n")
+    assert nest == ["GET :id", "POST "]
+    echo = _routes(tmp_path, "main.go", 'e.GET("/users/:id", getUser)\ng.DELETE("/users/:id", del)\n')
+    assert echo == ["GET /users/:id", "DELETE /users/:id"]
+    rails = _routes(tmp_path, "routes.rb", "get 'photos', to: 'photos#index'\npost '/login' => 'sessions#create'\n")
+    assert rails == ["GET photos", "POST /login"]
+
+
+def test_lookups_and_client_declarations_are_not_served_endpoints(tmp_path: Path):
+    lookups = _routes(tmp_path, "views.js", (
+        "const name = user.get('name');\nconst type = header.get('Content-Type');\nconst owner = container.get('owner');\n"
+    ))
+    assert lookups == []
+    retrofit = _routes(tmp_path, "GitHubService.java", (
+        'interface GitHubService {\n  @GET("users/{user}/repos")\n  Call<List<Repo>> listRepos(@Path("user") String user);\n}\n'
+    ))
+    assert retrofit == []
+
+
+def test_endpoint_fact_cap_is_reported(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(api_source_analyzer, "MAX_ENDPOINT_FACTS", 2)
+    findings = _scan(tmp_path, "app.js", "app.js", "".join(f"app.get('/r{index}', h);\n" for index in range(4)))
+    assert any(item.title == "API endpoint facts truncated: app.js" and item.confidence == "UNKNOWN" for item in findings)

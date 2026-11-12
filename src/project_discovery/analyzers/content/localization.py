@@ -202,7 +202,7 @@ class LocalizationAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ET.ParseError, ValueError) as exc:
             return [Finding(
                 "localization", f"Localization catalog parse error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
 

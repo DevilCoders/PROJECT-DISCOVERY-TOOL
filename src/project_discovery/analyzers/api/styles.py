@@ -20,7 +20,12 @@ _PATTERNS = {
     "JSON-RPC": re.compile(r"(?i)(?:jsonrpc|json-rpc|application/json-rpc|rpc\.discover)"),
     "SOAP/WSDL": re.compile(r"(?i)(?:<definitions\b|<soap:|wsdl:|SoapClient|javax\.xml\.ws)"),
     "WebSocket": re.compile(r"(?i)(?:websocket|socket\.io|ws://|wss://|@WebSocket)"),
-    "Event-driven API": re.compile(r"(?i)(?:asyncapi:|@KafkaListener|KafkaTemplate|basic_publish|basic_consume|publish\(|subscribe\()"),
+    # Broker clients publishing or subscribing to a named topic; RxJS and store
+    # subscriptions (observable.subscribe(...), unsubscribe()) are not event APIs.
+    "Event-driven API": re.compile(
+        r"(?i)(?:asyncapi:|@KafkaListener|KafkaTemplate|basic_publish|basic_consume|"
+        r"\b(?:producer|publisher|client|channel|nc|js|pubsub|sns|topic|broker|mqtt|redis)\.(?:publish|subscribe)\s*\(\s*['\"`])"
+    ),
     "Webhooks": re.compile(r"(?i)\bwebhooks?\b"),
 }
 _CONTRACT_EXTENSIONS = {".graphql", ".gql", ".proto", ".thrift", ".wsdl", ".raml", ".avdl"}
@@ -97,7 +102,7 @@ class APITypeAnalyzer(Analyzer):
         except OSError as exc:
             return [Finding(
                 "api", f"API classification unavailable: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
 

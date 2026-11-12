@@ -23,7 +23,6 @@ _TECHNOLOGIES = {
     "elasticsearch": ("Elasticsearch", "elasticsearch"),
     "opensearch": ("OpenSearch", "opensearch"),
     "cassandra": ("Cassandra", "cassandra"),
-    "boto3": ("DynamoDB", "boto3"),
     "firebase_admin": ("Firestore", "firebase_admin"),
     "couchdb": ("CouchDB", "couchdb"),
     "influxdb_client": ("InfluxDB", "influxdb_client"),
@@ -47,13 +46,17 @@ _IMPORT_PATTERNS = {
         r"org\.mongodb|go\.mongodb\.org/mongo-driver)", re.I
     ),
     "Redis": re.compile(
-        r"(?:from\s+redis|import\s+redis|require\s*\(\s*['\"]ioredis['\"]|"
+        r"(?:from\s+redis|import\s+redis|require\s*\(\s*['\"]i?oredis['\"]|require\s*\(\s*['\"]redis['\"]|"
+        r"from\s+['\"]redis['\"]|"
         r"redis\.clients|github\.com/redis)", re.I
     ),
     "Neo4j": re.compile(r"(?:from\s+neo4j|import\s+neo4j|org\.neo4j)", re.I),
-    "Elasticsearch": re.compile(r"(?:from\s+elasticsearch|import\s+elasticsearch|org\.elasticsearch)", re.I),
+    "Elasticsearch": re.compile(
+        r"(?:from\s+elasticsearch|import\s+elasticsearch|org\.elasticsearch|@elastic/elasticsearch|"
+        r"github\.com/elastic/go-elasticsearch)", re.I,
+    ),
     "OpenSearch": re.compile(r"(?:from\s+opensearch|import\s+opensearch|org\.opensearch)", re.I),
-    "Cassandra": re.compile(r"(?:from\s+cassandra|import\s+cassandra|com\.datastax)", re.I),
+    "Cassandra": re.compile(r"(?:from\s+cassandra|import\s+cassandra|com\.datastax|cassandra-driver|gocql)", re.I),
     "DynamoDB": re.compile(r"dynamodb", re.I),
     "Firestore": re.compile(r"(?:firebase_admin\.firestore|google\.cloud\.firestore|Firestore)", re.I),
     "CouchDB": re.compile(r"(?:import\s+couchdb|require\s*\(\s*['\"]nano['\"])", re.I),
@@ -103,6 +106,17 @@ def _python_imports(source: str, relative: str) -> tuple[dict[str, set[int]], di
     imports: dict[str, set[int]] = {}
     operations: dict[str, set[int]] = {}
     aliases: dict[str, str] = {}
+    boto3_names: set[str] = set()
+
+    def boto3_service(call: ast.AST) -> str:
+        """The AWS service of boto3.client("dynamodb") / boto3.resource("dynamodb")."""
+        func = getattr(call, "func", None)
+        if (isinstance(call, ast.Call) and isinstance(func, ast.Attribute) and func.attr in {"client", "resource"}
+                and isinstance(func.value, ast.Name) and func.value.id in boto3_names and call.args
+                and isinstance(call.args[0], ast.Constant)):
+            return str(call.args[0].value).lower()
+        return ""
+
     def root_name(node: ast.AST) -> str:
         while isinstance(node, ast.Attribute):
             node = node.value
@@ -112,6 +126,8 @@ def _python_imports(source: str, relative: str) -> tuple[dict[str, set[int]], di
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".", 1)[0]
+                if alias.name == "boto3":
+                    boto3_names.add(alias.asname or "boto3")  # a datastore only by its service
                 tech = _TECHNOLOGIES.get(root)
                 if tech:
                     imports.setdefault(tech[0], set()).add(node.lineno)
@@ -125,7 +141,13 @@ def _python_imports(source: str, relative: str) -> tuple[dict[str, set[int]], di
                     aliases[alias.asname or alias.name] = tech[0]
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
-            if isinstance(value, ast.Call):
+            if isinstance(value, ast.Call) and boto3_service(value) == "dynamodb":
+                imports.setdefault("DynamoDB", set()).add(node.lineno)
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        aliases[target.id] = "DynamoDB"
+            elif isinstance(value, ast.Call):
                 technology = aliases.get(root_name(value.func))
                 if technology:
                     targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -166,7 +188,7 @@ class NoSQLIntelligenceAnalyzer(Analyzer):
                 "database",
                 f"NoSQL analysis unavailable: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

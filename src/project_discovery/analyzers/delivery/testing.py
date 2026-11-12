@@ -130,7 +130,7 @@ class TestDiscoveryAnalyzer(Analyzer):
                 "testing",
                 f"Test file read error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

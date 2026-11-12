@@ -304,7 +304,7 @@ class BuildManifestAnalyzer(Analyzer):
                 "build",
                 f"Build manifest parse error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

@@ -117,3 +117,16 @@ def test_coverage_reports_growth_as_unknown_and_redacts_parser_errors(tmp_path: 
     error = CoverageArtifactAnalyzer().analyze(path, record)
     assert error[0].confidence == "UNKNOWN"
     assert "coverage-parser-secret" not in error[0].detail
+
+
+def test_phpunit_clover_reports_project_metrics(tmp_path: Path):
+    # Regression: php-code-coverage writes per-class and per-file <metrics> before the
+    # project's, and the first class's counters were reported as the project's coverage.
+    findings = _scan(tmp_path, "build/logs/clover.xml", (
+        '<?xml version="1.0"?>\n<coverage generated="1"><project timestamp="1">'
+        '<file name="/a.php"><class name="A"><metrics statements="10" coveredstatements="10" methods="1" coveredmethods="1"/></class>'
+        '<metrics statements="10" coveredstatements="10"/></file>'
+        '<metrics files="2" statements="100" coveredstatements="15" methods="8" coveredmethods="3"/>'
+        "</project></coverage>"
+    ))
+    assert "statements: 15/100 (15.0%)" in findings[0].detail

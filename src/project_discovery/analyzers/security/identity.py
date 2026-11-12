@@ -188,7 +188,7 @@ class IdentityIntelligenceAnalyzer(Analyzer):
             return [Finding(
                 "identity", f"Identity analysis unavailable: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
+                confidence="UNKNOWN", severity="LOW", evidence=[record.path], analyzer=self.name,
             )]
         frameworks: dict[str, set[int]] = {}
         markers: dict[str, set[int]] = {}

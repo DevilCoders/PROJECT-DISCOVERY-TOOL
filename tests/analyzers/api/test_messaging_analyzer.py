@@ -43,3 +43,16 @@ def test_unrelated_source_has_no_messaging_findings(tmp_path: Path):
 def test_non_source_file_is_not_supported():
     record = FileRecord("schema.sql", 20, ".sql", "SQL")
     assert MessagingIntelligenceAnalyzer().supports(record) is False
+
+
+def test_boto3_celery_and_whole_word_brokers(tmp_path: Path):
+    # Regressions: any boto3 import was SQS/SNS, Celery's task.delay() never counted, and
+    # "pika" inside "Pikachu" was a CONFIRMED RabbitMQ reference.
+    s3 = _scan(tmp_path, "s3.py", "import boto3\nboto3.client('s3').list_buckets()\n")
+    assert not any("SQS" in item.title for item in s3)
+    sqs = _scan(tmp_path, "queue.py", "import boto3\nqueue = boto3.client('sqs')\nqueue.send_message(QueueUrl='u', MessageBody='b')\n")
+    assert any("SQS" in item.title for item in sqs)
+    celery = _scan(tmp_path, "tasks.py", "from celery import shared_task\n@shared_task\ndef add(x, y):\n    return x + y\nadd.delay(1, 2)\n")
+    assert any("1 producer/consumer" in item.detail or "operation" in item.detail.lower() for item in celery)
+    pikachu = _scan(tmp_path, "game.js", "const hero = 'Pikachu';\n")
+    assert not any("RabbitMQ" in item.title for item in pikachu)

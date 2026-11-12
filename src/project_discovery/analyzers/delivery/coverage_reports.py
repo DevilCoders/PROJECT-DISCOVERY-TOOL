@@ -124,6 +124,28 @@ def _xml_summary(root: ET.Element) -> dict[str, tuple[int, int]] | None:
         if counters:
             return counters
 
+    # Clover: php-code-coverage writes <metrics> for every class and file before the
+    # project's own, so the first <metrics> in document order is one class, not the project.
+    project = root.find("project")
+    if root.tag == "coverage" and project is not None:
+        metrics = project.find("metrics")
+        files = list(project.iter("file"))
+        elements = [metrics] if metrics is not None else [
+            item for item in (file.find("metrics") for file in files) if item is not None
+        ]
+        result: dict[str, tuple[int, int]] = {}
+        for key, covered_key in (
+            ("statements", "coveredstatements"),
+            ("conditionals", "coveredconditionals"),
+            ("methods", "coveredmethods"),
+        ):
+            total = sum(int(element.attrib.get(key, 0)) for element in elements)
+            covered = sum(int(element.attrib.get(covered_key, 0)) for element in elements)
+            if total:
+                result[key] = (covered, total)
+        if result:
+            return result
+
     for element in root.iter():
         local = element.tag.rsplit("}", 1)[-1].lower()
         if local == "summary":
@@ -228,7 +250,7 @@ class CoverageArtifactAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ET.ParseError, ValueError, RecursionError, MemoryError) as exc:
             return [Finding(
                 "coverage", f"Coverage report parse error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         if not summary:
@@ -236,7 +258,7 @@ class CoverageArtifactAnalyzer(Analyzer):
                 "coverage", f"Unrecognized coverage report: {record.path}",
                 "The artifact name was recognized, but no supported coverage counters "
                 "could be extracted.",
-                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
+                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name, severity="LOW",
             )]
         return [Finding(
             "coverage", f"{format_name}: {record.path}",

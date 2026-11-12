@@ -15,7 +15,10 @@ These are per-analyzer safety limits, not a global scan-size policy. They are cu
 | Python import graph | 16 MiB per module | AST extraction over inventoried source | UNKNOWN for skipped or over-budget modules |
 | Python API endpoint extraction | 16 MiB per Python AST file | PEP 263-aware limit + 1 byte read and AST parsing | UNKNOWN on oversize/growth/parser resource failure |
 | Non-Python API endpoint scanning | 32 MiB per file; 256 KiB per line | Bounded line streaming | UNKNOWN/partial when scan byte limit is reached |
-| API-style classification | 32 MiB per file; 256 KiB per line; 25,000 retained unique indicators; 100 evidence lines | Bounded byte/line streaming with bounded per-category samples | UNKNOWN/partial on byte or indicator cap |
+| API-style classification | 32 MiB per file; 256 KiB per line; 20 evidence lines per style | Bounded byte/line streaming with bounded per-category samples | UNKNOWN/partial on byte or indicator cap |
+| Network indicators | 64 MiB per file; 256 KiB per line; 25,000 retained unique indicators; 100 evidence lines | Bounded line streaming; values reduced to hosts, addresses and ports | UNKNOWN/partial when a byte, line or indicator limit is reached |
+| Operating-system indicators | 64 Mi characters per file; 256 Ki characters per line; 20 evidence lines per platform | Bounded line streaming; per-platform counts | UNKNOWN when the file budget is reached |
+| SQL, migration, Prisma, NoSQL, messaging, observability, test and deployment analyzers | 16 MiB per file | Bounded read; line numbers from one newline index | UNKNOWN on oversize or read failure |
 | API contract parsing | 16 MiB per file | Bounded one-buffer read for OpenAPI, AsyncAPI, OpenRPC, WSDL, RAML, GraphQL, Protobuf and Thrift | UNKNOWN on oversize/growth/parse failure |
 | Tree-sitter syntax parsing | 16 MiB per file | Bounded source read before parser invocation | UNKNOWN on oversize/growth/parser failure |
 | Build manifest analysis | 16 MiB per file | Bounded one-buffer read for build/CI manifests | UNKNOWN on oversize/growth/parse failure |

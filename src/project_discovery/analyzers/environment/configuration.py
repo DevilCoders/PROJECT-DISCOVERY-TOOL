@@ -27,23 +27,29 @@ _CONFIG_EXTENSIONS = {
     ".env", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".properties", ".tf", ".tfvars", ".hcl", ".nix", ".xml", ".plist", ".service", ".desktop", ".rc", ".cnf", ".json5", ".jsonc",
 }
-_KEY_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*(.*?)\s*$")
-_ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
+# Only the key is read; values are never part of the inventory.
+_KEY_LINE = re.compile(r"^\s*+([A-Za-z_][A-Za-z0-9_.-]*+)\s*+[:=]")
+_ENV_LINE = re.compile(r"^\s*+(?:export\s++)?([A-Za-z_][A-Za-z0-9_]*+)\s*+=")
+# Keys and values may be quoted (JSON, YAML, TOML): "debug": true, verify: 'false'.
+_Q = "[\"']?"
 _RISK_PATTERNS = (
-    ("debug_enabled", re.compile(r"(?i)^\s*(?:debug|debug_mode)\s*[:=]\s*(?:true|1|yes|on)\b")),
+    ("debug_enabled", re.compile(rf"(?i)^\s*{_Q}(?:debug|debug_mode){_Q}\s*[:=]\s*{_Q}(?:true|1|yes|on)\b")),
     ("tls_verification_disabled", re.compile(
-        r"(?i)^\s*(?:(?:verify|ssl_?verify|tls_?verify|rejectUnauthorized)\s*[:=]\s*(?:false|0|no|off)|(?:insecure_skip_verify|insecureSkipVerify)\s*[:=]\s*(?:true|1|yes|on))\b"
+        rf"(?i)^\s*{_Q}(?:(?:verify|ssl_?verify|tls_?verify|rejectUnauthorized){_Q}\s*[:=]\s*{_Q}(?:false|0|no|off)"
+        rf"|(?:insecure_skip_verify|insecureSkipVerify){_Q}\s*[:=]\s*{_Q}(?:true|1|yes|on))\b"
     )),
-    ("privileged_container", re.compile(r"(?i)^\s*privileged\s*:\s*true\b")),
+    ("privileged_container", re.compile(rf"(?i)^\s*{_Q}privileged{_Q}\s*:\s*true\b")),
     ("privilege_escalation_enabled", re.compile(
-        r"(?i)^\s*allowPrivilegeEscalation\s*:\s*true\b"
+        rf"(?i)^\s*{_Q}allowPrivilegeEscalation{_Q}\s*:\s*true\b"
     )),
-    ("root_user_allowed", re.compile(r"(?i)^\s*runAsNonRoot\s*:\s*false\b")),
-    ("host_network_enabled", re.compile(r"(?i)^\s*hostNetwork\s*:\s*true\b")),
+    ("root_user_allowed", re.compile(rf"(?i)^\s*{_Q}runAsNonRoot{_Q}\s*:\s*false\b")),
+    ("host_network_enabled", re.compile(rf"(?i)^\s*{_Q}hostNetwork{_Q}\s*:\s*true\b")),
     ("root_container_user", re.compile(r"(?i)^\s*USER\s+root\b")),
     ("nginx_client_verification_disabled", re.compile(r"(?i)\bssl_verify_client\s+off\b")),
+    # allow_origins: ['*'], "allowedOrigins": "*", allowed-origins=*, and nginx's
+    # add_header Access-Control-Allow-Origin *; the wildcard must be the whole value.
     ("wildcard_cors", re.compile(
-        r"(?i)(?:allow[_-]?origins?|access-control-allow-origin)\s*[:=]\s*(?:\[\s*)?\*",
+        rf"(?i)(?:allow(?:ed)?[_-]?origins?|access-control-allow-origin){_Q}(?:\s*[:=]\s*|\s+)(?:\[\s*)?{_Q}\*(?![\w.*-])",
     )),
 )
 _SECRET_KEY = re.compile(r"(?i)(?:password|passwd|secret|token|api[_-]?key|private[_-]?key)")
@@ -184,6 +190,43 @@ def _directive_keys(content: str) -> list[str]:
     return keys
 
 
+def _line_keys(content: str) -> list[str]:
+    return _collect_keys(
+        match.group(1)
+        for line in io.StringIO(content, newline=None)
+        if (match := _KEY_LINE.match(line)) and not line.lstrip().startswith(("#", ";", "//", "!"))
+    )
+
+
+def _yaml_keys(content: str) -> list[str]:
+    try:
+        import yaml
+    except ImportError:
+        return _line_keys(content)
+    try:
+        return _flatten(safe_yaml_load(content))
+    except yaml.YAMLError as exc:
+        raise ValueError("YAML parse error") from exc
+
+
+# Names whose format their extension does not tell (checked before the extension).
+_DIRECTIVE_FILES = frozenset({"haproxy.cfg", "nginx.conf", "sshd_config"})
+_YAML_FILES = frozenset({"cloud.cfg"})
+_JSONC_NAMES = frozenset({"jsconfig.json", "devcontainer.json", ".devcontainer.json", "settings.json",
+                          "launch.json", "tasks.json", "extensions.json"})
+
+
+def _jsonc_file(record: FileRecord, name: str) -> bool:
+    """tsconfig.json and editor settings carry comments (tsc --init writes them)."""
+    path = record.path.replace("\\", "/").lower()
+    return name.endswith(".json") and (
+        name.startswith("tsconfig") or (name in _JSONC_NAMES and (
+            name in {"jsconfig.json", "devcontainer.json", ".devcontainer.json"}
+            or "/.vscode/" in f"/{path}" or "/.devcontainer/" in f"/{path}"
+        ))
+    )
+
+
 def _parse_config(
     content: str, record: FileRecord
 ) -> tuple[list[str], list[tuple[int, str]], dict[int, str]]:
@@ -198,7 +241,18 @@ def _parse_config(
                 risk_source[line_number] = redact_source_excerpt(line)
                 risk_counts[risk_name] = risk_counts.get(risk_name, 0) + 1
 
-    if name in {".env", ".envrc"} or name.startswith(".env."):
+    if name in _DIRECTIVE_FILES:
+        keys = _directive_keys(content)
+        if name == "sshd_config":
+            for key in _line_keys(content):
+                _append_key(keys, key)
+    elif name in _YAML_FILES:
+        keys = _yaml_keys(content)
+    elif _jsonc_file(record, name):
+        keys = _collect_keys(
+            match.group(1) for match in re.finditer(r"""["']([^"'\n]{1,200}+)["']\s*:""", content)
+        )
+    elif name in {".env", ".envrc"} or name.startswith(".env."):
         keys = _collect_keys(
             match.group(1)
             for line in io.StringIO(content, newline=None)
@@ -217,27 +271,18 @@ def _parse_config(
         # logging-style "%(asctime)s" values (alembic.ini, logging.ini) and quoted the raw
         # value in its error. Duplicate keys are merged rather than refused.
         parser = configparser.ConfigParser(interpolation=None, strict=False)
-        parser.read_string(content)
-        keys = _collect_keys(
-            f"{section}.{key}" for section in parser.sections() for key in parser.options(section)
-        )
+        try:
+            parser.read_string(content)
+        except configparser.MissingSectionHeaderError:
+            keys = _line_keys(content)  # key = value files without [sections], such as pyvenv.cfg
+        else:
+            keys = _collect_keys(
+                f"{section}.{key}" for section in parser.sections() for key in parser.options(section)
+            )
     elif record.extension in {".xml", ".plist"} or name == "web.config" or name.endswith(".xml"):
         keys = _xml_keys(content)
     elif record.extension in {".yaml", ".yml"}:
-        try:
-            import yaml
-        except ImportError:
-            keys = _collect_keys(
-                match.group(1)
-                for line in io.StringIO(content, newline=None)
-                if (match := _KEY_LINE.match(line))
-                and not line.lstrip().startswith(("#", "//"))
-            )
-        else:
-            try:
-                keys = _flatten(safe_yaml_load(content))
-            except yaml.YAMLError as exc:
-                raise ValueError("YAML parse error") from exc
+        keys = _yaml_keys(content)
     elif name in {"dockerfile", "containerfile"}:
         keys = _collect_keys(
             match.group(1).upper()
@@ -247,8 +292,6 @@ def _parse_config(
                 line,
             ))
         )
-    elif name == "nginx.conf":
-        keys = _directive_keys(content)
     elif record.extension == ".nix":
         keys = _collect_keys(match.group(1) for match in _NIX_ASSIGNMENT.finditer(content))
     elif record.extension in {
@@ -261,10 +304,6 @@ def _parse_config(
             if (match := _KEY_LINE.match(line))
             and not line.lstrip().startswith(("#", "//", "!"))
         )
-        if name == "sshd_config":
-            extra = _directive_keys(content)
-            for key in extra:
-                _append_key(keys, key)
     else:
         keys = []
     return sorted(set(keys)), risks, risk_source
@@ -327,7 +366,7 @@ class ConfigurationAnalyzer(Analyzer):
                 "configuration",
                 f"Configuration parse error: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

@@ -86,7 +86,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "robotics", f"ROS source read error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         if record.extension == ".py":
@@ -220,7 +220,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
         except (OSError, ValueError, ET.ParseError) as exc:
             return [Finding(
                 "robotics", f"ROS package manifest parse error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         values: dict[str, list[str]] = {}
@@ -260,7 +260,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
         except (OSError, UnicodeDecodeError) as exc:
             return [Finding(
                 "robotics", f"ROS interface read error: {record.path}",
-                describe_error(exc), confidence="UNKNOWN",
+                describe_error(exc), confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path], analyzer=self.name,
             )]
         content = [

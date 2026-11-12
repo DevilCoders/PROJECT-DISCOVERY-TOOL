@@ -58,6 +58,26 @@ def _plausible_hostname(domain: str) -> bool:
     return len(labels) >= 3 or tld in _COMMON_TLDS
 
 
+# File names that end in a TLD-shaped extension (lcov.info, configure.in).
+_FILE_NAMES = frozenset({
+    "lcov.info", "configure.in", "manifest.in", "makefile.in", "requirements.in", "setup.in",
+    "config.in", "doxyfile.in", "aclocal.in", "dev.in", "test.in",
+})
+# The key of a configuration line (spring.application.name=..., "tool.coverage.run":) and
+# a [section.name] header are names, not hosts.
+_CONFIG_KEY = re.compile(r"""^[ \t]*+["']?[A-Za-z_][\w.-]*+["']?[ \t]*+[:=]""")
+_SECTION_HEADER = re.compile(r"^[ \t]*+\[++[^\]\n]*+\]++\s*+$")
+_VERSION_CONTEXT = 48
+
+
+def _key_end(line: str) -> int:
+    """End offset of the key part of a configuration line (0 when there is none)."""
+    if _SECTION_HEADER.match(line):
+        return len(line)
+    match = _CONFIG_KEY.match(line)
+    return match.end() if match else 0
+
+
 def _plausible_ipv6(candidate: str, line: str, start: int) -> bool:
     """Reject bare "::" and single-group forms unless they appear bracketed or as ::1."""
     groups = [group for group in candidate.split(":") if group]
@@ -100,7 +120,7 @@ def _literal_spans(line: str) -> list[tuple[int, int]]:
 def _in_spans(spans: list[tuple[int, int]], start: int, end: int) -> bool:
     return any(left <= start and end <= right for left, right in spans)
 _IPV6_MAPPED = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,6}(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
-_CIDR = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b|(?<![\w:])[0-9A-Fa-f:]{3,}/\d{1,3}\b")
+_CIDR = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b|(?<![\w:])[0-9A-Fa-f:]{2,}/\d{1,3}\b")
 _PORT_KEY = re.compile(
     r"""(?i)\b(?:port|listen|expose|target_port|containerPort|hostPort|bind_port)\s*(?:=|:)\s*['"]?(\d{1,5})\b"""
 )
@@ -123,7 +143,7 @@ _PROTOCOL_PATTERNS = {
     "AMQP": re.compile(r"\b(?:amqp|rabbitmq)\b", re.I),
     "Kafka": re.compile(r"\b(?:kafka|KafkaProducer|KafkaConsumer)\b", re.I),
     "SSH": re.compile(r"\b(?:ssh|sftp|scp)\b", re.I),
-    "DNS": re.compile(r"\b(?:dns|nameserver|resolve\(\))\b", re.I),
+    "DNS": re.compile(r"\b(?:dns|nameserver)\b|\bresolve\(\)", re.I),
 }
 # One pass per line over all protocol markers; group names map back to labels.
 _PROTOCOL_LABELS = {f"p{index}": label for index, label in enumerate(_PROTOCOL_PATTERNS)}
@@ -339,7 +359,11 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     if budget_reason:
                         break
 
-                    for candidate in (_IPV4.findall(line) if has_dot else ()):
+                    for ipv4 in (_IPV4.finditer(line) if has_dot else ()):
+                        candidate = ipv4.group(0)
+                        # AssemblyVersion("1.0.0.0"), <FileVersion>, version = "1.2.3.4"
+                        if "version" in lower[max(0, ipv4.start() - _VERSION_CONTEXT):ipv4.start()]:
+                            continue
                         try:
                             parsed = ipaddress.ip_address(candidate)
                             if not retain(addresses["IPv4"], (str(parsed), line_number)):
@@ -398,7 +422,12 @@ class NetworkIndicatorAnalyzer(Analyzer):
                         if safe:
                             if not retain(uris, (safe, line_number)):
                                 break
-                            if host and not retain(domains, (host, line_number)):
+                            # A URI host is a hostname when it is a plausible DNS name; a bare
+                            # label (http://api:8080) needs a port to be a service name.
+                            if host and (
+                                _plausible_hostname(host) if "." in host
+                                else host == "localhost" or uri_port is not None
+                            ) and not retain(domains, (host, line_number)):
                                 break
                             if uri_port is not None and 1 <= uri_port <= 65535:
                                 if not retain(ports, (uri_port, line_number)):
@@ -408,13 +437,16 @@ class NetworkIndicatorAnalyzer(Analyzer):
                     if budget_reason:
                         break
 
+                    key_end = 0 if source_code or not has_dot else _key_end(line)
                     for match in (_DOMAIN.finditer(line) if has_dot else ()):
                         domain = match.group(0).lower().rstrip(".")
                         if domain in {
                             "example.com", "example.org", "example.net",
                             "localhost.localdomain",
-                        } or not _plausible_hostname(domain):
+                        } or domain in _FILE_NAMES or not _plausible_hostname(domain):
                             continue
+                        if match.end() <= key_end:
+                            continue  # a configuration key or section name
                         if spans is not None and not _in_spans(spans, match.start(), match.end()):
                             continue
                         if not retain(domains, (domain, line_number)):
@@ -436,7 +468,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
                 "network",
                 f"Network indicator scan unavailable: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

@@ -184,3 +184,41 @@ def test_jdbc_properties_and_replica_lists_never_reach_uri_or_host_evidence(tmp_
     assert "fakejdbcpwd42" not in dumped and "databasename" not in dumped.lower()
     assert "sqlserver://sqlprod01/<redacted-path>" in dumped
     assert "mongodb://h1.example.com:27017/<redacted-path>" in dumped
+
+
+def _network_scan(tmp_path: Path, name: str, content: str):
+    path = tmp_path / name.replace("/", "_")
+    path.write_text(content, encoding="utf-8")
+    record = FileRecord(name, path.stat().st_size, Path(name).suffix, "Text", file_type="text")
+    return NetworkIndicatorAnalyzer().analyze(path, record)
+
+
+def _network_evidence(findings, title: str) -> str:
+    return repr([item.evidence for item in findings if item.title.startswith(title)])
+
+
+def test_configuration_keys_versions_and_file_names_are_not_network_indicators(tmp_path: Path):
+    # Regressions: config keys (spring.application.name), [tool.coverage.run] headers and
+    # file names (lcov.info) were hostnames; four-part versions were IPv4 addresses.
+    findings = _network_scan(tmp_path, "application.properties", (
+        "spring.application.name=orders\nspring.mail.host=smtp.mail-provider.com\n"
+        "[tool.coverage.run]\nreport = lcov.info\n"
+    ))
+    hosts = _network_evidence(findings, "Hostname and domain")
+    assert "smtp.mail-provider.com" in hosts
+    assert "spring.application.name" not in hosts and "tool.coverage.run" not in hosts and "lcov.info" not in hosts
+    versions = _network_scan(tmp_path, "AssemblyInfo.cs", '[assembly: AssemblyVersion("1.0.0.0")]\nvar ip = "10.1.2.3";\n')
+    addresses = _network_evidence(versions, "IPv4 address")
+    assert "10.1.2.3" in addresses and "1.0.0.0" not in addresses
+
+
+def test_ipv6_any_ranges_dns_markers_and_uri_hosts(tmp_path: Path):
+    findings = _network_scan(tmp_path, "sg.tf", (
+        'cidr_blocks = ["0.0.0.0/0"]\nipv6_cidr_blocks = ["::/0"]\n'
+        'url = "http://auth/token"\napi = "http://api:8080/v1"\n'
+    ))
+    assert "::/0" in _network_evidence(findings, "CIDR")
+    hosts = _network_evidence(findings, "Hostname and domain")
+    assert "api" in hosts and "'auth" not in hosts and "(auth)" not in hosts
+    dns = _network_scan(tmp_path, "dns.js", "const addr = await resolve();\n")
+    assert any(item.title.startswith("Network protocol references") for item in dns)

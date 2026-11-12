@@ -381,7 +381,7 @@ class TreeSitterAnalyzer(Analyzer):
                 "code",
                 f"Tree-sitter analysis error: {record.language}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]

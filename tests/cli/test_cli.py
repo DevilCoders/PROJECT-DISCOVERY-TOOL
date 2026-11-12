@@ -838,3 +838,19 @@ def test_query_shows_resolved_names_and_refuses_a_scan_without_an_index(tmp_path
         main()
     assert exited.value.code == 3
     assert "no code index" in capsys.readouterr().err
+
+
+def test_strict_fails_on_files_the_analyzers_could_not_parse(tmp_path: Path):
+    # Regression: parse and read failures kept severity INFO, so --strict passed scans with
+    # unparsed contracts, configuration, CI and coverage files.
+    for name, content in (
+        ("openapi.yaml", "openapi: 3.0.0\npaths: [\n"),
+        ("config.ini", "[odbc]\nnot a key value line\n"),
+        ("coverage.xml", "<coverage><unclosed>"),
+    ):
+        project = tmp_path / name.replace(".", "_")
+        project.mkdir()
+        (project / name).write_text(content, encoding="utf-8")
+        assert run_scan(project, tmp_path / f"{project.name}-out", {"json"}, 1, quiet=True, strict=True) == 3, name
+        report = _json_report(tmp_path / f"{project.name}-out")
+        assert any(item["confidence"] == "UNKNOWN" and item["severity"] == "LOW" for item in report["findings"]), name

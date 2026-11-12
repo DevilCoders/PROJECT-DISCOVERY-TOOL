@@ -775,7 +775,7 @@ class SecureCodePatternAnalyzer(Analyzer):
                 "security",
                 f"Secure-code scan unavailable: {record.path}",
                 describe_error(exc),
-                confidence="UNKNOWN",
+                confidence="UNKNOWN", severity="LOW",
                 evidence=[record.path],
                 analyzer=self.name,
             )]
@@ -789,7 +789,7 @@ class SecureCodePatternAnalyzer(Analyzer):
                     "security",
                     f"Secure-code parse error: {record.path}",
                     describe_error(exc),
-                    confidence="UNKNOWN",
+                    confidence="UNKNOWN", severity="LOW",
                     evidence=[record.path],
                     analyzer=self.name,
                 )]

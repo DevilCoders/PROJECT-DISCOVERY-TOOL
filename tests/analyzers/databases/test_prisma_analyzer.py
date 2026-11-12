@@ -28,3 +28,17 @@ def test_prisma_file_without_blocks_is_unknown(tmp_path: Path):
     record = FileRecord(path.name, path.stat().st_size, ".prisma", "Prisma")
     findings = PrismaSchemaAnalyzer().analyze(path, record)
     assert findings[0].confidence == "UNKNOWN"
+
+
+def test_prisma_reads_tab_indented_fields_and_only_datasource_providers(tmp_path: Path):
+    path = tmp_path / "schema.prisma"
+    path.write_text(
+        'generator client {\n\tprovider = "prisma-client-js"\n}\n'
+        'datasource db {\n\tprovider = "mysql"\n}\n'
+        'model User {\n\tid Int @id\n\tposts Post[]\n}\nmodel Post {\n\tid Int @id\n\tauthor User\n}\n',
+        encoding="utf-8",
+    )
+    record = FileRecord("schema.prisma", path.stat().st_size, ".prisma", "Prisma")
+    finding = PrismaSchemaAnalyzer().analyze(path, record)[0]
+    assert "4 model fields" in finding.detail and "2 model relations" in finding.detail
+    assert "datasource providers: mysql" in finding.detail and "prisma-client-js" not in finding.detail

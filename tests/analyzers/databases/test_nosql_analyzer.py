@@ -95,3 +95,21 @@ def test_no_sql_analyzer_accepts_the_full_source_language_catalog():
     for extension in source_extensions():
         record = FileRecord("sample" + extension, 1, extension, "Source")
         assert analyzer.supports(record), extension
+
+
+def test_boto3_is_a_datastore_only_through_its_service(tmp_path: Path):
+    # Regression: any "import boto3" was a CONFIRMED DynamoDB reference (S3-only code too).
+    s3 = _scan(tmp_path, "s3.py", "import boto3\ns3 = boto3.client('s3')\ns3.list_buckets()\n")
+    assert not any("DynamoDB" in item.title for item in s3)
+    dynamo = _scan(tmp_path, "store.py", "import boto3\ntable = boto3.resource('dynamodb').Table('t')\n"
+                   "db = boto3.client('dynamodb')\ndb.put_item(TableName='t', Item={})\n")
+    assert any("DynamoDB" in item.title for item in dynamo)
+
+
+def test_node_and_go_clients_are_recognized(tmp_path: Path):
+    titles = " ".join(item.title for item in _scan(tmp_path, "cache.js", (
+        "const { createClient } = require('redis');\nimport { Client } from '@elastic/elasticsearch';\n"
+        "const cassandra = require('cassandra-driver');\n"
+    )))
+    for name in ("Redis", "Elasticsearch", "Cassandra"):
+        assert name in titles, name
