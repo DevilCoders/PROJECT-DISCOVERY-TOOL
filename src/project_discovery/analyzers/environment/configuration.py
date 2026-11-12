@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
-from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt
+from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt, text_encoding
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
 
@@ -310,7 +310,7 @@ class ConfigurationAnalyzer(Analyzer):
                     analyzer=self.name,
                     severity="LOW",
                 )]
-            content = raw_content.decode("utf-8")
+            content = raw_content.decode(text_encoding(raw_content))
             keys, risks, risk_source = _parse_config(content, record)
         except ConfigurationKeyBudgetExceeded as exc:
             return [Finding(

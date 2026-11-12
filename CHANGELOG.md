@@ -274,6 +274,15 @@ Findings and their status are in the second-round section of
 - `tests/test_regex_complexity.py` sees rule objects and patterns compiled inside functions and
   builds backtracking witnesses from each pattern; the 86 more super-linear patterns it found are
   fixed (PDT-357).
+- Python taint follows loop-carried values, `except` handlers as alternatives, comprehension
+  elements (PDT-358), positional-only route parameters (PDT-359), helper chains of any depth and
+  every parameter label (PDT-360); every lexical budget cut is reported (PDT-361), and
+  parameters after `=>`/`->` function types are kept (PDT-362).
+- UTF-16 and UTF-32 files are decoded and scanned (PDT-363); the self-scan is clean outside
+  `tests/` again (PDT-364); credential names need a credential noun last, and type names and
+  elided examples are placeholders (PDT-365); archive members use the file scanners' rules
+  (PDT-366); Python gets the JWT, permission, XXE, randomness and redirect rules (PDT-367);
+  `setWritable`, `chmodSync`, `chmod -R` and `exec "$@"` are judged by meaning (PDT-368).
 
 ## 0.2.0 — 2026-11-05
 

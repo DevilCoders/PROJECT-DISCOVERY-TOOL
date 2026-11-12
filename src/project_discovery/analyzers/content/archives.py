@@ -15,10 +15,11 @@ import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
-from ...core.secret_patterns import ANY_TOKEN, PRIVATE_KEY_MARKER
-from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt
+from ...core.source_utils import LineIndex, describe_error, open_verified_binary, redact_source_excerpt
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
+from ..security.privacy import personal_email_matches
+from ..security.secrets import credential_matches
 
 _ARCHIVE_EXTENSIONS = {
     ".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg",
@@ -122,30 +123,22 @@ def _colliding_names(names) -> list[str]:
     return sorted(
         " / ".join(sorted(variants)) for variants in seen.values() if len(variants) > 1
     )
-_CONTENT_RULES = (
-    (
-        "credential-like assignment",
-        re.compile(
-            # Possessive, same-line separators: two adjacent \s* runs backtracked
-            # quadratically on long whitespace after a keyword.
-            r"""(?im)\b(?:password|passwd|passphrase|api[_-]?key|client[_-]?secret|"""
-            r"""access[_-]?token|refresh[_-]?token|secret)\b[ \t]*+["']?[ \t]*+[:=][ \t]*+["']?"""
-            r"""[^\s,"']{4,}"""
-        ),
-        "secrets",
-    ),
-    ("private-key marker", PRIVATE_KEY_MARKER, "secrets"),
-    # The same provider-token registry as the source secret scanner.
-    ("provider credential token", ANY_TOKEN, "secrets"),
-    (
-        "email-shaped value",
-        re.compile(
-            r"(?i)\b[A-Z0-9.!#$%&'*+/=?^_{|}~-]{1,64}@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?"
-            r"(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+\b"
-        ),
-        "privacy",
-    ),
-)
+# Members get the file scanners' own rules (credential assignments with keyed names and
+# placeholder filtering, credential URLs, provider tokens, private keys, and personal
+# addresses), so a secret in a .env file is reported the same whether or not it is zipped.
+_SECRET_LABELS = {
+    "private_key": "private-key marker",
+    "credential_assignment": "credential-like assignment",
+    "credential_url": "credential URL",
+}
+
+
+def _member_matches(text: str, member_name: str):
+    """(label, category, match) for every secret and personal address in a member sample."""
+    for pattern_name, match in credential_matches(text, member_name):
+        yield _SECRET_LABELS.get(pattern_name, "provider credential token"), "secrets", match
+    for match in personal_email_matches(text):
+        yield "email-shaped value", "privacy", match
 
 
 def _read_member_sample(
@@ -191,34 +184,22 @@ def _member_content_findings(
     excerpt_counts: Counter[tuple[str, str]] = Counter()
     timed_out = False
 
-    for label, pattern, category in _CONTENT_RULES:
-        line_number = 1
-        position_cursor = 0
-        for match in pattern.finditer(text):
-            if deadline is not None and time.monotonic() >= deadline:
-                timed_out = True
-                break
-
-            # Each pattern yields ordered matches. Count only the not-yet-visited
-            # segment so repeated matches do not rescan the start of a large sample.
-            line_number += text.count("\n", position_cursor, match.start())
-            position_cursor = match.start()
-            key = (category, label)
-            hits.setdefault(key, set()).add(line_number)
-            evidence_key = (category, label, line_number)
-            if evidence_key not in excerpts and excerpt_counts[key] < 20:
-                line_start = text.rfind("\n", 0, match.start()) + 1
-                line_end = text.find("\n", match.end())
-                if line_end < 0:
-                    line_end = len(text)
-                excerpts[evidence_key] = redact_source_excerpt(text[line_start:line_end])
-                excerpt_counts[key] += 1
-
-        if timed_out or (
-            deadline is not None and time.monotonic() >= deadline
-        ):
+    lines = LineIndex(text)
+    for label, category, match in _member_matches(text, member_name):
+        if deadline is not None and time.monotonic() >= deadline:
             timed_out = True
             break
+        line_number = lines.line(match.start())
+        key = (category, label)
+        hits.setdefault(key, set()).add(line_number)
+        evidence_key = (category, label, line_number)
+        if evidence_key not in excerpts and excerpt_counts[key] < 20:
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(text)
+            excerpts[evidence_key] = redact_source_excerpt(text[line_start:line_end])
+            excerpt_counts[key] += 1
 
     findings: list[Finding] = []
     for (category, label), lines in sorted(hits.items()):

@@ -74,7 +74,8 @@ _REFERENCE = {
     "jwt_verification_disabled": r"""(?i)(?:algorithms\s*[:=]\s*\[\s*["']none["']|ignoreExpiration\s*[:=]\s*true|verify\s*\(\s*[^,]+,\s*false\s*\))""",
     "insecure_random_for_secret": r"""(?i)(?:token|secret|session|nonce|api[_-]?key).{0,130}?(?:Math\.random\s*\(|new\s+Random\s*\(|\brand\s*\()""",
     "open_redirect_user_controlled": r"""(?i)\b(?:redirect|sendRedirect|Redirect)\s*\([^;\n]*(?:req(?:uest)?\.(?:query|params)|getParameter\s*\(|returnUrl|return_url|nextUrl|next_url)""",
-    "insecure_file_permissions": r"""(?i)(?:\bchmod\s*\([^;\n]*(?:0o?777|511)|\bchmod\s+0?777\b|\bsetWritable\s*\(\s*true\s*\))""",
+    # setWritable(true) sets only the owner's bit; (true, false) grants every user.
+    "insecure_file_permissions": r"""(?i)(?:\bchmod(?:Sync)?\s*\([^;\n]*(?:0o?777|511)|\bchmod\s+(?:-[A-Za-z]+\s+)*0?777\b|\bset(?:Writable|Readable|Executable)\s*\(\s*true\s*,\s*false\s*\))""",
     "unsafe_xml_external_entities": r"""(?i)(?:setFeature\s*\([^;\n]*(?:external-general-entities|external-parameter-entities)[^;\n]*true|resolveExternals\s*=\s*true|DtdProcessing\s*[:=]\s*(?:DtdProcessing\.)?Parse)""",
 }
 _LINES = [
@@ -84,7 +85,8 @@ _LINES = [
     "verify(a, b, false)", "verify(, false)", "verify(x , false )", 'algorithms: ["none"]', "ignoreExpiration: true",
     "token = Math.random()", "session" + "x" * 140 + "Math.random()", "nonce" + "x" * 120 + "rand()",
     "res.redirect(req.query.next)", "redirect(a); returnUrl", "Redirect(nextUrl)", "os.chmod(p, 0o777)",
-    "chmod(p, 511)", "chmod 777 file", "f.setWritable(true)", "chmod(p); 0777",
+    "chmod(p, 511)", "chmod 777 file", "f.setWritable(true)", "chmod(p); 0777", "f.setWritable(true, false)",
+    "fs.chmodSync(p, 0o777)", "chmod -R 777 /srv", "f.setExecutable(true,false)",
     'f.setFeature("http://xml.org/sax/features/external-general-entities", true)',
     'f.setFeature("external-parameter-entities", false); true', "resolveExternals = true",
     "settings.DtdProcessing = DtdProcessing.Parse", "redirect(a,redirect(a,redirect(req.query.x)",

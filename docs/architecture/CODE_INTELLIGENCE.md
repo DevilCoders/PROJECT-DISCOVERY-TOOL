@@ -106,7 +106,9 @@ arguments without a shell and safe YAML loaders are not sinks.
 
 **Python engine.** Values carry labels naming where input entered. Each function is
 interpreted in statement order: assignments propagate labels and re-assignment replaces them,
-branches merge, and loops run until labels stop growing. Sanitizers clear labels for the sink
+branches merge, loops run again from the merged state until it stops growing, `except`
+handlers start from any point of the `try` body and are alternatives to the normal path, and
+comprehension targets carry their iterable's labels. Sanitizers clear labels for the sink
 kinds they defend (`shlex.quote` for commands, `os.path.basename`/`secure_filename` for paths,
 `html.escape` for HTML, `int()` for all). Functions of the same module get summaries (which
 parameters reach a sink or the return value), iterated to a fixed point, so input that passes

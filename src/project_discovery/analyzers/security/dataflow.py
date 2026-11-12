@@ -26,8 +26,10 @@ from .taint_lexical import RULES, analyze_lexical
 from .taint_python import _PROPAGATING_FUNCTIONS, _SANITIZERS, Flow, analyze_python_taint
 
 MAX_FLOWS_DESCRIBED = 6
-MAX_EXPORTED_FACTS = 50
-MAX_OUTGOING_FACTS = 200
+# Facts a file exports for the cross-module join; a file with more is reported as
+# truncated (a "Data-flow analysis truncated" UNKNOWN), never cut silently.
+MAX_EXPORTED_FACTS = 500
+MAX_OUTGOING_FACTS = 500
 
 # kind -> (title, severity, impact, recommendation)
 KINDS: dict[str, tuple[str, str, str, str]] = {
@@ -176,14 +178,16 @@ class DataFlowAnalyzer(Analyzer):
         if model.tree is not None:
             result = analyze_python_taint(model.tree, model.types)
             flows, sources = result.flows, result.sources
-            self._python_facts(result)
-            if result.truncated:
+            cut = self._python_facts(result)
+            if result.truncated or cut:
                 code_facts.emit_fact("dataflow_truncated", model.language, functions=1)
         else:
             lexical = analyze_lexical(model, LEXICAL_LANGUAGES[model.language],
                                       export=not _third_party(record.path))
             flows, sources = lexical.flows, lexical.sources
-            self._lexical_facts(lexical)
+            cut = self._lexical_facts(lexical)
+            if lexical.truncated or cut:
+                code_facts.emit_fact("dataflow_truncated", model.language, functions=1)
         if sources or flows:
             counts = Counter(flow.kind for flow in flows)
             code_facts.emit_fact("dataflow_stats", model.language, sources=sources, flows=len(flows),
@@ -191,7 +195,8 @@ class DataFlowAnalyzer(Analyzer):
         return flow_findings(model, flows, self.name) if flows else []
 
     @staticmethod
-    def _lexical_facts(result) -> None:
+    def _lexical_facts(result) -> bool:
+        """Export summaries and tainted calls; True when a cap left some out."""
         exported = [
             (name, index, summary.params[index] if index < len(summary.params) else "", entry)
             for name, summary in sorted(result.summaries.items())
@@ -206,9 +211,11 @@ class DataFlowAnalyzer(Analyzer):
                 "tainted_call", call.callee, arg=call.arg, keyword="", receiver=call.receiver,
                 source=call.source, source_line=call.source_line, line=call.line,
             )
+        return len(exported) > MAX_EXPORTED_FACTS or len(result.outgoing) > MAX_OUTGOING_FACTS
 
     @staticmethod
-    def _python_facts(result) -> None:
+    def _python_facts(result) -> bool:
+        """Export summaries and tainted calls; True when a cap left some out."""
         exported = [
             (key, index, summary.params[index] if index < len(summary.params) else "", entry)
             for key, summary in sorted(result.exported.items())
@@ -224,3 +231,4 @@ class DataFlowAnalyzer(Analyzer):
                 "tainted_call", call.target, arg=call.arg, keyword=call.keyword, source=call.source,
                 source_line=call.source_line, line=call.line,
             )
+        return len(exported) > MAX_EXPORTED_FACTS or len(outgoing) > MAX_OUTGOING_FACTS

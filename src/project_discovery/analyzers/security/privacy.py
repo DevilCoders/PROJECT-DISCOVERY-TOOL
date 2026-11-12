@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from ...catalog.languages import is_documentation_path, is_textual_path
-from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt
+from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt, utf8_stream
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
 from ..environment.network import _literal_spans, iana_tlds
@@ -65,9 +65,12 @@ def _line_excerpt(line: str) -> str:
     return redact_source_excerpt(line)
 
 
-def _has_personal_email(line: str) -> bool:
-    """Whether the line holds an address that could reach a real mailbox."""
-    for match in _EMAIL.finditer(line):
+def personal_email_matches(text: str):
+    """Email-shaped values that could reach a real mailbox, as this analyzer reports them.
+
+    The archive member scanner uses this too, so members and files get the same rules.
+    """
+    for match in _EMAIL.finditer(text):
         domain = match.group(1).lower()
         tld = domain.rsplit(".", 1)[-1]
         if tld in _RESERVED_EMAIL_TLDS or tld not in iana_tlds():
@@ -76,15 +79,20 @@ def _has_personal_email(line: str) -> bool:
             tuple("." + reserved for reserved in _RESERVED_EMAIL_DOMAINS)
         ):
             continue
-        if line.startswith(":", match.end()):
+        if text.startswith(":", match.end()):
             continue  # SCP-style remotes such as git@github.com:org/repo.git
-        scheme = line.rfind("://", 0, match.start())
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        scheme = text.rfind("://", line_start, match.start())
         if scheme >= 0 and not any(
-            char.isspace() or char in "\"'<>(),;" for char in line[scheme:match.start()]
+            char.isspace() or char in "\"'<>(),;" for char in text[scheme:match.start()]
         ):
             continue  # URL user info, as in ssh://git@host/org/repo
-        return True
-    return False
+        yield match
+
+
+def _has_personal_email(line: str) -> bool:
+    """Whether the line holds an address that could reach a real mailbox."""
+    return next(personal_email_matches(line), None) is not None
 
 
 class DataExposureAnalyzer(Analyzer):
@@ -132,7 +140,10 @@ class DataExposureAnalyzer(Analyzer):
         # Field names in prose describe data rather than define it; values still count.
         inventory_field_names = not is_documentation_path(record.path)
         try:
-            with open_verified_binary(path, record.analysis_identity) as stream:
+            with open_verified_binary(path, record.analysis_identity) as raw_stream:
+                # UTF-16 and UTF-32 text is transcoded so its lines are scanned too.
+                stream, transcoded_over_budget = utf8_stream(raw_stream, _MAX_DATA_EXPOSURE_FILE_BYTES)
+                budget_reached = budget_reached or transcoded_over_budget
                 line_number = 1
                 while bytes_scanned < _MAX_DATA_EXPOSURE_FILE_BYTES:
                     remaining = _MAX_DATA_EXPOSURE_FILE_BYTES - bytes_scanned

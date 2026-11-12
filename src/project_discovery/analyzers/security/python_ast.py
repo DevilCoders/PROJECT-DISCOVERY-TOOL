@@ -71,6 +71,11 @@ _RULE_DETAILS = {
     "insecure_temporary_file": ("tempfile.mktemp() is race-prone; use NamedTemporaryFile or mkstemp.", "MEDIUM"),
     "weak_cryptographic_hash": ("{callee} is unsuitable for collision-resistant security uses; select a modern hash or keyed MAC.", "LOW"),
     "possible_sql_injection": ("SQL execution receives a dynamically formatted query string; prefer parameterized query arguments.", "HIGH"),
+    "jwt_verification_disabled": ("{callee}() accepts unsigned tokens or skips signature verification; pin algorithms and verify signatures.", "HIGH"),
+    "insecure_file_permissions": ("{callee}() grants write access to every user; restrict the mode to the owner or group that needs it.", "MEDIUM"),
+    "unsafe_xml_external_entities": ("{callee}() enables external entity resolution; disable it for untrusted XML.", "HIGH"),
+    "insecure_random_for_secret": ("A secret-like value comes from the random module; use the secrets module or os.urandom.", "MEDIUM"),
+    "open_redirect_user_controlled": ("{callee}() redirects to a request-supplied destination; validate it against an allowlist.", "MEDIUM"),
 }
 
 

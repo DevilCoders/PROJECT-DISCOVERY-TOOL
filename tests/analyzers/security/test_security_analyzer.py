@@ -369,3 +369,49 @@ def test_quoted_authorization_headers_and_identity_forms_are_redacted():
         ('email := "someone@example.org"', "someone@example.org"),
     ):
         assert value not in redact_source_excerpt(line), line
+
+
+def test_utf16_and_utf32_files_are_scanned(tmp_path: Path):
+    # Regression: PowerShell 5.1 writes UTF-16LE; decoded as UTF-8 the file had a NUL between
+    # every character and came back clean.
+    from project_discovery.analyzers.security.privacy import DataExposureAnalyzer
+    from project_discovery.core.source_utils import text_encoding
+
+    token = "ghp_" + "C" * 36
+    content = f"$env:GH_TOKEN = '{token}'\n$password = 'Fake-Utf16-Pass1'\n"
+    for name, encoding in (("deploy.ps1", "utf-16"), ("bare.ps1", "utf-16-le"), ("wide.ps1", "utf-32")):
+        path = tmp_path / name
+        path.write_bytes(content.encode(encoding))
+        record = FileRecord(name, path.stat().st_size, ".ps1", "Source")
+        titles = [item.title for item in SecretPatternAnalyzer().analyze(path, record)]
+        assert "Potential hardcoded credential: github_token" in titles, name
+        privacy = DataExposureAnalyzer().analyze(path, FileRecord(name, path.stat().st_size, ".ps1", "PowerShell", file_type="text"))
+        assert any("Credential field-name" in item.title for item in privacy), name
+    assert text_encoding("abc".encode("utf-16-be")[2:] * 10) == "utf-16-be"
+    assert text_encoding(b"plain ascii text here") == "utf-8"
+
+
+def test_credential_keys_need_a_credential_noun_last(tmp_path: Path):
+    # Regression: a keyword anywhere in a name was a HIGH credential (tokenizer, token_type).
+    descriptors = (
+        'tokenizer = "bert-base-uncased"\ntoken_type = "Bearer"\nsecret_name = "prod-db-creds"\n'
+        'password_hash_algorithm = "argon2id"\nTOKEN_HEADER = "X-Auth-Token"\nsecretary = "Jane Fakename"\n'
+        '"insecure_random_for_secret": "insecure_random_for_secret"\n'
+    )
+    assert _assignment_lines(tmp_path, "settings.py", descriptors) == []
+    credentials = (
+        'db_password = "Fake-Db-Pass1"\napiKey = "Fake-Api-Key2"\nSECRET_KEY = "Fake-Secret-3"\n'
+        'auth_token = "Fake-Auth-Tok4"\nAWS_SECRET_ACCESS_KEY = "Fake-Aws-Key5"\n'
+    )
+    assert _assignment_lines(tmp_path, "settings.py", credentials) == [1, 2, 3, 4, 5]
+    schema = "password: string\ntoken: String!\napi_key: ghp_...\n"
+    assert _assignment_lines(tmp_path, "openapi.yaml", schema) == []
+
+
+def test_credential_urls_skip_placeholder_passwords(tmp_path: Path):
+    findings = _scan(tmp_path, "notes.txt", (
+        "postgres://user:pass@db.internal/app\nmysql://root:${DB_PASSWORD}@db/app\n"
+        "redis://app:%s@cache:6379\npostgres://svc:Fake-Real-Pw9@db.internal/app\n"
+    ))
+    lines = [item.evidence[0] for item in findings if item.title.endswith("credential_url")]
+    assert lines == ["notes.txt:4"]

@@ -200,6 +200,52 @@ def describe_error(exc: BaseException) -> str:
     return redact_source_excerpt(f"{name}: {exc}")
 
 
+_BOMS = (
+    (b"\xff\xfe\x00\x00", "utf-32"), (b"\x00\x00\xfe\xff", "utf-32"),
+    (b"\xef\xbb\xbf", "utf-8-sig"), (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16"),
+)
+
+
+def text_encoding(sample: bytes) -> str:
+    """The codec of a text file from its first bytes.
+
+    UTF-8 unless a byte-order mark or NUL-interleaved ASCII marks UTF-16 or UTF-32. Windows
+    PowerShell 5.1 writes UTF-16LE for ``>`` and ``Out-File``; read as UTF-8, such a file
+    has a NUL between every character, no pattern matches, and it looked clean.
+    """
+    for bom, codec in _BOMS:
+        if sample.startswith(bom):
+            return codec
+    head = sample[:4096]
+    half = len(head) // 2
+    if half >= 8:
+        even, odd = head[0::2].count(0), head[1::2].count(0)
+        if odd > 0.4 * half and even < 0.05 * half:
+            return "utf-16-le"
+        if even > 0.4 * half and odd < 0.05 * half:
+            return "utf-16-be"
+    return "utf-8"
+
+
+def utf8_stream(stream: BinaryIO, limit: int) -> tuple[BinaryIO, bool]:
+    """``stream`` itself for UTF-8 text, or UTF-16/32 text transcoded to UTF-8 in memory.
+
+    Returns the stream to read and whether more than ``limit`` bytes were available (the
+    transcoded copy then holds only the first ``limit``). Line numbers are unchanged.
+    """
+    head = stream.read(4096)
+    encoding = text_encoding(head)
+    if encoding in ("utf-8", "utf-8-sig"):
+        if stream.seekable():
+            stream.seek(0)
+            return stream, False
+        rest = stream.read(max(0, limit + 1 - len(head)))
+        data = head + rest
+        return io.BytesIO(data[:limit]), len(data) > limit
+    data = head + stream.read(max(0, limit + 1 - len(head)))
+    return io.BytesIO(data[:limit].decode(encoding, errors="replace").encode("utf-8")), len(data) > limit
+
+
 _NEWLINE = re.compile("\n")
 
 

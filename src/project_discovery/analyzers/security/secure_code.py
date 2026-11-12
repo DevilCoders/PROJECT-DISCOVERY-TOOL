@@ -224,9 +224,13 @@ _PATTERNS = (
     ),
     (
         "insecure_file_permissions",
+        # Java's setWritable(true) sets only the owner's bit; (true, false) grants everyone.
         _AnyOf(
-            _CallPattern(r"\bchmod\s*\(", r"0o?777|511", flags=re.I),
-            re.compile(r"""(?i)\bchmod\s+0?777\b|\bsetWritable\s*\(\s*true\s*\)"""),
+            _CallPattern(r"\bchmod(?:Sync)?\s*\(", r"0o?777|511", flags=re.I),
+            re.compile(
+                r"""(?i)\bchmod\s+(?:-[A-Za-z]+\s+)*0?777\b"""
+                r"""|\bset(?:Writable|Readable|Executable)\s*\(\s*true\s*,\s*false\s*\)"""
+            ),
         ),
         "Potentially permissive filesystem permissions",
         "A source declaration appears to grant broad write permissions. Review the "
@@ -244,6 +248,10 @@ _PATTERNS = (
     ),
 )
 _PYTHON_UNSAFE_LOADERS = {"UnsafeLoader", "Loader", "FullLoader"}
+# In shell scripts ``exec "$@"`` replaces the shell with its arguments (the standard
+# entrypoint idiom); only eval evaluates code.
+_SHELL_EXTENSIONS = frozenset({".sh", ".bash", ".zsh", ".ksh", ".fish"})
+_SHELL_EVAL = re.compile(r"""(?<![.\w$])eval\s*(?:\(|["'\x60$])""")
 # Rules that only make sense for particular language families.
 _RULE_EXTENSIONS = {
     "unsafe_c_memory_api": frozenset({
@@ -459,6 +467,9 @@ class _SqlStructure:
                 pending.extend((item.left, item.right))
             elif isinstance(item, ast.UnaryOp):
                 pending.append(item.operand)
+            elif isinstance(item, ast.IfExp):
+                # The condition never reaches the string; both outcomes must be structure.
+                pending.extend((item.body, item.orelse))
             elif isinstance(item, ast.JoinedStr):
                 pending.extend(part.value for part in item.values if isinstance(part, ast.FormattedValue))
             elif isinstance(item, ast.Name):
@@ -502,6 +513,14 @@ def _bindings(nodes, *, loops: bool = False):
                             yield name.id, None
         elif loops and isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
             yield node.target.id, node.value
+        elif loops and isinstance(node, ast.comprehension):
+            # [db.execute(f"... FROM {table}") for table in ("a", "b")], as a for loop.
+            if isinstance(node.target, ast.Name):
+                yield node.target.id, node.iter if _literal(node.iter) or isinstance(node.iter, ast.Name) else None
+            else:
+                for item in ast.walk(node.target):
+                    if isinstance(item, ast.Name):
+                        yield item.id, None
 
 
 def _import_aliases(tree: ast.AST) -> dict[str, str]:
@@ -557,7 +576,61 @@ PYTHON_RULE_CATEGORIES = {
     "tls_verification_disabled": "tls_verification_disabled",
     "insecure_temporary_file": "insecure_temporary_file",
     "possible_sql_injection": "dynamic_sql_query",
+    "jwt_verification_disabled": "jwt_verification_disabled",
+    "insecure_file_permissions": "insecure_file_permissions",
+    "unsafe_xml_external_entities": "unsafe_xml_external_entities",
+    "insecure_random_for_secret": "insecure_random_for_secret",
+    "open_redirect_user_controlled": "open_redirect_user_controlled",
 }
+# Non-cryptographic generators; secrets.* and random.SystemRandom are fine.
+_RANDOM_FUNCTIONS = frozenset({
+    "random.random", "random.randint", "random.randrange", "random.choice", "random.choices",
+    "random.sample", "random.getrandbits", "random.uniform", "random.randbytes",
+})
+_SECRET_NAME = re.compile(r"(?i)token|secret|nonce|passw|api_?key|otp|salt|session_?id")
+_REQUEST_VALUES = frozenset({"args", "values", "GET", "form", "query_params"})
+
+
+def _python_family_rule(node: ast.Call, name: str) -> str | None:
+    """The rule families the regex catalog covers for other languages, from the syntax tree."""
+    parts = name.split(".")
+    last = parts[-1]
+    if last == "decode" and "jwt" in parts:
+        algorithms = _keyword(node, "algorithms")
+        options = _keyword(node, "options")
+        if isinstance(algorithms, (ast.List, ast.Tuple, ast.Set)) and any(
+            isinstance(item, ast.Constant) and str(item.value).lower() == "none" for item in algorithms.elts
+        ):
+            return "jwt_verification_disabled"
+        if isinstance(options, ast.Dict) and any(
+            isinstance(key, ast.Constant) and key.value == "verify_signature" and _is_constant(value, False)
+            for key, value in zip(options.keys, options.values, strict=True)
+        ):
+            return "jwt_verification_disabled"
+        if _is_constant(_keyword(node, "verify"), False):
+            return "jwt_verification_disabled"
+    if last in {"chmod", "fchmod", "lchmod"}:
+        # os.chmod(path, mode); a pathlib method takes the mode first.
+        index = 1 if parts[0] == "os" else 0
+        mode = node.args[index] if len(node.args) > index else _keyword(node, "mode")
+        if isinstance(mode, ast.Constant) and isinstance(mode.value, int) and mode.value & 0o002:
+            return "insecure_file_permissions"
+        if mode is not None and any(_dotted(item).endswith("S_IWOTH") for item in ast.walk(mode)):
+            return "insecure_file_permissions"
+    if last == "XMLParser" and _is_constant(_keyword(node, "resolve_entities"), True):
+        return "unsafe_xml_external_entities"
+    if last == "setFeature" and len(node.args) >= 2 and _is_constant(node.args[1], True) and (
+        _dotted(node.args[0]).rsplit(".", 1)[-1] in {"feature_external_ges", "feature_external_pes"}
+    ):
+        return "unsafe_xml_external_entities"
+    if last in {"redirect", "HttpResponseRedirect", "RedirectResponse"} and node.args and any(
+        isinstance(item, ast.Attribute) and _dotted(item).split(".")[:2] in (
+            ["request", value] for value in _REQUEST_VALUES
+        )
+        for item in ast.walk(node.args[0])
+    ):
+        return "open_redirect_user_controlled"
+    return None
 
 
 def _python_call_rule(
@@ -623,10 +696,16 @@ def python_security_matches(tree: ast.AST) -> list[tuple[str, int, str]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = _resolve(_dotted(node.func), aliases)
-            rule = _python_call_rule(node, name, aliases, structure)
+            rule = _python_call_rule(node, name, aliases, structure) or _python_family_rule(node, name)
             if rule:
                 add(rule, node.lineno, name)
         elif isinstance(node, ast.Assign):
+            # token = random.choice(...): a secret from a non-cryptographic generator.
+            if any(_SECRET_NAME.search(_dotted(target) or "") for target in node.targets) and any(
+                isinstance(item, ast.Call) and _resolve(_dotted(item.func), aliases) in _RANDOM_FUNCTIONS
+                for item in ast.walk(node.value)
+            ):
+                add("insecure_random_for_secret", node.lineno, "random")
             # ctx.verify_mode = ssl.CERT_NONE / ctx.check_hostname = False / s.verify = False
             for target in node.targets:
                 if not isinstance(target, ast.Attribute):
@@ -717,8 +796,10 @@ class SecureCodePatternAnalyzer(Analyzer):
         else:
             # Keep line iteration streaming. splitlines() can allocate millions of
             # strings for a newline-heavy 16 MiB source file.
+            shell = record.extension in _SHELL_EXTENSIONS
             rules = [
-                (rule, pattern) for rule, pattern, _, _ in _PATTERNS
+                (rule, _SHELL_EVAL if shell and rule == "dynamic_code_execution" else pattern)
+                for rule, pattern, _, _ in _PATTERNS
                 if record.extension in _RULE_EXTENSIONS.get(rule, (record.extension,))
             ]
             for line_number, line in enumerate(io.StringIO(source, newline=None), 1):

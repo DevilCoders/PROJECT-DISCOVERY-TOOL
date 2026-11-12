@@ -18,7 +18,13 @@ from ...core.secret_patterns import (
     PRIVATE_KEY_ANCHORS,
     PRIVATE_KEY_MARKER,
 )
-from ...core.source_utils import describe_error, keyed_identifier, open_verified_binary, redact_source_excerpt
+from ...core.source_utils import (
+    describe_error,
+    keyed_identifier,
+    open_verified_binary,
+    redact_source_excerpt,
+    text_encoding,
+)
 from ...engine.native import count_byte as native_count_byte
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
@@ -26,15 +32,15 @@ from ..base import Analyzer
 _CREDENTIAL_KEY = keyed_identifier(CREDENTIAL_KEYWORDS)
 # Shared with the excerpt redactor, so every syntax detected here is also redacted.
 _ASSIGNMENT_OPERATOR = ASSIGNMENT_OPERATOR
-_QUOTED_VALUE = r""""([^"\r\n]{6,})"|'([^'\r\n]{6,})'"""
-_UNQUOTED_VALUE = r"""([^\s"'#,;]{6,})"""
+_QUOTED_VALUE = r""""(?P<double>[^"\r\n]{6,})"|'(?P<single>[^'\r\n]{6,})'"""
+_UNQUOTED_VALUE = r"""(?P<bare>[^\s"'#,;]{6,})"""
 # Configuration, environment and shell files hold literal unquoted values (TOKEN=abc123).
 _ASSIGNMENT_ANY = re.compile(
-    rf"(?i){_CREDENTIAL_KEY}{_ASSIGNMENT_OPERATOR}(?:{_QUOTED_VALUE}|{_UNQUOTED_VALUE})"
+    rf"(?i)(?P<key>{_CREDENTIAL_KEY}){_ASSIGNMENT_OPERATOR}(?:{_QUOTED_VALUE}|{_UNQUOTED_VALUE})"
 )
 # In programming languages an unquoted right-hand side is an expression
 # (secret = load_secret(), token: list[str] = []), so only string literals count.
-_ASSIGNMENT_QUOTED = re.compile(rf"(?i){_CREDENTIAL_KEY}{_ASSIGNMENT_OPERATOR}(?:{_QUOTED_VALUE})")
+_ASSIGNMENT_QUOTED = re.compile(rf"(?i)(?P<key>{_CREDENTIAL_KEY}){_ASSIGNMENT_OPERATOR}(?:{_QUOTED_VALUE})")
 # Source-family languages whose assignments are literal key/value data, not expressions.
 _LITERAL_ASSIGNMENT_LANGUAGES = frozenset({
     "Shell", "Batch", "Unity Scene", "Unity Prefab", "Unity Asset YAML", "Godot Scene",
@@ -44,7 +50,7 @@ _LITERAL_ASSIGNMENT_LANGUAGES = frozenset({
 _SPECIFIC_PATTERNS = (
     ("private_key", PRIVATE_KEY_MARKER, PRIVATE_KEY_ANCHORS),
     *((item.name, pattern, item.anchors) for item, pattern in COMPILED_FORMATS),
-    ("credential_url", re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{0,31}://[^\s/:@]+:[^\s/@]+@"), ("://",)),
+    ("credential_url", re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{0,31}://[^\s/:@]+:(?P<password>[^\s/@]+)@"), ("://",)),
 )
 _PATTERNS = (*_SPECIFIC_PATTERNS, ("credential_assignment", _ASSIGNMENT_ANY, ()))
 _EXPRESSION_PATTERNS = (*_SPECIFIC_PATTERNS, ("credential_assignment", _ASSIGNMENT_QUOTED, ()))
@@ -81,10 +87,20 @@ _OVERLAP_CHARS = 4096
 _MAX_FINDINGS = 10_000
 
 
+# Type names in schemas, interfaces and docs (password: string, token: String!) describe a
+# value; they are not one.
+_TYPE_WORDS = frozenset({
+    "string", "str", "number", "boolean", "bool", "integer", "int", "object", "array", "any",
+    "undefined", "required", "optional", "secretstr", "bytes", "text", "varchar",
+})
+
+
 def _is_placeholder(value: str) -> bool:
     normalized = value.strip().strip("\"'").strip().lower()
     return (
         normalized in _PLACEHOLDERS
+        or normalized.rstrip("!?;,") in _TYPE_WORDS
+        or "..." in normalized or "…" in normalized  # elided examples: ghp_..., sk-…
         or normalized.startswith(("$" + "{", "$env:", "$(", "os.getenv", "os.environ",
                                   "process.env", "getenv(", "env(", "{{", "%(", "<%"))
         or normalized.startswith(("your_", "your-", "replace_me", "placeholder", "example"))
@@ -107,7 +123,67 @@ def _low_risk_path(relative: str) -> bool:
 
 
 def _assignment_value(match: re.Match[str]) -> str:
-    return next((value for value in match.groups() if value is not None), "")
+    groups = match.groupdict()
+    return next((groups[name] for name in ("double", "single", "bare") if groups.get(name) is not None), "")
+
+
+# A name holds a credential when its last word is a credential noun: db_password, apiKey,
+# SECRET_KEY, auth_token. Names that merely contain the word describe something else:
+# tokenizer, token_type, secret_name, password_hash_algorithm, TOKEN_HEADER, secretary.
+_NAME_WORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+")
+_CREDENTIAL_WORDS = frozenset({
+    "password", "passwd", "passphrase", "secret", "token", "apikey", "secretkey", "accesskey",
+})
+_KEY_QUALIFIERS = frozenset({"api", "access", "secret", "encryption", "signing", "client", "private"})
+
+
+def _credential_key(name: str) -> bool:
+    words = [word.lower() for word in _NAME_WORD.findall(name)]
+    while len(words) > 1 and words[-1].isdigit():
+        words.pop()  # PASSWORD2, token_1
+    if not words:
+        return False
+    last = words[-1]
+    if last in _CREDENTIAL_WORDS:
+        return True
+    if last == "key":
+        return len(words) > 1 and words[-2] in _KEY_QUALIFIERS
+    return words[-2:] == ["database", "url"]
+
+
+def _placeholder_password(value: str) -> bool:
+    """User-info passwords in documentation and templates: user:pass@, ${DB_PASSWORD}, %s."""
+    lowered = value.lower()
+    return _is_placeholder(value) or lowered in {"pass", "pwd", "pw", "passwd", "pass123"} or (
+        value.startswith(("$", "%", "{"))
+    )
+
+
+def _reported(pattern_name: str, match: re.Match[str]) -> bool:
+    """Whether a match is a credential the scanner reports (not a placeholder or descriptor)."""
+    if pattern_name == "credential_assignment":
+        value = _assignment_value(match)
+        # A value that repeats its key names something ("insecure_random_for_secret":
+        # "insecure_random_for_secret" in a rule table); it is not a secret.
+        return (_credential_key(match.group("key")) and not _is_placeholder(value)
+                and value.strip().lower() != match.group("key").lower())
+    if pattern_name == "credential_url":
+        return not _placeholder_password(match.group("password"))
+    return True
+
+
+def credential_matches(text: str, relative: str):
+    """(pattern name, match) for every credential the scanner reports in ``text``.
+
+    The archive member scanner uses this too, so members and files get the same rules.
+    """
+    patterns = _EXPRESSION_PATTERNS if _expression_language(relative) else _PATTERNS
+    for pattern_name, pattern, anchors in patterns:
+        if anchors and not any(anchor in text for anchor in anchors):
+            continue
+        for match in pattern.finditer(text):
+            if _reported(pattern_name, match):
+                yield pattern_name, match
 
 
 def _expression_language(relative: str) -> bool:
@@ -170,7 +246,8 @@ class SecretPatternAnalyzer(Analyzer):
         low_risk = _low_risk_path(record.path)
         patterns = _EXPRESSION_PATTERNS if _expression_language(record.path) else _PATTERNS
         # An incremental decoder keeps multi-byte characters intact across chunk edges.
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        # UTF-16 and UTF-32 files are decoded as such (see text_encoding).
+        decoder = None
         try:
             with open_verified_binary(path, record.analysis_identity) as stream:
                 while bytes_scanned < _MAX_SCAN_BYTES:
@@ -178,6 +255,8 @@ class SecretPatternAnalyzer(Analyzer):
                         _CHUNK_BYTES, _MAX_SCAN_BYTES - bytes_scanned
                     ))
                     final = not raw_chunk
+                    if decoder is None:
+                        decoder = codecs.getincrementaldecoder(text_encoding(raw_chunk))(errors="replace")
                     chunk = decoder.decode(raw_chunk, final=final)
                     if final and not chunk:
                         break
@@ -194,10 +273,7 @@ class SecretPatternAnalyzer(Analyzer):
                         for match in pattern.finditer(combined):
                             if match.end() <= prefix_length:
                                 continue
-                            if (
-                                pattern_name == "credential_assignment"
-                                and _is_placeholder(_assignment_value(match))
-                            ):
+                            if not _reported(pattern_name, match):
                                 continue
                             counted_lines += combined.count("\n", counted_to, match.start())
                             counted_to = match.start()

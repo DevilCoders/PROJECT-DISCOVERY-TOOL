@@ -252,3 +252,76 @@ def test_member_calls_and_c_apis_in_other_languages_are_not_flagged(tmp_path: Pa
         assert _scan(tmp_path, name, source) == [], name
     assert _scan(tmp_path, "copy.c", "void f(char *d, char *s) { strcpy(d, s); }\n")
     assert _scan(tmp_path, "run.js", "eval(userInput);\n")
+
+
+def test_python_gets_every_rule_family(tmp_path):
+    # Regression: the regex catalog never ran on Python and no AST rule covered JWT
+    # verification, permissions, XML entities, randomness for secrets or redirects.
+    from pathlib import Path
+
+    from project_discovery.models import FileRecord
+
+    path = Path(tmp_path) / "app.py"
+    path.write_text(
+        "import jwt, os, random\nfrom lxml import etree\nfrom flask import redirect, request\n"
+        "claims = jwt.decode(token, key, algorithms=['none'])\n"
+        "claims = jwt.decode(token, options={'verify_signature': False})\n"
+        "os.chmod('/srv/data', 0o777)\n"
+        "parser = etree.XMLParser(resolve_entities=True)\n"
+        "reset_token = ''.join(random.choice('abc') for _ in range(32))\n"
+        "def go():\n    return redirect(request.args.get('next'))\n"
+        "os.chmod('/srv/own', 0o750)\nsafe = random.choice([1, 2])\n",
+        encoding="utf-8",
+    )
+    record = FileRecord("app.py", path.stat().st_size, ".py", "Python")
+    found = {item.title.split(":")[0]: item.evidence for item in SecureCodePatternAnalyzer().analyze(path, record)}
+    assert found["JWT or token verification may be disabled"] == ["app.py:4", "app.py:5"]
+    assert found["Potentially permissive filesystem permissions"] == ["app.py:6"]
+    assert found["Potential unsafe XML external-entity configuration"] == ["app.py:7"]
+    assert found["Potential non-cryptographic randomness for a secret"] == ["app.py:8"]
+    assert found["Potential user-controlled redirect target"] == ["app.py:10"]
+
+
+def test_permission_and_exec_rules_match_their_semantics(tmp_path):
+    # Regressions: Java's owner-only setWritable(true) was flagged while (true, false) was not,
+    # fs.chmodSync and chmod -R 777 were missed, and exec "$@" in an entrypoint was HIGH.
+    from pathlib import Path
+
+    from project_discovery.models import FileRecord
+
+    def titles(name, source):
+        path = Path(tmp_path) / name
+        path.write_text(source, encoding="utf-8")
+        record = FileRecord(name, path.stat().st_size, Path(name).suffix, "Source")
+        return {item.title.split(":")[0] for item in SecureCodePatternAnalyzer().analyze(path, record)}
+
+    permissive = "Potentially permissive filesystem permissions"
+    assert permissive not in titles("Owner.java", "f.setWritable(true);\n")
+    assert permissive in titles("World.java", "f.setWritable(true, false);\n")
+    assert permissive in titles("perm.js", "fs.chmodSync(target, 0o777);\n")
+    assert permissive in titles("perm.sh", "chmod -R 777 /srv/app\n")
+    assert "Dynamic code execution primitive" not in titles("entrypoint.sh", '#!/bin/sh\nexec "$@"\n')
+    assert "Dynamic code execution primitive" in titles("evil.sh", 'eval "$payload"\n')
+
+
+def test_structural_sql_in_comprehensions_and_conditionals_is_not_dynamic(tmp_path):
+    # Self-scan regressions: constant table names in a comprehension and a conditional
+    # placeholder clause were HIGH "dynamic SQL".
+    from pathlib import Path
+
+    from project_discovery.models import FileRecord
+
+    path = Path(tmp_path) / "store.py"
+    path.write_text(
+        "def counts(db, last):\n"
+        "    rows = [db.execute(f'SELECT COUNT(*) FROM {table}') for table in ('a', 'b')]\n"
+        "    query = 'SELECT * FROM t WHERE k=? {after}'\n"
+        "    after = 'AND id > ?'\n"
+        "    db.execute(query.format(after=after if last else ''))\n"
+        "def unsafe(db, name):\n"
+        "    db.execute(f'SELECT * FROM t WHERE name = {name}')\n",
+        encoding="utf-8",
+    )
+    record = FileRecord("store.py", path.stat().st_size, ".py", "Python")
+    found = {item.title.split(":")[0]: item.evidence for item in SecureCodePatternAnalyzer().analyze(path, record)}
+    assert found.get("Potential dynamically constructed SQL query") == ["store.py:7"]

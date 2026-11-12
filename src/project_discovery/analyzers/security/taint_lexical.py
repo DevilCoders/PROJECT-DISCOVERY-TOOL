@@ -146,6 +146,9 @@ class LexicalResult:
     sources: int
     summaries: dict[str, Summary]
     outgoing: list[OutgoingCall]
+    # A budget stopped the analysis (events, summary work, outgoing calls, a right-hand
+    # side, helper depth): the flows are a lower bound, reported as an UNKNOWN.
+    truncated: bool = False
 
 
 def _c(pattern: str) -> re.Pattern:
@@ -519,6 +522,11 @@ def _split(clean: str, start: int, stop: int, delimiters: re.Pattern = _ARGUMENT
     spans, depth, begin = [], 0, start
     for match in delimiters.finditer(clean, start, stop):
         char = match.group()
+        if char in "<>" and (
+            (char == ">" and match.start() > start and clean[match.start() - 1] in "-=")
+            or (char == "<" and clean.startswith("-", match.end()))
+        ):
+            continue  # the arrows of function types (=>, ->) and Go channels (<-) are not brackets
         if char in "([{<":
             depth += 1
         elif char in ")]}>":
@@ -540,6 +548,7 @@ def _label(text: str) -> str:
 
 class _FileTaint:
     def __init__(self, model: FileModel, rules: Rules, family: str) -> None:
+        self.truncated = False
         self.model = model
         self.rules = rules
         self.family = family
@@ -815,7 +824,9 @@ class _FileTaint:
             starts = [interval[0] for interval in skip]
             events = [event for event in events if not self._inside(event[0], skip, starts)]
         events.sort(key=lambda event: (event[0], event[1]))
-        events = events[:MAX_EVENTS]
+        if len(events) > MAX_EVENTS:
+            self.truncated = True
+            events = events[:MAX_EVENTS]
         if self.collect is not None:
             self.summary_events += len(events)
         for _offset, _order, kind, match in events:
@@ -837,13 +848,20 @@ class _FileTaint:
             else:
                 self.sink(kind, match, end, tainted, function)
 
+    def statement_end(self, start: int, limit: int) -> int:
+        """End of the right-hand side at ``start``; a cut at _MAX_STATEMENT marks the result."""
+        end = _statement_end(self.clean, start, limit, self.newline)
+        if end - start >= _MAX_STATEMENT and end < limit:
+            self.truncated = True
+        return end
+
     @staticmethod
     def _inside(offset: int, skip: list[tuple[int, int]], starts: list[int]) -> bool:
         index = bisect.bisect_right(starts, offset) - 1
         return index >= 0 and skip[index][0] <= offset < skip[index][1]
 
     def assign(self, match: re.Match, limit: int, tainted: dict, blocks: dict) -> None:
-        rhs_end = _statement_end(self.clean, match.end(), limit, self.newline)
+        rhs_end = self.statement_end(match.end(), limit)
         labels = self.origins(match.end(), rhs_end, tainted)
         groups = match.groupdict()
         if groups.get("destructure"):
@@ -929,7 +947,7 @@ class _FileTaint:
             else:
                 spans = [arguments[index] for index in sink.arguments if -len(arguments) <= index < len(arguments)]
         else:
-            spans = [(match.end(), _statement_end(clean, match.end(), limit, self.newline))]
+            spans = [(match.end(), self.statement_end(match.end(), limit))]
         line = self.model.line_of(match.start())
         for start, end in spans:
             for source, source_line, cleared in self.origins(start, end, tainted):
@@ -955,7 +973,7 @@ class _FileTaint:
 
     def returned(self, match: re.Match, limit: int, tainted: dict) -> None:
         """``return expr`` while summarizing: which parameters and sources it carries."""
-        end = _statement_end(self.clean, match.end(), limit, self.newline)
+        end = self.statement_end(match.end(), limit)
         summary, sources = self.collect, set()
         for source, line, cleared in self.origins(match.end(), end, tainted):
             if source.startswith(_MARKER):
@@ -1016,12 +1034,13 @@ class _FileTaint:
 
     def outgoing_call(self, call, tainted: dict) -> None:
         """Untrusted input passed to a function defined in another file (joined in the index)."""
-        if len(self.outgoing) >= MAX_OUTGOING or not tainted and not self.rules.sources.search(
-            self.clean, call.offset, call.offset + 400
-        ):
+        if not tainted and not self.rules.sources.search(self.clean, call.offset, call.offset + 400):
             return
         if self.claimed_at(call.offset):
             return  # a source, sink or sanitizer call, analyzed where it is
+        if len(self.outgoing) >= MAX_OUTGOING:
+            self.truncated = True
+            return
         opening = self.clean.find("(", call.offset + len(call.callee), call.offset + len(call.callee) + 8)
         close = self.model.parens.get(opening) if opening >= 0 else None
         if close is None:
@@ -1225,6 +1244,7 @@ def _summarize(engine: _FileTaint, functions: list, sinks: list[int]) -> None:
         summaries: dict[str, Summary] = {}
         for symbol in functions:
             if engine.summary_events > MAX_SUMMARY_EVENTS:
+                engine.truncated = True
                 break
             params = signatures[id(symbol)]
             summary = Summary(tuple(params))
@@ -1248,6 +1268,8 @@ def _summarize(engine: _FileTaint, functions: list, sinks: list[int]) -> None:
         engine.set_summaries(summaries)
         if not changed or engine.summary_events > MAX_SUMMARY_EVENTS:
             return
+    if chained:
+        engine.truncated = True  # helpers nest deeper than MAX_ROUNDS
 
 
 def analyze_lexical(model: FileModel, family: str, *, export: bool = True) -> LexicalResult:
@@ -1289,7 +1311,8 @@ def analyze_lexical(model: FileModel, family: str, *, export: bool = True) -> Le
         engine.analyze_region(0, len(engine.clean), outermost, "<top level>", [], 0)
     flows = sorted(engine.flows.values(), key=lambda flow: (flow.sink_line, flow.kind, flow.source_line, flow.source))
     summaries = {name: item for name, item in engine.summaries.items() if item.sinks}
-    return LexicalResult(flows, len(engine.source_sites), summaries, list(engine.outgoing.values()))
+    return LexicalResult(flows, len(engine.source_sites), summaries, list(engine.outgoing.values()),
+                         engine.truncated)
 
 
 def analyze_lexical_taint(model: FileModel, family: str) -> tuple[list[Flow], int]:

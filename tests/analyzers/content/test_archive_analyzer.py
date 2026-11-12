@@ -71,7 +71,7 @@ def test_zip_member_content_is_scanned_in_memory_with_redaction(tmp_path: Path):
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(
             ".env",
-            "PASSWORD=super-secret-value\nEMAIL=person@example.test\n",
+            "PASSWORD=super-secret-value\nEMAIL=person@fixture-mailbox.net\n",
         )
     before = path.read_bytes()
     findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "secrets.zip"))
@@ -79,7 +79,7 @@ def test_zip_member_content_is_scanned_in_memory_with_redaction(tmp_path: Path):
     assert any("Email-Shaped Value inside archive member" in item.title for item in findings)
     serialized = repr([item.to_dict() for item in findings])
     assert "super-secret-value" not in serialized
-    assert "person@example.test" not in serialized
+    assert "person@fixture-mailbox.net" not in serialized
     assert "secrets.zip::.env" in serialized
     credential = next(item for item in findings if "Credential-Like Assignment" in item.title)
     email = next(item for item in findings if "Email-Shaped Value" in item.title)
@@ -88,7 +88,7 @@ def test_zip_member_content_is_scanned_in_memory_with_redaction(tmp_path: Path):
     assert "super-secret-value" not in credential.code_evidence[0].code
     assert credential.impact and credential.recommendation
     assert email.code_evidence[0].line_number == 2
-    assert "person@example.test" not in email.code_evidence[0].code
+    assert "person@fixture-mailbox.net" not in email.code_evidence[0].code
     assert email.impact and email.recommendation
     assert path.read_bytes() == before
     assert not (tmp_path / ".env").exists()
@@ -197,8 +197,8 @@ def test_archive_member_matcher_reports_distinct_line_numbers_and_bounded_excerp
         (
             b"PASSWORD=secret-one\n"
             b"PASSWORD=secret-two\n"
-            b"EMAIL=first@example.test\n"
-            b"EMAIL=second@example.test\n"
+            b"EMAIL=first@fixture-mailbox.net\n"
+            b"EMAIL=second@fixture-mailbox.net\n"
         ),
     )
     assert timed_out is False
@@ -207,7 +207,7 @@ def test_archive_member_matcher_reports_distinct_line_numbers_and_bounded_excerp
     assert [line.line_number for line in credential.code_evidence] == [1, 2]
     assert [line.line_number for line in email.code_evidence] == [3, 4]
     assert all("secret-" not in line.code for line in credential.code_evidence)
-    assert all("@example.test" not in line.code for line in email.code_evidence)
+    assert all("@fixture-mailbox.net" not in line.code for line in email.code_evidence)
 
 
 def _tar_bytes(members, mode="w"):
@@ -266,3 +266,20 @@ def test_case_and_unicode_colliding_member_names_are_reported(tmp_path: Path):
     findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "collide.zip"))
     collision = next(finding for finding in findings if "colliding" in finding.title)
     assert len(collision.evidence) == 2
+
+
+def test_archive_members_use_the_file_scanners_rules(tmp_path: Path):
+    # Regression: members had their own weaker keyword rule (no DB_PASSWORD, signing keys or
+    # credential URLs) and an email rule without the reserved-domain filters.
+    path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(".env", (
+            "DB_PASSWORD=Fake-Zip-Pass1\nSIGNING_KEY=Fake-Signing-2\n"
+            "DATABASE=postgres://svc:Fake-Url-Pass3@db.internal/app\nOWNER=dev@example.com\n"
+        ))
+    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "bundle.zip"))
+    credential = next(item for item in findings if "Credential-Like Assignment" in item.title)
+    assert [line.line_number for line in credential.code_evidence] == [1, 2]
+    assert any("Credential Url inside archive member" in item.title or "Credential URL" in item.title for item in findings)
+    assert not any("Email-Shaped Value" in item.title for item in findings)
+    assert "Fake-Zip-Pass1" not in repr([item.to_dict() for item in findings])

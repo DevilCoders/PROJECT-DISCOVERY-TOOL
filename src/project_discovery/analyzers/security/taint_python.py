@@ -23,9 +23,10 @@ from dataclasses import dataclass, field
 
 from ...intelligence.model.python_types import TypeTable, module_aliases
 
-MAX_LABELS = 6
+MAX_LABELS = 6               # source labels kept per value (parameters are always kept)
 MAX_VISITS = 50_000          # statements interpreted per function and round
-MAX_ROUNDS = 4               # summary fixed-point rounds (helper call depth)
+MAX_ROUNDS = 64              # cap on summary rounds; summaries iterate until unchanged
+MAX_LOOP_PASSES = 4          # passes over a loop body before its state must be stable
 MAX_SINKS_PER_PARAMETER = 24
 
 EMPTY: frozenset = frozenset()
@@ -217,7 +218,12 @@ def _merge(first: frozenset, second: frozenset) -> frozenset:
         return second
     merged = first | second
     if len(merged) > MAX_LABELS:
-        merged = frozenset(sorted(merged, key=_rank)[:MAX_LABELS])
+        # Parameter labels carry a helper's summary (which argument reaches which sink), so
+        # they are never dropped; a function has few. Only source labels beyond the cap go:
+        # the flow is still reported, with its first MAX_LABELS sources.
+        params = [label for label in merged if label.kind == "param"]
+        others = sorted((label for label in merged if label.kind != "param"), key=_rank)
+        merged = frozenset(params + others[:MAX_LABELS])
     return merged
 
 
@@ -421,8 +427,10 @@ class PythonTaintEngine:
         if route is None:
             return {}
         typed = set(_FLASK_TYPED.findall(route))
-        defaults = [None] * (len(node.args.args) - len(node.args.defaults)) + list(node.args.defaults)
-        default_of = dict(zip((argument.arg for argument in node.args.args), defaults, strict=True))
+        # Defaults cover the positional-only parameters too (def health(verbose=False, /)).
+        positional = [*node.args.posonlyargs, *node.args.args]
+        defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+        default_of = dict(zip((argument.arg for argument in positional), defaults, strict=True))
         default_of.update(zip((argument.arg for argument in node.args.kwonlyargs), node.args.kw_defaults, strict=True))
         sources = {}
         for argument in arguments:
@@ -534,7 +542,10 @@ class PythonTaintEngine:
     # -- interpretation --------------------------------------------------------
     def run(self) -> TaintResult:
         functions = [key for key in self.relevant if key != "<module>"]
-        for _ in range(MAX_ROUNDS if functions else 0):
+        # Summaries are iterated until none changes: a chain of n helpers needs n rounds.
+        # The cap only stops a pathological file, and then the result says so.
+        changed = bool(functions)
+        for _ in range(min(len(functions) + 1, MAX_ROUNDS) if functions else 0):
             changed = False
             for key in functions:
                 summary = _Interpreter(self, self.functions[key], None).run()
@@ -543,6 +554,8 @@ class PythonTaintEngine:
                     changed = True
             if not changed:
                 break
+        if changed:
+            self.truncated = True
         collector = _Collector()
         if self.has_sources:
             # Without a source in the file no flow can start here; summaries are enough.
@@ -604,9 +617,7 @@ class _Interpreter:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return
         for expression in _header(node):
-            for child in ast.walk(expression):
-                if isinstance(child, ast.Call):
-                    self.check_call(child)
+            self.check_calls(expression)
         if isinstance(node, ast.Assign):
             value = self.taint(node.value)
             for target in node.targets:
@@ -631,10 +642,22 @@ class _Interpreter:
                     self.bind(item.optional_vars, self.taint(item.context_expr))
             self.block(node.body)
         elif isinstance(node, ast.Try) or type(node).__name__ == "TryStar":
+            # A handler may start anywhere in the body, and the handlers and the normal path
+            # (body then else) are alternatives: a handler's clean reassignment does not
+            # erase what the normal path carries.
+            start = self.env
+            self.env = dict(start)
             self.block(node.body)
-            for handler in node.handlers:
-                self.block(handler.body)
+            handler_entry = _merge_env(start, self.env)
             self.block(node.orelse)
+            outcome = self.env
+            for handler in node.handlers:
+                self.env = dict(handler_entry)
+                if handler.name:
+                    self.env.pop(handler.name, None)
+                self.block(handler.body)
+                outcome = _merge_env(outcome, self.env)
+            self.env = dict(outcome)
             self.block(node.finalbody)
         elif isinstance(node, ast.Match):
             self.branches([case.body for case in node.cases] + [[]])
@@ -649,15 +672,24 @@ class _Interpreter:
             self.taint(node.value)
 
     def loop(self, body: list) -> None:
-        before = self.env
-        self.env = dict(before)
-        self.block(body)
-        merged = _merge_env(before, self.env)
-        if merged != self.env:
-            self.env = dict(merged)
+        """Run the body until the state at its entry stops growing.
+
+        A value tainted late in one iteration reaches a sink early in the next, so the body
+        runs again from the merged state until nothing changes (the loop may also run zero
+        times, so the entry state stays part of the result). A loop that has not settled
+        after MAX_LOOP_PASSES marks the result truncated.
+        """
+        entry = self.env
+        for _ in range(MAX_LOOP_PASSES):
+            self.env = dict(entry)
             self.block(body)
-            merged = _merge_env(merged, self.env)
-        self.env = merged
+            following = _merge_env(entry, self.env)
+            if following == entry:
+                self.env = following
+                return
+            entry = following
+        self.engine.truncated = True
+        self.env = entry
 
     def branches(self, blocks) -> None:
         start = self.env
@@ -725,7 +757,7 @@ class _Interpreter:
         if isinstance(node, ast.Dict):
             return self.union([value for value in node.values if value is not None])
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
-            return self.union([generator.iter for generator in node.generators])
+            return self.comprehension(node)
         if isinstance(node, (ast.Await, ast.Starred)):
             return self.taint(node.value)
         if isinstance(node, ast.NamedExpr):
@@ -735,6 +767,42 @@ class _Interpreter:
         if isinstance(node, ast.UnaryOp) and not isinstance(node.op, ast.Not):
             return self.taint(node.operand)
         return EMPTY
+
+    def comprehension(self, node) -> frozenset:
+        """Taint of a comprehension's elements, with its targets bound in its own scope.
+
+        Each target carries its iterable's taint, so ``[os.system(c) for c in commands]``
+        and ``" ".join(x for x in args)`` follow the elements; calls inside the
+        comprehension are checked with those bindings.
+        """
+        saved = self.env
+        self.env = dict(saved)
+        try:
+            for generator in node.generators:
+                self.check_calls(generator.iter)
+                self.bind(generator.target, self.taint(generator.iter))
+                for condition in generator.ifs:
+                    self.check_calls(condition)
+            parts = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+            for part in parts:
+                self.check_calls(part)
+            return self.union(parts)
+        finally:
+            self.env = saved
+
+    def check_calls(self, expression: ast.AST) -> None:
+        """Check every call an expression makes, except those inside comprehensions.
+
+        A comprehension's calls are checked when it is evaluated, with its own bindings.
+        """
+        pending = [expression]
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                continue
+            if isinstance(node, ast.Call):
+                self.check_call(node)
+            pending.extend(ast.iter_child_nodes(node))
 
     def union(self, nodes) -> frozenset:
         result = EMPTY

@@ -397,3 +397,131 @@ def test_modules_that_share_a_name_join_only_the_importers_own(tmp_path: Path):
     assert [len(item["evidence"]) for item in cross] == [1]
     assert cross[0]["evidence"][0].startswith("svc_b/app.py:4 ")
     assert cross[0]["evidence"][0].endswith("at svc_b/helpers.py:3")
+
+
+def test_python_loops_run_to_a_fixed_point_and_handlers_are_alternatives():
+    # Regressions: a loop body ran again only when it removed taint, so a value tainted late
+    # in one iteration never reached a sink early in the next; an except handler's clean
+    # reassignment erased the normal path's taint; comprehension elements were never followed.
+    loop = """
+        import os
+        from flask import request
+        def handler():
+            command = "ls"
+            for _ in range(3):
+                os.system(command)
+                command = request.args["c"]
+        """
+    assert ("command", 7) in python_flows(loop)
+    loop_while = loop.replace("for _ in range(3):", "while True:")
+    assert ("command", 7) in python_flows(loop_while)
+    handler = """
+        import os
+        from flask import request
+        def handler():
+            command = request.args["c"]
+            try:
+                int(command)
+            except ValueError:
+                command = "ls"
+            os.system(command)
+        """
+    assert ("command", 10) in python_flows(handler)
+    elements = """
+        import os
+        from flask import request
+        def handler():
+            for item in [request.args[key] for key in ("a", "b")]:
+                os.system(item)
+            commands = {key: request.args[key] for key in ("a",)}
+            os.system(commands["a"])
+            [os.system(value) for value in request.args.values()]
+        """
+    assert python_flows(elements) >= {("command", 6), ("command", 8), ("command", 9)}
+
+
+def test_python_summaries_reach_a_fixed_point_and_keep_every_parameter():
+    # Regressions: summaries stopped after four rounds (a chain of five helpers lost its
+    # flow) and values kept six labels, so the seventh parameter of a helper was dropped.
+    chain = ["import os", "from flask import request", "def h0(x):", "    os.system(x)"]
+    for depth in range(1, 7):
+        chain += [f"def h{depth}(x):", f"    h{depth - 1}(x)"]
+    chain += ["def handler():", "    h6(request.args['c'])"]
+    result = analyze_python_taint(ast.parse("\n".join(chain)))
+    assert [flow.kind for flow in result.flows] == ["command"] and not result.truncated
+    wide = """
+        from flask import request
+        def query(a, b, c, d, e, f, g):
+            db.execute(a + b + c + d + e + f + g)
+        def handler():
+            query(1, 2, 3, 4, 5, 6, request.args["g"])
+        """
+    assert ("sql", 6) in python_flows(wide)
+
+
+def test_python_route_handlers_with_positional_only_parameters():
+    # Regression: positional-only defaults made zip(strict=True) raise, and every flow in
+    # the file was lost.
+    source = """
+        import os
+        from flask import Flask, request
+        app = Flask(__name__)
+        @app.route("/health")
+        def health(verbose=False, /):
+            return "ok"
+        @app.route("/run")
+        def run():
+            os.system(request.args["c"])
+        """
+    assert ("command", 10) in python_flows(source)
+
+
+def test_lexical_parameters_after_function_types_are_kept():
+    # Regression: the ">" of an arrow closed a bracket that was never opened, so every
+    # parameter after a callback type was lost.
+    typescript = """
+        import { exec } from "child_process";
+        function run(id: string, done: (err: Error) => void, cmd: string) {
+            exec(cmd);
+        }
+        app.get("/x", (req, res) => { run("1", () => {}, req.query.cmd); });
+        """
+    assert ("command", 4) in lexical_flows("typed.ts", "TypeScript", typescript)
+    kotlin = """
+        fun run(id: String, done: (Int) -> Unit, cmd: String) {
+            Runtime.getRuntime().exec(cmd)
+        }
+        fun handler(request: HttpServletRequest) {
+            run("1", { }, request.getParameter("cmd"))
+        }
+        """
+    assert ("command", 3) in lexical_flows("Runner.kt", "Kotlin", kotlin)
+
+
+def test_lexical_budget_cuts_are_reported(monkeypatch):
+    # Regression: the event, outgoing-call and right-hand-side budgets cut silently.
+    from project_discovery.analyzers.security import taint_lexical
+
+    monkeypatch.setattr(taint_lexical, "MAX_EVENTS", 3)
+    source = textwrap.dedent("""
+        const { exec } = require("child_process");
+        app.get("/x", (req, res) => {
+            let a = 1; let b = 2; let c = 3; let d = 4;
+            exec(req.query.cmd);
+        });
+        """)
+    model = build_lexical_model("app.js", "JavaScript", source)
+    assert taint_lexical.analyze_lexical(model, LEXICAL_LANGUAGES["JavaScript"]).truncated
+
+
+def test_exported_fact_caps_report_truncation(tmp_path: Path, monkeypatch):
+    from project_discovery.analyzers.security import dataflow
+
+    monkeypatch.setattr(dataflow, "MAX_EXPORTED_FACTS", 1)
+    path = tmp_path / "helpers.py"
+    path.write_text("import os\ndef a(x):\n    os.system(x)\ndef b(x):\n    os.system(x)\n", encoding="utf-8")
+    record = FileRecord("helpers.py", path.stat().st_size, ".py", "Python")
+    with collecting_facts() as facts:
+        DataFlowAnalyzer().analyze(path, record)
+    kinds = [kind for kind, _, _ in facts.facts]
+    assert kinds.count("taint_sink_param") == 1 and "dataflow_truncated" in kinds
