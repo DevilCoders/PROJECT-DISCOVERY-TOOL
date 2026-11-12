@@ -7,7 +7,7 @@ pdt compare project-a-report/discovery-report.json project-b-report/discovery-re
   --output comparison-report
 ```
 
-The comparison reports, for all projects together and for every pair: language overlap, declared dependency overlap, resolved dependency version conflicts, Python module-name overlap, matching API evidence strings and SHA-256-identical file content. It also builds an **integration map** (`integration_map`) of links between the projects:
+The comparison reports, for all projects together: language overlap (the `Other` bucket and ambiguous labels are not languages), declared dependency overlap, resolved dependency versions per ecosystem with conflicts (version sets that differ between projects), Python module-name overlap, matching API evidence strings and SHA-256-identical non-empty file content (the first 1,000 shared digests, with `duplicate_file_total`). For every pair it reports the shared languages, dependencies and module names, and counts of duplicate files and version conflicts. It also builds an **integration map** (`integration_map`) of links between the projects:
 
 | Link | Evidence | Confidence |
 |---|---|---|
@@ -25,6 +25,6 @@ Resolved dependency versions come from `metrics.code_index.dependencies`, which 
 
 **Coverage.** `coverage` lists, per project, the evidence its report cannot provide: an `--inventory-only` scan (no dependencies, hashes or integration points), a skipped or failed code index or integration pass, lists cut at their caps, files without content hashes (older reports) and resolved-dependency lists that were cut. The same gaps are in `warnings` and in the Markdown Coverage section. A section that is empty because of a gap is unknown, not absent: an empty integration map then says that the evidence is incomplete instead of reporting no links. Methods and limits are described in [CODE_INTELLIGENCE.md](../architecture/CODE_INTELLIGENCE.md#6-integration-points-and-the-integration-map-integration-points).
 
-Every project remains a separate identity. Similar names, dependencies or matching paths are not treated as proof of compatible architecture or a recommendation to merge, and an inferred link still needs confirmation of deployment and configuration. The comparison writes JSON and Markdown artifacts outside the target projects and does not modify any of them. The local project catalog (`pdt catalog-compare`, see [PROJECT_CATALOG.md](PROJECT_CATALOG.md)) runs the same comparison over every registered report.
+Every project remains a separate identity. Similar names, dependencies or matching paths are not treated as proof of compatible architecture or a recommendation to merge, and an inferred link still needs confirmation of deployment and configuration. The comparison writes JSON and Markdown artifacts, refuses an `--output` inside a compared local project, and modifies none of them. Each report is loaded whole, so memory grows with report size. The local project catalog (`pdt catalog-compare`, see [PROJECT_CATALOG.md](PROJECT_CATALOG.md)) runs the same comparison over every registered report.
 
 Cross-project symbol matching, interface compatibility between contract versions, data-model mapping and integration planning remain future work.

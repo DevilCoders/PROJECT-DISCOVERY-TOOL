@@ -46,7 +46,9 @@ def generate(root: Path, files: int, size_bytes: int, seed: int) -> dict:
         directory = root.joinpath(*(f"d{rng.randint(0, 40)}" for _ in range(depth)))
         directory.mkdir(parents=True, exist_ok=True)
         extension = rng.choice(extensions)
-        target = int(min(average * 50, max(64, rng.lognormvariate(0, 1.0) * average)))
+        # lognormvariate(-0.5, 1) has mean 1 (mu = -sigma^2/2), so the corpus totals about
+        # --size-gb; (0, 1) has mean e^0.5 and made corpora 65% larger than requested.
+        target = int(min(average * 50, max(64, rng.lognormvariate(-0.5, 1.0) * average)))
         path = directory / f"f{index}{extension}"
         with path.open("wb") as stream:
             if extension in _BINARY_EXTENSIONS:
@@ -57,7 +59,13 @@ def generate(root: Path, files: int, size_bytes: int, seed: int) -> dict:
                     remaining -= chunk
             else:
                 snippet = _SOURCE_SNIPPETS[extension].encode()
-                stream.write(snippet * max(1, target // len(snippet)))
+                copies = max(1, target // len(snippet))
+                block = snippet * max(1, (1024 * 1024) // len(snippet))
+                per_block = len(block) // len(snippet)
+                while copies > 0:  # in chunks, as binary files are written
+                    count = min(copies, per_block)
+                    stream.write(block if count == per_block else snippet * count)
+                    copies -= count
         written += path.stat().st_size
     return {"root": str(root), "files": files, "bytes": written, "seed": seed}
 

@@ -992,9 +992,12 @@ def run_scan(
             "required_restrictions": list(plugin_policy.required),
             "plugins": analyzer_load.plugins,
         },
+        # Analyzer domains plus the built-in passes that run outside the registry.
         "active_analyzer_domains": sorted({
             domain for analyzer in analyzers for domain in analyzer.domains
-        }),
+        } | ({"architecture"} if not inventory_only else set()) | (
+            {"vulnerabilities"} if vulnerability_db is not None or online_vulnerabilities is not None else set()
+        )),
         "analyzer_registry": [
             {
                 "name": analyzer.name,
@@ -1414,6 +1417,23 @@ def _run_remote_targets(
         "green" if exit_code == EXIT_OK else "yellow",
     )
     return exit_code
+
+
+def _refuse_output_inside_projects(output: Path, reports) -> None:
+    """Comparison artifacts stay outside the compared projects, as a scan's do."""
+    target = output.expanduser().resolve()
+    for report in reports:
+        root = str(report.get("root") or "")
+        if "://" in root or not root:
+            continue  # a remote project has no local tree
+        try:
+            project = Path(root).expanduser().resolve()
+        except (OSError, ValueError):
+            continue
+        if project.is_dir() and (target == project or project in target.parents):
+            raise ValueError(
+                f"--output {target} is inside the compared project {project}; choose a directory outside it."
+            )
 
 
 def _tolerant_console_streams() -> None:
@@ -1837,6 +1857,7 @@ def main() -> None:
                 parser.error("catalog-compare --format accepts json, markdown")
             with ProjectCatalog(args.db) as catalog:
                 reports = catalog.load_reports()
+            _refuse_output_inside_projects(args.output, reports)
             comparison = compare_many_reports(reports)
             for report in write_comparison(comparison, args.output, formats):
                 print("[ SUCCESS ] Catalog comparison: " + str(report))
@@ -2017,7 +2038,9 @@ def main() -> None:
             parser.error("compare --format accepts json, markdown")
         if len(args.reports) < 2:
             parser.error("compare requires at least two report JSON files")
-        comparison = compare_many_reports([load_report(path) for path in args.reports])
+        loaded = [load_report(path) for path in args.reports]
+        _refuse_output_inside_projects(args.output, loaded)
+        comparison = compare_many_reports(loaded)
         for report in write_comparison(comparison, args.output, formats):
             print("[ SUCCESS ] Comparison report: " + str(report))
         raise SystemExit(0)

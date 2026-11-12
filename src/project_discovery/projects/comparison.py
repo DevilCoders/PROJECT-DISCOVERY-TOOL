@@ -127,7 +127,8 @@ def _file_hashes(report: dict[str, Any]) -> dict[str, list[str]]:
     result: dict[str, list[str]] = defaultdict(list)
     for item in report.get("files", []):
         digest = item.get("sha256")
-        if digest:
+        # Empty files are identical everywhere (every package's __init__.py): not a signal.
+        if digest and item.get("size_bytes") != 0:
             result[digest].append(item.get("path", ""))
     return dict(result)
 
@@ -136,26 +137,43 @@ def _file_hashes(report: dict[str, Any]) -> dict[str, list[str]]:
 _EVIDENCE_OMITTED = re.compile(r"Evidence lists the first [\d,]++; [\d,]++ more are omitted")
 
 
-def _resolved_dependency_versions(report: dict[str, Any]) -> dict[str, set[str]]:
-    """Resolved versions by package: every package of every lockfile from the code index;
-    for older reports, the first 200 per lockfile that finding evidence lists."""
-    resolved: dict[str, set[str]] = defaultdict(set)
+_LOCKFILE_ECOSYSTEM = re.compile(r"from an? ([\w.+-]{1,40}+) lockfile")
+
+
+def _resolved_dependency_versions(report: dict[str, Any]) -> dict[tuple[str, str], set[str]]:
+    """Resolved versions by (ecosystem, package): every package of every lockfile from the
+    code index; for older reports, the first 200 per lockfile that finding evidence lists.
+    The ecosystem is part of the key: PyPI redis and npm redis are different packages."""
+    resolved: dict[tuple[str, str], set[str]] = defaultdict(set)
     lockfiles = _section(report, "metrics", "code_index", "dependencies").get("lockfiles")
     if isinstance(lockfiles, dict):
         for entry in lockfiles.values():
-            for name, versions in _section(entry if isinstance(entry, dict) else {}, "packages").items():
+            entry = entry if isinstance(entry, dict) else {}
+            ecosystem = str(entry.get("ecosystem") or "")
+            for name, versions in _section(entry, "packages").items():
                 if isinstance(versions, list):
-                    resolved[str(name)].update(str(version) for version in versions if version)
+                    resolved[(ecosystem, str(name))].update(str(version) for version in versions if version)
         return dict(resolved)
     for finding in report.get("findings", []):
         if not finding.get("title", "").startswith("Resolved dependency inventory:"):
             continue
+        match = _LOCKFILE_ECOSYSTEM.search(str(finding.get("detail", "")))
+        ecosystem = match.group(1) if match else ""
         for evidence in finding.get("evidence", []):
             if "==" in evidence:
                 package, version = evidence.rsplit("==", 1)
                 if package and version:
-                    resolved[package].add(version)
+                    resolved[(ecosystem, package)].add(version)
     return dict(resolved)
+
+
+# Language buckets that name no language: they are never "shared".
+_NOT_LANGUAGES = frozenset({"Other", "Objective-C / MATLAB (ambiguous)", "V / Verilog (ambiguous)"})
+MAX_DUPLICATES_LISTED = 1000
+
+
+def _languages(report: dict[str, Any]) -> set[str]:
+    return set(_section(report, "metrics", "languages")) - _NOT_LANGUAGES
 
 
 def _dependency_gaps(report: dict[str, Any]) -> list[str]:
@@ -352,8 +370,8 @@ def compare_reports(
     left: dict[str, Any], right: dict[str, Any]
 ) -> dict[str, Any]:
     """Compare two independent project reports without merging their identities."""
-    left_languages = set(left.get("metrics", {}).get("languages", {}))
-    right_languages = set(right.get("metrics", {}).get("languages", {}))
+    left_languages = _languages(left)
+    right_languages = _languages(right)
     left_dependencies = _declared_dependencies(left)
     right_dependencies = _declared_dependencies(right)
     left_modules = _python_modules(left)
@@ -390,9 +408,11 @@ def compare_reports(
     shared_api_evidence = sorted(left_api & right_api)
     resolved_overlap = [
         {
-            "name": package,
+            "name": package[1],
+            "ecosystem": package[0],
             "left_versions": sorted(left_resolved[package]),
             "right_versions": sorted(right_resolved[package]),
+            # The same rule as all_projects_shared: the projects' version sets differ.
             "version_conflict": left_resolved[package] != right_resolved[package],
         }
         for package in sorted(set(left_resolved) & set(right_resolved))
@@ -453,9 +473,7 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         for report, label in zip(reports, labels, strict=True)
     ]
     coverage = [project_coverage(report, label) for report, label in zip(reports, labels, strict=True)]
-    language_sets = [
-        set(report.get("metrics", {}).get("languages", {})) for report in reports
-    ]
+    language_sets = [_languages(report) for report in reports]
     dependency_sets = [_declared_dependencies(report) for report in reports]
     module_sets = [_python_modules(report) for report in reports]
     resolved_sets = [_resolved_dependency_versions(report) for report in reports]
@@ -479,19 +497,24 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     common_api = set.intersection(*api_sets) if api_sets else set()
     resolved_across_all = [
         {
-            "name": package,
+            "name": package[1],
+            "ecosystem": package[0],
             "versions_by_project": {
                 labels[index]: sorted(item[package]) for index, item in enumerate(resolved_sets)
             },
-            "version_conflict": len({
-                version for item in resolved_sets for version in item[package]
-            }) > 1,
+            # Version sets that differ between projects, as in the pairwise results (a
+            # project resolving two versions itself is not a conflict with an identical one).
+            "version_conflict": len({frozenset(item[package]) for item in resolved_sets}) > 1,
         }
         for package in sorted(common_resolved)
     ]
     duplicates = []
+    duplicate_total = 0
     for digest, locations in sorted(shared_hashes.items()):
         if len(locations) >= 2:
+            duplicate_total += 1
+            if len(duplicates) >= MAX_DUPLICATES_LISTED:
+                continue
             duplicates.append({
                 "sha256": digest,
                 "projects": {
@@ -531,6 +554,8 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "pairwise_comparisons": pairwise,
         "duplicate_file_content": duplicates,
+        # Shared digests in all; the list above holds the first MAX_DUPLICATES_LISTED.
+        "duplicate_file_total": duplicate_total,
         "integration_map": integration_map(reports, projects),
         "interpretation": {
             "shared_dependencies": "CONFIRMED declarations; not proof of compatible versions or runtime use.",
@@ -595,6 +620,8 @@ def write_comparison(
                 lines.append(f"- {m(item['name'])}: {versions}{suffix}")
             lines.extend(["", "### Python module names"])
             lines.extend(f"- {m(item)}" for item in shared["python_module_names"])
+            lines.extend(["", "### API evidence"])
+            lines.extend(f"- {m(item)}" for item in shared.get("api_evidence", []))
             lines.extend(["", "## Pairwise overlap", ""])
             for item in comparison["pairwise_comparisons"]:
                 lines.append(
@@ -603,8 +630,13 @@ def write_comparison(
                     f"{len(item['shared_declared_dependencies'])} dependencies, "
                     f"{item['duplicate_file_count']} duplicate files, "
                     f"{item['dependency_version_conflict_count']} version conflicts"
+                    + (f"; module names: {', '.join(m(name) for name in item['shared_python_module_names'][:20])}"
+                       if item.get("shared_python_module_names") else "")
                 )
             lines.extend(["", "## Byte-identical content", ""])
+            if comparison.get("duplicate_file_total", 0) > len(comparison["duplicate_file_content"]):
+                lines.append(f"- {comparison['duplicate_file_total']:,} shared digests; the first "
+                             f"{len(comparison['duplicate_file_content']):,} are listed (empty files are not counted).")
             for item in comparison["duplicate_file_content"]:
                 locations = "; ".join(
                     "{}: {}".format(m(project), ", ".join(m(path) for path in paths))

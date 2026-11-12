@@ -54,7 +54,6 @@ _SPECS = (
     LanguageSpec("Clojure", (".clj", ".cljs", ".cljc", ".edn")),
     LanguageSpec("Scala", (".scala", ".sc")),
     LanguageSpec("Groovy", (".groovy", ".gradle")),
-    LanguageSpec("C", (".h",), family="header"),
     LanguageSpec("Fortran", (".f", ".for", ".f90", ".f95", ".f03", ".f08")),
     LanguageSpec("COBOL", (".cob", ".cbl", ".cpy")),
     LanguageSpec("Pascal", (".pas", ".pp")),

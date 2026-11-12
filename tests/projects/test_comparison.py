@@ -119,6 +119,7 @@ def test_comparison_reports_resolved_dependency_version_conflicts():
     result = compare_reports(left, right)
     assert result["resolved_dependency_overlap"] == [{
         "name": "httpx",
+        "ecosystem": "",  # these findings name no ecosystem (detail text absent)
         "left_versions": ["0.27.0"],
         "right_versions": ["0.28.0"],
         "version_conflict": True,
@@ -259,3 +260,59 @@ def test_a_scan_records_every_resolved_package_for_comparison(tmp_path):
     report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
     lockfiles = report["metrics"]["code_index"]["dependencies"]["lockfiles"]
     assert len(lockfiles["package-lock.json"]["packages"]) == 250
+
+
+def _ecosystem_report(root, lockfiles, files=()):
+    report = _report(root, ["Python"], [], [], list(files))
+    report["metrics"]["code_index"] = {"dependencies": {"lockfiles": {
+        path: {"ecosystem": ecosystem, "packages": packages} for path, (ecosystem, packages) in lockfiles.items()
+    }}, "integration": {}}
+    return report
+
+
+def test_version_conflicts_respect_the_ecosystem_and_one_rule():
+    # Regressions: PyPI redis and npm redis "conflicted", and identical lockfiles resolving two
+    # lodash versions each were a conflict across all projects but not pairwise.
+    from project_discovery.projects.comparison import compare_many_reports
+
+    left = _ecosystem_report("/a", {"poetry.lock": ("PyPI", {"redis": ["5.0.1"]}),
+                                     "package-lock.json": ("npm", {"lodash": ["4.17.20", "4.17.21"]})})
+    right = _ecosystem_report("/b", {"package-lock.json": ("npm", {"redis": ["4.6.13"], "lodash": ["4.17.20", "4.17.21"]})})
+    result = compare_many_reports([left, right])
+    shared = {(item["ecosystem"], item["name"]): item for item in result["all_projects_shared"]["resolved_dependencies"]}
+    assert set(shared) == {("npm", "lodash")}
+    assert shared[("npm", "lodash")]["version_conflict"] is False
+    assert result["pairwise_comparisons"][0]["dependency_version_conflict_count"] == 0
+
+
+def test_empty_files_and_other_are_not_shared():
+    from project_discovery.projects.comparison import compare_many_reports
+
+    empty = {"path": "pkg/__init__.py", "sha256": "e3b0c442", "size_bytes": 0}
+    left = _report("/a", ["Python", "Other"], [], [], [empty])
+    right = _report("/b", ["Python", "Other"], [], [], [empty])
+    result = compare_many_reports([left, right])
+    assert result["duplicate_file_content"] == [] and result["duplicate_file_total"] == 0
+    assert result["all_projects_shared"]["languages"] == ["Python"]
+
+
+def test_comparison_output_inside_a_compared_project_is_refused(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    import pytest
+
+    from project_discovery import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    reports = []
+    for name in ("a", "b"):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({"schema_version": "1.7", "root": str(project), "files": [],
+                                    "findings": [], "metrics": {}}), encoding="utf-8")
+        reports.append(str(path))
+    monkeypatch.setattr(sys, "argv", ["pdt", "compare", *reports, "--output", str(project / "cmp")])
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+    assert exited.value.code == cli.EXIT_USAGE

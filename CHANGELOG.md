@@ -246,6 +246,12 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   errors (PDT-334); equivalent repository spellings are scanned once (PDT-335); Git over
   `http://` works with `--allow-insecure-transport` (PDT-336); `.cmd`/`.bat` wrappers are
   not reported as available (PDT-337); a lookup that sent no request is not online (PDT-338).
+- `pdt compare`: version conflicts per ecosystem with one rule (PDT-339); empty files excluded
+  and duplicates capped with a total (PDT-340); `--output` inside a compared project refused,
+  API evidence and per-pair module names in Markdown (PDT-343); `Other` is not a shared
+  language, and the catalog lists `C` once (PDT-345).
+- `tools/benchmark.py generate` writes the requested size (PDT-341); README, BENCHMARKS and
+  domain scopes describe what exists (PDT-342, PDT-344).
 
 ## 0.2.0 — 2026-11-05
 

@@ -43,7 +43,7 @@ plugin that reads every file:
 | Host | Threads | Processes |
 |---|---|---|
 | Ubuntu 26.04, 4 cores, Py 3.14 (Landlock + seccomp) | +1.13 ms per file | +0.32 ms per file |
-| Windows 10, 16 threads, Py 3.12 (job + untrusted integrity) | +0.64 ms per file | +0.77 ms per file |
+| Windows 10, 16 threads, Py 3.12 (the 0.2.0 sandbox: job + untrusted integrity; the AppContainer sandbox is not yet re-measured) | +0.64 ms per file | +0.77 ms per file |
 
 The cost covers staging a verified copy and one JSON round trip per supported file, plus one
 batched `supports()` round trip per 32 files and host start-up.

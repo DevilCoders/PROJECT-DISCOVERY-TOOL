@@ -68,3 +68,10 @@ def test_component_and_localization_formats_are_recognized_as_text():
         "Resources/en.lproj/Localizable.strings", "locales/en/app.ftl",
     ):
         assert is_textual_path(path), path
+
+
+def test_the_language_catalog_names_each_language_once():
+    from project_discovery.catalog.languages import language_catalog
+
+    names = [item["name"] for item in language_catalog()]
+    assert len(names) == len(set(names))

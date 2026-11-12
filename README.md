@@ -33,7 +33,7 @@ PDT does not assume that a project is Python-based, that one language is its cor
 - Built-in analyzer reads use shared descriptor-verified helpers: reject symlinks/non-regular paths, request `O_NOFOLLOW` where supported, compare the opened descriptor with `fstat`, and enforce available scan-time identity from inventory. Bounded text/Python/binary readers, SHA-256 fingerprinting, signature sampling and ZIP/TAR input streams use that boundary. Third-party plugins still receive the legacy `Path` interface; PDT cannot enforce how arbitrary plugin code opens files. The Rust Windows walker also lacks a stable scan-time file ID in the current implementation, so cross-platform identity continuity remains a release gate.
 - ZIP/TAR members can be inspected through bounded in-memory streams; archive entries are never extracted to disk. ZIP central-directory count/size is checked before materializing the member index; ZIP/TAR traversal and member sampling have an 8-second cooperative wall-time budget, plus a 32 MiB total and 1 MiB per-member content-sample budget. Unknown or exceeded bounds produce `UNKNOWN`/partial findings. Formats without a supported index reader are reported as detected but not deeply inspected.
 - Secret and PII evidence must be redacted. Reports may retain category, file/member path, line, confidence and a keyed local fingerprint; they must not contain complete passwords, tokens, private keys, email addresses or personal-data values.
-- Third-party analyzer plugins never run inside PDT by default. Each runs in a sandboxed host process that receives private copies of the files it analyzes and an allowlisted environment. On Linux (Landlock, seccomp) and macOS (Seatbelt), plugins cannot write files, read outside the Python runtime, use the network or start processes; Windows restricts writes and process creation only. See the [Plugin SDK](docs/guides/PLUGIN_SDK.md).
+- Third-party analyzer plugins never run inside PDT by default. Each runs in a sandboxed host process that receives private copies of the files it analyzes and an allowlisted environment. On Linux (Landlock, seccomp) and macOS (Seatbelt), plugins cannot write files, read outside the Python runtime, use the network or start processes. On Windows an AppContainer without capabilities denies writes, network and process creation, and reads outside PDT's runtime copy, the staged packages and the staged files (system folders that Windows opens to every app container stay readable). See the [Plugin SDK](docs/guides/PLUGIN_SDK.md).
 - Static references are not runtime facts. A URL, hostname, port, API route, dependency, package manifest or ROS topic found in source is not proof that it is deployed, reachable, installed or active.
 
 ### Polyglot, not Python-only
@@ -366,12 +366,10 @@ The current PR remains unmerged. Production readiness requires all mandatory roa
 
 The work prioritizes correctness and scale over adding catalog labels. Done on this branch: persistent SQLite-backed inventory and findings with no silent pruning, multi-process analysis with `--resume`, bounded archive inspection (sample, decompression and wall-time budgets), the shared code model and cross-file code index, data-flow/taint analysis, sandboxed plugins, bounded HTML embedding, and redacted vulnerable-line findings across every report format. Remaining release work:
 
-1. Finish online mode end to end, including online vulnerability sources and a no-download path (in progress).
-2. Reorganize `src/` into a nested package layout.
-3. Archives: nested-archive traversal under a shared budget, and metadata readers for 7z, RAR, CAB and ISO.
-4. Deeper semantics: inference of classes the code does not state, and HDL elaboration of `generate` blocks and parameters. (Lexical inter-procedural taint and Tree-sitter-backed code models are implemented; see the changelog.)
-5. Chunked offline HTML rendering for result sets larger than the embedded bounds.
-6. GPU-present, GPU-absent, OpenCL-failure and CPU/GPU parity tests on supported hardware.
+1. Archives: nested-archive traversal under a shared budget, and metadata readers for 7z, RAR, CAB and ISO.
+2. Deeper semantics: inference of classes the code does not state, and HDL elaboration of `generate` blocks and parameters. (Lexical inter-procedural taint and Tree-sitter-backed code models are implemented; see the changelog.)
+3. Chunked offline HTML rendering for result sets larger than the embedded bounds.
+4. GPU-present, GPU-absent, OpenCL-failure and CPU/GPU parity tests on supported hardware.
 7. Benchmark 2 GB/10 GB/50 GB/100 GB+ corpora and tune worker and GPU thresholds using wall time, throughput and peak RSS.
 8. Run the full cross-platform build, security, coverage and packaging gates on the final PR head, and an independent security review.
 

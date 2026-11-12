@@ -52,3 +52,10 @@ def test_a_completed_scan_records_its_figures(tmp_path, monkeypatch):
     monkeypatch.setattr(benchmark.subprocess, "run", fake_run)
     result = benchmark.run(tmp_path, output, [], tmp_path / "results.jsonl", "label")
     assert result["failed"] is False and result["files"] == 10 and result["executor"] == "thread"
+
+
+def test_generated_corpora_have_about_the_requested_size(tmp_path):
+    # Regression: sizes were drawn with mean e^0.5, so corpora were about 65% too large.
+    benchmark = _module()
+    result = benchmark.generate(tmp_path / "corpus", 400, 4 * 1024 * 1024, seed=1)
+    assert abs(result["bytes"] - 4 * 1024 * 1024) / (4 * 1024 * 1024) < 0.25
