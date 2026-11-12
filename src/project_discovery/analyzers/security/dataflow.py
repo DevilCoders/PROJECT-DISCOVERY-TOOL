@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from ...intelligence import facts as code_facts
-from ...intelligence.model import FileModel, model_for
+from ...intelligence.model import AMBIGUOUS_M, FileModel, model_for
 from ...intelligence.model.lexical import LEXICAL_LANGUAGES
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -165,7 +165,9 @@ class DataFlowAnalyzer(Analyzer):
     def supports(self, record: FileRecord) -> bool:
         if record.error or record.content_skipped_reason:
             return False
-        return record.language == "Python" or LEXICAL_LANGUAGES.get(record.language) in RULES
+        # A .m file is modelled as Objective-C only when its content is (see AMBIGUOUS_M).
+        language = "Objective-C" if record.language == AMBIGUOUS_M else record.language
+        return language == "Python" or LEXICAL_LANGUAGES.get(language) in RULES
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         model = model_for(path, record)

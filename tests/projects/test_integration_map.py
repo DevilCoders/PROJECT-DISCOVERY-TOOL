@@ -157,3 +157,70 @@ def test_scan_records_integration_summary(tmp_path: Path):
     assert {"method": "ANY", "path": "/health", "file": "app/main.py"} in integration["endpoints"]
     assert integration["internal_calls_matched"] == 1
     assert any(item["title"] == "Integration points" for item in report["findings"])
+
+
+def test_installed_dependencies_are_not_the_projects_own_packages(tmp_path: Path):
+    # Regression: every package.json below node_modules became a package the project
+    # provides, so any other project using the same public package got a CONFIRMED edge.
+    project = tmp_path / "billing-ui"
+    for relative, name in (("package.json", "billing-ui"), ("node_modules/admin-ui/package.json", "admin-ui"),
+                           ("vendor/acme/lib/composer.json", "acme/lib")):
+        path = project / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"name": name}), encoding="utf-8")
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    packages = report["metrics"]["code_index"]["integration"]["packages"]
+    assert [item["name"] for item in packages] == ["billing-ui"]
+
+
+def test_django_routes_match_http_calls():
+    # Regression: Django path() routes are recorded with the method "DJANGO", which matched
+    # no GET or POST call, so Django providers never got an http_api edge.
+    provider = _report("/django-api", {"endpoints": [{"method": "DJANGO", "path": "/orders/{}", "file": "urls.py"}]})
+    consumer = _report("/shop-web", {"http_calls": [
+        {"method": "GET", "path": "/orders/{}", "host": "", "file": "a.ts"},
+        {"method": "POST", "path": "/orders/{}", "host": "", "file": "b.ts"},
+    ]})
+    [edge] = compare_reports(provider, consumer)["integration_map"]["edges"]
+    assert (edge["from"], edge["to"], edge["kind"], edge["count"]) == ("/shop-web", "/django-api", "http_api", 2)
+
+
+def test_declaring_a_queue_is_not_publishing_to_it():
+    # Regression: two competing consumers that both declare their queue got messaging edges
+    # in both directions, each claiming that one publishes what the other consumes.
+    first, second = (
+        _report(root, {"topics": [{"name": "jobs", "system": "RabbitMQ", "role": "declare", "file": "w.py"},
+                                  {"name": "jobs", "system": "RabbitMQ", "role": "consume", "file": "w.py"}]})
+        for root in ("/worker-a", "/worker-b")
+    )
+    edges = compare_reports(first, second)["integration_map"]["edges"]
+    assert [(edge["kind"], edge["from"], edge["to"]) for edge in edges] == [("shared_channel", "/worker-a", "/worker-b")]
+    publisher = _report("/api", {"topics": [{"name": "jobs", "system": "RabbitMQ", "role": "produce", "file": "a.py"}]})
+    edges = compare_reports(publisher, first)["integration_map"]["edges"]
+    assert [(edge["kind"], edge["from"], edge["to"]) for edge in edges] == [("messaging", "/api", "/worker-a")]
+
+
+def test_a_capped_package_list_keeps_the_root_manifest_and_says_so(tmp_path: Path):
+    from project_discovery.intelligence import index as code_index
+
+    project = tmp_path / "many"
+    (project / "zz-admin").mkdir(parents=True)
+    (project / "package.json").write_text(json.dumps({"name": "zz-admin"}), encoding="utf-8")
+    for number in range(4):
+        path = project / "packages" / f"a{number}" / "package.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"name": f"a{number}"}), encoding="utf-8")
+    output = tmp_path / "out"
+    original = code_index.MAX_INTEGRATION_PACKAGES
+    code_index.MAX_INTEGRATION_PACKAGES = 3
+    try:
+        assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    finally:
+        code_index.MAX_INTEGRATION_PACKAGES = original
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    integration = report["metrics"]["code_index"]["integration"]
+    assert integration["packages"][0]["name"] == "zz-admin"
+    assert integration["truncated"] == {"packages": 2}
+    assert any(item["title"] == "Integration points truncated" for item in report["findings"])

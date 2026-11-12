@@ -91,3 +91,13 @@ def test_inventory_only_scan_skips_the_code_index(tmp_path: Path):
     assert run_scan(project, output, {"json"}, 1, quiet=True, inventory_only=True) == 0
     report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
     assert report["metrics"]["code_index"] == {"skipped": "inventory-only scan"}
+
+
+def test_objective_c_m_files_reach_the_code_index(tmp_path: Path):
+    _, output = _scan(tmp_path, {
+        "Sources/Widget.m": "#import <Foundation/Foundation.h>\n\nint widget_scale(int value) {\n    return value * 2;\n}\n",
+        "scripts/analysis.m": "function y = analysis(x)\n% MATLAB, not Objective-C\ny = 2 * x;\nend\n",
+    })
+    inventory = output / ".pdt-cache" / "inventory.sqlite3"
+    assert [item["path"] for item in query_code_index(inventory, "symbol", "widget_scale")] == ["Sources/Widget.m"]
+    assert query_code_index(inventory, "symbol", "analysis") == []

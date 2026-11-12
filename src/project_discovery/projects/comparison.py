@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -55,20 +55,55 @@ def _normalized(data: dict[str, Any]) -> dict[str, Any]:
     graph["modules"] = _objects(graph.get("modules"))
     metrics["python_dependency_graph"] = graph
     metrics["languages"] = _object(metrics.get("languages"))
-    code_index = _object(metrics.get("code_index"))
-    integration = _object(code_index.get("integration"))
-    for key in ("packages", "topics"):
-        integration[key] = [item for item in _objects(integration.get(key)) if isinstance(item.get("name"), str)]
-    for key in ("endpoints", "http_calls"):
-        integration[key] = _objects(integration.get(key))
-    integration["grpc"] = {
-        key: [str(value) for value in values]
-        for key, values in _object(integration.get("grpc")).items() if isinstance(values, list)
-    }
-    code_index["integration"] = integration
-    metrics["code_index"] = code_index
+    if "code_index" in metrics:
+        # Absence stays absence: the coverage block reports a missing section as unknown.
+        code_index = _object(metrics["code_index"])
+        if "integration" in code_index:
+            integration = _object(code_index["integration"])
+            for key in ("packages", "topics"):
+                integration[key] = [item for item in _objects(integration.get(key))
+                                    if isinstance(item.get("name"), str)]
+            for key in ("endpoints", "http_calls"):
+                integration[key] = _objects(integration.get(key))
+            integration["grpc"] = {
+                key: [str(value) for value in values]
+                for key, values in _object(integration.get("grpc")).items() if isinstance(values, list)
+            }
+            code_index["integration"] = integration
+        metrics["code_index"] = code_index
     data["metrics"] = metrics
     return data
+
+
+def _section(report: dict[str, Any], *keys: str) -> dict:
+    """``report[keys[0]][keys[1]]...`` as a dict; {} where a level is missing or not a dict."""
+    value: Any = report
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def project_labels(reports: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """A distinct label per input report, and a warning for each root several inputs share.
+
+    A remote scan's label carries its ref or revision, so two refs of one repository stay
+    apart. Inputs that still share a label (before/after scans of one project) are told
+    apart by position; before, the second silently replaced the first in every result.
+    """
+    bases = []
+    for report in reports:
+        root = str(report.get("root") or "?")
+        remote = _section(report, "scan", "remote") or _section(report, "metrics", "source", "remote")
+        ref = remote.get("ref") or remote.get("revision")
+        bases.append(f"{root}#{ref}" if ref and "#" not in root else root)
+    counts = Counter(bases)
+    labels = [f"{base} [report {index + 1}]" if counts[base] > 1 else base for index, base in enumerate(bases)]
+    warnings = [
+        f"{count} input reports have the project label {base}; they are told apart as [report N] by their "
+        "position on the command line."
+        for base, count in counts.items() if count > 1
+    ]
+    return labels, warnings
 
 
 def _declared_dependencies(report: dict[str, Any]) -> set[str]:
@@ -98,8 +133,20 @@ def _file_hashes(report: dict[str, Any]) -> dict[str, list[str]]:
 
 
 
+_EVIDENCE_OMITTED = re.compile(r"Evidence lists the first [\d,]++; [\d,]++ more are omitted")
+
+
 def _resolved_dependency_versions(report: dict[str, Any]) -> dict[str, set[str]]:
+    """Resolved versions by package: every package of every lockfile from the code index;
+    for older reports, the first 200 per lockfile that finding evidence lists."""
     resolved: dict[str, set[str]] = defaultdict(set)
+    lockfiles = _section(report, "metrics", "code_index", "dependencies").get("lockfiles")
+    if isinstance(lockfiles, dict):
+        for entry in lockfiles.values():
+            for name, versions in _section(entry if isinstance(entry, dict) else {}, "packages").items():
+                if isinstance(versions, list):
+                    resolved[str(name)].update(str(version) for version in versions if version)
+        return dict(resolved)
     for finding in report.get("findings", []):
         if not finding.get("title", "").startswith("Resolved dependency inventory:"):
             continue
@@ -109,6 +156,70 @@ def _resolved_dependency_versions(report: dict[str, Any]) -> dict[str, set[str]]
                 if package and version:
                     resolved[package].add(version)
     return dict(resolved)
+
+
+def _dependency_gaps(report: dict[str, Any]) -> list[str]:
+    dependencies = _section(report, "metrics", "code_index", "dependencies")
+    lockfiles = dependencies.get("lockfiles")
+    if isinstance(lockfiles, dict):
+        gaps = [
+            f"{path}: {int(entry.get('omitted') or 0):,} resolved package(s) beyond the per-lockfile limit are "
+            "not compared"
+            for path, entry in sorted(lockfiles.items()) if isinstance(entry, dict) and entry.get("omitted")
+        ]
+        if dependencies.get("truncated"):
+            gaps.append(f"{int(dependencies['truncated']):,} resolved package(s) beyond the scan's limit are not compared")
+        return gaps
+    partial = [
+        str(item.get("title", "")).split(": ", 1)[-1] for item in report.get("findings", [])
+        if str(item.get("title", "")).startswith("Resolved dependency inventory:")
+        and _EVIDENCE_OMITTED.search(str(item.get("detail", "")))
+    ]
+    if partial:
+        return [
+            f"resolved versions come from finding evidence (an older report), which lists only the first 200 "
+            f"packages of {len(partial):,} lockfile(s): " + ", ".join(partial[:5])
+        ]
+    return []
+
+
+def project_coverage(report: dict[str, Any], label: str) -> dict[str, Any]:
+    """What a report cannot tell the comparison, so a missing section never reads as absence."""
+    metrics = _section(report, "metrics")
+    gaps: list[str] = []
+    if _section(report, "metrics", "execution").get("analysis_mode") == "inventory-only":
+        gaps.append("inventory-only scan: no file contents were analyzed, so dependencies, file hashes and "
+                    "integration points are unknown, not absent")
+        return {"project": label, "complete": False, "gaps": gaps}
+    code_index = metrics.get("code_index")
+    if not isinstance(code_index, dict):
+        gaps.append("no code index (an older report): only API findings give integration points")
+    elif "skipped" in code_index or "error" in code_index:
+        state = "skipped" if "skipped" in code_index else "failed"
+        gaps.append(f"code index {state} ({code_index.get('skipped') or code_index.get('error')}): integration "
+                    "points and resolved dependencies are unknown")
+    else:
+        integration = code_index.get("integration")
+        if not isinstance(integration, dict):
+            gaps.append("no integration summary (an older report): packages, HTTP calls, topics and gRPC services "
+                        "are unknown; endpoints come from API findings")
+        elif "error" in integration:
+            gaps.append(f"integration pass failed ({integration['error']}): integration points are unknown")
+        elif isinstance(integration.get("truncated"), dict) and integration["truncated"]:
+            gaps.append("integration lists cut at their caps: " + ", ".join(
+                f"{name} ({count:,} left out)" for name, count in sorted(integration["truncated"].items())
+                if isinstance(count, int)
+            ))
+    unhashed = sum(
+        1 for item in report.get("files", [])
+        if isinstance(item, dict) and not item.get("sha256") and not item.get("content_skipped_reason")
+        and not item.get("error")
+    )
+    if unhashed:
+        gaps.append(f"{unhashed:,} file(s) have no content hash (an older report, or files not analyzed), so "
+                    "byte-identical content is not compared for them")
+    gaps.extend(_dependency_gaps(report))
+    return {"project": label, "complete": not gaps, "gaps": gaps}
 
 
 MAX_EDGE_EVIDENCE = 25
@@ -128,10 +239,12 @@ def _integration_summary(report: dict[str, Any]) -> dict[str, Any]:
                 if route:
                     endpoints.append({"method": method.upper(), "path": normalize_route(route),
                                       "file": location.rsplit(":", 1)[0]})
+    truncated = summary.get("truncated")
     return {
         "packages": list(summary.get("packages") or []), "endpoints": endpoints,
         "http_calls": list(summary.get("http_calls") or []), "topics": list(summary.get("topics") or []),
         "grpc": dict(summary.get("grpc") or {}),
+        "truncated": dict(truncated) if isinstance(truncated, dict) else {},
     }
 
 
@@ -139,19 +252,39 @@ def _package_key(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name.strip().lower())
 
 
+def _same_system(left: str, right: str) -> bool:
+    return not left or not right or left == right or "pub/sub" in {left, right}
+
+
+def _shared_channels(left: dict[str, Any], right: dict[str, Any], linked: set[str]) -> list[str]:
+    """Topics both projects use without one publishing what the other consumes."""
+    shared = set()
+    for item in left["topics"]:
+        for other in right["topics"]:
+            if (item["name"] == other["name"] and item["name"] not in linked
+                    and _same_system(item.get("system", ""), other.get("system", ""))):
+                shared.add(f"{item['name']} ({item.get('system') or other.get('system') or 'unknown system'}; "
+                           f"{item.get('role') or '?'} / {other.get('role') or '?'})")
+    return sorted(shared)
+
+
 def integration_map(reports: list[dict[str, Any]], projects: list[dict[str, Any]]) -> dict[str, Any]:
     """Edges between projects: package dependencies, HTTP calls to served endpoints, topics
     one project publishes and another consumes, and gRPC services one serves and another calls."""
     summaries = [_integration_summary(report) for report in reports]
     declared = [{_package_key(name) for name in _declared_dependencies(report)} for report in reports]
-    labels = [str(project["root"]) for project in projects]
+    labels = [str(project.get("label") or project["root"]) for project in projects]
     edges: list[dict[str, Any]] = []
+    # Topic names linked by publishing, per unordered project pair.
+    linked: dict[tuple[int, int], set[str]] = defaultdict(set)
     for provider_index, provider in enumerate(summaries):
         index = EndpointIndex([(item.get("method", ""), item.get("path", "")) for item in provider["endpoints"]])
         services = {name.rsplit(".", 1)[-1] for name in provider["grpc"].get("service", [])} | set(
             provider["grpc"].get("server", []))
+        # Only publishing counts: declaring a queue (queue_declare, assertQueue) is what
+        # competing consumers do too, so it made two consumers "publish" to each other.
         produced = {(item["name"], item.get("system", "")) for item in provider["topics"]
-                    if item.get("role") in {"produce", "declare"}}
+                    if item.get("role") == "produce"}
         for consumer_index, consumer in enumerate(summaries):
             if provider_index == consumer_index:
                 continue
@@ -172,32 +305,45 @@ def integration_map(reports: list[dict[str, Any]], projects: list[dict[str, Any]
             if calls:
                 edges.append({"from": consumer_label, "to": provider_label, "kind": "http_api", "count": len(calls),
                               "evidence": calls[:MAX_EDGE_EVIDENCE], "confidence": "INFERRED"})
-            topics = sorted({
-                f"{item['name']} ({item.get('system') or system})" for item in consumer["topics"]
-                if item.get("role") in {"consume", "declare"}
+            matched = [
+                (item["name"], item.get("system") or system) for item in consumer["topics"]
+                if item.get("role") == "consume"
                 for name, system in produced
-                if item["name"] == name and (not item.get("system") or not system or item.get("system") == system
-                                             or "pub/sub" in {item.get("system"), system})
-            })
+                if item["name"] == name and _same_system(item.get("system", ""), system)
+            ]
+            topics = sorted({f"{name} ({system})" for name, system in matched})
             if topics:
+                linked[tuple(sorted((provider_index, consumer_index)))].update(name for name, _ in matched)
                 edges.append({"from": provider_label, "to": consumer_label, "kind": "messaging", "count": len(topics),
                               "evidence": topics[:MAX_EDGE_EVIDENCE], "confidence": "INFERRED"})
             grpc = sorted(services & set(consumer["grpc"].get("client", [])))
             if grpc:
                 edges.append({"from": consumer_label, "to": provider_label, "kind": "grpc", "count": len(grpc),
                               "evidence": grpc[:MAX_EDGE_EVIDENCE], "confidence": "INFERRED"})
+    for left_index in range(len(summaries)):
+        for right_index in range(left_index + 1, len(summaries)):
+            shared = _shared_channels(summaries[left_index], summaries[right_index],
+                                      linked[(left_index, right_index)])
+            if shared:
+                edges.append({"from": labels[left_index], "to": labels[right_index], "kind": "shared_channel",
+                              "count": len(shared), "evidence": shared[:MAX_EDGE_EVIDENCE],
+                              "confidence": "INFERRED"})
     return {
         "edges": edges,
         "projects": [
             {"root": labels[index], "packages": [item["name"] for item in summary["packages"]][:20],
              "endpoints": len(summary["endpoints"]), "http_calls": len(summary["http_calls"]),
-             "topics": len(summary["topics"]), "grpc_services": len(summary["grpc"].get("service", []))}
+             "topics": len(summary["topics"]), "grpc_services": len(summary["grpc"].get("service", [])),
+             # Lists cut at the scan's caps; links through what was left out are missing.
+             "truncated": summary["truncated"]}
             for index, summary in enumerate(summaries)
         ],
         "interpretation": (
-            "`from` depends on or calls `to`; for messaging, `from` publishes what `to` consumes. Package edges are "
-            "CONFIRMED declarations; HTTP, messaging and gRPC edges are INFERRED from literal paths, topic and "
-            "service names and need confirmation of deployment and configuration."
+            "`from` depends on or calls `to`; for messaging, `from` publishes what `to` consumes. A shared_channel "
+            "edge has no direction: both projects use the topic or queue (for example as competing consumers) "
+            "and neither publishes what the other consumes. Package edges are CONFIRMED declarations; HTTP, "
+            "messaging, shared-channel and gRPC edges are INFERRED from literal paths, topic and service names "
+            "and need confirmation of deployment and configuration."
         ),
     }
 
@@ -251,13 +397,18 @@ def compare_reports(
         }
         for package in sorted(set(left_resolved) & set(right_resolved))
     ]
+    labels, warnings = project_labels([left, right])
+    coverage = [project_coverage(report, label) for report, label in zip((left, right), labels, strict=True)]
     return {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "comparison_type": "independent_project_reports",
         "projects": [
-            {"root": left.get("root"), "file_count": len(left.get("files", []))},
-            {"root": right.get("root"), "file_count": len(right.get("files", []))},
+            {"root": left.get("root"), "label": labels[0], "file_count": len(left.get("files", []))},
+            {"root": right.get("root"), "label": labels[1], "file_count": len(right.get("files", []))},
         ],
+        # What each report cannot show; a section that is empty because of a gap is unknown.
+        "coverage": coverage,
+        "warnings": warnings + [f"{item['project']}: {gap}" for item in coverage for gap in item["gaps"]],
         "language_overlap": {
             "shared": sorted(left_languages & right_languages),
             "left_only": sorted(left_languages - right_languages),
@@ -277,7 +428,7 @@ def compare_reports(
         "resolved_dependency_overlap": resolved_overlap,
         "duplicate_file_content": duplicate_content,
         "integration_map": integration_map(
-            [left, right], [{"root": left.get("root")}, {"root": right.get("root")}],
+            [left, right], [{"root": left.get("root"), "label": label} for label in labels],
         ),
         "interpretation": {
             "shared_dependencies": "CONFIRMED declarations; not proof of compatible versions or runtime use.",
@@ -296,10 +447,12 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     """Compare two or more independent project reports pairwise and collectively."""
     if len(reports) < 2:
         raise ValueError("At least two project reports are required.")
+    labels, warnings = project_labels(reports)
     projects = [
-        {"root": report.get("root"), "file_count": len(report.get("files", []))}
-        for report in reports
+        {"root": report.get("root"), "label": label, "file_count": len(report.get("files", []))}
+        for report, label in zip(reports, labels, strict=True)
     ]
+    coverage = [project_coverage(report, label) for report, label in zip(reports, labels, strict=True)]
     language_sets = [
         set(report.get("metrics", {}).get("languages", {})) for report in reports
     ]
@@ -328,8 +481,7 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         {
             "name": package,
             "versions_by_project": {
-                str(projects[index]["root"]): sorted(item[package])
-                for index, item in enumerate(resolved_sets)
+                labels[index]: sorted(item[package]) for index, item in enumerate(resolved_sets)
             },
             "version_conflict": len({
                 version for item in resolved_sets for version in item[package]
@@ -343,8 +495,7 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             duplicates.append({
                 "sha256": digest,
                 "projects": {
-                    str(projects[index]["root"]): sorted(paths)
-                    for index, paths in sorted(locations.items())
+                    labels[index]: sorted(paths) for index, paths in sorted(locations.items())
                 },
                 "confidence": "CONFIRMED",
             })
@@ -354,8 +505,8 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
         for right_index in range(left_index + 1, len(reports)):
             result = compare_reports(reports[left_index], reports[right_index])
             pairwise.append({
-                "left_project": projects[left_index]["root"],
-                "right_project": projects[right_index]["root"],
+                "left_project": labels[left_index],
+                "right_project": labels[right_index],
                 "shared_languages": result["language_overlap"]["shared"],
                 "shared_declared_dependencies": result["dependency_overlap"]["shared_declared_dependencies"],
                 "shared_python_module_names": result["python_module_overlap"]["shared_module_names"],
@@ -366,9 +517,11 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             })
 
     return {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "comparison_type": "independent_project_reports",
         "projects": projects,
+        "coverage": coverage,
+        "warnings": warnings + [f"{item['project']}: {gap}" for item in coverage for gap in item["gaps"]],
         "all_projects_shared": {
             "languages": sorted(common_languages),
             "declared_dependencies": sorted(common_dependencies),
@@ -387,6 +540,16 @@ def compare_many_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
             "integration_recommendation": "Not generated. Similarity is evidence for human review, not authorization to merge projects.",
         },
     }
+
+
+def _coverage_lines(comparison: dict[str, Any]) -> list[str]:
+    """The Markdown coverage section: what the inputs cannot show."""
+    m = md_inline
+    warnings = [item for item in comparison.get("warnings") or [] if isinstance(item, str)]
+    if not warnings:
+        return []
+    return ["", "## Coverage", "", "Sections that depend on missing evidence are partial: an empty result there "
+            "is unknown, not absent.", "", *(f"- {m(item)}" for item in warnings)]
 
 
 def write_comparison(
@@ -414,9 +577,10 @@ def write_comparison(
                 "",
             ]
             lines.extend(
-                f"- {m(project['root'])} ({project['file_count']} files)"
+                f"- {m(project.get('label') or project['root'])} ({project['file_count']} files)"
                 for project in comparison["projects"]
             )
+            lines.extend(_coverage_lines(comparison))
             lines.extend(["", "## Shared across all projects", "", "### Languages"])
             lines.extend(f"- {m(item)}" for item in shared["languages"])
             lines.extend(["", "### Declared dependencies"])
@@ -452,8 +616,9 @@ def write_comparison(
             lines = [
                 "# Independent Project Comparison",
                 "",
-                f"- Project A: {m(left['root'])}",
-                f"- Project B: {m(right['root'])}",
+                f"- Project A: {m(left.get('label') or left['root'])}",
+                f"- Project B: {m(right.get('label') or right['root'])}",
+                *_coverage_lines(comparison),
                 "",
                 "## Shared languages",
                 "",
@@ -492,6 +657,9 @@ def write_comparison(
                     f"({edge['count']}, {m(edge['confidence'])})"
                 )
                 lines.extend(f"  - {m(item)}" for item in edge["evidence"][:10])
+        elif any(not item.get("complete", True) for item in comparison.get("coverage") or []):
+            lines.append("- No links were found, but the evidence is incomplete (see Coverage): this is not "
+                         "evidence that the projects are unrelated.")
         else:
             lines.append("- No package, HTTP, messaging or gRPC links were found between the projects.")
         if mapping.get("interpretation"):

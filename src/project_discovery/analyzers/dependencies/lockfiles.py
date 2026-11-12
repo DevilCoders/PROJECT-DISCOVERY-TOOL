@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...core.source_utils import SourceBudgetExceeded, read_text_bounded, redact_source_excerpt
+from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 from .lockfile_parsers import (
@@ -19,6 +20,9 @@ _MAX_LOCKFILE_INVENTORY_BYTES = MAX_LOCKFILE_BYTES
 _MAX_LOCKFILE_PACKAGE_ENTRIES = MAX_LOCKFILE_PACKAGE_ENTRIES
 _LOCK_NAMES = LOCKFILE_NAMES
 _MAX_INVENTORY_EVIDENCE = 200
+# Resolved packages recorded per lockfile for `pdt compare` (code_index.dependencies); the
+# finding's evidence keeps a readable sample only. Below the per-file fact ceiling.
+MAX_RESOLVED_FACTS = 4_000
 
 
 class LockfileAnalyzer(Analyzer):
@@ -71,6 +75,10 @@ class LockfileAnalyzer(Analyzer):
             )]
 
         ecosystem = LOCKFILE_ECOSYSTEMS[Path(record.path).name.lower()]
+        for item in packages[:MAX_RESOLVED_FACTS]:
+            code_facts.emit_fact("resolved_package", item.name, version=item.version, ecosystem=ecosystem)
+        if len(packages) > MAX_RESOLVED_FACTS:
+            code_facts.emit_fact("resolved_packages_truncated", ecosystem, omitted=len(packages) - MAX_RESOLVED_FACTS)
         omitted = max(0, len(packages) - _MAX_INVENTORY_EVIDENCE)
         detail = (
             f"Extracted {len(packages)} package/version entries from a {ecosystem} lockfile. "

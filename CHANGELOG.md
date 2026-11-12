@@ -193,6 +193,14 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   readable to plugins (PDT-279).
 - A second scan into the same output in one process no longer refuses every sandboxed
   plugin (PDT-280).
+- `.m` files with Objective-C content get the Objective-C code model (PDT-281).
+- Integration maps: dependency and vendor trees are not the project's own packages, capped
+  lists are counted (PDT-282); Django routes match calls (PDT-283); declaring a queue is not
+  publishing, and shared use is a `shared_channel` edge (PDT-284).
+- `pdt compare` reports per-project coverage and warnings instead of presenting missing
+  evidence as no links (PDT-285), compares every resolved package from
+  `metrics.code_index.dependencies` (PDT-286), and keeps inputs with one root apart (PDT-287).
+- `tools/benchmark.py` records a failed scan as failed and exits with its code (PDT-288).
 
 ## 0.2.0 — 2026-11-05
 

@@ -95,6 +95,19 @@ _GRPC_SERVERS = (
 )
 _MANIFESTS = {"pyproject.toml", "setup.cfg", "package.json", "cargo.toml", "go.mod", "pom.xml", "settings.gradle",
               "settings.gradle.kts", "composer.json"}
+# Directories of installed or vendored dependencies. Their manifests, sources and protocol
+# files describe other projects, not what this one provides or calls: a node_modules tree
+# made every installed package look like one of the project's own.
+_VENDORED_DIRECTORIES = frozenset({
+    "node_modules", "bower_components", "jspm_packages", "vendor", ".venv", "venv", "site-packages",
+    "dist-packages", "target", "pods", "carthage", ".cargo", ".m2", "third_party", "third-party", ".yarn",
+    ".pnpm-store",
+})
+
+
+def is_vendored(path: str) -> bool:
+    """Whether ``path`` lies below a dependency or vendor directory."""
+    return any(part.lower() in _VENDORED_DIRECTORIES for part in path.replace("\\", "/").split("/")[:-1])
 
 
 def _normalize_url(url: str) -> tuple[str, str]:
@@ -154,7 +167,8 @@ class EndpointIndex:
         """(served method, served route, 'exact'|'prefixed') of the first match, or None."""
         for segment in dict.fromkeys(route_segments(route)):
             for served_method, served in self.by_segment.get(segment, ()):
-                wildcard = {"?", "ANY", "ALL", "*"}
+                # Routes declared without a method: Django's path()/re_path() serve any.
+                wildcard = {"?", "ANY", "ALL", "*", "DJANGO"}
                 if method and served_method and method != served_method and not wildcard & {method, served_method}:
                     continue
                 kind = route_matches(route, served)
@@ -176,7 +190,7 @@ class IntegrationAnalyzer(Analyzer):
     domains = ("multi_project", "api_rest", "messaging", "api_rpc")
 
     def supports(self, record: FileRecord) -> bool:
-        if record.error or record.content_skipped_reason:
+        if record.error or record.content_skipped_reason or is_vendored(record.path):
             return False
         name = PurePosixPath(record.path.replace("\\", "/")).name.lower()
         return (record.language in _LEXICAL or record.language in {"Python", "Protocol Buffers"} or name in _MANIFESTS

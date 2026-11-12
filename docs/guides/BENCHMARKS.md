@@ -17,6 +17,10 @@ Arguments after the known options are passed through to `pdt scan`, for example 
 file and byte counts, findings, errors, executor, worker count, wall seconds, per-phase seconds,
 files/s, MB/s, coordinator peak RSS and, on POSIX, the largest process's peak RSS.
 
+`run` deletes any `discovery-report.json` in `--output` before the scan. A scan that exits
+with a code other than 0, 1 or 3, or writes no report, is recorded as `"failed": true` with
+its exit code and no measurements, and the tool exits with that code.
+
 ## Measured results
 
 These are small-scale engineering measurements on one development workstation (Windows 10,

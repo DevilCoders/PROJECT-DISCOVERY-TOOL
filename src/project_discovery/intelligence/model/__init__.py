@@ -17,6 +17,7 @@ carry no type resolution and are reported as INFERRED.
 from __future__ import annotations
 
 import bisect
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -146,10 +147,18 @@ FUNCTION_KINDS = frozenset({"function", "method", "constructor"})
 _memo = threading.local()
 
 
+# ".m" is both Objective-C and MATLAB, so the inventory cannot name the language. A file
+# whose content shows Objective-C is modelled as Objective-C; one that does not, is not.
+AMBIGUOUS_M = "Objective-C / MATLAB (ambiguous)"
+_OBJECTIVE_C = re.compile(
+    r"^[ \t]*+(?:#[ \t]*+(?:import|include)\b|@(?:interface|implementation|protocol|class)\b)", re.M,
+)
+
+
 def supports_language(language: str) -> bool:
     from .lexical import LEXICAL_LANGUAGES
 
-    return language == "Python" or language in LEXICAL_LANGUAGES
+    return language == "Python" or language in LEXICAL_LANGUAGES or language == AMBIGUOUS_M
 
 
 def model_for(path: Path, record: FileRecord) -> FileModel | None:
@@ -183,8 +192,14 @@ def _build(path: Path, record: FileRecord) -> FileModel | None:
         source = read_text_bounded(
             path, MAX_MODEL_BYTES, errors="replace", expected_identity=record.analysis_identity,
         )
-        model = build_lexical_model(record.path, record.language, source)
-        grammar = model_grammar(record.language, record.path)
+        language = record.language
+        if language == AMBIGUOUS_M:
+            # MATLAB has no #import/#include and no @interface; Objective-C files have both.
+            if not _OBJECTIVE_C.search(source):
+                return None
+            language = "Objective-C"
+        model = build_lexical_model(record.path, language, source)
+        grammar = model_grammar(language, record.path)
         if grammar is not None:
             from .tree_sitter_model import refine
 

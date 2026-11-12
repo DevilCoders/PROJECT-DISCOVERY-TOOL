@@ -165,3 +165,97 @@ def test_an_unexpected_error_exits_2_not_the_fail_on_code(tmp_path, monkeypatch,
         cli.main()
     assert result.value.code == cli.EXIT_USAGE
     assert "Unexpected AttributeError" in capsys.readouterr().err
+
+
+def _lockfile_report(root, versions, *, ref=None):
+    report = _report(root, ["JavaScript"], [], [], [])
+    report["metrics"]["code_index"] = {"dependencies": {"lockfiles": {"package-lock.json": {
+        "ecosystem": "npm", "packages": {name: [version] for name, version in versions.items()},
+    }}}, "integration": {}}
+    if ref:
+        report["scan"] = {"remote": {"ref": ref, "revision": "abc"}}
+    return report
+
+
+def test_resolved_versions_come_from_every_package_not_the_first_200():
+    # Regression: versions were read from finding evidence, which lists the first 200
+    # packages of each lockfile, so a conflict at entry 230 was never reported.
+    from project_discovery.projects.comparison import compare_many_reports
+
+    shared = {f"pkg{index:03d}": "1.0.0" for index in range(300)}
+    left = _lockfile_report("/left", shared)
+    right = _lockfile_report("/right", {**shared, "pkg230": "2.0.0"})
+    result = compare_many_reports([left, right])
+    conflicts = [item["name"] for item in result["all_projects_shared"]["resolved_dependencies"] if item["version_conflict"]]
+    assert conflicts == ["pkg230"]
+    assert result["pairwise_comparisons"][0]["dependency_version_conflict_count"] == 1
+
+
+def test_older_reports_with_capped_evidence_are_marked_partial():
+    from project_discovery.projects.comparison import compare_many_reports
+
+    old = _report("/old", [], [], [], [])
+    old["findings"].append({"title": "Resolved dependency inventory: package-lock.json", "category": "dependency",
+                            "detail": "Extracted 230 entries. Evidence lists the first 200; 30 more are omitted.",
+                            "evidence": ["a==1"]})
+    result = compare_many_reports([old, _lockfile_report("/new", {"a": "1"})])
+    [gaps] = [item["gaps"] for item in result["coverage"] if item["project"] == "/old"]
+    assert any("first 200 packages of 1 lockfile(s): package-lock.json" in gap for gap in gaps)
+
+
+def test_missing_evidence_is_reported_as_unknown_not_as_no_links(tmp_path):
+    # Regression: an inventory-only report (no hashes, dependencies or integration points)
+    # produced "No package, HTTP, messaging or gRPC links were found", like a clean result.
+    from project_discovery.projects.comparison import compare_many_reports, write_comparison
+
+    inventory_only = _report("/fast", [], [], [], [{"path": "a.py", "sha256": None}])
+    inventory_only["metrics"]["execution"] = {"analysis_mode": "inventory-only"}
+    inventory_only["metrics"]["code_index"] = {"skipped": "inventory-only scan"}
+    full = _lockfile_report("/full", {"a": "1"})
+    result = compare_many_reports([inventory_only, full])
+    assert [item["complete"] for item in result["coverage"]] == [False, True]
+    assert any(warning.startswith("/fast: inventory-only scan") for warning in result["warnings"])
+    [written] = write_comparison(result, tmp_path / "out", {"markdown"})
+    markdown = written.read_text(encoding="utf-8")
+    assert "## Coverage" in markdown
+    assert "not evidence that the projects are unrelated" in markdown
+
+
+def test_reports_with_one_root_keep_their_own_entries():
+    # Regression: two refs (or a before/after pair) of one project share a root, and the
+    # second report replaced the first in every result keyed by root.
+    from project_discovery.projects.comparison import compare_many_reports
+
+    before = _lockfile_report("https://github.com/acme/app", {"lodash": "4.17.20"}, ref="v1")
+    after = _lockfile_report("https://github.com/acme/app", {"lodash": "4.17.21"}, ref="v2")
+    result = compare_many_reports([before, after])
+    assert [project["label"] for project in result["projects"]] == [
+        "https://github.com/acme/app#v1", "https://github.com/acme/app#v2",
+    ]
+    [lodash] = result["all_projects_shared"]["resolved_dependencies"]
+    assert lodash["versions_by_project"] == {
+        "https://github.com/acme/app#v1": ["4.17.20"], "https://github.com/acme/app#v2": ["4.17.21"],
+    }
+    local = compare_many_reports([_lockfile_report("/app", {"a": "1"}), _lockfile_report("/app", {"a": "2"})])
+    assert [project["label"] for project in local["projects"]] == ["/app [report 1]", "/app [report 2]"]
+    assert any("2 input reports have the project label /app" in warning for warning in local["warnings"])
+    [entry] = local["all_projects_shared"]["resolved_dependencies"]
+    assert entry["versions_by_project"] == {"/app [report 1]": ["1"], "/app [report 2]": ["2"]}
+
+
+def test_a_scan_records_every_resolved_package_for_comparison(tmp_path):
+    import json
+
+    from project_discovery.cli import run_scan
+
+    project = tmp_path / "app"
+    project.mkdir()
+    packages = {"": {"name": "app"}, **{f"node_modules/pkg{index}": {"version": "1.0.0"} for index in range(250)}}
+    (project / "package-lock.json").write_text(
+        json.dumps({"name": "app", "lockfileVersion": 3, "packages": packages}), encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    lockfiles = report["metrics"]["code_index"]["dependencies"]["lockfiles"]
+    assert len(lockfiles["package-lock.json"]["packages"]) == 250

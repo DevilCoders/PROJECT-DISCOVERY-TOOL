@@ -41,6 +41,8 @@ _CALLABLE_KINDS = _FUNCTION_KINDS + ("class", "struct", "record", "object", "typ
 # Languages whose definitions can call each other, for lexical name resolution.
 _LANGUAGE_GROUPS = {
     "C": "c-family", "C++": "c-family", "C/C++ Header": "c-family", "Objective-C": "c-family",
+    # .m files: modelled (as Objective-C) only when their content is Objective-C.
+    "Objective-C / MATLAB (ambiguous)": "c-family",
     "Objective-C++": "c-family", "CUDA": "c-family", "OpenCL": "c-family", "Arduino Sketch": "c-family",
     "JavaScript": "javascript", "TypeScript": "javascript", "Vue": "javascript", "Svelte": "javascript",
     "Java": "jvm", "Kotlin": "jvm", "Scala": "jvm", "Groovy": "jvm",
@@ -1165,7 +1167,35 @@ def _component_graph(context: _Context) -> tuple[dict, list[Finding]]:
     return value, findings
 
 
+MAX_RESOLVED_PACKAGES = 50_000
+
+
+def _dependencies(context: _Context) -> tuple[dict, list[Finding]]:
+    """Resolved package versions per lockfile, for comparing projects (``pdt compare``)."""
+    lockfiles: dict[str, dict] = {}
+    total = kept = 0
+    for name, path, values in _fact_rows(context.db, "resolved_package"):
+        total += 1
+        if kept >= MAX_RESOLVED_PACKAGES:
+            continue
+        entry = lockfiles.setdefault(path, {"ecosystem": str(values.get("ecosystem", "")), "packages": {}})
+        versions = entry["packages"].setdefault(name, [])
+        version = str(values.get("version", ""))
+        if version not in versions:
+            versions.append(version)
+            kept += 1
+    partial = {path: int(values.get("omitted", 0)) for _, path, values in _fact_rows(context.db, "resolved_packages_truncated")}
+    for path, omitted in partial.items():
+        lockfiles.setdefault(path, {"ecosystem": "", "packages": {}})["omitted"] = omitted
+    return {
+        "lockfiles": dict(sorted(lockfiles.items())),
+        # Entries left out at the scan-wide cap; per-lockfile omissions are under "omitted".
+        "truncated": max(0, total - kept) if kept >= MAX_RESOLVED_PACKAGES else 0,
+    }, []
+
+
 MAX_INTEGRATION_ITEMS = 5000
+MAX_INTEGRATION_PACKAGES = 500
 
 
 def _integration(context: _Context) -> tuple[dict, list[Finding]]:
@@ -1173,28 +1203,41 @@ def _integration(context: _Context) -> tuple[dict, list[Finding]]:
     from ..analyzers.api.integration import EndpointIndex, normalize_route
 
     db = context.db
-    packages = sorted({(name, str(values.get("ecosystem", "")), path)
-                       for name, path, values in _fact_rows(db, "package_name")})[:500]
+    truncated: dict[str, int] = {}
+    # Root and workspace manifests first, so a capped list keeps the project's own packages.
+    all_packages = sorted({(name, str(values.get("ecosystem", "")), path)
+                           for name, path, values in _fact_rows(db, "package_name")},
+                          key=lambda item: (item[2].count("/"), item[2], item[0], item[1]))
+    packages = all_packages[:MAX_INTEGRATION_PACKAGES]
+    if len(all_packages) > len(packages):
+        truncated["packages"] = len(all_packages) - len(packages)
     endpoints: dict[tuple[str, str], str] = {}
     for name, path, _ in _fact_rows(db, "api_endpoint"):
         method, _, route = name.partition(" ")
         key = (method.upper(), normalize_route(route))
+        if key not in endpoints and len(endpoints) >= MAX_INTEGRATION_ITEMS:
+            truncated["endpoints"] = truncated.get("endpoints", 0) + 1
+            continue
         endpoints.setdefault(key, path)
-        if len(endpoints) >= MAX_INTEGRATION_ITEMS:
-            break
     calls: dict[tuple[str, str, str], str] = {}
     hosts: Counter = Counter()
     for name, path, values in _fact_rows(db, "http_call"):
         method, _, route = name.partition(" ")
         host = str(values.get("host", ""))
-        if len(calls) < MAX_INTEGRATION_ITEMS:
-            calls.setdefault((method.upper(), route, host), path)
+        key = (method.upper(), route, host)
+        if key in calls or len(calls) < MAX_INTEGRATION_ITEMS:
+            calls.setdefault(key, path)
+        else:
+            truncated["http_calls"] = truncated.get("http_calls", 0) + 1
         if host:
             hosts[host] += 1
     topics: dict[tuple[str, str, str], str] = {}
     for name, path, values in _fact_rows(db, "message_topic"):
-        if len(topics) < MAX_INTEGRATION_ITEMS:
-            topics.setdefault((name, str(values.get("system", "")), str(values.get("role", ""))), path)
+        key = (name, str(values.get("system", "")), str(values.get("role", "")))
+        if key in topics or len(topics) < MAX_INTEGRATION_ITEMS:
+            topics.setdefault(key, path)
+        else:
+            truncated["topics"] = truncated.get("topics", 0) + 1
     grpc = {
         kind: sorted({name for name, _, _ in _fact_rows(db, f"grpc_{kind}")})[:1000]
         for kind in ("service", "server", "client")
@@ -1212,9 +1255,18 @@ def _integration(context: _Context) -> tuple[dict, list[Finding]]:
         "topics": [{"name": name, "system": system, "role": role, "file": path}
                    for (name, system, role), path in sorted(topics.items())],
         "grpc": grpc, "hosts": dict(hosts.most_common(50)), "internal_calls_matched": internal,
+        # Items left out at a cap, by list; `pdt compare` reports these lists as partial.
+        "truncated": truncated,
     }
+    coverage = [Finding(
+        "analysis_coverage", "Integration points truncated",
+        "Lists at their cap, with the items left out: "
+        + ", ".join(f"{name} ({count:,})" for name, count in sorted(truncated.items()))
+        + ". Integration maps built from this report can miss links.",
+        confidence="UNKNOWN", analyzer="code-index", severity="LOW",
+    )] if truncated else []
     if not (packages or endpoints or calls or topics or any(grpc.values())):
-        return value, []
+        return value, coverage
     produced = sorted({name for (name, _, role) in topics if role == "produce"})
     consumed = sorted({name for (name, _, role) in topics if role == "consume"})
     parts = []
@@ -1233,7 +1285,7 @@ def _integration(context: _Context) -> tuple[dict, list[Finding]]:
     return value, [Finding(
         "multi_project", "Integration points", "; ".join(parts) + ". `pdt compare` joins these across scans into an "
         "integration map.", confidence="INFERRED", analyzer="code-index",
-    )]
+    ), *coverage]
 
 
 QUERY_KINDS = ("symbol", "callers", "callees", "references")
@@ -1283,6 +1335,7 @@ def query_code_index(inventory_path: Path, kind: str, name: str, limit: int = 20
 
 
 _PASSES = (
+    ("dependencies", _dependencies),
     ("symbols", _symbols),
     ("call_graph", _call_graph),
     ("unreferenced", _unreferenced),

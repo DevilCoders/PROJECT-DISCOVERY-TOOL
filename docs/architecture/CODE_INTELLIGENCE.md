@@ -19,7 +19,7 @@ always generated or minified, and the code-index analyzer reports them as `UNKNO
 | Backend | Languages | Method |
 |---|---|---|
 | Syntax tree | Python | Standard-library `ast`. Symbols carry qualified names (`Class.method`), decorators, parameters and async markers. Call targets are resolved through `import`/`from ... import` aliases (including relative imports), `self`/`cls`, module-level definitions, and the class of the receiver when the code states it (see below). |
-| Structural lexer | C, C++, C/C++ headers, Objective-C/C++, CUDA, OpenCL, GLSL, HLSL, Metal, WGSL, Java, Kotlin, Scala, Groovy, C#, Swift, Dart, JavaScript, TypeScript, Vue, Svelte, Go, Rust, PHP, Solidity, Zig, Arduino | A linear-time cleaner blanks comments, string contents and (JavaScript/TypeScript) regular-expression literals while keeping every offset, so braces and parentheses are paired exactly. Definitions come from type keywords, function keywords and C-style typed signatures, nested by brace containment; calls carry their receiver; imports are read per family. |
+| Structural lexer | C, C++, C/C++ headers, Objective-C/C++, CUDA, OpenCL, GLSL, HLSL, Metal, WGSL, Java, Kotlin, Scala, Groovy, C#, Swift, Dart, JavaScript, TypeScript, Vue, Svelte, Go, Rust, PHP, Solidity, Zig, Arduino | A linear-time cleaner blanks comments, string contents and (JavaScript/TypeScript) regular-expression literals while keeping every offset, so braces and parentheses are paired exactly. Definitions come from type keywords, function keywords and C-style typed signatures, nested by brace containment; calls carry their receiver; imports are read per family. A `.m` file, which can be Objective-C or MATLAB, is modelled as Objective-C when it has `#import`, `#include`, `@interface`, `@implementation`, `@protocol` or `@class` at the start of a line, and is not modelled otherwise. |
 | Tree-sitter refinement | C, C++, C/C++ headers, CUDA, Arduino, Java, C#, Kotlin, Scala, Swift, JavaScript, TypeScript (and TSX), Go, Rust, PHP, Solidity, when the grammar is provisioned locally | The file is parsed, and the grammar's tags query, completed by patterns PDT adds where a bundled query has gaps, replaces the lexer's symbols and calls: exact definition spans and nesting, method containers (namespaces, Go receivers, Rust `impl` blocks, Swift extensions, C++ `Type::method`), constructors, abstract and interface members, expression-bodied members and calls the lexer cannot see (Kotlin trailing lambdas), and no false definitions or calls from prototypes, declarations and initializers. The cleaned text, brace pairs, strings, imports and macros stay the lexer's, so both backends keep one contract. |
 
 **When the Tree-sitter refinement applies.** `tree-sitter-language-pack` must be installed and the language's grammar already in its local cache: PDT never downloads grammars (see the [Operations Guide](../guides/OPERATIONS.md)). The lexical model is kept when no grammar is provisioned, when `PDT_CODE_MODEL=lexical` is set, when error nodes cover more than 20% of the parse, when the syntax tree nests deeper than 4,096 levels (Tree-sitter's query cursor slows down quadratically on such trees; the deepest of 1,124 real npm JavaScript files measured 53 levels), and on any parser failure. Regions the tree does not structure (error nodes, Rust macro arguments and `macro_rules!` bodies, C/C++ `#define` bodies) keep the lexer's definitions and calls. `metrics.code_index.symbols.models` counts the files each backend modelled, per language, and `pdt capabilities` shows which languages a provisioned grammar refines. Results are still structural, without type resolution, and reported as `INFERRED`.
@@ -227,7 +227,12 @@ Angular HttpClient/ky/got, RestTemplate/WebClient/OkHttp, net/http, .NET HttpCli
 topics produced and consumed (Kafka, RabbitMQ, NATS, MQTT, SQS, Google Pub/Sub, Redis, Celery,
 Socket.IO, Spring listeners), gRPC services, servers and client stubs, and package identity
 from manifests. Served endpoints come from the API endpoint analyzer. Interpolated URL parts,
-numbers and UUIDs become `{}`.
+numbers and UUIDs become `{}`. Files below dependency and vendor directories (`node_modules`,
+`vendor`, `site-packages`, `.venv`, `target`, `third_party`, ...) describe other projects and are
+skipped. Lists are capped (500 packages, root and workspace manifests first; 5,000 endpoints,
+calls and topics); what a cap leaves out is counted under `truncated` and reported as an
+`UNKNOWN` "Integration points truncated" finding. The `dependencies` pass lists each lockfile's
+resolved packages for `pdt compare`.
 
 `pdt compare` joins the summaries of several scans into `integration_map` edges:
 
@@ -235,7 +240,8 @@ numbers and UUIDs become `{}`.
 |---|---|---|
 | `package_dependency` | A declares a dependency on B's package name (normalized) | CONFIRMED |
 | `http_api` | A calls a path that B serves, exactly or below a gateway/mount prefix; a served literal segment needs the same literal | INFERRED |
-| `messaging` | A publishes a topic that B consumes | INFERRED |
+| `messaging` | A publishes a topic that B consumes; declaring a queue is not publishing | INFERRED |
+| `shared_channel` | A and B use one topic or queue and neither publishes what the other consumes (no direction) | INFERRED |
 | `grpc` | A uses a client stub for a service B defines or serves | INFERRED |
 
 Reports from older scans fall back to the endpoint evidence in their API findings.

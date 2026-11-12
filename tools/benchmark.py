@@ -71,30 +71,50 @@ def _largest_child_rss() -> int | None:
     return int(peak) if sys.platform == "darwin" else int(peak) * 1024
 
 
+# Exit codes of a scan that wrote its report: clean, a --fail-on hit, and incomplete (--strict).
+_REPORTED_EXIT_CODES = {0, 1, 3}
+
+
 def run(corpus: Path, output: Path, extra: list[str], results: Path, label: str | None) -> dict:
     command = [
         sys.executable, "-m", "project_discovery", "scan", str(corpus),
         "--output", str(output), "--format", "json", "--quiet", *extra,
     ]
+    report_path = output / "discovery-report.json"
+    # A report left by an earlier run must never be read as this run's result.
+    report_path.unlink(missing_ok=True)
     started = time.perf_counter()
     completed = subprocess.run(command, check=False)
     wall = time.perf_counter() - started
-    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
-    metrics = report["metrics"]
-    performance = metrics.get("performance", {})
-    result = {
+    base = {
         "label": label,
         "corpus": str(corpus),
         "exit_code": completed.returncode,
         "arguments": extra,
         "host": {"system": platform.system(), "machine": platform.machine(), "cpus": os.cpu_count()},
+        "wall_seconds": round(wall, 2),
+    }
+    if completed.returncode not in _REPORTED_EXIT_CODES or not report_path.is_file():
+        # No throughput figures for a run that produced no report: they would be invented.
+        result = {**base, "failed": True, "reason": (
+            f"pdt scan exited {completed.returncode}" if report_path.is_file()
+            else f"pdt scan exited {completed.returncode} without writing {report_path.name}"
+        )}
+        with results.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(result, sort_keys=True) + "\n")
+        return result
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    metrics = report["metrics"]
+    performance = metrics.get("performance", {})
+    result = {
+        **base,
+        "failed": False,
         "files": metrics.get("file_count"),
         "bytes": metrics.get("total_bytes"),
         "findings": metrics.get("finding_persistence", {}).get("record_count"),
         "errors": len(report.get("errors", [])),
         "executor": metrics.get("execution", {}).get("executor"),
         "workers": metrics.get("execution", {}).get("worker_count"),
-        "wall_seconds": round(wall, 2),
         "phase_seconds": performance.get("phase_seconds"),
         "files_per_second": round((metrics.get("file_count") or 0) / max(wall, 1e-9), 1),
         "megabytes_per_second": round((metrics.get("total_bytes") or 0) / 1e6 / max(wall, 1e-9), 2),
@@ -123,7 +143,11 @@ def main() -> None:
     if args.command == "generate":
         print(json.dumps(generate(args.root, args.files, int(args.size_gb * 1024**3), args.seed), indent=2))
         return
-    print(json.dumps(run(args.corpus, args.output, extra, args.results, args.label), indent=2))
+    result = run(args.corpus, args.output, extra, args.results, args.label)
+    print(json.dumps(result, indent=2))
+    if result["failed"]:
+        # A scripted campaign must see the failure, not a normal-looking line.
+        raise SystemExit(result["exit_code"] or 1)
 
 
 if __name__ == "__main__":

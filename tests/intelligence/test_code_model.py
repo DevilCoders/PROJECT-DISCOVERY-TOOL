@@ -200,3 +200,27 @@ def test_python_calls_on_objects_resolve_to_the_class_the_code_states():
     # parameter, a name reassigned from an unknown call, and a parameter shadowing SHARED.
     assert sorted(line for line, target in by_line.items() if target) == [19, 20, 28, 29, 30, 32]
     assert sorted(line for line, target in by_line.items() if not target) == [22, 33, 36, 39]
+
+
+def test_m_files_are_modelled_as_objective_c_only_when_their_content_is(tmp_path):
+    # Regression: ".m" is always "Objective-C / MATLAB (ambiguous)" in the inventory, and only
+    # the exact name "Objective-C" had a model, so no Objective-C file was ever modelled while
+    # the language catalog listed Objective-C under the structural lexer.
+    from project_discovery.intelligence.model import AMBIGUOUS_M, model_for
+    from project_discovery.models import FileRecord
+
+    objc = tmp_path / "Widget.m"
+    objc.write_text(
+        "// Widget\n#import <Foundation/Foundation.h>\n\n"
+        "static int clamp(int value) {\n    return value < 0 ? 0 : value;\n}\n\n"
+        "@implementation Widget\n@end\n",
+        encoding="utf-8",
+    )
+    matlab = tmp_path / "analysis.m"
+    matlab.write_text("function y = analysis(x)\n% Scale the input.\ny = 2 * x;\nend\n", encoding="utf-8")
+    for path, expected in ((objc, "Objective-C"), (matlab, None)):
+        record = FileRecord(path.name, path.stat().st_size, ".m", AMBIGUOUS_M, mtime_ns=path.stat().st_mtime_ns)
+        model = model_for(path, record)
+        assert (model.language if model else None) == expected, path.name
+    model = model_for(objc, FileRecord("Widget.m", objc.stat().st_size, ".m", AMBIGUOUS_M, mtime_ns=1))
+    assert "clamp" in {symbol.name for symbol in model.symbols}
