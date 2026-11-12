@@ -767,7 +767,14 @@ def _safe_destination(root: Path, raw_path: bytes, *, windows: bool | None = Non
     return root.joinpath(*parts)
 
 
-def _ensure_safe_parent(root: Path, parent: Path) -> None:
+def _ensure_safe_parent(root: Path, parent: Path, created: set[str] | None = None) -> None:
+    """Create the directories from ``root`` down to ``parent``, refusing collisions.
+
+    ``created`` holds the exact spelling of every directory made so far in this tree. On a
+    filesystem that folds case (Windows, default macOS) or Unicode normalization (macOS),
+    ``src`` resolves to an existing ``Src``; without this check the two directories were
+    merged, and reports cited paths such as ``Src/b.py`` that the repository does not have.
+    """
     relative = parent.relative_to(root)
     current = root
     for component in relative.parts:
@@ -776,9 +783,16 @@ def _ensure_safe_parent(root: Path, parent: Path) -> None:
             current.lstat()
         except FileNotFoundError:
             current.mkdir()
+            if created is not None:
+                created.add(str(current))
             continue
         if current.is_symlink() or not current.is_dir():
             raise RemoteScanError("Repository tree has a non-directory ancestor collision.")
+        if created is not None and str(current) not in created:
+            raise RemoteScanError(
+                "Repository tree has directories whose names differ only in case or Unicode "
+                "normalization, which this filesystem cannot keep apart."
+            )
 
 
 def _read_blob(
@@ -921,6 +935,7 @@ def _extract_git_tree(
         budget_omitted_bytes = 0
         materialized_bytes = 0
         next_space_check = 64 * 1024 * 1024
+        created_directories: set[str] = set()
 
         assert tree.stdout is not None and blobs.stdin is not None
         assert blobs.stdout is not None
@@ -944,8 +959,8 @@ def _extract_git_tree(
                         submodule_paths.append(raw_path.decode("utf-8", errors="replace"))
                     try:
                         destination = _safe_destination(checkout, raw_path)
-                        _ensure_safe_parent(checkout, destination.parent)
-                        destination.mkdir(exist_ok=True)
+                        # The submodule's own (empty) directory, created like an ancestor.
+                        _ensure_safe_parent(checkout, destination, created_directories)
                     except (OSError, RemoteScanError):
                         omitted_path_count += 1
                     continue
@@ -965,7 +980,7 @@ def _extract_git_tree(
                 output = None
                 try:
                     destination = _safe_destination(checkout, raw_path)
-                    _ensure_safe_parent(checkout, destination.parent)
+                    _ensure_safe_parent(checkout, destination.parent, created_directories)
                     if not symlink:
                         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
                         flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -1298,6 +1313,56 @@ def _replace_directory(source: Path, destination: Path) -> None:
     if destination.exists() or destination.is_symlink():
         raise RemoteScanError("Temporary checkout destination already exists.")
     os.replace(source, destination)
+
+
+def _delete_file(path: Path) -> None:
+    """Unlink one file, clearing a read-only bit (Windows refuses to unlink those)."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        path.unlink(missing_ok=True)
+
+
+def _apply_budget(checkout: Path, limits: RemoteLimits) -> tuple[int, int]:
+    """Keep regular files in path order up to the byte and file budgets; delete the rest.
+
+    For clients that export a whole tree at once, this applies the budgets that Git
+    extraction applies file by file: first fit in path order, links not counted, and
+    directory links never descended into. Returns (files removed, bytes removed).
+    """
+    kept_files = kept_bytes = removed_files = removed_bytes = 0
+    pending = [checkout]
+    while pending:
+        current = pending.pop()
+        with os.scandir(current) as entries:
+            children = sorted(entries, key=lambda entry: entry.name)
+        directories = []
+        for entry in children:
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode) and not _is_link_like(info):
+                directories.append(Path(entry.path))
+            elif stat.S_ISREG(info.st_mode) and not _is_link_like(info):
+                if kept_files >= limits.max_files or kept_bytes + info.st_size > limits.max_bytes:
+                    _delete_file(Path(entry.path))
+                    removed_files += 1
+                    removed_bytes += info.st_size
+                else:
+                    kept_files += 1
+                    kept_bytes += info.st_size
+        # A stack pops the last item first: push in reverse to walk in sorted order.
+        pending.extend(reversed(directories))
+    return removed_files, removed_bytes
+
+
+def _add_coverage(metadata: dict, kind: str, count: int, detail: str, *, incomplete: bool) -> None:
+    """Append one coverage item (and its warning) to a backend's metadata."""
+    if count:
+        metadata["coverage"] = [
+            *(metadata.get("coverage") or []),
+            {"kind": kind, "count": count, "detail": detail, "incomplete": incomplete},
+        ]
+        metadata["warnings"] = [*(metadata.get("warnings") or []), detail]
 
 
 def _hg_checkout(
@@ -1725,8 +1790,10 @@ def _p4_checkout(
 
     checkout.mkdir(parents=True, exist_ok=False)
     materialized = 0
+    materialized_bytes = 0
     unsafe = 0
-    for entry in entries:
+    created_directories: set[str] = set()
+    for index, entry in enumerate(entries):
         depot_file = entry.get("depotFile", "")
         revision = entry.get("rev", "")
         if not depot_file.startswith(depot_prefix) or not revision.isdigit():
@@ -1735,7 +1802,7 @@ def _p4_checkout(
         relative = _p4_local_name(depot_file[len(depot_prefix):])
         try:
             destination = _safe_destination(checkout, os.fsencode(relative))
-            _ensure_safe_parent(checkout, destination.parent)
+            _ensure_safe_parent(checkout, destination.parent, created_directories)
             descriptor = os.open(
                 destination,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
@@ -1752,8 +1819,16 @@ def _p4_checkout(
                 disk_guard=(checkout, limits.min_free_bytes),
             )
         except Exception:
-            destination.unlink(missing_ok=True)
+            _delete_file(destination)
             raise
+        size = destination.lstat().st_size
+        if materialized_bytes + size > limits.max_bytes:
+            # The depot listing carries no sizes, so the byte budget is checked after each
+            # print: the file that crosses it is removed and the rest are not fetched.
+            _delete_file(destination)
+            omitted += len(entries) - index
+            break
+        materialized_bytes += size
         materialized += 1
 
     changes = [
@@ -1763,7 +1838,8 @@ def _p4_checkout(
     coverage = _Coverage()
     coverage.add(
         "materialization_budget", omitted,
-        f"{omitted:,} depot file(s) were not fetched because the Perforce file-count limit was reached.",
+        f"{omitted:,} depot file(s) were not fetched because the remote budget of "
+        f"{limits.max_bytes:,} bytes / {file_limit:,} files was reached.",
         incomplete=True,
     )
     coverage.add(
@@ -1846,6 +1922,18 @@ def _materialize(target: RemoteTarget, temporary: Path, *, timeout: int, limits:
         metadata = _fossil_checkout(target, checkout, temporary, timeout=timeout, limits=limits)
     else:
         raise RemoteScanError(f"Unsupported remote VCS backend: {target.vcs}")
+    if target.vcs not in {"git", "p4"}:
+        # These clients export the whole tree; the free-space guard bounds the export, and
+        # the byte and file budgets are applied here, before analysis. Git and Perforce
+        # apply them while fetching, file by file.
+        removed_files, removed_bytes = _apply_budget(checkout, limits)
+        _add_coverage(
+            metadata, "materialization_budget", removed_files,
+            f"{removed_files:,} file(s) ({removed_bytes:,} bytes) were removed before analysis "
+            f"because the remote budget of {limits.max_bytes:,} bytes / {limits.max_files:,} "
+            "files was reached.",
+            incomplete=True,
+        )
     return checkout, metadata
 
 

@@ -42,6 +42,8 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_RETRIES = 3
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_RETRY_AFTER_SECONDS = 120.0
+# GitHub: after a secondary rate limit without Retry-After, wait at least a minute.
+SECONDARY_RATE_LIMIT_WAIT_SECONDS = 60.0
 MAX_REDIRECTS = 5
 CA_BUNDLE_VARIABLES = ("PDT_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 _RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -52,12 +54,15 @@ class NetworkError(RuntimeError):
 
     def __init__(
         self, message: str, *, kind: str = "network", status: int | None = None,
-        retry_after: float | None = None,
+        retry_after: float | None = None, received: int | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.status = status
         self.retry_after = retry_after
+        # For "too_large": the body bytes read before refusing (0 when Content-Length
+        # already showed the response too large); None when unknown.
+        self.received = received
 
 
 def is_loopback_host(host: str | None) -> bool:
@@ -186,9 +191,18 @@ def _reset_wait_seconds(value: str | None) -> float | None:
 
 def _read_bounded(response, max_bytes: int) -> bytes:
     encoding = (response.headers.get("Content-Encoding") or "").lower()
+    declared = (response.headers.get("Content-Length") or "").strip()
+    if not encoding and declared.isdigit() and int(declared) > max_bytes:
+        # Refuse before reading: the body is never transferred.
+        raise NetworkError(
+            f"response of {int(declared):,} bytes exceeds the {max_bytes:,}-byte limit",
+            kind="too_large", received=0,
+        )
     raw = response.read(max_bytes + 1)
     if len(raw) > max_bytes:
-        raise NetworkError(f"response exceeds the {max_bytes:,}-byte limit", kind="too_large")
+        raise NetworkError(
+            f"response exceeds the {max_bytes:,}-byte limit", kind="too_large", received=len(raw),
+        )
     if encoding in {"gzip", "x-gzip", "deflate"}:
         decoder = zlib.decompressobj(16 + zlib.MAX_WBITS if "gzip" in encoding else zlib.MAX_WBITS)
         try:
@@ -198,6 +212,7 @@ def _read_bounded(response, max_bytes: int) -> bytes:
         if len(data) > max_bytes or decoder.unconsumed_tail:
             raise NetworkError(
                 f"decompressed response exceeds the {max_bytes:,}-byte limit", kind="too_large",
+                received=len(raw),
             )
         return data
     return raw
@@ -289,14 +304,27 @@ class HttpClient:
                 error_headers = exc.headers or {}
                 retry_after = _retry_after_seconds(error_headers.get("Retry-After"))
                 remaining = error_headers.get("X-RateLimit-Remaining") or error_headers.get("RateLimit-Remaining")
+                secondary = False
+                if status in {403, 429}:
+                    try:
+                        secondary = b"secondary rate limit" in exc.read(4096).lower()
+                    except (OSError, http.client.HTTPException):
+                        secondary = False
                 exc.close()
                 if status == 404 and not_found_ok:
                     return 404, b"", error_headers
-                rate_limited = status == 429 or (status == 403 and remaining == "0")
+                # GitHub's secondary rate limit answers 403 with Retry-After, or with only its
+                # message, while the primary limit still has requests left.
+                rate_limited = status == 429 or (
+                    status == 403 and (remaining == "0" or retry_after is not None or secondary)
+                )
                 if rate_limited and retry_after is None:
-                    retry_after = _reset_wait_seconds(
-                        error_headers.get("X-RateLimit-Reset") or error_headers.get("RateLimit-Reset"),
-                    )
+                    if remaining == "0" or not secondary:
+                        retry_after = _reset_wait_seconds(
+                            error_headers.get("X-RateLimit-Reset") or error_headers.get("RateLimit-Reset"),
+                        )
+                    if retry_after is None and secondary:
+                        retry_after = SECONDARY_RATE_LIMIT_WAIT_SECONDS
                 if (status in _RETRY_STATUSES or rate_limited) and attempt <= self.retries:
                     if retry_after is not None and retry_after > MAX_RETRY_AFTER_SECONDS:
                         self._count(self.failures, host)

@@ -226,7 +226,8 @@ if(vcsFindingCount>100){
 }
 $("inventory-summary").textContent=number(total("files"))+" files • "+
  number(Math.max(0,total("directories")-1))+" directories • "+number(total("symlinks"))+
- " links • "+number(total("special_entries"))+" special entries • "+formatBytes(metrics.total_bytes)+" • "+number(metrics.hidden_entry_count||0)+
+ " links • "+number(total("special_entries"))+" special entries • "+formatBytes(metrics.total_bytes)+
+ (metrics.size_unknown_count?" (plus "+number(metrics.size_unknown_count)+" files of unknown size)":"")+" • "+number(metrics.hidden_entry_count||0)+
  " hidden entries • "+number(metrics.development_directory_count||0)+" development/cache trees";
 $("raw-metrics").textContent=JSON.stringify(metrics,null,2);
 $("raw-errors").textContent=JSON.stringify(REPORT.errors||[],null,2);

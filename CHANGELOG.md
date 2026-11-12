@@ -174,6 +174,18 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
 - The fingerprint cache stores file IDs beyond 64 bits and never fails a file (PDT-268).
 - Inventory records are read in keyset pages, so the WAL no longer grows through the analysis
   phase (PDT-269).
+- A malformed provider answer fails only its own `--url` target, and an unexpected error exits 2
+  with a one-line message instead of 1, the `--fail-on` code; `pdt compare` reads null report
+  sections as empty (PDT-270).
+- `--remote-max-gb` and the file budget apply to every backend, not only Git (PDT-271).
+- Remote trees with directories that differ only in case are no longer merged on Windows and
+  macOS; the colliding paths are reported as not materialized (PDT-272).
+- No-download: GitLab files without a listed size are reported as of unknown size instead of
+  0 bytes; `--skip`/`--max-file-mb` apply to them; `--api-max-mb` holds with parallel reads
+  (PDT-273). GitHub's secondary rate limit is retried or stops requests (PDT-274).
+- A `--url` file with one repository gets the batch layout, summary and exit codes (PDT-275).
+- VCS markers for `hg init`, `darcs init`, Jujutsu, Bazaar, Pijul, CVS and POSIX Fossil
+  checkouts, Jujutsu Git remotes and bare repositories at any depth (PDT-276).
 
 ## 0.2.0 — 2026-11-05
 

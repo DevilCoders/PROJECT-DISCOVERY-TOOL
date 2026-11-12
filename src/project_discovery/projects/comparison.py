@@ -25,6 +25,49 @@ def load_report(path: Path) -> dict[str, Any]:
     missing = required - set(data)
     if missing:
         raise ValueError(f"Invalid PDT report {path}: missing {', '.join(sorted(missing))}")
+    return _normalized(data)
+
+
+def _object(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _objects(value: Any) -> list[dict]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _normalized(data: dict[str, Any]) -> dict[str, Any]:
+    """Read the sections comparison uses as empty when they have the wrong type.
+
+    A report from another producer, or edited by hand, may hold null or another type
+    where PDT writes an object or a list (for example ``python_dependency_graph: null``).
+    Such a section compares as empty instead of failing with a traceback.
+    """
+    data["files"] = _objects(data.get("files"))
+    findings = _objects(data.get("findings"))
+    for item in findings:
+        item["title"] = str(item.get("title") or "")
+        evidence = item.get("evidence")
+        item["evidence"] = [str(value) for value in evidence] if isinstance(evidence, list) else []
+    data["findings"] = findings
+    metrics = _object(data.get("metrics"))
+    graph = _object(metrics.get("python_dependency_graph"))
+    graph["modules"] = _objects(graph.get("modules"))
+    metrics["python_dependency_graph"] = graph
+    metrics["languages"] = _object(metrics.get("languages"))
+    code_index = _object(metrics.get("code_index"))
+    integration = _object(code_index.get("integration"))
+    for key in ("packages", "topics"):
+        integration[key] = [item for item in _objects(integration.get(key)) if isinstance(item.get("name"), str)]
+    for key in ("endpoints", "http_calls"):
+        integration[key] = _objects(integration.get(key))
+    integration["grpc"] = {
+        key: [str(value) for value in values]
+        for key, values in _object(integration.get("grpc")).items() if isinstance(values, list)
+    }
+    code_index["integration"] = integration
+    metrics["code_index"] = code_index
+    data["metrics"] = metrics
     return data
 
 

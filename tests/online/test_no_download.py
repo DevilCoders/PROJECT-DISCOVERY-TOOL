@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from provider_server import COMMIT, MARKER, ProviderService, RunningProviders
+from provider_server import COMMIT, MARKER, ProviderService, RunningProviders, fixture_files
 
 from project_discovery import cli
 from project_discovery.online import credentials
@@ -174,6 +174,69 @@ def test_budgets_leave_unfetched_files_in_the_inventory_as_coverage_gaps(options
     assert any(item["title"] == "Remote source coverage gap: content not fetched" for item in report["findings"])
 
 
+@pytest.mark.parametrize(
+    ("options", "reason", "gap"),
+    [
+        (["--api-max-mb", "1"], "byte budget of 1,048,576 bytes reached", True),
+        (["--api-max-file-mb", "1"], "per-file budget of 1,048,576 bytes", True),
+        (["--skip", "--max-file-mb", "1"], "Explicit --skip: exceeds 1048576 bytes", False),
+    ],
+)
+def test_gitlab_sizes_the_listing_lacks_are_unknown_not_zero(options, reason, gap, tmp_path: Path, monkeypatch):
+    # Regression: GitLab's tree listing has no sizes, and each became 0 bytes. --skip let
+    # assets/big.bin (1.5 MiB) through, --api-max-mb 1 fetched 1.5 MiB, and files that
+    # were never fetched were reported as 0 bytes in the smallest size bucket.
+    with RunningProviders(ProviderService()) as running:
+        code = _main(monkeypatch, "scan", PROVIDERS["gitlab"][0], "--no-download", "--api-url",
+                     running.url + "/gitlab/api/v4", "--output", str(tmp_path / "out"), "--quiet",
+                     "--format", "json", *options)
+    assert code == cli.EXIT_OK
+    report = _report(tmp_path / "out")
+    big = next(item for item in report["files"] if item["path"] == "assets/big.bin")
+    assert reason in big["content_skipped_reason"]
+    assert big["content_skipped_reason"].startswith("no-download:") is gap
+    assert big["size_bucket"] == "unknown"
+    metrics = report["metrics"]
+    source = metrics["source"]["remote"]
+    assert source["bytes_fetched"] <= 1024 * 1024
+    # The Content-Length header refused big.bin before its body was transferred.
+    assert source["bytes_discarded"] == 0
+    # Fetched files have their real sizes; only big.bin's stays unknown, out of the totals.
+    files = {path: content for path, (content, mode) in fixture_files().items() if mode != "120000"}
+    assert metrics["size_unknown_count"] == 1
+    assert metrics["size_buckets"]["unknown"] == 1
+    assert metrics["total_bytes"] == sum(len(content) for path, content in files.items() if path != "assets/big.bin")
+    assert any(item["title"] == "Remote source coverage gap: sizes unknown" for item in report["findings"])
+
+
+def test_gitlab_inventory_only_reports_sizes_as_unknown(tmp_path: Path, monkeypatch):
+    with RunningProviders(ProviderService()) as running:
+        code = _main(monkeypatch, "scan", PROVIDERS["gitlab"][0], "--no-download", "--api-url",
+                     running.url + "/gitlab/api/v4", "--output", str(tmp_path / "out"), "--quiet",
+                     "--format", "json", "--inventory-only")
+    assert code == cli.EXIT_OK
+    metrics = _report(tmp_path / "out")["metrics"]
+    files = [path for path, (_, mode) in fixture_files().items() if mode != "120000"]
+    assert metrics["size_buckets"] == {"unknown": len(files)}
+    assert metrics["size_unknown_count"] == len(files)
+    assert metrics["total_bytes"] == 0
+
+
+def test_parallel_reads_never_overshoot_the_byte_budget(tmp_path: Path, monkeypatch):
+    # Regression: each worker checked the bytes fetched so far, so eight parallel reads of
+    # 300,000-byte files all passed a 1 MiB budget together. Reservations count reads in flight.
+    service = ProviderService(files={f"data/f{index}.txt": (b"x" * 300_000, "100644") for index in range(8)},
+                              submodules=())
+    with RunningProviders(service) as running:
+        code = _main(monkeypatch, "scan", PROVIDERS["github"][0], "--no-download", "--api-url",
+                     running.url + "/github", "--output", str(tmp_path / "out"), "--quiet",
+                     "--format", "json", "--api-max-mb", "1", "--api-workers", "8")
+    assert code == cli.EXIT_OK
+    source = _report(tmp_path / "out")["metrics"]["source"]["remote"]
+    assert source["files_fetched"] == 3
+    assert source["bytes_fetched"] == 900_000
+
+
 def test_rate_limit_exhaustion_stops_fetching_and_is_reported(tmp_path: Path, monkeypatch):
     service = ProviderService(rate_limit_after_blobs=2)
     with RunningProviders(service) as running:
@@ -188,6 +251,41 @@ def test_rate_limit_exhaustion_stops_fetching_and_is_reported(tmp_path: Path, mo
     # After the first rate-limited answer PDT stops asking.
     assert content_requests <= 4
     assert any("rate limit" in error for error in report["errors"])
+
+
+@pytest.mark.parametrize("retry_after", ["1", None])
+def test_a_short_secondary_rate_limit_is_waited_out_and_retried(retry_after, tmp_path: Path, monkeypatch):
+    # Regression: HTTP 403 with Retry-After (or GitHub's "secondary rate limit" message) and
+    # requests left on the primary limit was a plain HTTP error: never retried, and every
+    # later file was requested again from an API that refused it.
+    from project_discovery.online import http as http_module
+
+    monkeypatch.setattr(http_module, "SECONDARY_RATE_LIMIT_WAIT_SECONDS", 0.05)
+    service = ProviderService(secondary_refusals=1, secondary_retry_after=retry_after)
+    with RunningProviders(service) as running:
+        code = _main(monkeypatch, "scan", PROVIDERS["github"][0], "--no-download", "--api-url",
+                     running.url + "/github", "--output", str(tmp_path / "out"), "--quiet",
+                     "--strict", "--format", "json", "--api-workers", "1")
+    assert code == cli.EXIT_OK
+    report = _report(tmp_path / "out")
+    assert not [item for item in report["files"] if (item["content_skipped_reason"] or "").startswith("no-download:")]
+    assert report["metrics"]["source"]["remote"]["requests"]["retries"] >= 1
+
+
+def test_a_long_secondary_rate_limit_stops_content_requests(tmp_path: Path, monkeypatch):
+    service = ProviderService(secondary_refusals=1_000, secondary_retry_after="3600")
+    with RunningProviders(service) as running:
+        code = _main(monkeypatch, "scan", PROVIDERS["github"][0], "--no-download", "--api-url",
+                     running.url + "/github", "--output", str(tmp_path / "out"), "--quiet",
+                     "--format", "json", "--api-workers", "1")
+        content_requests = len(service.content_requests())
+    assert code == cli.EXIT_OK
+    report = _report(tmp_path / "out")
+    reasons = {item["content_skipped_reason"] for item in report["files"] if item["content_skipped_reason"]}
+    assert reasons == {"no-download: provider API rate limit exhausted; resets in about 3,600 s"}
+    # The first refused request (the symlink target, read while listing) stopped all others.
+    assert content_requests == 1
+    assert {item["target_state"] for item in report["symlinks"]} == {"unverified"}
 
 
 def test_request_budget_exhaustion_is_reported(tmp_path: Path, monkeypatch):
@@ -277,6 +375,23 @@ def test_url_batch_mixes_providers_through_per_host_api_urls(tmp_path: Path, mon
     assert [item["status"] for item in summary["targets"]] == ["completed", "completed", "failed"]
     assert summary["targets"][0]["revision"] == COMMIT
     assert "not found" in summary["targets"][2]["error"]
+
+
+def test_a_malformed_provider_answer_fails_only_its_own_target(tmp_path: Path, monkeypatch):
+    # Regression: a GitHub repository answer with "default_branch": 123 raised TypeError,
+    # which escaped the batch loop: later repositories were skipped, no batch summary was
+    # written, and the process exited 1, the --fail-on code.
+    url_file = tmp_path / "repos.txt"
+    url_file.write_text(f"{PROVIDERS['github'][0]}\n{PROVIDERS['gitea'][0]}\n", encoding="utf-8")
+    with RunningProviders(ProviderService(default_branches={"github": 123})) as running:
+        monkeypatch.setenv("PDT_API_URL_GITHUB_COM", running.url + "/github")
+        monkeypatch.setenv("PDT_API_URL_CODEBERG_ORG", running.url + "/gitea/api/v1")
+        code = _main(monkeypatch, "scan", "--url", str(url_file), "--no-download",
+                     "--output", str(tmp_path / "batch"), "--quiet", "--format", "json")
+    assert code == cli.EXIT_INCOMPLETE
+    summary = json.loads((tmp_path / "batch" / "batch-summary.json").read_text(encoding="utf-8"))
+    assert [item["status"] for item in summary["targets"]] == ["failed", "completed"]
+    assert "malformed default branch" in summary["targets"][0]["error"]
 
 
 def test_git_credential_helper_supplies_a_host_bound_token(tmp_path: Path, monkeypatch):

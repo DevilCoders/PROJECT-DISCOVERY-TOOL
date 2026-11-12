@@ -70,6 +70,7 @@ from .online.memory_scan import (
     DEFAULT_API_MAX_FILES,
     DEFAULT_API_MAX_REQUESTS,
     DEFAULT_API_WORKERS,
+    SKIP_OPTION_REASON,
     ApiLimits,
     NoDownloadOptions,
     NoDownloadSource,
@@ -699,8 +700,14 @@ def run_scan(
                 def apply_memory_result(record, outcome, reason, fetched_size):
                     walk_stats[f"file_type:{record.file_type}"] += 1
                     if outcome is None:
-                        record.content_skipped_reason = f"no-download: {reason}"
-                        memory_source.record_skip(record, reason)
+                        if reason.startswith(SKIP_OPTION_REASON):
+                            # --skip, decided from the bytes for a size the listing lacked:
+                            # the user's choice, as on a local tree, not a coverage gap.
+                            record.content_skipped_reason = reason
+                            walk_stats["oversized_content_skipped"] += 1
+                        else:
+                            record.content_skipped_reason = f"no-download: {reason}"
+                            memory_source.record_skip(record, reason)
                     else:
                         record.analyzed = outcome.analyzed
                         record.sha256 = outcome.digest
@@ -709,8 +716,12 @@ def run_scan(
                             finding_store.extend_code_facts(record.path, outcome.facts)
                         finding_store.extend_diagnostics(outcome.errors)
                         delta = fetched_size - record.size_bytes
-                        if delta:
-                            # Providers that list no sizes (GitLab): correct the aggregates.
+                        unlisted = memory_source.listed_size(record.path) is None
+                        if unlisted:
+                            walk_stats["size_unknown_count"] -= 1
+                            memory_source.size_learned()
+                        if delta or unlisted:
+                            # Providers that list no sizes (GitLab): the size is known now.
                             walk_stats[f"size_bucket:{record.size_bucket}"] -= 1
                             record.size_bytes = fetched_size
                             record.size_bucket = memory_source.size_bucket(fetched_size)
@@ -908,9 +919,12 @@ def run_scan(
         },
         "size_buckets": {
             key.split(":", 1)[1]: value
-            for key, value in walk_stats.items() if key.startswith("size_bucket:")
+            for key, value in walk_stats.items() if key.startswith("size_bucket:") and value
         },
         "total_bytes": walk_stats.get("total_bytes", 0),
+        # Files whose size no listing gave and no read revealed (no-download, GitLab); they
+        # are in the "unknown" size bucket and not in total_bytes.
+        "size_unknown_count": walk_stats.get("size_unknown_count", 0),
         "walk_errors": walk_stats.get("walk_errors", 0),
         "oversized_files": walk_stats.get("oversized_content_skipped", 0),
         "content_skip_enabled": skip_oversized,
@@ -1222,16 +1236,18 @@ def _run_remote_targets(
     scan_options: dict,
     remote_options: dict | None = None,
     no_download: NoDownloadOptions | None = None,
+    batch: bool | None = None,
 ) -> int:
     """Scan one or more remote repositories, continuing after target-specific failures.
 
     Each target gets its own report directory. A batch also writes batch-summary.json
     and batch-summary.md (per-target status, revision, exit code and error) into the
-    output directory, including when the batch is interrupted.
+    output directory, including when the batch is interrupted. Every --url run is a
+    batch (``batch=True``), however many unique repositories its file lists.
     """
     remote_options = dict(remote_options or {})
     allow_insecure = bool(remote_options.get("allow_insecure_transport", False))
-    multiple = len(targets) > 1
+    multiple = len(targets) > 1 if batch is None else batch
     base_output = output
     if multiple and base_output is None:
         base_output = Path.cwd() / "pdt-remote-reports"
@@ -1315,6 +1331,15 @@ def _run_remote_targets(
             except (OSError, ValueError, sqlite3.Error, NetworkError) as exc:
                 entry["status"] = "failed"
                 entry["error"] = sanitize_client_output(str(exc), max_chars=4_000)
+                _status(
+                    error_console, "FAILED",
+                    f"{target.provider} / {target.repository_name}: {entry['error']}", "red",
+                )
+            except Exception as exc:  # noqa: BLE001 - a remote answer is untrusted input
+                # One malformed provider answer (or any other defect) must cost only this
+                # target: the rest of the batch still runs and the summary is written.
+                entry["status"] = "failed"
+                entry["error"] = sanitize_client_output(f"{type(exc).__name__}: {exc}", max_chars=4_000)
                 _status(
                     error_console, "FAILED",
                     f"{target.provider} / {target.repository_name}: {entry['error']}", "red",
@@ -1909,6 +1934,9 @@ def main() -> None:
                     scan_options=scan_options,
                     remote_options=remote_options,
                     no_download=no_download_options,
+                    # A URL file is a batch even when it lists one repository (or its
+                    # lines collapse to one): same layout, summary and exit codes.
+                    batch=args.url is not None,
                 ))
             raise SystemExit(run_scan(
                 Path(args.path), args.output, formats, args.max_file_mb,
@@ -1934,6 +1962,12 @@ def main() -> None:
         parser.exit(EXIT_INTERRUPTED, "\n[ INTERRUPTED ] Scan cancelled; partial output may remain.\n")
     except (OSError, ValueError, sqlite3.Error) as exc:
         parser.exit(EXIT_USAGE, "[ ERROR ] " + str(exc) + "\n")
+    except Exception as exc:  # noqa: BLE001 - never exit 1 (the --fail-on code) on a crash
+        parser.exit(
+            EXIT_USAGE,
+            f"[ ERROR ] Unexpected {type(exc).__name__}: {neutralize_controls(str(exc))}\n"
+            "[ ERROR ] This is a PDT defect; please report it with the command line used.\n",
+        )
 
 
 if __name__ == "__main__":

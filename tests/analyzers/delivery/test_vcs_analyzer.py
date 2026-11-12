@@ -163,3 +163,95 @@ def test_vcs_metadata_read_rejects_changed_inventory_identity(tmp_path: Path):
     assert "identity changed" in findings[0].detail.lower()
     assert all("attacker.invalid" not in item.detail for item in findings)
 
+
+
+def _scan_tree(tmp_path: Path, files: dict[str, str], relative: str):
+    """Write a whole layout, then analyze one of its files (sibling checks need the tree)."""
+    for name, content in files.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    path = tmp_path / relative
+    record = FileRecord(relative, path.stat().st_size, path.suffix.lower(), "Metadata")
+    analyzer = VCSHostingAnalyzer()
+    if not analyzer.supports(record):
+        return None
+    return analyzer.analyze(path, record)
+
+
+def test_every_vcs_control_directory_gives_one_marker_without_optional_files(tmp_path: Path):
+    # Regression: Mercurial was reported only with .hg/hgrc, Darcs only with
+    # _darcs/prefs/repos and Jujutsu only with .jj/repo/config.toml, all optional files:
+    # "hg init", "darcs init" and ordinary jj repositories produced no finding at all.
+    layouts = {
+        "Mercurial": ({"hg/.hg/requires": "revlogv1\nstore\nfncache\n",
+                       "hg/.hg/store/requires": "revlog-compression-zstd\n"}, "hg/.hg/requires"),
+        "Darcs": ({"darcs/_darcs/format": "hashed\ndarcs-2\n"}, "darcs/_darcs/format"),
+        "Jujutsu": ({"jj/.jj/repo/store/type": "git"}, "jj/.jj/repo/store/type"),
+        "Bazaar": ({"bzr/.bzr/branch-format": "Bazaar-NG meta directory, format 1\n"}, "bzr/.bzr/branch-format"),
+        "Pijul": ({"pijul/.pijul/pristine/db": "\0binary"}, "pijul/.pijul/pristine/db"),
+        "Subversion": ({"svn/.svn/wc.db": "SQLite format 3\0", "svn/.svn/entries": "12\n"}, "svn/.svn/wc.db"),
+        "CVS": ({"cvs/CVS/Root": ":pserver:anonymous@cvs.example.net:/cvsroot\n"}, "cvs/CVS/Root"),
+    }
+    for vcs, (files, marker) in layouts.items():
+        findings = _scan_tree(tmp_path, files, marker)
+        assert findings and findings[0].confidence == "CONFIRMED", vcs
+        assert findings[0].title == f"{vcs} repository metadata: {marker.split('/')[0]}", vcs
+    hg = _scan_tree(tmp_path, {}, "hg/.hg/requires")
+    assert "requirements: revlogv1, store, fncache" in hg[0].evidence
+    assert "cvs.example.net" in _scan_tree(tmp_path, {}, "cvs/CVS/Root")[0].detail
+    # One finding per control directory: the share-safe store requirements and the 1.7
+    # entries file next to wc.db add none.
+    assert _scan_tree(tmp_path, {}, "hg/.hg/store/requires") is None
+    assert _scan_tree(tmp_path, {}, "svn/.svn/entries") == []
+
+
+def test_jujutsu_git_backend_remotes_and_shared_workspaces(tmp_path: Path):
+    findings = _scan_tree(
+        tmp_path, {".jj/repo/store/git/config": '[remote "origin"]\n url = https://gitlab.com/acme/project.git\n'},
+        ".jj/repo/store/git/config",
+    )
+    assert any(item.category == "hosting_providers" and "GitLab" in item.title for item in findings)
+    assert any(item.title.startswith("Jujutsu Git backend configuration") for item in findings)
+    pointer = _scan_tree(tmp_path, {"second/.jj/repo": "../../.jj/repo"}, "second/.jj/repo")
+    assert "shared with another workspace" in pointer[0].detail
+
+
+def test_fossil_checkout_databases_under_every_name(tmp_path: Path):
+    for name in ("_FOSSIL_", ".fslckout", ".fos"):
+        findings = _scan_tree(tmp_path, {f"checkout/{name}": "SQLite format 3\0"}, f"checkout/{name}")
+        assert len(findings) == 1 and "Fossil" in findings[0].title, name
+
+
+def test_bare_repository_is_recognized_at_any_depth(tmp_path: Path):
+    (tmp_path / "mirrors" / "tool.git" / "objects").mkdir(parents=True)
+    findings = _scan_tree(
+        tmp_path, {"mirrors/tool.git/HEAD": "ref: refs/heads/main\n",
+                   "mirrors/tool.git/config": "[core]\n bare = true\n"},
+        "mirrors/tool.git/HEAD",
+    )
+    assert findings[0].title == "Git bare repository metadata: mirrors/tool.git"
+    # A HEAD file that is not part of a repository is not claimed.
+    assert _scan_tree(tmp_path, {"docs/HEAD": "notes\n"}, "docs/HEAD") == []
+
+
+def test_cvs_and_old_subversion_report_a_working_copy_once(tmp_path: Path):
+    # Both keep a control directory in every directory of a working copy.
+    files = {
+        "cvs/CVS/Root": ":pserver:anonymous@cvs.example.net:/cvsroot\n",
+        "cvs/src/CVS/Root": ":pserver:anonymous@cvs.example.net:/cvsroot\n",
+        "svn/.svn/entries": "10\n",
+        "svn/lib/.svn/entries": "10\n",
+    }
+    assert _scan_tree(tmp_path, files, "cvs/CVS/Root")
+    assert _scan_tree(tmp_path, files, "cvs/src/CVS/Root") == []
+    assert _scan_tree(tmp_path, files, "svn/.svn/entries")
+    assert _scan_tree(tmp_path, files, "svn/lib/.svn/entries") == []
+
+
+def test_files_without_a_handler_are_not_claimed():
+    analyzer = VCSHostingAnalyzer()
+    for relative in (".git/commondir", ".git/description", ".bzr/branch/last-revision",
+                     "CVS/Repository", "CVS/Entries", ".hg/store/requires", ".jj/repo/op_store/type"):
+        assert analyzer.supports(FileRecord(relative, 1, "", "Metadata")) is False, relative
+    assert analyzer.supports(FileRecord(".git/worktrees/feature/gitdir", 1, "", "Metadata"))

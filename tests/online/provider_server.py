@@ -51,7 +51,13 @@ class ProviderService:
     private: bool = False
     github_truncated: bool = False
     rate_limit_after_blobs: int | None = None
+    # GitHub's secondary rate limit: refuse this many content requests with HTTP 403 and
+    # Retry-After (None: the message only) while X-RateLimit-Remaining stays non-zero.
+    secondary_refusals: int = 0
+    secondary_retry_after: str | None = "1"
     page_size: int = 3
+    # Per-provider override of the default branch an API reports (to send malformed answers).
+    default_branches: dict[str, object] = field(default_factory=dict)
     requests: list[dict] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
     base_url: str = ""
@@ -111,6 +117,17 @@ class _Handler(BaseHTTPRequestHandler):
         service = self.service
         with service.lock:
             fetched = len(service.content_requests())
+        with service.lock:
+            refuse = service.secondary_refusals > 0
+            if refuse:
+                service.secondary_refusals -= 1
+        if refuse:
+            headers = {"X-RateLimit-Remaining": "4999", "X-RateLimit-Reset": str(int(time.time()) + 3600)}
+            if service.secondary_retry_after is not None:
+                headers["Retry-After"] = service.secondary_retry_after
+            self._send(403, {"message": "You have exceeded a secondary rate limit. Please wait a few "
+                                        "minutes before you try again."}, headers=headers)
+            return
         if service.rate_limit_after_blobs is not None and fetched > service.rate_limit_after_blobs:
             self._send(403, {"message": "API rate limit exceeded"}, headers={
                 "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(time.time()) + 3600),
@@ -141,7 +158,7 @@ class _Handler(BaseHTTPRequestHandler):
         service = self.service
         repo = "/repos/acme/fixture"
         if path == repo:
-            self._send(200, {"default_branch": "main", "private": service.private})
+            self._send(200, {"default_branch": service.default_branches.get("github", "main"), "private": service.private})
         elif path in {f"{repo}/commits/main", f"{repo}/commits/{COMMIT}", f"{repo}/commits/v1.0"}:
             self._send(200, {"sha": COMMIT, "commit": {"tree": {"sha": TREE}}})
         elif path.startswith(f"{repo}/git/trees/"):

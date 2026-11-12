@@ -246,6 +246,9 @@ class GitHubClient(ProviderClient):
         if not isinstance(info, dict):
             raise self._not_found()
         default_branch = info.get("default_branch")
+        if default_branch is not None and not isinstance(default_branch, str):
+            # The API answer is untrusted input: a malformed one fails this target only.
+            raise ProviderError(f"The provider returned a malformed default branch: {type(default_branch).__name__}")
         target = ref or default_branch
         if not target:
             raise ProviderError("The GitHub repository is empty (no default branch).")
@@ -311,6 +314,9 @@ class GitLabClient(ProviderClient):
         if not isinstance(info, dict):
             raise self._not_found()
         default_branch = info.get("default_branch")
+        if default_branch is not None and not isinstance(default_branch, str):
+            # The API answer is untrusted input: a malformed one fails this target only.
+            raise ProviderError(f"The provider returned a malformed default branch: {type(default_branch).__name__}")
         target = ref or default_branch
         if not target:
             raise ProviderError("The GitLab repository is empty (no default branch).")
@@ -368,6 +374,9 @@ class BitbucketClient(ProviderClient):
         if not isinstance(info, dict):
             raise self._not_found()
         default_branch = (info.get("mainbranch") or {}).get("name") if isinstance(info.get("mainbranch"), dict) else None
+        if default_branch is not None and not isinstance(default_branch, str):
+            # The API answer is untrusted input: a malformed one fails this target only.
+            raise ProviderError(f"The provider returned a malformed default branch: {type(default_branch).__name__}")
         target = ref or default_branch
         if not target:
             raise ProviderError("The Bitbucket repository is empty (no main branch).")
@@ -433,6 +442,9 @@ class GiteaClient(ProviderClient):
         if not isinstance(info, dict):
             raise self._not_found()
         default_branch = info.get("default_branch")
+        if default_branch is not None and not isinstance(default_branch, str):
+            # The API answer is untrusted input: a malformed one fails this target only.
+            raise ProviderError(f"The provider returned a malformed default branch: {type(default_branch).__name__}")
         target = ref or default_branch
         if not target:
             raise ProviderError("The Gitea repository is empty (no default branch).")

@@ -412,3 +412,43 @@ def test_run_scan_turns_remote_coverage_into_unknown_findings(tmp_path: Path):
         root, tmp_path / "report-2", {"json"}, 128, quiet=True, strict=True,
         source_metadata=metadata, display_root=metadata["url"],
     ) == cli.EXIT_OK
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        "https://github.com/acme/only\n",
+        # Lines that differ only in host case or a trailing slash collapse to one repository.
+        "https://github.com/acme/only\nhttps://GitHub.com/acme/only/\n",
+    ],
+)
+def test_a_url_file_with_one_repository_is_still_a_batch(lines, tmp_path: Path, monkeypatch):
+    # Regression: a URL file whose entries collapsed to one repository was treated as a
+    # single URL: reports went straight into OUTPUT, no batch summary was written, and a
+    # failure exited 2 instead of the batch's 3, with no record of the failure on disk.
+    import json
+
+    url_file = tmp_path / "repos.txt"
+    url_file.write_text(lines, encoding="utf-8")
+    calls = _fake_remote(monkeypatch, tmp_path, fail=lambda target: "not found")
+    output = tmp_path / "out"
+    code = _run_cli(monkeypatch, "scan", "--url", str(url_file), "--output", str(output), "--quiet")
+    assert code == 3
+    assert [item[0] for item in calls] == ["checkout"]
+    summary = json.loads((output / "batch-summary.json").read_text(encoding="utf-8"))
+    assert [item["status"] for item in summary["targets"]] == ["failed"]
+    assert summary["targets"][0]["error"] == "not found"
+    assert Path(summary["targets"][0]["report_directory"]).parent == output
+    assert (output / "batch-summary.md").is_file()
+
+
+def test_a_url_file_with_one_repository_writes_reports_into_its_own_directory(tmp_path: Path, monkeypatch):
+    url_file = tmp_path / "repos.txt"
+    url_file.write_text("https://github.com/acme/only\n", encoding="utf-8")
+    calls = _fake_remote(monkeypatch, tmp_path)
+    output = tmp_path / "out"
+    code = _run_cli(monkeypatch, "scan", "--url", str(url_file), "--output", str(output), "--quiet")
+    assert code == 0
+    scan_output = next(item[2] for item in calls if item[0] == "scan")
+    assert scan_output.parent == output and scan_output.name.startswith("only-")
+    assert (output / "batch-summary.json").is_file()

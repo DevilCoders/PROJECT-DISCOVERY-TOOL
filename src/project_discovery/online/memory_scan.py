@@ -58,6 +58,8 @@ DEFAULT_API_WORKERS = 8
 # Lockfile texts kept in memory for the online vulnerability lookup after analysis.
 MAX_KEPT_LOCKFILE_BYTES = 256 * 1024 * 1024
 MAX_SYMLINK_TARGET_BYTES = 4096
+# A skip reason with this prefix is the user's --skip, not a no-download coverage gap.
+SKIP_OPTION_REASON = "Explicit --skip: "
 
 
 @dataclass(frozen=True)
@@ -129,7 +131,13 @@ class NoDownloadSource:
         self.python_imports: dict[str, tuple] = {}
         self._kept_lockfile_bytes = 0
         self._lock = threading.Lock()
+        # Byte-budget accounting: reservations of reads in flight plus bytes already used.
+        self._budget_changed = threading.Condition(self._lock)
+        self._reserved_bytes = 0
+        self._in_flight = 0
+        self._skip_bytes: int | None = None
         self._stop_reason: str | None = None
+        self._stop_kind: str | None = None
         self.counters: Counter[str] = Counter()
         self.skipped: dict[str, list[str]] = {}
         self.started = time.monotonic()
@@ -189,6 +197,8 @@ class NoDownloadSource:
                         max_file_bytes: int, skip_oversized: bool):
         """Persist the commit tree as PDT inventory records (no content is read)."""
         assert self.revision is not None, "open() must be called first"
+        # A file whose size the listing lacks (GitLab) is checked against --skip when read.
+        self._skip_bytes = max_file_bytes if skip_oversized else None
         entries, truncated = self.client.tree(self.revision)
         excluded = {item.replace("\\", "/").strip("/").casefold() for item in ignores or () if item.strip("/")}
         stats: Counter[str] = Counter()
@@ -261,13 +271,18 @@ class NoDownloadSource:
                 stats["symlink_count"] += 1
                 stats[f"symlink_scope:{scope}"] += 1
                 continue
+            # GitLab's tree listing has no sizes. Such a file keeps size 0 in the unknown
+            # bucket, out of the totals, until its content arrives (see listed_size).
             size = entry.size if entry.size is not None else 0
             file_type = "source" if is_source_path(entry.path) else "text" if is_textual_path(entry.path) else "binary/unclassified"
             record = FileRecord(
                 entry.path, size, PurePosixPath(name).suffix.lower(), detect_language(entry.path),
-                file_type=file_type, size_bucket=_size_bucket(size), is_hidden=hidden,
-                permissions=0o755 if entry.executable else 0o644,
+                file_type=file_type,
+                size_bucket=_size_bucket(size) if entry.size is not None else "unknown",
+                is_hidden=hidden, permissions=0o755 if entry.executable else 0o644,
             )
+            if entry.size is None:
+                stats["size_unknown_count"] += 1
             if size > max_file_bytes and skip_oversized:
                 record.content_skipped_reason = f"Explicit --skip: exceeds {max_file_bytes} bytes"
                 stats["oversized_content_skipped"] += 1
@@ -297,6 +312,7 @@ class NoDownloadSource:
         self.counters["invalid_tree_paths"] = invalid
         self.counters["tree_truncated"] = int(truncated)
         self.counters["submodules"] = stats.get("submodule_count", 0)
+        self.counters["sizes_unknown"] = stats.get("size_unknown_count", 0)
         self.walk_stats = stats
         return (
             StoredFileRecords(store.path),
@@ -307,9 +323,16 @@ class NoDownloadSource:
         )
 
     def _symlink_target(self, entry: TreeEntry) -> str | None:
+        with self._lock:
+            stopped = self._stop_kind
+        if stopped is not None:
+            self._note_skip(f"symlink target not read ({stopped})", entry.path)
+            return None
         try:
             data = self.client.read(entry, self.revision, MAX_SYMLINK_TARGET_BYTES)
         except NetworkError as exc:
+            if exc.kind in {"rate_limit", "budget"}:
+                self._stop_for(exc)
             self._note_skip(f"symlink target not read ({exc.kind})", entry.path)
             return None
         self.counters["symlink_requests"] += 1
@@ -320,43 +343,95 @@ class NoDownloadSource:
         with self._lock:
             self.skipped.setdefault(reason, []).append(path)
 
-    def _reserve(self, record: FileRecord) -> str | None:
-        """Apply the file, byte and per-file budgets before a content request."""
-        with self._lock:
-            if self._stop_reason:
-                return self._stop_reason
-            if self.counters["content_requests"] >= self.limits.max_files:
-                return f"no-download file budget of {self.limits.max_files:,} files reached"
-            entry = self.entries.get(record.path)
-            size = entry.size if entry and entry.size is not None else None
-            if size is not None and size > self.limits.max_file_bytes:
-                return f"exceeds the no-download per-file budget of {self.limits.max_file_bytes:,} bytes"
-            if self.counters["bytes_fetched"] + (size or 0) > self.limits.max_bytes:
-                return f"no-download byte budget of {self.limits.max_bytes:,} bytes reached"
+    def listed_size(self, path: str) -> int | None:
+        """The size the provider's tree listing gave for ``path``; None when it gave none."""
+        entry = self.entries.get(path)
+        return entry.size if entry is not None else None
+
+    def _reserve(self, record: FileRecord) -> tuple[str | None, int]:
+        """Apply the file, byte and per-file budgets before a content request.
+
+        Returns (refusal reason, bytes reserved). The byte budget counts the reservations
+        of reads in flight, so parallel reads cannot overshoot it together. A size the
+        listing lacks reserves what the read may return: the per-file budget, or the
+        rest of the byte budget when less remains. When reads in flight hold the budget,
+        this waits for them to release what they did not use instead of refusing.
+        """
+        entry = self.entries.get(record.path)
+        size = entry.size if entry and entry.size is not None else None
+        with self._budget_changed:
+            while True:
+                if self._stop_reason:
+                    return self._stop_reason, 0
+                if self.counters["content_requests"] >= self.limits.max_files:
+                    return f"no-download file budget of {self.limits.max_files:,} files reached", 0
+                if size is not None and size > self.limits.max_file_bytes:
+                    return f"exceeds the no-download per-file budget of {self.limits.max_file_bytes:,} bytes", 0
+                available = self.limits.max_bytes - self._reserved_bytes
+                if (size if size is not None else 1) <= available:
+                    break
+                if not self._in_flight:
+                    return f"no-download byte budget of {self.limits.max_bytes:,} bytes reached", 0
+                self._budget_changed.wait()
+            reservation = size if size is not None else min(self.limits.max_file_bytes, available)
+            self._reserved_bytes += reservation
+            self._in_flight += 1
             self.counters["content_requests"] += 1
-            return None
+            return None, reservation
+
+    def _stop_for(self, exc: NetworkError) -> str:
+        """Stop all later requests: the rate limit or the request budget is exhausted."""
+        with self._lock:
+            if self._stop_reason is None:
+                when = ""
+                if exc.retry_after is not None:
+                    when = f"; resets in about {int(exc.retry_after):,} s"
+                self._stop_reason = (
+                    "provider API rate limit exhausted" + when if exc.kind == "rate_limit"
+                    else str(exc)
+                )
+                self._stop_kind = exc.kind
+            return self._stop_reason
+
+    def _settle(self, reservation: int, used: int) -> None:
+        """Release the unused part of a read's reservation and wake waiting reads."""
+        with self._budget_changed:
+            self._reserved_bytes -= reservation - used
+            self._in_flight -= 1
+            self._budget_changed.notify_all()
 
     def _fetch(self, record: FileRecord) -> tuple[bytes | None, str | None]:
-        reason = self._reserve(record)
+        reason, reservation = self._reserve(record)
         if reason is not None:
             return None, reason
         entry = self.entries[record.path]
+        cap = self.limits.max_file_bytes
+        cap_reason = f"exceeds the no-download per-file budget of {self.limits.max_file_bytes:,} bytes"
+        if entry.size is None:
+            # The read may return no more than it reserved, and --skip, which could not be
+            # decided from the listing, is decided from the bytes as they arrive.
+            if reservation < cap:
+                cap, cap_reason = reservation, f"no-download byte budget of {self.limits.max_bytes:,} bytes reached"
+            if self._skip_bytes is not None and self._skip_bytes < cap:
+                cap, cap_reason = self._skip_bytes, f"{SKIP_OPTION_REASON}exceeds {self._skip_bytes} bytes"
+        used = 0
         try:
-            data = self.client.read(entry, self.revision, self.limits.max_file_bytes)
+            data = self.client.read(entry, self.revision, cap)
+            used = len(data)
         except NetworkError as exc:
             if exc.kind == "too_large":
-                return None, f"exceeds the no-download per-file budget of {self.limits.max_file_bytes:,} bytes"
-            if exc.kind in {"rate_limit", "budget"}:
+                # What a refused response transferred counts against the byte budget, so
+                # oversized files of unknown size cannot exceed it. A Content-Length above
+                # the cap refuses it before any body byte is read.
+                used = cap if exc.received is None else min(cap, exc.received)
                 with self._lock:
-                    when = ""
-                    if exc.retry_after is not None:
-                        when = f"; resets in about {int(exc.retry_after):,} s"
-                    self._stop_reason = (
-                        "provider API rate limit exhausted" + when if exc.kind == "rate_limit"
-                        else str(exc)
-                    )
-                return None, self._stop_reason
+                    self.counters["bytes_discarded"] += used
+                return None, cap_reason
+            if exc.kind in {"rate_limit", "budget"}:
+                return None, self._stop_for(exc)
             return None, f"content request failed ({exc.kind}: {exc})"
+        finally:
+            self._settle(reservation, used)
         with self._lock:
             self.counters["bytes_fetched"] += len(data)
             self.counters["files_fetched"] += 1
@@ -426,6 +501,9 @@ class NoDownloadSource:
         for reason, paths in sorted(self.skipped.items()):
             add("content_not_fetched", len(paths),
                 f"{len(paths):,} file(s) were inventoried but their content was not fetched: {reason}.", True)
+        add("sizes_unknown", self.counters["sizes_unknown"],
+            f"{self.counters['sizes_unknown']:,} file(s) have no size in the provider's tree listing and "
+            "were not fetched; size totals and buckets leave them out (bucket 'unknown').", False)
         add("git_submodules_not_fetched", self.counters["submodules"],
             f"{self.counters['submodules']:,} Git submodule(s) were inventoried but not fetched.", False)
         add("plugins_not_run", len(self.excluded_plugins),
@@ -440,6 +518,7 @@ class NoDownloadSource:
             "tree_entries": self.counters["tree_entries"],
             "files_fetched": self.counters["files_fetched"],
             "bytes_fetched": self.counters["bytes_fetched"],
+            "bytes_discarded": self.counters["bytes_discarded"],
             "content_requests": self.counters["content_requests"],
             "api_requests": self.budget.used,
             "api_request_budget": self.budget.limit,
@@ -449,6 +528,11 @@ class NoDownloadSource:
 
     def record_skip(self, record: FileRecord, reason: str) -> None:
         self._note_skip(reason, record.path)
+
+    def size_learned(self) -> None:
+        """One file whose listing lacked a size was fetched, so its size is now known."""
+        with self._lock:
+            self.counters["sizes_unknown"] -= 1
 
 
 def iter_skip_reasons(source: NoDownloadSource) -> Iterator[tuple[str, int]]:

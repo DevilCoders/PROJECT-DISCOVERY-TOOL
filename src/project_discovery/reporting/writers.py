@@ -574,7 +574,10 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- Special filesystem entries: {len(result.special_entries):,}",
         f"- Explicitly pruned directories: {metrics.get('pruned_directory_count', 0):,}",
         f"- Findings: {len(result.findings):,}",
-        f"- Total file size: {metrics.get('total_bytes', 0):,} bytes",
+        f"- Total file size: {metrics.get('total_bytes', 0):,} bytes" + (
+            f" (plus {metrics['size_unknown_count']:,} file(s) of unknown size)"
+            if metrics.get("size_unknown_count") else ""
+        ),
         f"- Hidden entries: {metrics.get('hidden_entry_count', 0):,}",
         f"- Development/cache trees: {metrics.get('development_directory_count', 0):,}",
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",

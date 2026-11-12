@@ -13,7 +13,31 @@ from ..base import Analyzer
 _VCS_ROOTS = {
     ".git": "Git", ".hg": "Mercurial", ".svn": "Subversion",
     ".bzr": "Bazaar", "_darcs": "Darcs", ".jj": "Jujutsu",
-    ".pijul": "Pijul", "CVS": "CVS", "_FOSSIL_": "Fossil",
+    ".pijul": "Pijul", "CVS": "CVS",
+}
+# Marker files at a working-copy root. Fossil's checkout database is _FOSSIL_ on Windows,
+# .fslckout elsewhere and .fos in old releases; it is never opened.
+_MARKER_FILES = {
+    ".git": "Git", ".hg": "Mercurial", ".svn": "Subversion",
+    "_FOSSIL_": "Fossil", ".fslckout": "Fossil", ".fos": "Fossil",
+}
+# Git files read anywhere inside a .git directory (also below modules/ and worktrees/).
+_GIT_FILES = frozenset({"config", "config.worktree", "HEAD", "packed-refs", "shallow"})
+# Files read inside the other control directories, by their path inside the directory.
+# A "marker" is a file every repository of that VCS has: it gives the one repository
+# finding of its control directory, whether or not optional files such as hgrc exist.
+# The "remotes" files name remote locations.
+_CONTROL_FILES = {
+    ".hg": {"requires": "marker", "hgrc": "remotes"},
+    ".svn": {"wc.db": "marker", "entries": "marker", "format": "marker"},
+    ".bzr": {"branch-format": "marker", "branch/branch.conf": "remotes"},
+    "_darcs": {"format": "marker", "prefs/repos": "remotes"},
+    # .jj/repo is a directory in a repository's first workspace and a pointer file in
+    # the others. A non-colocated repository keeps its Git remotes in store/git/config.
+    ".jj": {"repo/store/type": "marker", "repo": "marker",
+            "repo/store/git/config": "remotes", "repo/config.toml": "remotes"},
+    ".pijul": {"pristine/db": "marker", "config": "remotes", "config.toml": "remotes"},
+    "CVS": {"Root": "marker"},
 }
 _PROVIDER_RULES = (
     ("GitHub", re.compile(r"(^|\.)github\.com$", re.I)),
@@ -60,12 +84,20 @@ _CLOUD_MARKERS = {
 }
 
 
-def _vcs_root(relative: str) -> tuple[str, str] | None:
-    parts = Path(relative).parts
-    for part in parts[:-1]:
+def _vcs_root(relative: str) -> tuple[str, str, str] | None:
+    """(control directory, VCS name, path inside the directory) of the first control
+    directory on ``relative``; None when the path is not inside one."""
+    parts = relative.split("/")
+    for index, part in enumerate(parts[:-1]):
         if part in _VCS_ROOTS:
-            return part, _VCS_ROOTS[part]
+            return part, _VCS_ROOTS[part], "/".join(parts[index + 1:])
     return None
+
+
+def _is_worktree_pointer(inner: str) -> bool:
+    """``worktrees/<name>/gitdir`` inside a .git directory: a linked worktree."""
+    parts = inner.split("/")
+    return len(parts) == 3 and parts[0] == "worktrees" and parts[2] == "gitdir"
 
 
 def _remote_host(raw: str) -> tuple[str | None, str | None]:
@@ -137,27 +169,26 @@ class VCSHostingAnalyzer(Analyzer):
 
     name = "vcs-hosting-intelligence"
     domains = ("vcs", "hosting_providers", "ci_cd", "cloud_services")
-    languages = tuple(_VCS_ROOTS.values()) + ("Perforce", "Git LFS", "Git Submodules")
+    languages = tuple(dict.fromkeys([*_VCS_ROOTS.values(), *_MARKER_FILES.values()])) + (
+        "Perforce", "Git LFS", "Git Submodules",
+    )
 
     def supports(self, record: FileRecord) -> bool:
         if record.error:
             return False
         relative = record.path.replace("\\", "/")
         relative_lower = relative.casefold()
-        name = Path(relative).name.lower()
-        parts = [part.lower() for part in relative.split("/")]
-        if name in {".git", ".hg", ".svn", "_fossil_"} or relative == "HEAD":
-            return True
-        if _vcs_root(relative) or any(
-            part in {".git", ".hg", ".svn", ".bzr", "_darcs", ".jj", ".pijul", "cvs"}
-            for part in parts[:-1]
-        ):
-            return name in {
-                "config", "config.worktree", "head", "packed-refs", "shallow",
-                "commondir", "gitdir", "hgrc", "requires", "format",
-                "branch.conf", "last-revision", "repos", "root", "repository",
-                "entries", "config.toml",
-            } or name in {".gitmodules", ".gitattributes"}
+        file_name = relative.rsplit("/", 1)[-1]
+        name = file_name.lower()
+        control = _vcs_root(relative)
+        if control is not None:
+            # Only files that a handler reads: names without one cost a read and gave nothing.
+            root_name, _, inner = control
+            if root_name == ".git":
+                return file_name in _GIT_FILES or _is_worktree_pointer(inner)
+            return inner in _CONTROL_FILES[root_name]
+        if file_name in _MARKER_FILES or file_name == "HEAD":
+            return True  # HEAD: a bare repository is recognized from its siblings
         if name in _CI_FILES or relative_lower in {".gitmodules", ".gitattributes", ".p4config"}:
             return True
         if any(relative_lower.startswith(prefix + "/") for prefix in _CI_PATHS):
@@ -168,37 +199,31 @@ class VCSHostingAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         relative = record.path.replace("\\", "/")
-        name = Path(relative).name.lower()
-        root = _vcs_root(relative)
-        if relative == "HEAD" and (path.parent / "objects").is_dir() and (path.parent / "config").is_file():
+        file_name = relative.rsplit("/", 1)[-1]
+        name = file_name.lower()
+        control = _vcs_root(relative)
+        if control is not None:
+            return self._vcs_metadata(path, record, *control)
+        if file_name == "HEAD":
+            return self._bare_repository(path, relative)
+        if file_name in _MARKER_FILES:
+            if file_name == ".git":
+                content, error = _read_text(path, record.analysis_identity)
+                if error:
+                    return [self._unknown(record, error)]
+                if content and content.strip().startswith("gitdir:"):
+                    return [Finding(
+                        "vcs", f"Git metadata pointer: {record.path}",
+                        "The .git file points to a separate Git metadata directory, as used by "
+                        "linked worktrees and submodules. The pointer target is not followed.",
+                        confidence="CONFIRMED", evidence=[record.path, "gitdir pointer present"],
+                        analyzer=self.name,
+                    )]
             return [Finding(
-                "vcs", "Git bare repository metadata",
-                "A root-level Git HEAD, objects directory and config file are present. "
-                "This is consistent with a bare Git repository.",
-                confidence="CONFIRMED",
-                evidence=["HEAD", "objects/", "config"],
-                analyzer=self.name,
-            )]
-        if name in {".git", ".hg", ".svn", "_fossil_"}:
-            content, error = _read_text(path, record.analysis_identity)
-            if error:
-                return [self._unknown(record, error)]
-            if name == ".git" and content and content.strip().startswith("gitdir:"):
-                return [Finding(
-                    "vcs", f"Git metadata pointer: {record.path}",
-                    "The .git file points to a separate Git metadata directory, as used by "
-                    "linked worktrees and submodules. The pointer target is not followed.",
-                    confidence="CONFIRMED", evidence=[record.path, "gitdir pointer present"],
-                    analyzer=self.name,
-                )]
-            marker_label = _VCS_ROOTS.get(Path(record.path).name, name)
-            return [Finding(
-                "vcs", f"{marker_label} metadata marker: {record.path}",
-                "A version-control metadata marker file is present.",
+                "vcs", f"{_MARKER_FILES[file_name]} metadata marker: {record.path}",
+                "A version-control metadata marker file is present; it is not opened.",
                 confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
             )]
-        if root:
-            return self._vcs_metadata(path, record, root[0], root[1])
         if relative == ".gitmodules":
             return self._gitmodules(path, record)
         if relative == ".gitattributes":
@@ -238,50 +263,126 @@ class VCSHostingAnalyzer(Analyzer):
             confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
         )
 
+    def _bare_repository(self, path: Path, relative: str) -> list[Finding]:
+        """A HEAD file outside any control directory, next to objects/ and config."""
+        directory = path.parent
+        if not ((directory / "objects").is_dir() and (directory / "config").is_file()):
+            return []
+        location = relative.rsplit("/", 1)[0] if "/" in relative else ""
+        prefix = location + "/" if location else ""
+        return [Finding(
+            "vcs", "Git bare repository metadata" + (f": {location}" if location else ""),
+            "A Git HEAD file, objects directory and config file are present"
+            + (f" in {location}" if location else " at the scan root")
+            + ". This is consistent with a bare Git repository.",
+            confidence="CONFIRMED",
+            evidence=[prefix + "HEAD", prefix + "objects/", prefix + "config"],
+            analyzer=self.name,
+        )]
+
+    def _git_config(self, record: FileRecord, text: str, label: str) -> list[Finding]:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            parser.read_string(text)
+        except configparser.Error as exc:
+            return [self._unknown(record, f"Invalid Git config: {exc}")]
+        remotes = []
+        for section in parser.sections():
+            if section.lower().startswith('remote "'):
+                remote_name = section[8:-1] if section.endswith('"') else section
+                raw = parser.get(section, "url", fallback="")
+                host, locator = _remote_host(raw)
+                remotes.append((remote_name, _hosting_provider(host), host, locator))
+        findings = [
+            Finding(
+                "hosting_providers",
+                f"Git remote provider: {provider}",
+                f"Remote {remote_name!r} points to host {host or 'unresolved'}; "
+                f"sanitized locator: {locator or 'not resolved'}. Authentication material "
+                "and URL query/fragment values are removed.",
+                confidence="CONFIRMED" if host else "UNKNOWN",
+                evidence=[record.path, f"remote section: {remote_name}"],
+                analyzer=self.name,
+            )
+            for remote_name, provider, host, locator in remotes
+        ]
+        branches = sum(
+            section.lower().startswith('branch "') for section in parser.sections()
+        )
+        findings.append(Finding(
+            "vcs", f"{label}: {record.path}",
+            f"Detected {len(remotes)} remote(s) and {branches} local branch configuration "
+            "section(s). A config file alone does not prove a complete clone.",
+            confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
+        ))
+        return findings
+
+    def _control_marker(
+        self, path: Path, record: FileRecord, root_name: str, vcs_name: str, inner: str,
+    ) -> list[Finding]:
+        """The one repository finding of a control directory, from its marker file."""
+        relative = record.path.replace("\\", "/")
+        control_directory = relative[: len(relative) - len(inner) - 1]
+        working = control_directory.rsplit("/", 1)[0] if "/" in control_directory else "."
+        if root_name == ".svn" and inner != "wc.db":
+            # One marker per working copy: wc.db (Subversion 1.7+), else entries, else format.
+            if (path.parent / "wc.db").exists() or (inner == "format" and (path.parent / "entries").exists()):
+                return []
+        if root_name in {".svn", "CVS"} and inner != "wc.db" and relative.count("/") >= 2:
+            # CVS and Subversion before 1.7 keep a control directory in every directory of a
+            # working copy: report the copy once, at its top directory.
+            parent_control = path.parents[2] / root_name
+            if (parent_control / inner).exists():
+                return []
+        detail = f"{vcs_name} repository metadata is present."
+        evidence = [record.path]
+        if root_name == ".jj" and inner == "repo":
+            detail = ("A Jujutsu workspace whose repository is shared with another workspace; "
+                      "the pointer is not followed.")
+        elif root_name in {".hg", "_darcs", ".bzr", ".jj", "CVS"} or inner == "entries":
+            # Small text files with the repository format or server; binary markers
+            # (wc.db, Pijul's pristine database) are never opened.
+            content, error = _read_text(path, record.analysis_identity)
+            if error:
+                return [self._unknown(record, error)]
+            lines = [line.strip() for line in (content or "").splitlines() if line.strip()]
+            if root_name == "CVS":
+                match = re.search(r"@([^:/]+)", content or "")
+                detail = "CVS working copy; server host: " + (match.group(1).lower() if match else "not identified")
+            elif lines:
+                label = {".hg": "requirements", "_darcs": "format", ".bzr": "format",
+                         ".jj": "backend", ".svn": "format"}[root_name]
+                # Subversion's entries file lists the working copy after its format number.
+                shown = lines[:1] if root_name == ".svn" else lines[:20]
+                evidence.append(f"{label}: " + ", ".join(shown)[:300])
+        return [Finding(
+            "vcs", f"{vcs_name} repository metadata: {working}",
+            detail, confidence="CONFIRMED", evidence=evidence, analyzer=self.name,
+        )]
+
     def _vcs_metadata(
-        self, path: Path, record: FileRecord, root_name: str, vcs_name: str,
+        self, path: Path, record: FileRecord, root_name: str, vcs_name: str, inner: str,
     ) -> list[Finding]:
         name = Path(record.path).name.lower()
+        if root_name == ".git":
+            if _is_worktree_pointer(inner):
+                return [Finding(
+                    "vcs", f"Git linked worktree: {inner.split('/')[1]}",
+                    "The repository has a linked worktree; its location is not followed.",
+                    confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
+                )]
+        elif _CONTROL_FILES[root_name].get(inner) == "marker":
+            return self._control_marker(path, record, root_name, vcs_name, inner)
+        elif inner not in _CONTROL_FILES[root_name]:
+            return []
         content, error = _read_text(path, record.analysis_identity)
         if error:
             return [self._unknown(record, error)]
         text = content or ""
         if root_name == ".git" and name in {"config", "config.worktree"}:
-            parser = configparser.ConfigParser(interpolation=None, strict=False)
-            try:
-                parser.read_string(text)
-            except configparser.Error as exc:
-                return [self._unknown(record, f"Invalid Git config: {exc}")]
-            remotes = []
-            for section in parser.sections():
-                if section.lower().startswith('remote "'):
-                    remote_name = section[8:-1] if section.endswith('"') else section
-                    raw = parser.get(section, "url", fallback="")
-                    host, locator = _remote_host(raw)
-                    remotes.append((remote_name, _hosting_provider(host), host, locator))
-            findings = [
-                Finding(
-                    "hosting_providers",
-                    f"Git remote provider: {provider}",
-                    f"Remote {remote_name!r} points to host {host or 'unresolved'}; "
-                    f"sanitized locator: {locator or 'not resolved'}. Authentication material "
-                    "and URL query/fragment values are removed.",
-                    confidence="CONFIRMED" if host else "UNKNOWN",
-                    evidence=[record.path, f"remote section: {remote_name}"],
-                    analyzer=self.name,
-                )
-                for remote_name, provider, host, locator in remotes
-            ]
-            branches = sum(
-                section.lower().startswith('branch "') for section in parser.sections()
-            )
-            findings.append(Finding(
-                "vcs", f"Git repository configuration: {record.path}",
-                f"Detected {len(remotes)} remote(s) and {branches} local branch configuration "
-                "section(s). A config file alone does not prove a complete clone.",
-                confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
-            ))
-            return findings
+            return self._git_config(record, text, "Git repository configuration")
+        if root_name == ".jj" and inner == "repo/store/git/config":
+            return self._git_config(record, text, "Jujutsu Git backend configuration")
         if root_name == ".git" and name == "head":
             stripped = text.strip()
             if stripped.startswith("ref:"):
@@ -339,14 +440,7 @@ class VCSHostingAnalyzer(Analyzer):
                 ],
                 analyzer=self.name,
             )]
-        if root_name == ".svn" and name in {"entries", "format", "wc.db"}:
-            return [Finding(
-                "vcs", f"Subversion working-copy metadata: {record.path}",
-                "Subversion metadata is present. The working-copy database and repository URL "
-                "are not decoded by this initial adapter.",
-                confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
-            )]
-        if root_name == ".bzr" and name in {"branch.conf", "last-revision"}:
+        if root_name == ".bzr" and inner == "branch/branch.conf":
             providers = []
             for line in text.splitlines():
                 match = re.match(r"\s*(?:parent_location|push_location)\s*=\s*(\S+)", line)
@@ -358,7 +452,7 @@ class VCSHostingAnalyzer(Analyzer):
                 "Hosting providers: " + (", ".join(sorted(set(providers))) or "not identified"),
                 confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
             )]
-        if root_name == "_darcs" and name == "repos":
+        if root_name == "_darcs" and inner == "prefs/repos":
             providers = []
             for remote in text.splitlines():
                 host, _ = _remote_host(remote)
@@ -369,15 +463,7 @@ class VCSHostingAnalyzer(Analyzer):
                 "Remote providers: " + (", ".join(sorted(set(providers))) or "not identified"),
                 confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
             )]
-        if root_name == "CVS" and name in {"root", "repository"}:
-            match = re.search(r"@([^:/]+)", text)
-            host = match.group(1).lower() if match else None
-            return [Finding(
-                "vcs", "CVS working-copy metadata",
-                "CVS server host: " + (host or "not identified"),
-                confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
-            )]
-        if root_name == ".pijul" and name == "config.toml":
+        if root_name == ".pijul" and inner in {"config", "config.toml"}:
             providers = []
             for line in text.splitlines():
                 if re.search(r"(?i)(?:remote|url|path)\s*=", line):
@@ -389,7 +475,7 @@ class VCSHostingAnalyzer(Analyzer):
                 "Remote providers: " + (", ".join(sorted(set(providers))) or "not identified"),
                 confidence="CONFIRMED", evidence=[record.path], analyzer=self.name,
             )]
-        if root_name == ".jj" and name == "config.toml":
+        if root_name == ".jj" and inner == "repo/config.toml":
             providers = []
             for line in text.splitlines():
                 if re.search(r"(?i)(?:remote|url)\s*=", line):

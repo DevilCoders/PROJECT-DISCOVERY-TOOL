@@ -123,3 +123,45 @@ def test_comparison_reports_resolved_dependency_version_conflicts():
         "right_versions": ["0.28.0"],
         "version_conflict": True,
     }]
+
+
+def test_reports_with_null_sections_compare_as_empty(tmp_path):
+    # Regression: a 1.x report whose metrics.python_dependency_graph (or another section) is
+    # null crashed `pdt compare` with AttributeError, and main() exited 1, the --fail-on code.
+    import json
+
+    from project_discovery.projects.comparison import compare_many_reports, load_report
+
+    paths = []
+    for name, metrics in (("left", {"python_dependency_graph": None, "languages": None,
+                                    "code_index": {"integration": {"packages": [None, {"name": 3}]}}}),
+                          ("right", None)):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({
+            "schema_version": "1.4", "root": f"/{name}", "files": None,
+            "findings": [None, {"title": None, "evidence": "not-a-list"}], "metrics": metrics,
+        }), encoding="utf-8")
+        paths.append(path)
+    comparison = compare_many_reports([load_report(path) for path in paths])
+    assert [project["file_count"] for project in comparison["projects"]] == [0, 0]
+
+
+def test_an_unexpected_error_exits_2_not_the_fail_on_code(tmp_path, monkeypatch, capsys):
+    import sys
+
+    import pytest
+
+    from project_discovery import cli
+
+    def broken(*_args, **_kwargs):
+        raise AttributeError("'NoneType' object has no attribute 'get'")
+
+    monkeypatch.setattr(cli, "compare_many_reports", broken)
+    report = tmp_path / "report.json"
+    report.write_text('{"schema_version": "1.0", "root": "/r", "files": [], "findings": [], "metrics": {}}',
+                      encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["pdt", "compare", str(report), str(report), "--output", str(tmp_path / "out")])
+    with pytest.raises(SystemExit) as result:
+        cli.main()
+    assert result.value.code == cli.EXIT_USAGE
+    assert "Unexpected AttributeError" in capsys.readouterr().err

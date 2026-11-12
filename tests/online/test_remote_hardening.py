@@ -936,3 +936,118 @@ def test_p4_lists_only_live_files_and_unescapes_depot_names(tmp_path: Path, monk
     assert not (tmp_path / "source" / "old.c").exists()
     assert commands[1][-1] == "//depot/project/docs/user%40host.txt#2"
     assert metadata["tracked_file_count"] == 1
+
+
+def _svn_export_of(files: dict[str, bytes]):
+    """A fake _run for Subversion that exports ``files`` into the checkout."""
+
+    def fake_run(command, **kwargs):
+        if "info" in command:
+            return SimpleNamespace(stdout=b"42")
+        if "export" in command:
+            root = Path(command[-1])
+            for relative, content in files.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_bytes(content)
+        return SimpleNamespace(stdout=b"")
+
+    return fake_run
+
+
+@pytest.mark.parametrize(
+    ("limits", "kept", "removed_bytes"),
+    [
+        (RemoteLimits(max_files=2), {"a.txt", "b.txt"}, 24),
+        # First fit in path order: a smaller later file still fits.
+        (RemoteLimits(max_bytes=25), {"a.txt", "b.txt", "sub/small.txt"}, 20),
+        (RemoteLimits(max_bytes=19), {"a.txt", "sub/small.txt"}, 30),
+    ],
+)
+def test_non_git_exports_are_trimmed_to_the_materialization_budget(
+    tmp_path: Path, monkeypatch, limits, kept, removed_bytes,
+):
+    # Regression: --remote-max-gb and the file budget were enforced only by Git extraction;
+    # every other backend analyzed whatever its client exported and recorded no gap.
+    files = {"a.txt": b"x" * 10, "b.txt": b"x" * 10, "c.txt": b"x" * 10, "sub/small.txt": b"x" * 4,
+             "sub/z.txt": b"x" * 10}
+    monkeypatch.setattr(remote, "_run", _svn_export_of(files))
+    target = remote.parse_remote_target("svn+https://svn.example.net/repos/project/trunk")
+    checkout, metadata = remote._materialize(target, tmp_path, timeout=30, limits=limits)
+
+    present = {path.relative_to(checkout).as_posix() for path in checkout.rglob("*") if path.is_file()}
+    assert present == kept
+    budget = next(item for item in metadata["coverage"] if item["kind"] == "materialization_budget")
+    assert budget["count"] == len(files) - len(kept)
+    assert budget["incomplete"] is True
+    assert f"({removed_bytes:,} bytes)" in budget["detail"]
+
+
+def test_non_git_exports_within_the_budget_record_no_gap(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(remote, "_run", _svn_export_of({"main.py": b"print(1)\n"}))
+    target = remote.parse_remote_target("svn+https://svn.example.net/repos/project/trunk")
+    checkout, metadata = remote._materialize(target, tmp_path, timeout=30, limits=RemoteLimits())
+    assert (checkout / "main.py").is_file()
+    assert not any(item["kind"] == "materialization_budget" for item in metadata["coverage"])
+
+
+def test_p4_stops_fetching_at_the_byte_budget(tmp_path: Path, monkeypatch):
+    target = remote.parse_remote_target("p4+ssl://perforce.example.net:1666/depot/project")
+    printed = []
+
+    def fake_run(command, **kwargs):
+        if "files" in command:
+            return SimpleNamespace(stdout=b"".join(
+                f"... depotFile //depot/project/f{index}.txt\n... rev 1\n... change {index}\n".encode()
+                for index in range(4)
+            ))
+        printed.append(command[-1])
+        Path(command[4]).write_bytes(b"x" * 10)
+        return SimpleNamespace(stdout=b"")
+
+    monkeypatch.setattr(remote, "_run", fake_run)
+    metadata = remote._p4_checkout(target, tmp_path / "source", timeout=30,
+                                   limits=RemoteLimits(max_bytes=25))
+
+    assert sorted(path.name for path in (tmp_path / "source").iterdir()) == ["f0.txt", "f1.txt"]
+    # The third file crossed the budget and was removed; the fourth was never fetched.
+    assert len(printed) == 3
+    assert metadata["tracked_file_count"] == 2
+    assert metadata["omitted_file_count"] == 2
+    budget = next(item for item in metadata["coverage"] if item["kind"] == "materialization_budget")
+    assert budget["count"] == 2 and budget["incomplete"] is True
+
+
+def _folds_case(directory: Path) -> bool:
+    probe = directory / "Case-Probe"
+    probe.mkdir()
+    try:
+        return (directory / "case-probe").exists()
+    finally:
+        probe.rmdir()
+
+
+def test_git_extraction_never_merges_directories_that_differ_only_in_case(tmp_path: Path, monkeypatch):
+    first, second = b"1" * 40, b"2" * 40
+    tree = (
+        b"100644 blob " + first + b"       2\tSrc/a.py\0"
+        + b"100644 blob " + second + b"       2\tsrc/b.py\0"
+    )
+    folds = _folds_case(tmp_path)
+    blobs = first + b" blob 2\na\n\n" + (b"" if folds else second + b" blob 2\nb\n\n")
+    created = _install_fake_git(monkeypatch, tree, blobs)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    counts = remote._extract_git_tree(checkout, {}, timeout=30)
+
+    assert (checkout / "Src" / "a.py").read_bytes() == b"a\n"
+    if folds:
+        # Regression: b.py was written into Src/, and reports cited Src/b.py, a path the
+        # repository does not have. It is refused and counted as not materialized.
+        assert os.listdir(checkout) == ["Src"]
+        assert os.listdir(checkout / "Src") == ["a.py"]
+        assert counts["omitted_tree_path_count"] == 1
+        assert created["blobs"].stdin.getvalue() == first + b"\n"
+    else:
+        assert (checkout / "src" / "b.py").read_bytes() == b"b\n"
+        assert counts["omitted_tree_path_count"] == 0
