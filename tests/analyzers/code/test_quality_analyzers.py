@@ -182,3 +182,21 @@ def test_rust_trait_impls_are_not_loops(tmp_path: Path):
         "fn real(ids: &[i64], conn: &Conn) {\n    for id in ids {\n        conn.query(\"SELECT 2\", &[id]);\n    }\n}\n"
     ))
     assert issues["Database query inside a loop"][1] == [11]
+
+
+def test_dict_values_bound_by_a_loop_are_not_http_clients(tmp_path):
+    # Regression (self-scan): ``for name, client in report.items(): client.get(...)`` was an
+    # "HTTP request inside a loop" because the receiver was named client.
+    from project_discovery.analyzers.code.performance import PerformanceHotspotAnalyzer
+    from project_discovery.models import FileRecord
+
+    path = tmp_path / "table.py"
+    path.write_text(
+        "def rows(report):\n    for name, client in report['clients'].items():\n        print(client.get('executable'))\n"
+        "def fetch(urls, client):\n    for url in urls:\n        client.get(url)\n",
+        encoding="utf-8",
+    )
+    record = FileRecord("table.py", path.stat().st_size, ".py", "Python", mtime_ns=path.stat().st_mtime_ns)
+    findings = PerformanceHotspotAnalyzer().analyze(path, record)
+    http = [item for item in findings if item.title.startswith("HTTP request inside a loop")]
+    assert len(http) == 1 and "table.py:6" in " ".join(http[0].evidence)

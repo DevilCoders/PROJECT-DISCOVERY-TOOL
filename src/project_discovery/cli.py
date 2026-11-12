@@ -49,7 +49,7 @@ from .engine.metrics import PhaseTimer, peak_rss_bytes
 from .engine.native import capabilities as native_capabilities
 from .engine.native import native_available
 from .intelligence.architecture import analyze_project_architecture
-from .intelligence.index import QUERY_KINDS, analyze_code_index, query_code_index
+from .intelligence.index import QUERY_KINDS, analyze_code_index, code_index_state, query_code_index
 from .intelligence.python_graph import analyze_python_dependencies
 from .inventory.cache import ScanCache
 from .inventory.scanner import discover_inventory
@@ -877,6 +877,7 @@ def run_scan(
             architecture_layout, architecture_findings = analyze_project_architecture(records)
             finding_store.extend_findings(graph_findings)
             finding_store.extend_findings(architecture_findings)
+            timer.lap("architecture")
             if inventory_only:
                 code_index = {"skipped": "inventory-only scan"}
             else:
@@ -890,7 +891,7 @@ def run_scan(
         raise
     engine.shutdown()
     shutil.rmtree(plugin_work_dir, ignore_errors=True)
-    timer.lap("architecture")
+    timer.lap("shutdown")  # the worker pool, plugin hosts and their staging folder
     findings = StoredFindingRecords(inventory_path)
     errors = StoredDiagnosticRecords(inventory_path)
     domain_catalog = analyzer_domain_catalog()
@@ -1097,10 +1098,12 @@ def run_scan(
         f"Scan complete: {len(records)} files; {len(findings)} findings; reports in {output}",
         "green",
     )
+    # --quiet suppresses progress, never the reason for a non-zero exit (as in batches).
+    gate_console = Console(stderr=True, no_color=True if no_color else None)
     error_count = len(errors)
     if error_count:
         _status(
-            console,
+            gate_console,
             "WARNING",
             f"{error_count} file/analyzer errors recorded in JSON report.",
             "yellow",
@@ -1120,7 +1123,7 @@ def run_scan(
                     (gaps, "UNKNOWN coverage finding(s)"),
                 ) if count
             ]
-            _status(console, "FAILED", f"--strict: the scan is incomplete: {', '.join(reasons)}.", "red")
+            _status(gate_console, "FAILED", f"--strict: the scan is incomplete: {', '.join(reasons)}.", "red")
     if fail_on is not None:
         # UNKNOWN findings describe coverage gaps; --strict is the gate for those.
         threshold = SEVERITY_RANK[fail_on]
@@ -1132,7 +1135,7 @@ def run_scan(
         if gated:
             exit_code = EXIT_FINDINGS
             _status(
-                console, "FAILED",
+                gate_console, "FAILED",
                 f"--fail-on {fail_on}: {gated:,} finding(s) at or above {fail_on} severity.",
                 "red",
             )
@@ -1715,9 +1718,19 @@ def main() -> None:
             )
             if not 1 <= args.limit <= 100_000:
                 parser.error("--limit must be between 1 and 100000")
-            rows = query_code_index(
-                args.scan_output.expanduser() / ".pdt-cache" / "inventory.sqlite3", kind, name, args.limit,
-            )
+            inventory = args.scan_output.expanduser() / ".pdt-cache" / "inventory.sqlite3"
+            rows = query_code_index(inventory, kind, name, args.limit)
+            state = code_index_state(inventory)
+            if not state["built"]:
+                # An --inventory-only scan (or one with no modelled source) has no index:
+                # "0 results" there is unknown, not absent.
+                print("[ WARNING ] This scan has no code index (an --inventory-only scan, or no modelled "
+                      "source files); run a full scan to query it.", file=sys.stderr)
+                raise SystemExit(EXIT_INCOMPLETE)
+            truncated = state["truncated"]
+            if truncated.get("tables") or truncated.get("files"):
+                print("[ WARNING ] The code index was cut at a limit (see the 'Code index truncated' finding); "
+                      "results can be incomplete.", file=sys.stderr)
             if args.json:
                 # Raw non-ASCII only when stdout is UTF-8; JSON escapes stay valid elsewhere.
                 print(json.dumps(rows, indent=2, ensure_ascii=not _stdout_is_utf8()))
@@ -1726,8 +1739,10 @@ def main() -> None:
                 location = f"{row['path']}:{row['line']}" if "line" in row else row["path"]
                 detail = {
                     "symbol": lambda r: f"{r['kind']} {r['qualified']} ({r['language']}, lines {r['line']}-{r['end_line']})",
-                    "callers": lambda r: f"{r['caller']} calls {name}" + (f" -> {r['target']}" if r["target"] else ""),
-                    "callees": lambda r: f"{r['caller']} calls {r['callee']}" + (f" -> {r['target']}" if r["target"] else ""),
+                    "callers": lambda r: f"{r['caller']} calls {name}" + (
+                        f" -> {r['target']} ({r['resolution']})" if r["target"] else ""),
+                    "callees": lambda r: f"{r['caller']} calls {r['callee']}" + (
+                        f" -> {r['target']} ({r['resolution']})" if r["target"] else ""),
                     "references": lambda r: "",
                 }[kind](row)
                 print(f"{location}  {detail}".rstrip())

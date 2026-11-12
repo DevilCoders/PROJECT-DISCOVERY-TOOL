@@ -223,6 +223,12 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   headers in any encoding and size, from comments only (PDT-307).
 - Dependency manifests tolerate empty sections and read more declaration forms (PDT-308);
   Cabal fields and go.mod comments are no longer dependencies (PDT-309).
+- `phase_seconds` names each pass, with the shutdown as its own phase (PDT-310); `--quiet`
+  keeps the reason a `--fail-on`/`--strict` gate failed (PDT-311).
+- `pdt query` shows resolved names with a resolution label, accepts module-qualified
+  `--callees`, and warns and exits 3 on a scan without a code index (PDT-312).
+- No HTTP-in-loop finding for dict values bound by a loop (PDT-313); `ScanResult.to_dict()`
+  writes the schema 1.7 `scan` block (PDT-314); README report claims corrected (PDT-315).
 
 ## 0.2.0 — 2026-11-05
 

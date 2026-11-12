@@ -189,8 +189,12 @@ class ScanResult:
     special_entries: Sequence[SpecialEntryRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        from .reporting.writers import scan_summary  # the writers import this module
+
         return {
             "schema_version": REPORT_SCHEMA_VERSION,
+            # Schema 1.7 added this block; the serializer now writes what it stamps.
+            "scan": scan_summary(self.metrics),
             "root": self.root,
             "started_at": self.started_at,
             "finished_at": self.finished_at,

@@ -797,3 +797,44 @@ def test_local_snapshot_gaps_are_reported_not_read_as_clean(tmp_path: Path):
     assert report["metrics"]["vulnerability_intelligence"]["stale"] is True
     markdown = (tmp_path / "out" / "discovery-report.md").read_text(encoding="utf-8")
     assert "**Stale snapshot:**" in markdown and "- Ecosystems: PyPI (1)" in markdown
+
+
+def test_phase_timings_name_each_pass_and_quiet_keeps_gate_reasons(tmp_path, capsys):
+    # Regressions: the architecture pass was billed to code_index and "architecture" timed
+    # the pool shutdown; --quiet hid why --fail-on/--strict failed (a CI gate exited 1 silently).
+    import json
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("import os\nos.system(input())\n", encoding="utf-8")
+    output = tmp_path / "out"
+    code = run_scan(project, output, {"json"}, 1, quiet=True, fail_on="INFO")
+    assert code == 1
+    assert "[ FAILED ] --fail-on INFO" in capsys.readouterr().err
+    phases = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))["metrics"]["performance"]["phase_seconds"]
+    assert {"python_graph", "architecture", "code_index", "shutdown"} <= set(phases)
+
+
+def test_query_shows_resolved_names_and_refuses_a_scan_without_an_index(tmp_path, monkeypatch, capsys):
+    import sys
+
+    from project_discovery.cli import main
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("def run():\n    return 1\n\ndef main():\n    return run()\n", encoding="utf-8")
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    monkeypatch.setattr(sys, "argv", ["pdt", "query", str(output), "--callees", "app.main"])
+    with pytest.raises(SystemExit) as exited:
+        main()
+    assert exited.value.code == 0
+    out = capsys.readouterr().out
+    assert "main calls run" in out and "@" not in out
+    fast = tmp_path / "fast"
+    assert run_scan(project, fast, {"json"}, 1, quiet=True, inventory_only=True) == 0
+    monkeypatch.setattr(sys, "argv", ["pdt", "query", str(fast), "--symbol", "run"])
+    with pytest.raises(SystemExit) as exited:
+        main()
+    assert exited.value.code == 3
+    assert "no code index" in capsys.readouterr().err

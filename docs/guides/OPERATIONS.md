@@ -151,8 +151,10 @@ could not be read during the walk are listed as diagnostics in every report.
 
 Every JSON report contains `metrics.performance`:
 
-- `phase_seconds`: inventory, analysis, cache maintenance, python_graph, code_index and
-  architecture.
+- `phase_seconds`: inventory, analysis, cache_maintenance, online_vulnerabilities (with
+  `--vuln-online`), python_graph, architecture, code_index, shutdown (the worker pool and plugin
+  hosts) and reporting. Before 2026-11-12 the architecture pass was billed to code_index and
+  "architecture" measured the shutdown.
 - `files_per_second` and `bytes_per_second` up to report writing.
 - `peak_rss_bytes`: the coordinator process's peak resident memory. Worker processes are
   separate; see `tools/benchmark.py` for the largest-process figure on POSIX.

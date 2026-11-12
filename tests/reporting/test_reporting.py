@@ -407,3 +407,10 @@ def test_public_url_drops_credentials_even_when_the_url_does_not_parse():
     for value in ("https://user:secret@example.com:99999/repo?token=x", "https://user:secret@[::1/repo#frag"):
         cleaned = public_url(value)
         assert "secret" not in cleaned and "token" not in cleaned and "frag" not in cleaned, cleaned
+
+
+def test_scan_result_to_dict_writes_the_schema_it_stamps():
+    from project_discovery.models import ScanResult
+
+    data = ScanResult("/r", "start", "end", metrics={"source": {"mode": "local"}}).to_dict()
+    assert data["scan"]["source"] == "local"

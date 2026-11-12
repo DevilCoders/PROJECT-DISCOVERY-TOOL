@@ -79,7 +79,7 @@ pdt query OUTPUT --references parse_config
 ```
 
 `OUTPUT` is the scan's output directory (the index is `OUTPUT/.pdt-cache/inventory.sqlite3`).
-Names may be bare (`run`), qualified (`Engine.run`) or module-qualified as the call graph prints them (`pkg.engine.Engine.run`, matched against the defining file's path). Callers include calls resolved inside their own file (`self.run()`, `this.run()`).
+Names may be bare (`run`), qualified (`Engine.run`) or module-qualified as the call graph prints them (`pkg.engine.Engine.run`, matched against the defining file's path). Callers include calls resolved inside their own file (`self.run()`, `this.run()`). Each call row carries a `resolution`: `resolved`, `same file`, `receiver not resolved` (a call through an object whose type the index does not know) or `by name`. On a scan without a code index (an `--inventory-only` scan) `pdt query` warns and exits 3, since an empty answer would be unknown, not absent; on a truncated index it warns that results can be incomplete.
 
 ## 3. Quality analyzers
 

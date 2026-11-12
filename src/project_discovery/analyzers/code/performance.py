@@ -123,6 +123,18 @@ def _complexity(function: ast.AST) -> int:
     return count
 
 
+def _mapping_targets(node) -> set[str]:
+    """Names a for loop binds from a mapping's ``.items()``/``.values()`` or a dict literal."""
+    iterable = node.iter
+    from_mapping = isinstance(iterable, ast.Dict) or (
+        isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Attribute)
+        and iterable.func.attr in {"items", "values"} and not iterable.args
+    )
+    if not from_mapping:
+        return set()
+    return {item.id for item in ast.walk(node.target) if isinstance(item, ast.Name)}
+
+
 def _constant_iterable(node: ast.AST) -> bool:
     """Loops over literals or module constants run a fixed number of times."""
     if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
@@ -143,6 +155,8 @@ class _PythonHotspots(ast.NodeVisitor):
         self.issues: dict[str, list[int]] = defaultdict(list)
         self.functions: list[tuple[str, int, int, int]] = []  # (qualified, line, complexity, length)
         self.scope: list[str] = []
+        # Names a for loop binds from a mapping (dict values, never HTTP clients).
+        self.data_names: set[str] = set()
 
     def _function(self, node) -> None:
         qualified = ".".join((*self.scope, node.name))
@@ -175,7 +189,11 @@ class _PythonHotspots(ast.NodeVisitor):
 
     def visit_For(self, node) -> None:
         self.visit(node.iter)  # evaluated once, before the first iteration
+        # ``for name, client in config.items()``: the targets are data, not HTTP clients.
+        bound = _mapping_targets(node) - self.data_names
+        self.data_names |= bound
         self._loop(node, [node.target, *node.body, *node.orelse], not _constant_iterable(node.iter))
+        self.data_names -= bound
 
     visit_AsyncFor = visit_For
 
@@ -234,7 +252,8 @@ class _PythonHotspots(ast.NodeVisitor):
             elif attribute in _HTTP_VERBS and (
                 name.startswith(("requests.", "httpx.", "urllib.request.", "aiohttp."))
                 or name in {"urlopen", "urllib.request.urlopen"}
-                or (_HTTP_RECEIVER.search(receiver or "-") and receiver.split(".")[-1] not in {"dict", "os", "environ"})
+                or (_HTTP_RECEIVER.search(receiver or "-") and receiver.split(".")[-1] not in {"dict", "os", "environ"}
+                    and receiver.split(".")[0] not in self.data_names)
             ):
                 self.issues["http_in_loop"].append(node.lineno)
             elif name in {"time.sleep", "asyncio.sleep", "sleep"}:

@@ -1441,6 +1441,37 @@ def _integration(context: _Context) -> tuple[dict, list[Finding]]:
 QUERY_KINDS = ("symbol", "callers", "callees", "references")
 
 
+def _shown(row: dict) -> dict:
+    """A call row with its stored resolution hint as a name and a resolution label.
+
+    ``@Engine.run`` (resolved in its own file) and ``~items.size`` (a call through a
+    receiver the index did not resolve) are internal markers, not names.
+    """
+    target = row.get("target") or ""
+    if target.startswith("@"):
+        return {**row, "target": target[1:], "resolution": "same file"}
+    if target.startswith("~"):
+        return {**row, "target": target[1:], "resolution": "receiver not resolved"}
+    return {**row, "resolution": "resolved" if target else "by name"}
+
+
+def code_index_state(inventory_path: Path) -> dict:
+    """Whether a scan's inventory holds a code index, and whether it was cut at a limit."""
+    db = _connect(inventory_path)
+    try:
+        rows = sum(
+            db.execute(f"SELECT EXISTS (SELECT 1 FROM {table})").fetchone()[0]
+            for table in ("code_symbols", "code_calls", "code_references")
+        )
+        row = db.execute("SELECT value FROM inventory_metadata WHERE key='code_index_truncated'").fetchone()
+        truncated = json.loads(row[0]) if row else {"tables": [], "files": 0}
+    except sqlite3.Error:
+        return {"built": False, "truncated": {}}
+    finally:
+        db.close()
+    return {"built": bool(rows), "truncated": truncated}
+
+
 def _limited(items, limit: int) -> list[dict]:
     result = []
     for item in items:
@@ -1515,17 +1546,23 @@ def query_code_index(inventory_path: Path, kind: str, name: str, limit: int = 20
                 (simple,),
             )
             return _limited(
-                (dict(zip(keys, row, strict=True)) for row in rows
+                (_shown(dict(zip(keys, row, strict=True))) for row in rows
                  if qualified is None or _call_names(qualified, row[3] or "", row[0])),
                 limit,
             )
         elif kind == "callees":
+            keys = ("path", "line", "callee", "target", "caller")
+            # Candidates by the last name segment, then the full name: bare, qualified or
+            # module-qualified (``app.main``, as the call graph prints it).
             rows = db.execute(
                 """SELECT path, line, callee, target, caller FROM code_calls
-                   WHERE caller = ? OR caller LIKE '%.' || ? ORDER BY path, line LIMIT ?""",
-                (name, name, limit),
+                   WHERE caller = ? OR caller LIKE '%.' || ? ORDER BY path, line""",
+                (simple, simple),
             )
-            keys = ("path", "line", "callee", "target", "caller")
+            return _limited(
+                (_shown(dict(zip(keys, row, strict=True))) for row in rows if _names(name, row[4], row[0])),
+                limit,
+            )
         else:
             rows = db.execute(
                 "SELECT path FROM code_references WHERE name = ? ORDER BY path LIMIT ?", (simple, limit),
