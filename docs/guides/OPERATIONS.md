@@ -136,11 +136,13 @@ and Windows).
 | 0 | Scan completed (findings may exist) |
 | 1 | `--fail-on`: a CONFIRMED or INFERRED finding at or above the given severity |
 | 2 | Invalid usage or a fatal error (message on stderr) |
-| 3 | `--strict`: file, analyzer or traversal errors left the scan incomplete |
+| 3 | `--strict`: the scan is incomplete: a file, analyzer, inventory or traversal error, or an `UNKNOWN` coverage finding above INFO |
 | 130 | Interrupted (Ctrl-C) |
 
 `UNKNOWN` findings describe coverage gaps such as budgets, parse failures and missing parsers.
-They never trigger `--fail-on`; use `--strict` to gate on completeness.
+They never trigger `--fail-on`; `--strict` gates on completeness and counts every `UNKNOWN`
+finding above INFO. The FAILED line names the counts behind it. Entries whose metadata
+could not be read during the walk are listed as diagnostics in every report.
 
 ## Performance data
 

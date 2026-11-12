@@ -42,7 +42,7 @@ const truncated=["findings","files","directories","symlinks","special_entries","
 });
 if(truncated.length){
  const notice=$("truncation-notice");
- notice.textContent="Large report: this page embeds a bounded, severity-ordered subset ("+
+ notice.textContent="Large report: this page embeds a bounded subset (findings by severity, inventory by path: "+
   truncated.map(function(name){return number((REPORT[name]||[]).length)+" of "+number(total(name))+" "+name.replace("_"," ");}).join(", ")+
   "). The JSON report contains the complete data set.";
  notice.classList.remove("hidden");
@@ -77,6 +77,7 @@ if(remoteSummary){
 }else{
  $("source-line").textContent="Local directory";
 }
+$("inventory-badge").classList.toggle("hidden",(metrics.execution||{}).analysis_mode!=="inventory-only");
 $("source-summary").textContent=remoteSummary
  ? "Remote // "+(remoteSummary.acquisition==="api"?"provider API, no download":"temporary download")+" // "+String(remoteSummary.url||"")
  : (scan.mode==="online"?"Local directory // online advisory lookup":"Local directory // no network access");
@@ -105,11 +106,16 @@ $("source-notes").textContent=sourceNotes.length?"Notes: "+sourceNotes.map(Strin
 const vulnMeta=metrics.vulnerability_intelligence||{enabled:false};
 const onlineMeta=(vulnMeta.online&&typeof vulnMeta.online==="object")?vulnMeta.online:null;
 const allFindings=REPORT.findings||[];
-const vulnFindings=[];let vulnFindingCount=0;
-for(const item of allFindings){
- if(item.category==="vulnerabilities"){
-  vulnFindingCount++;
-  if(vulnFindings.length<200)vulnFindings.push(item);
+// Complete per-category counts and dedicated samples; older payloads lack them.
+const categoryTotals=(totals.categories&&typeof totals.categories==="object")?totals.categories:null;
+const vulnFindings=Array.isArray(REPORT.vulnerability_findings)?REPORT.vulnerability_findings.slice(0,200):[];
+let vulnFindingCount=categoryTotals?Number(categoryTotals.vulnerabilities||0):0;
+if(!Array.isArray(REPORT.vulnerability_findings)){
+ for(const item of allFindings){
+  if(item.category==="vulnerabilities"){
+   if(!categoryTotals)vulnFindingCount++;
+   if(vulnFindings.length<200)vulnFindings.push(item);
+  }
  }
 }
 $("vuln-summary").textContent=[
@@ -119,7 +125,7 @@ $("vuln-summary").textContent=[
   : "online lookup off",
  number(vulnFindingCount)+" vulnerability finding(s)",
 ].join(" • ");
-$("vuln-db-state").textContent=vulnMeta.enabled?"LOCAL DATABASE ACTIVE":"NO LOCAL DATABASE";
+$("vuln-db-state").textContent=!vulnMeta.enabled?"NO LOCAL DATABASE":vulnMeta.coverage==="skipped"?"LOCAL DATABASE SKIPPED":"LOCAL DATABASE ACTIVE";
 const onlineState=$("vuln-online-state");
 onlineState.textContent=onlineMeta?"ONLINE: "+String(onlineMeta.coverage||"unknown").toUpperCase():"ONLINE LOOKUP OFF";
 onlineState.className="badge"+(onlineMeta?" "+String(onlineMeta.coverage||"unknown"):"");
@@ -175,10 +181,12 @@ if(vulnFindingCount>200){
  vulnTarget.append(note);
 }
 const vcsCategories=new Set(["vcs","hosting_providers","ci_cd","cloud_services"]);
-const vcsFindings=[],providerNameSet=new Set();let vcsFindingCount=0;
-for(const item of allFindings){
+const vcsFindings=[],providerNameSet=new Set();
+let vcsFindingCount=categoryTotals?Array.from(vcsCategories).reduce(function(sum,name){return sum+Number(categoryTotals[name]||0);},0):0;
+const vcsSource=Array.isArray(REPORT.vcs_findings)?REPORT.vcs_findings:allFindings;
+for(const item of vcsSource){
  if(vcsCategories.has(item.category)){
-  vcsFindingCount++;
+  if(!categoryTotals)vcsFindingCount++;
   providerNameSet.add(item.title.split(":")[0]);
   if(vcsFindings.length<100)vcsFindings.push(item);
  }

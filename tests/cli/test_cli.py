@@ -98,6 +98,36 @@ def test_catalog_list_cli_without_format_argument(tmp_path: Path, monkeypatch):
     assert result.value.code == 0
 
 
+def test_commands_survive_a_console_encoding_that_cannot_show_the_path(tmp_path: Path, monkeypatch):
+    # Regression: on Windows a redirected stdout uses the ANSI code page, so catalog-add
+    # registered the project and then exited 2 with UnicodeEncodeError on a non-ANSI path.
+    import io
+    import json
+    import sys
+
+    from project_discovery.cli import main
+
+    root = tmp_path / "проект"
+    root.mkdir()
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({
+        "schema_version": "1.0", "root": str(root), "finished_at": "2026-11-12T10:00:00+00:00",
+        "files": [], "findings": [], "metrics": {"languages": {}},
+    }), encoding="utf-8")
+    buffer = io.BytesIO()
+    stdout = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    database = str(tmp_path / "catalog.sqlite3")
+    for argv in (["catalog-add", str(report), "--db", database], ["catalog-list", "--db", database]):
+        monkeypatch.setattr(sys, "argv", ["pdt", *argv])
+        with pytest.raises(SystemExit) as result:
+            main()
+        assert result.value.code == 0, argv
+    stdout.flush()
+    # The path is printed escaped (backslashreplace), not dropped and not fatal.
+    assert r"\u043f" in buffer.getvalue().decode("cp1252")
+
+
 def test_large_file_content_skip_is_opt_in(tmp_path: Path):
     import json
 
@@ -496,6 +526,33 @@ def test_escape_sequences_in_scanned_content_never_reach_the_terminal_or_reports
         assert not any("\x1b" in text or "\x07" in text for text in texts), finding["title"]
 
 
+def test_strict_counts_inventory_errors_and_names_the_entry(tmp_path: Path, monkeypatch):
+    # Regression: an entry whose metadata failed during the walk was counted only in the
+    # inventory metrics, so --strict exited 0 and every report said "no errors".
+    from project_discovery.inventory import scanner
+
+    project = tmp_path / "project"
+    project.mkdir()
+    entries = [("broken.", "entry_error", 0, None, None, False, "", "OSError: cannot stat", 1, None, None, None)]
+    monkeypatch.setattr(scanner, "native_create_walker", lambda *_args, **_kwargs: iter(entries))
+    assert run_scan(project, tmp_path / "out", {"json", "markdown"}, 1, quiet=True, strict=True) == 3
+    report = _json_report(tmp_path / "out")
+    assert any(item.startswith("broken.: inventory error: OSError") for item in report["errors"])
+    assert "broken.: inventory error" in (tmp_path / "out" / "discovery-report.md").read_text(encoding="utf-8")
+
+
+def test_strict_fails_on_unknown_coverage_findings(tmp_path: Path):
+    # Regression: --strict, documented as the completeness gate, ignored UNKNOWN findings,
+    # so a scan whose only lockfile could not be parsed passed it.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package-lock.json").write_text("{ not json", encoding="utf-8")
+    assert run_scan(project, tmp_path / "plain", {"json"}, 1, quiet=True) == 0
+    assert run_scan(project, tmp_path / "strict", {"json"}, 1, quiet=True, strict=True) == 3
+    report = _json_report(tmp_path / "strict")
+    assert any(item["confidence"] == "UNKNOWN" and item["severity"] != "INFO" for item in report["findings"])
+
+
 def _finding_keys(report: dict) -> set[tuple]:
     return {(item["analyzer"], item["title"], tuple(item["evidence"])) for item in report["findings"]}
 
@@ -536,6 +593,26 @@ def test_inventory_only_scan_reads_no_contents(tmp_path: Path, monkeypatch):
     # Only path-based correlation may contribute findings; no content analyzer runs.
     assert {item["analyzer"] for item in report["findings"]} <= {"architecture-layout"}
     assert report["metrics"]["execution"]["analysis_mode"] == "inventory-only"
+
+
+def test_inventory_only_reports_say_contents_were_not_analyzed(tmp_path: Path):
+    # Regression: Markdown and HTML never said so, and with --vuln-db a local database
+    # that never ran read as an active, clean 0-match result.
+    from project_discovery.vulnerabilities.database import VulnerabilityDatabase
+
+    database = tmp_path / "advisories.sqlite3"
+    with VulnerabilityDatabase(database):
+        pass
+    project = _sample_project(tmp_path / "project")
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json", "markdown", "html"}, 1, quiet=True, inventory_only=True,
+                    vulnerability_db=database) == 0
+    markdown = (output / "discovery-report.md").read_text(encoding="utf-8")
+    assert "- Analysis: inventory only; no file contents were read" in markdown
+    assert "Skipped: --inventory-only reads no lockfile contents" in markdown
+    assert _json_report(output)["metrics"]["vulnerability_intelligence"]["coverage"] == "skipped"
+    html = (output / "discovery-report.html").read_text(encoding="utf-8")
+    assert 'id="inventory-badge"' in html and "LOCAL DATABASE SKIPPED" in html
 
 
 def test_resume_skips_completed_files_and_keeps_stored_findings(tmp_path: Path, capsys):

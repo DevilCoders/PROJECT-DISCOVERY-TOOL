@@ -3,11 +3,44 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 from .comparison import load_report
+
+# ``user@host:path`` (scp-style Git remotes); a Windows drive ``C:\`` has no "@".
+_SCP_REMOTE = re.compile(r"^[\w.-]+@[\w.-]+:")
+
+
+def _is_remote(root: str) -> bool:
+    return "://" in root or bool(_SCP_REMOTE.match(root))
+
+
+def _local_path(root: str) -> bool:
+    """Whether ``root`` is an absolute path on this host (``/srv/app`` is not, on Windows)."""
+    return Path(root).expanduser().is_absolute()
+
+
+def catalog_root(report: dict[str, Any]) -> str:
+    """The catalog key of a report's project.
+
+    Local roots are resolved. A remote scan's root is its credential-free URL, kept as is
+    and followed by ``#ref`` when a ref or revision was scanned, so two refs of one
+    repository are two projects. Roots that are not local paths on this host (a report
+    from another operating system) are kept verbatim instead of being resolved under the
+    current directory.
+    """
+    root = str(report.get("root", ""))
+    scan = report.get("scan") if isinstance(report.get("scan"), dict) else {}
+    remote = scan.get("remote") if isinstance(scan.get("remote"), dict) else None
+    if remote is not None or _is_remote(root):
+        ref = (remote or {}).get("ref") or (remote or {}).get("revision")
+        return f"{root}#{ref}" if ref and "#" not in root else root
+    if not _local_path(root):
+        return root
+    return str(Path(root).expanduser().resolve())
 
 
 class ProjectCatalog:
@@ -34,7 +67,7 @@ class ProjectCatalog:
     def add_report(self, report_path: Path) -> dict[str, Any]:
         report_path = report_path.expanduser().resolve(strict=True)
         report = load_report(report_path)
-        root = str(Path(report["root"]).expanduser().resolve())
+        root = catalog_root(report)
         project_id = hashlib.sha256(root.encode("utf-8")).hexdigest()
         metrics = report.get("metrics", {})
         languages = metrics.get("languages", {})
@@ -102,9 +135,17 @@ class ProjectCatalog:
             reports.append(load_report(report_path))
         return reports
 
-    def remove_project(self, root: Path) -> bool:
-        canonical_root = str(root.expanduser().resolve())
-        cursor = self.db.execute("DELETE FROM projects WHERE root=?", (canonical_root,))
+    def remove_project(self, root: Path | str) -> bool:
+        """Remove a project by its local path, or a remote one by URL (every ref) or URL#ref."""
+        text = str(root)
+        if _is_remote(text) or not _local_path(text):
+            cursor = self.db.execute(
+                "DELETE FROM projects WHERE root=? OR (instr(?, '#') = 0 AND substr(root, 1, ?) = ?)",
+                (text, text, len(text) + 1, text + "#"),
+            )
+        else:
+            canonical_root = str(Path(text).expanduser().resolve())
+            cursor = self.db.execute("DELETE FROM projects WHERE root=?", (canonical_root,))
         self.db.commit()
         return cursor.rowcount > 0
 

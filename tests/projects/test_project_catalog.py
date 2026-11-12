@@ -56,3 +56,36 @@ def test_catalog_loads_registered_reports(tmp_path: Path):
         catalog.add_report(first)
         catalog.add_report(second)
         assert len(catalog.load_reports()) == 2
+
+
+def _remote_report(path: Path, url: str, ref: str) -> None:
+    path.write_text(json.dumps({
+        "schema_version": "1.7", "root": url, "finished_at": "2026-11-12T10:00:00+00:00",
+        "files": [], "findings": [], "metrics": {"languages": {}},
+        "scan": {"mode": "online", "source": "remote", "remote": {"url": url, "ref": ref}},
+    }), encoding="utf-8")
+
+
+def test_remote_and_foreign_roots_are_kept_verbatim(tmp_path: Path, monkeypatch):
+    # Regression: every root went through Path.resolve(), so a remote scan's URL became a
+    # path under the current directory and two refs of one repository merged into one row.
+    import os
+
+    url = "https://github.example/acme/widgets"
+    database = tmp_path / "catalog.sqlite3"
+    first, second = tmp_path / "v1.json", tmp_path / "v2.json"
+    _remote_report(first, url, "v1.0.0")
+    _remote_report(second, url, "v2.0.0")
+    foreign = tmp_path / "foreign.json"
+    foreign_root = r"C:\projects\app" if os.name != "nt" else "/srv/app"
+    _write_report(foreign, foreign_root)
+    with ProjectCatalog(database) as catalog:
+        catalog.add_report(first)
+        monkeypatch.chdir(tmp_path)          # the stored key must not depend on the cwd
+        catalog.add_report(second)
+        catalog.add_report(foreign)
+        roots = sorted(project["root"] for project in catalog.list_projects())
+        assert roots == sorted([f"{url}#v1.0.0", f"{url}#v2.0.0", foreign_root])
+        assert catalog.remove_project(f"{url}#v1.0.0") is True
+        assert catalog.remove_project(url) is True      # every remaining ref of the URL
+        assert [project["root"] for project in catalog.list_projects()] == [foreign_root]

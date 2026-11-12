@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import sqlite3
+import sys
 import time
 from collections import Counter, deque
 from datetime import datetime, timezone
@@ -168,6 +169,8 @@ EXIT_FINDINGS = 1
 EXIT_USAGE = 2
 EXIT_INCOMPLETE = 3
 EXIT_INTERRUPTED = 130
+# Entries that failed at inventory time each get a diagnostic, up to this many.
+MAX_INVENTORY_ERROR_DIAGNOSTICS = 10_000
 
 # Analyzed file records are written back in batches of this size.
 RECORD_UPDATE_BATCH = 512
@@ -456,6 +459,11 @@ def run_scan(
                 "enabled": True,
                 **advisory_store.status(),
             }
+        if inventory_only:
+            # No lockfile is read, so no match is possible: a 0-match result would read as clean.
+            vulnerability_db_status.update(
+                coverage="skipped", skip_reason="--inventory-only reads no lockfile contents",
+            )
     vulnerability_db_status["sources"] = (["local-database"] if vulnerability_db is not None else []) + (
         ["osv.dev"] if online_vulnerabilities is not None else []
     )
@@ -510,6 +518,7 @@ def run_scan(
                 )
     timer.lap("inventory")
     resumed_skipped = 0
+    inventory_error_count = 0
     counts = Counter()
     cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
     hardware_threads = max(1, int(native_capabilities().get("hardware_threads", os.cpu_count() or 1)))
@@ -697,6 +706,12 @@ def run_scan(
                         )
                     for record in (records if memory_source is None else ()):
                         counts[record.language] += 1
+                        if record.error and not resumed:
+                            # An entry whose metadata failed during the walk: every report
+                            # names it, and --strict counts it (a resumed scan has them).
+                            inventory_error_count += 1
+                            if inventory_error_count <= MAX_INVENTORY_ERROR_DIAGNOSTICS:
+                                finding_store.append_diagnostic(f"{record.path}: inventory error: {record.error}")
                         if record.error or record.content_skipped_reason or inventory_only:
                             progress.advance(task)
                             continue
@@ -734,6 +749,11 @@ def run_scan(
                     flush_batch()
                     while pending:
                         collect_one()
+                    if inventory_error_count > MAX_INVENTORY_ERROR_DIAGNOSTICS:
+                        finding_store.append_diagnostic(
+                            f"{inventory_error_count - MAX_INVENTORY_ERROR_DIAGNOSTICS:,} more entries "
+                            "had inventory errors; the JSON report's files[] lists each with its error."
+                        )
                 finally:
                     # Also on Ctrl-C: keep completed files for --resume (findings first).
                     if record_updates:
@@ -999,13 +1019,20 @@ def run_scan(
         )
 
     exit_code = EXIT_OK
-    if strict and (error_count or metrics["walk_errors"]):
-        exit_code = EXIT_INCOMPLETE
-        _status(
-            console, "FAILED",
-            "--strict: the scan is incomplete because of file, analyzer or traversal errors.",
-            "red",
-        )
+    if strict:
+        # Completeness: errors, and UNKNOWN coverage findings (budgets, parse failures,
+        # unreadable lockfiles, unfetched remote content) above INFO.
+        gaps = sum(1 for finding in findings if finding.confidence == "UNKNOWN" and finding.severity != "INFO")
+        if error_count or metrics["walk_errors"] or gaps:
+            exit_code = EXIT_INCOMPLETE
+            reasons = [
+                f"{count:,} {label}" for count, label in (
+                    (error_count, "file/analyzer error(s)"),
+                    (metrics["walk_errors"], "traversal error(s)"),
+                    (gaps, "UNKNOWN coverage finding(s)"),
+                ) if count
+            ]
+            _status(console, "FAILED", f"--strict: the scan is incomplete: {', '.join(reasons)}.", "red")
     if fail_on is not None:
         # UNKNOWN findings describe coverage gaps; --strict is the gate for those.
         threshold = SEVERITY_RANK[fail_on]
@@ -1273,7 +1300,28 @@ def _run_remote_targets(
     return exit_code
 
 
+def _tolerant_console_streams() -> None:
+    """Escape what the console encoding cannot represent instead of failing on it.
+
+    On Windows a redirected or piped stdout uses the ANSI code page, so printing a
+    project path or identifier outside it raised UnicodeEncodeError after a command had
+    already done its work (a project registered, comparison reports written).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="backslashreplace")
+            except (ValueError, OSError):
+                pass
+
+
+def _stdout_is_utf8() -> bool:
+    return (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "") == "utf8"
+
+
 def main() -> None:
+    _tolerant_console_streams()
     parser = argparse.ArgumentParser(
         prog="pdt", description="Local-first project intelligence analyzer"
     )
@@ -1414,7 +1462,8 @@ def main() -> None:
     )
     scan.add_argument(
         "--strict", action="store_true",
-        help="Exit with status 3 when any file, analyzer or traversal error left the scan incomplete",
+        help="Exit with status 3 when the scan is incomplete: a file, analyzer or traversal "
+             "error, or an UNKNOWN coverage finding above INFO (budget, parse failure, unread content)",
     )
     scan.add_argument(
         "--executor", choices=EXECUTOR_MODES, default="auto",
@@ -1491,7 +1540,7 @@ def main() -> None:
     catalog_list = sub.add_parser("catalog-list", help="List locally registered projects")
     catalog_list.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
     catalog_remove = sub.add_parser("catalog-remove", help="Remove a project from the local catalog")
-    catalog_remove.add_argument("root", type=Path)
+    catalog_remove.add_argument("root", help="A local project path, a remote URL (every ref) or URL#ref")
     catalog_remove.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
     catalog_compare = sub.add_parser("catalog-compare", help="Compare every registered project report")
     catalog_compare.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
@@ -1548,7 +1597,8 @@ def main() -> None:
                 args.scan_output.expanduser() / ".pdt-cache" / "inventory.sqlite3", kind, name, args.limit,
             )
             if args.json:
-                print(json.dumps(rows, indent=2, ensure_ascii=False))
+                # Raw non-ASCII only when stdout is UTF-8; JSON escapes stay valid elsewhere.
+                print(json.dumps(rows, indent=2, ensure_ascii=not _stdout_is_utf8()))
                 raise SystemExit(0)
             for row in rows:
                 location = f"{row['path']}:{row['line']}" if "line" in row else row["path"]

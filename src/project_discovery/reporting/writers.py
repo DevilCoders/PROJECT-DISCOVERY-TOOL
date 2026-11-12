@@ -7,6 +7,7 @@ import io
 import json
 import re
 import secrets
+from collections import Counter
 from importlib.resources import files as resource_files
 from itertools import islice
 from pathlib import Path
@@ -26,6 +27,9 @@ HTML_MAX_EMBEDDED = {
     "special_entries": 50_000,
     "errors": 10_000,
 }
+# Each dedicated HTML view (vulnerabilities, VCS/providers) embeds up to this many findings.
+_HTML_VIEW_SAMPLE = 200
+_VCS_CATEGORIES = frozenset({"vcs", "hosting_providers", "ci_cd", "cloud_services"})
 _TEMPLATE_PLACEHOLDER = re.compile(r"__(ROOT|GENERATED|REPORT_JS|CSP_NONCE|MODE_CLASS|MODE_LABEL|MODE_META)__")
 
 # Remote-source fields repeated in the top-level "scan" summary of every report.
@@ -244,7 +248,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
   <div class="eyebrow">Project discovery / analysis complete</div>
   <h1>Project Intelligence Report</h1>
   <div class="root">__ROOT__</div><div class="completed">COMPLETED // __GENERATED__</div>
-  <div class="mode-line"><span id="scan-mode" class="badge mode-__MODE_CLASS__">__MODE_LABEL__</span><span id="source-line" class="muted mono"></span><span id="transport-badge" class="badge insecure hidden">NO TLS</span></div>
+  <div class="mode-line"><span id="scan-mode" class="badge mode-__MODE_CLASS__">__MODE_LABEL__</span><span id="source-line" class="muted mono"></span><span id="transport-badge" class="badge insecure hidden">NO TLS</span><span id="inventory-badge" class="badge insecure hidden">INVENTORY ONLY: CONTENTS NOT ANALYZED</span></div>
   <div class="stats">
    <div class="stat cyan"><span>Files</span><strong id="stat-files">0</strong></div>
    <div class="stat"><span>Directories</span><strong id="stat-dirs">0</strong></div>
@@ -385,9 +389,24 @@ def _write_json_array(
 
 
 def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
-    """Embed bounded, severity-ordered slices plus true totals for the offline client."""
+    """Embed bounded slices plus true totals for the offline client.
+
+    Findings are severity-ordered, inventory records path-ordered. The vulnerability and
+    VCS views get their own samples and complete per-category counts, so they stay right
+    when the general findings slice is truncated.
+    """
+    categories: Counter[str] = Counter()
+    vulnerabilities: list = []
+    vcs: list = []
+    for finding in result.findings:
+        categories[finding.category] += 1
+        if finding.category == "vulnerabilities" and len(vulnerabilities) < _HTML_VIEW_SAMPLE:
+            vulnerabilities.append(finding)
+        elif finding.category in _VCS_CATEGORIES and len(vcs) < _HTML_VIEW_SAMPLE:
+            vcs.append(finding)
     totals = {
         "findings": len(result.findings),
+        "categories": dict(sorted(categories.items())),
         "files": len(result.files),
         "directories": len(result.directories),
         "symlinks": len(result.symlinks),
@@ -404,6 +423,9 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
     _write_json_value(stream, totals, script_safe=True)
     stream.write(',"embedded_limits":')
     _write_json_value(stream, HTML_MAX_EMBEDDED, script_safe=True)
+    for name, items in (("vulnerability_findings", vulnerabilities), ("vcs_findings", vcs)):
+        stream.write(f',"{name}":')
+        _write_json_array(stream, items, lambda item: item.to_dict(), script_safe=True)
     stream.write(',"findings":')
     _write_json_array(
         stream, bounded("findings", result.findings), lambda item: item.to_dict(), script_safe=True,
@@ -540,6 +562,10 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- Root: {_md(result.root)}",
         f"- Scan mode: {summary['mode']} ({_md(_network_label(summary))})",
         f"- Source: {_md(_source_label(summary))}",
+        "- Analysis: " + (
+            "inventory only; no file contents were read, so no content analyzer ran"
+            if execution.get("analysis_mode") == "inventory-only" else "full"
+        ) + ("; resumed from an earlier interrupted scan" if execution.get("resumed") else ""),
         f"- Schema version: {REPORT_SCHEMA_VERSION}",
         f"- Completed: {result.finished_at}",
         f"- Files: {len(result.files):,}",
@@ -738,6 +764,9 @@ def _write_markdown_vulnerabilities(line, result: ScanResult, meta: dict[str, An
     if not meta.get("enabled"):
         line("No local advisory database was configured. This is not a vulnerability-free result.")
     else:
+        if meta.get("coverage") == "skipped":
+            line(f"Skipped: {_md(meta.get('skip_reason', 'not run'))}. This is not a vulnerability-free result.")
+            line()
         line(f"- Local advisories available: {meta.get('advisory_count', 0):,}")
         line(f"- Local advisory snapshot imported: {_md(meta.get('last_imported_at', 'unknown'))}")
         if meta.get("snapshot_age_days") is not None:

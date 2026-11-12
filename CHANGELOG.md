@@ -142,6 +142,17 @@ Findings and their status are in [docs/project/AUDIT_2026-11-12.md](docs/project
   typed definitions; Rust `impl Trait for Type {` is not a loop (PDT-243 to PDT-246).
 - Python SQL built only from placeholder lists or constant table names is no longer reported as
   dynamically constructed; parameters and rebound names still are (PDT-247).
+- `--strict` is the completeness gate it is documented to be: it also fails on entries whose
+  metadata could not be read during the walk (now diagnostics in every report) and on `UNKNOWN`
+  coverage findings above INFO, and its FAILED line names the counts (PDT-248, PDT-249).
+- The HTML vulnerability and VCS views count every finding, not only the embedded slice
+  (PDT-250).
+- On Windows, `catalog-*`, `compare`, `query` and `vuln-db status` no longer exit 2 when stdout
+  is redirected and a path is outside the ANSI code page (PDT-251).
+- The project catalog keys remote scans by URL and ref instead of resolving the URL as a
+  local path; `pdt catalog-remove URL` removes every ref (PDT-252).
+- Reports of `--inventory-only` scans say that no contents were analyzed, and a local advisory
+  database is recorded as skipped rather than as a clean result (PDT-253).
 
 ## 0.2.0 — 2026-11-05
 

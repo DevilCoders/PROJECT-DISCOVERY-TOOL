@@ -328,3 +328,21 @@ def test_html_client_warns_when_the_online_lookup_is_incomplete(tmp_path: Path):
     assert "not a vulnerability-free result" in dump["vuln-coverage-warning"]["text"]
     assert dump["vuln-online-state"]["className"] == "badge unavailable"
     assert dump["source-summary"]["text"] == "Local directory // online advisory lookup"
+
+
+def test_html_views_count_every_finding_when_the_slice_is_truncated(tmp_path: Path, monkeypatch):
+    # Regression: the vulnerability and VCS views counted only the embedded, severity-
+    # ordered slice, so in large reports they claimed "0" and "No ... evidence".
+    import project_discovery.reporting.writers as reporting
+
+    result = _result()
+    result.findings = [Finding("security", f"High {index}", "d", severity="HIGH") for index in range(3)] + [
+        Finding("vulnerabilities", "GHSA-xxxx: lodash", "d", confidence="CONFIRMED", severity="LOW"),
+        Finding("vcs", "GitHub: remote origin", "d", severity="INFO"),
+        Finding("hosting_providers", "GitLab: remote mirror", "d", severity="INFO"),
+    ]
+    monkeypatch.setitem(reporting.HTML_MAX_EMBEDDED, "findings", 1)
+    dump = _render_html_client(result, tmp_path)
+    assert "1 vulnerability finding(s)" in dump["vuln-summary"]["text"]
+    assert dump["vcs-summary"]["text"].startswith("2 evidence item(s)")
+    assert "GitHub" in dump["vcs-summary"]["text"] and "GitLab" in dump["vcs-summary"]["text"]
