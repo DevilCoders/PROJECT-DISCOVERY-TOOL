@@ -23,8 +23,9 @@ from typing import Any, Literal, Sequence
 # records (development_marker is the marker catalog's key), metrics.development_categories,
 # metrics.development_confidence and metrics.pruned_by_profile. 1.14 added contents_recorded
 # to directory records (false inside a --development-trees directory-only tree) and
-# metrics.development_trees.
-REPORT_SCHEMA_VERSION = "1.14"
+# metrics.development_trees. 1.15 added metrics.analysis_budgets: the per-analyzer time and
+# memory budgets, the per-domain overrides, what each analyzer used and the calls a budget stopped.
+REPORT_SCHEMA_VERSION = "1.15"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

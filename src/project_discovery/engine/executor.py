@@ -18,6 +18,7 @@ from concurrent.futures import CancelledError, Future, ProcessPoolExecutor, Thre
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -28,9 +29,17 @@ from ..core.source_utils import (
     redact_source_excerpt,
     stat_identity,
 )
-from ..intelligence.facts import FileFacts, collecting_facts
+from ..intelligence.facts import FileFacts, collecting_facts, current_facts
 from ..inventory.scanner import sha256_file
 from ..models import FileRecord, Finding
+from . import budgets
+from .budgets import BudgetStop
+
+
+def _isolated_analyzer_type() -> type:
+    from ..plugins.isolation import IsolatedAnalyzer
+
+    return IsolatedAnalyzer
 
 # Files up to this size are read once per worker and served to every analyzer.
 PREFETCH_MAX_BYTES = 4 * 1024 * 1024
@@ -56,6 +65,10 @@ class FileOutcome:
     # Process workers: (GPU dispatches, CPU fallbacks) during this batch, carried by its
     # last outcome. The native counters are per process, so the coordinator sums them.
     gpu_counts: tuple[int, int] | None = None
+    # (analyzer, seconds, sampled peak memory growth in MiB or None) per analyzer call, and
+    # (analyzer, kind, limit, used) per call an analysis budget stopped.
+    budget_usage: list[tuple[str, float, float | None]] = field(default_factory=list)
+    budget_stops: list[tuple[str, str, float, float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -76,13 +89,47 @@ def verified_regular_file_stat(path: Path, expected=None) -> os.stat_result:
     return current
 
 
+def _budget_stop_finding(analyzer, record: FileRecord, stop: BudgetStop) -> Finding:
+    if stop.kind == "time":
+        what, limit = f"after {stop.used:.1f} s", f"{stop.limit:g}-second time budget"
+    else:
+        what, limit = f"at {stop.used:,.0f} MiB of memory growth", f"{stop.limit:,.0f} MiB memory budget"
+    return Finding(
+        "analysis_coverage",
+        f"Analyzer {stop.kind} budget exceeded: {analyzer.name}: {record.path}",
+        f"The analyzer was stopped {what}: its {limit} per file (--analyzer-timeout, "
+        "--analyzer-memory-mb, --domain-budget). Its findings for the file were discarded, so "
+        "absence of its findings is not evidence of absence.",
+        confidence="UNKNOWN", evidence=[record.path], analyzer=analyzer.name, severity="LOW",
+    )
+
+
+def _rollback_facts(sizes: tuple[int, int, int] | None) -> None:
+    """Drop the code facts a stopped analyzer emitted for the file."""
+    facts = current_facts()
+    if facts is not None and sizes is not None:
+        del facts.symbols[sizes[0]:], facts.calls[sizes[1]:], facts.facts[sizes[2]:]
+
+
 def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: FileOutcome) -> None:
+    policy = budgets.current_policy()
     for analyzer in analyzers:
         try:
             lock = locks.get(id(analyzer))
             with lock if lock is not None else nullcontext():
                 if analyzer.supports(record):
-                    produced = analyzer.analyze(path, record)
+                    # Isolated plugins run in their own hosts under --plugin-timeout/--plugin-memory-mb.
+                    budget = None if isinstance(analyzer, _isolated_analyzer_type()) else policy.for_analyzer(analyzer)
+                    facts = current_facts()
+                    sizes = (len(facts.symbols), len(facts.calls), len(facts.facts)) if facts is not None else None
+                    run = budgets.run_with_budget(budget, partial(analyzer.analyze, path, record))
+                    outcome.budget_usage.append((analyzer.name, run.seconds, run.peak_mb))
+                    if run.stop is not None:
+                        _rollback_facts(sizes)
+                        outcome.budget_stops.append((analyzer.name, run.stop.kind, run.stop.limit, run.stop.used))
+                        outcome.findings.append(_budget_stop_finding(analyzer, record, run.stop))
+                        continue
+                    produced = run.result
                     if getattr(analyzer, "_pdt_in_process_plugin", False):
                         # The isolated modes' validation, redaction and bounds; the plugin
                         # cannot choose the analyzer name either (PDT-317).
@@ -94,6 +141,10 @@ def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: Fi
                         )
                     outcome.findings.extend(produced)
                     outcome.analyzed = True
+        except budgets.AnalyzerBudgetExceeded:
+            # A stop delivered outside the guarded call (it fired as the call ended): already
+            # counted when it carried a stop; never let it escape and fail the whole batch.
+            continue
         except Exception as exc:
             message = redact_source_excerpt(f"{type(exc).__name__}: {exc}")
             outcome.errors.append(f"{record.path} [{analyzer.name}]: {message}")
@@ -206,8 +257,9 @@ def _watch_coordinator() -> None:
     threading.Thread(target=watch, name="pdt-coordinator-watch", daemon=True).start()
 
 
-def _initialize_worker(vulnerability_db: str | None, plugin_setup=None) -> None:
+def _initialize_worker(vulnerability_db: str | None, plugin_setup=None, budget_policy=None) -> None:
     """Load this worker process's own analyzer instances (built-ins and plugins)."""
+    budgets.set_policy(budget_policy)
     # Ctrl-C reaches the whole process group. Only the coordinator handles it and stops
     # the workers itself, so workers do not die mid-queue printing KeyboardInterrupt
     # tracebacks or hand interrupts back as task results.
@@ -273,6 +325,7 @@ class AnalysisExecutor:
         file_count: int,
         vulnerability_db: Path | None = None,
         plugin_setup: tuple | None = None,
+        budget_policy: budgets.BudgetPolicy | None = None,
     ) -> None:
         if mode not in EXECUTOR_MODES:
             raise ValueError(f"--executor must be one of: {', '.join(EXECUTOR_MODES)}")
@@ -284,6 +337,12 @@ class AnalysisExecutor:
         self._vulnerability_db = str(vulnerability_db) if vulnerability_db else None
         # (PluginPolicy, validated PluginSpecs) for worker processes to rebuild plugins.
         self._plugin_setup = plugin_setup
+        # Analyzer time and memory budgets: thread workers share this process's policy,
+        # process workers receive it when they start. The policy it replaced comes back
+        # at shutdown, so one scan's budgets never outlive it in a library caller.
+        self._budget_policy = budget_policy or budgets.BudgetPolicy()
+        self._replaced_policy = budgets.current_policy()
+        budgets.set_policy(self._budget_policy)
         self._locks = {
             id(analyzer): threading.Lock()
             for analyzer in self._analyzers
@@ -304,7 +363,7 @@ class AnalysisExecutor:
             return ProcessPoolExecutor(
                 max_workers=self.workers,
                 initializer=_initialize_worker,
-                initargs=(self._vulnerability_db, self._plugin_setup),
+                initargs=(self._vulnerability_db, self._plugin_setup, self._budget_policy),
             )
         return ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="pdt-analyzer")
 
@@ -380,6 +439,7 @@ class AnalysisExecutor:
             self._close_plugin_hosts(graceful=False)
         self._pool.shutdown(wait=True, cancel_futures=cancel)
         self._close_plugin_hosts(graceful=not cancel)
+        budgets.set_policy(self._replaced_policy)
 
     def __enter__(self) -> "AnalysisExecutor":
         return self

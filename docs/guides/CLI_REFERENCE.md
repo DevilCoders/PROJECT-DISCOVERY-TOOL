@@ -179,6 +179,21 @@ pdt scan https://bitbucket.example.com/scm/PROJ/repo.git --no-download --api-max
 pdt scan --url repositories.txt --no-download --vuln-online --output ./api-reports
 ```
 
+### Analyzer budgets
+
+| Option | Default | Description |
+|---|---|---|
+| `--analyzer-timeout SECONDS` | `120` | Time each analyzer may spend on one file. A call that runs longer is stopped, its findings and code facts for the file are discarded, and an `UNKNOWN` coverage finding names the analyzer, the file and the budget. `0` disables it. |
+| `--analyzer-memory-mb MB` | `2048` | How far the process's resident memory may grow during one analyzer call on one file, sampled every 50 ms on Linux, Windows and macOS (elsewhere only the time budget applies). A call past it is stopped the same way. `0` disables it. |
+| `--domain-budget DOMAIN:timeout=S,memory=MB` | none | Override either budget for the analyzers of one domain (`archives`, `secrets`, `firmware`, ...; `pdt capabilities --json` lists each analyzer's domains); `0` means no limit. An analyzer in several domains gets the most permissive override. Repeatable. |
+
+Isolated plugins keep `--plugin-timeout` and `--plugin-memory-mb` instead. `metrics.analysis_budgets` records the budgets, the overrides, every stop and, per analyzer, its calls, total and longest time and largest sampled memory growth; the terminal summary and the Markdown and HTML reports show them.
+
+```bash
+pdt scan ./monorepo --analyzer-timeout 30 --analyzer-memory-mb 1024
+pdt scan ./firmware --domain-budget firmware:timeout=600,memory=4096 --domain-budget archives:timeout=0
+```
+
 ### Plugins
 
 | Option | Default | Description |

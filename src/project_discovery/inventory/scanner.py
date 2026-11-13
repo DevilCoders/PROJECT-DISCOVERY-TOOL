@@ -10,7 +10,9 @@ from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 
 from ..catalog.languages import detect_language
-from ..core.source_utils import FileIdentity, as_identity, identity_matches, stat_identity
+from ..core.source_utils import (
+    FileIdentity, as_identity, identity_matches, open_regular_descriptor, stat_identity,
+)
 from ..engine.native import create_walker as native_create_walker
 from ..models import DirectoryRecord, FileRecord, SpecialEntryRecord, SymlinkRecord
 from .entry_metadata import (
@@ -87,13 +89,8 @@ def sha256_file(
     before = expected_info if expected_info is not None else path.lstat()
     if not stat.S_ISREG(before.st_mode):
         raise OSError(f"refusing to hash non-regular entry: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    descriptor, opened = open_regular_descriptor(path)
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise OSError(f"entry changed to a non-regular file: {path}")
         if not identity_matches(stat_identity(before), stat_identity(opened)):
             raise OSError(f"file identity changed before hashing: {path}")
         digest = hashlib.sha256()
@@ -198,13 +195,8 @@ def _read_verified_sample(
     )
     if not identity_matches(expected_identity, observed_identity):
         raise OSError(f"file identity changed before signature read: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    descriptor, opened = open_regular_descriptor(path)
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise OSError(f"entry changed to a non-regular file: {path}")
         opened_identity = stat_identity(opened)
         if not (
             identity_matches(observed_identity, opened_identity)

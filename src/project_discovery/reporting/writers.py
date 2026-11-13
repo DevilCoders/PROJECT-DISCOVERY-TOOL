@@ -106,6 +106,56 @@ def development_summary(metrics: dict[str, Any]) -> str:
     return f"{count:,}" + (f" ({', '.join(parts)})" if parts else "")
 
 
+def _limit_text(timeout: Any, memory: Any) -> str:
+    time_text = f"{timeout:g} s" if timeout else "no time limit"
+    memory_text = f"{memory:,} MiB" if memory else "no memory limit"
+    return f"{time_text} and {memory_text}"
+
+
+def budget_summary(budgets: dict[str, Any] | None) -> str:
+    """"120 s and 2,048 MiB per analyzer and file; 1 domain override; 2 stopped (time 2)"."""
+    budgets = budgets or {}
+    if not budgets:
+        return "not recorded"
+    text = f"{_limit_text(budgets.get('timeout_seconds'), budgets.get('memory_mb'))} per analyzer and file"
+    if budgets.get("memory_mb") and not budgets.get("memory_enforced"):
+        text += " (memory is not measured on this platform)"
+    overrides = budgets.get("domain_overrides") or {}
+    if overrides:
+        text += f"; {len(overrides)} domain override(s)"
+    stops = budgets.get("stops") or {}
+    stopped = stops.get("time", 0) + stops.get("memory", 0)
+    text += (f"; {stopped:,} call(s) stopped (time {stops.get('time', 0):,}, memory {stops.get('memory', 0):,})"
+             if stopped else "; no call stopped")
+    return text
+
+
+def _write_markdown_budgets(line, budgets: dict[str, Any]) -> None:
+    line("## Analyzer Budgets")
+    line()
+    line(f"- Budget: {_md(budget_summary(budgets))}")
+    for domain, values in (budgets.get("domain_overrides") or {}).items():
+        line(f"- Domain {_md(domain)}: " + _md(_limit_text(
+            values.get("timeout_seconds", budgets.get("timeout_seconds")),
+            values.get("memory_mb", budgets.get("memory_mb")),
+        )))
+    for item in (budgets.get("stopped") or [])[:20]:
+        unit = "s" if item["budget"] == "time" else "MiB"
+        line(f"- Stopped: {_md(item['path'])}: {_md(item['analyzer'])}, {item['budget']} budget "
+             f"{item['limit']:g} {unit}, at {item['used']:,.1f} {unit}")
+    analyzers = budgets.get("analyzers") or {}
+    if analyzers:
+        line()
+        line("Time per analyzer over all files (the ten slowest):")
+        line()
+        for name, entry in list(analyzers.items())[:10]:
+            memory = (f", peak memory growth {entry['max_memory_mb']:,.1f} MiB"
+                      if entry.get("max_memory_mb") is not None else "")
+            line(f"- {_md(name)}: {entry['seconds']:,.2f} s over {entry['calls']:,} file(s), longest "
+                 f"{entry['max_seconds']:,.2f} s ({_md(entry['max_seconds_path'] or '-')}){memory}")
+    line()
+
+
 def tree_mode_summary(trees: dict[str, Any] | None) -> str:
     """What --development-trees did, such as "directory-only: 3 trees, 120,412 files not recorded"."""
     trees = trees or {}
@@ -439,6 +489,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>Directory fan-out</h3><div id="fan-out"></div></div>
      <div class="profile-card"><h3>MIME types</h3><div id="mime-types"></div></div>
      <div class="profile-card"><h3>Host & native engine</h3><div id="host-os" class="mono muted"></div></div>
+     <div class="profile-card"><h3>Analyzer time (seconds)</h3><div id="analyzer-budgets" class="muted"></div><div id="analyzer-time"></div></div>
      <div class="profile-card"><h3>Vulnerability intelligence</h3><div id="vuln-summary" class="mono muted"></div></div>
      <div class="profile-card"><h3>Source control & delivery</h3><div id="vcs-summary" class="mono muted"></div></div>
     </div>
@@ -764,6 +815,8 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     ):
         line(value)
     _write_markdown_source(line, metrics, summary)
+    if metrics.get("analysis_budgets") and execution.get("analysis_mode") != "inventory-only":
+        _write_markdown_budgets(line, metrics["analysis_budgets"])
     line("## File Type Distribution")
     line()
     for name, count in sorted(metrics.get("file_types", {}).items()):

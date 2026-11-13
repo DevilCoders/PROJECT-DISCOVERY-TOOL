@@ -127,6 +127,7 @@ Hosts run in the per-user AppContainer profile `ProjectDiscoveryTool.PluginHost`
 
 - `concurrent_safe` matters only with `--plugin-isolation off`, because isolated hosts never run requests in parallel.
 - Isolated plugins contribute findings only. Code facts (`project_discovery.intelligence.facts.emit_fact`), which feed the cross-file code index, are not part of the host protocol, so calls to them inside a host are ignored. A plugin run with `--plugin-isolation off` executes inside PDT's fact collector and can record facts.
+- With `--plugin-isolation off`, each `analyze()` call runs under the analyzer budgets like a built-in analyzer: `--analyzer-timeout`, `--analyzer-memory-mb` and the `--domain-budget` overrides of the domains the plugin declares. A call past its budget is interrupted with `AnalyzerBudgetExceeded`, a `BaseException`, so catch `Exception` rather than `BaseException` or a bare `except:`. Its findings and facts for the file are discarded either way, and an `UNKNOWN` coverage finding takes their place.
 
 ## Limits of the isolation
 

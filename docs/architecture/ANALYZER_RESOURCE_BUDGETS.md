@@ -1,6 +1,19 @@
 # Analyzer resource budgets
 
-These are per-analyzer safety limits, not a global scan-size policy. They are currently fixed implementation defaults; they are not all exposed as CLI options yet.
+These are per-analyzer safety limits, not a global scan-size policy. Every analyzer call on a file has a time and a memory budget, configurable per scan and per analyzer domain; the byte, line and entry limits in the table below are fixed implementation defaults.
+
+## Time and memory budgets
+
+| Budget | Default | Option | Applies to |
+|---|---:|---|---|
+| Time per analyzer and file | 120 s | `--analyzer-timeout SECONDS` (`0`: none) | Every built-in and in-process plugin analyzer call |
+| Resident-memory growth per analyzer and file | 2048 MiB | `--analyzer-memory-mb MB` (`0`: none) | The same calls, on Linux, Windows and macOS |
+| Per-domain override | none | `--domain-budget DOMAIN:timeout=S,memory=MB` | The analyzers of that domain; the most permissive override of an analyzer's domains applies |
+| Isolated plugin hosts | 60 s per request, 4096 MiB per host (Linux and Windows) | `--plugin-timeout`, `--plugin-memory-mb` | Sandboxed and process-isolated plugins |
+
+A watchdog thread samples the running calls every 50 ms (`engine/budgets.py`). A call past a budget receives `AnalyzerBudgetExceeded`, a `BaseException`, at its next Python bytecode, so an analyzer's `except Exception` cannot swallow it. The engine discards the call's findings and code facts for the file and records an `UNKNOWN` `analysis_coverage` finding naming the analyzer, the file, the budget and what was used; the other analyzers still run. Memory is the growth of the process's resident set (Linux `/proc/self/statm`, Windows working set, macOS `task_info`) since the call started. `metrics.analysis_budgets` records the configuration, every stop and each analyzer's time and sampled memory; the terminal, Markdown and HTML reports show them.
+
+A single long C call (one regular-expression search, a blocking read) finishes before the stop takes effect, and a memory spike between two samples is not seen. With the thread executor the analyzers share one process, so memory growth includes concurrent calls.
 
 ## Current bounded work
 
@@ -53,18 +66,18 @@ An analyzer may apply its own specialized budget regardless of --skip. Such a re
 
 ## Important limitations
 
-- Most byte limits are fixed constants and are not yet configurable by CLI or a policy file.
+- Most byte limits are fixed constants and are not yet configurable by CLI or a policy file; only the time and memory budgets are.
 - Lockfile text formats iterate lines from a bounded in-memory content buffer; JSON/TOML lockfiles are parsed as bounded in-memory objects. The 250,000 entry cap limits retained package results, not the initial JSON/TOML parser object graph.
 - Core Python AST inventory, Python security AST, import graph and Python endpoint readers now use race-safe limit + 1 byte reads. The other listed parser-based analyzers also use bounded reads; newly added analyzers must follow the same contract.
 - The archive wall-time limit is cooperative. It is checked between metadata/member operations and regex matches; it cannot preempt a blocked filesystem read or interrupt a single in-progress Python regular-expression call.
 - The archive implementation does not yet impose a shared nested-archive depth or total-uncompressed-size budget because recursive nested archive inspection is not implemented.
 - The vulnerability lockfile limit is a format-parser admission limit, not a streaming parser; files below the limit may still need significant memory.
-- Inventory records, findings, diagnostics and code facts are persisted in SQLite and read back lazily, the JSON report is streamed, and the HTML report embeds bounded subsets (`embedded_limits` in the payload). Report metrics, the Python import graph (within its caps) and each per-file analyzer's working set are still held in memory. Bounded-memory behavior at 100 GB+ is unverified until the large-corpus benchmarks run.
+- Inventory records, findings, diagnostics and code facts are persisted in SQLite and read back lazily, the JSON report is streamed, and the HTML report embeds bounded subsets (`embedded_limits` in the payload). Report metrics, the Python import graph (within its caps) and each per-file analyzer's working set are still held in memory. Tests scan a 128 MiB text file and a 1 GiB sparse file with a bounded Python heap, refuse files that change after inventory or during analysis, and finish with FIFOs in the tree or swapped in for a file. Bounded-memory behavior at 100 GB+ is unverified until the large-corpus benchmarks run.
 
 ## Release requirements
 
-1. Centralize the budget definitions in a policy object and expose safe per-domain overrides.
-2. Record configured budget, consumed bytes/time, stop reason and analyzer state in JSON, Markdown, HTML and terminal summaries.
-3. Add adversarial tests for file mutation during reads, long lines, deeply nested ASTs, malformed parser input, archive bombs and wall-time boundaries.
+1. Move the byte budgets into the policy object that holds the time and memory budgets, with the same per-domain overrides.
+2. Record consumed bytes and partial-analysis state next to the configured budgets, time, memory and stops already in JSON, Markdown, HTML and terminal summaries.
+3. Add adversarial tests for file mutation inside a single analyzer read, long lines, deeply nested ASTs, malformed parser input, archive bombs and wall-time boundaries.
 4. Benchmark wall time, throughput and peak RSS over 2GB, 10GB, 50GB and 100GB+ corpora.
 5. Keep every budget-stopped outcome distinguishable from excluded, skipped, unsupported, parse-error and clean-complete states.

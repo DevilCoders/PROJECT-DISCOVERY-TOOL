@@ -75,6 +75,33 @@ def identity_matches(
     )
 
 
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+def open_regular_descriptor(path: Path | str) -> tuple[int, os.stat_result]:
+    """Open a regular file for reading without following a link or waiting on a FIFO.
+
+    Returns the descriptor and its fstat. A path checked as a regular file can be replaced
+    by a FIFO or a device before it is opened, and a plain open() of a FIFO waits for a
+    writer forever (no budget can interrupt a blocked system call). O_NONBLOCK makes that
+    open return at once; the descriptor must then be a regular file, and is made blocking
+    again (regular-file reads never wait on the flag anyway).
+    """
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | _NONBLOCK
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(f"entry changed to a non-regular file: {path}")
+        if _NONBLOCK:
+            os.set_blocking(descriptor, True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, opened
+
+
 def keyed_identifier(keywords: str) -> str:
     """Regex source for a whole identifier (letters, digits, ``_``, ``-``) containing a keyword.
 
@@ -360,13 +387,8 @@ def open_verified_binary(
     observed_identity = stat_identity(observed)
     if not identity_matches(expected_identity, observed_identity):
         raise OSError(f"file identity changed since inventory: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    descriptor, opened = open_regular_descriptor(path)
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
-            raise OSError(f"entry changed to a non-regular file: {path}")
         opened_identity = stat_identity(opened)
         if not identity_matches(observed_identity, opened_identity):
             raise OSError(f"file identity changed while opening: {path}")

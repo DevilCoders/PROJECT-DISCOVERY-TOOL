@@ -67,6 +67,15 @@ fillBars("entry-attributes",metrics.entry_attributes);
 const aggregates=metrics.inventory_aggregates||{};
 fillBars("fan-out",(aggregates.fan_out||{}).buckets);
 fillBars("mime-types",metrics.mime_types);
+const budgets=metrics.analysis_budgets||{};
+{const seconds={};for(const [name,entry] of Object.entries(budgets.analyzers||{}))seconds[name]=Math.round(entry.seconds*100)/100;
+ fillBars("analyzer-time",seconds);
+ const stops=budgets.stops||{},stopped=(stops.time||0)+(stops.memory||0);
+ $("analyzer-budgets").textContent=budgets.timeout_seconds===undefined?"Budgets not recorded":
+  (metrics.execution||{}).analysis_mode==="inventory-only"?"No analyzer ran (inventory only)":
+  (budgets.timeout_seconds?budgets.timeout_seconds+" s":"no time limit")+" and "+
+  (budgets.memory_mb?number(budgets.memory_mb)+" MiB":"no memory limit")+" per analyzer and file • "+
+  (stopped?number(stopped)+" call(s) stopped by a budget":"no call stopped");}
 $("host-os").textContent=JSON.stringify({
  host:metrics.host_os||{},
  native_backend:metrics.native_backend||{backend:"not reported"}

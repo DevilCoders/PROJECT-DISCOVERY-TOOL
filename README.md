@@ -81,7 +81,7 @@ Details: [Online Mode guide](docs/guides/ONLINE_MODE.md).
 
 ## Reports
 
-- **JSON** (schema 1.14): every finding, file record and metric, streamed for large scans.
+- **JSON** (schema 1.15): every finding, file record and metric, streamed for large scans.
 - **Markdown:** summaries, the scan source and findings with evidence, impact and remediation.
 - **HTML:** a standalone offline report with search, filters, pagination and collapsible findings; it loads no remote assets.
 
@@ -98,7 +98,7 @@ Security findings add the source line, a redacted excerpt, the conditional impac
 - SQLite-backed inventory, findings and code facts, written in bounded batches with checkpoints for `--resume`.
 - A multi-process engine (`--executor`, `--jobs`) with worker-crash isolation, read-once file prefetch and deterministic results.
 - Native components with Python fallbacks: a Rust no-follow walker, a C++ signature classifier, C/SIMD byte counting (x86-64 assembly on Linux) and an OpenCL GPU path for large buffers.
-- Per-analyzer byte, entry and time budgets: [Analyzer Resource Budgets](docs/architecture/ANALYZER_RESOURCE_BUDGETS.md).
+- Per-analyzer byte, entry, time and memory budgets: [Analyzer Resource Budgets](docs/architecture/ANALYZER_RESOURCE_BUDGETS.md).
 
 The 2 GB to 100 GB+ benchmarks await representative corpora, so the memory model is not yet certified for the largest targets ([Benchmarks](docs/guides/BENCHMARKS.md)).
 

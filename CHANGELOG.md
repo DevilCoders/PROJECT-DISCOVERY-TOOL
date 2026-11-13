@@ -228,7 +228,31 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: analyzer budgets
+- Every built-in and in-process plugin analyzer call on a file runs under a time budget,
+  `pdt scan --analyzer-timeout SECONDS` (default 120), and a memory budget,
+  `--analyzer-memory-mb MB` (default 2048): how far the process's resident memory may grow
+  during the call, sampled every 50 ms on Linux, Windows and macOS. A watchdog stops a call past
+  either at its next Python bytecode, even if the analyzer catches `Exception`; its findings and
+  code facts for the file are discarded and an `UNKNOWN` `analysis_coverage` finding names the
+  analyzer, the file and the budget. `0` disables a budget. Isolated plugins keep
+  `--plugin-timeout` and `--plugin-memory-mb`.
+- `--domain-budget DOMAIN:timeout=S,memory=MB` (repeatable) overrides the budgets for the
+  analyzers of one domain; an analyzer in several domains gets the most permissive override.
+- `metrics.analysis_budgets` records the budgets, the overrides, the stops and, per analyzer,
+  its calls, total and longest time and largest sampled memory growth with their files. The
+  terminal summary, the Markdown "Analyzer Budgets" section and the HTML "Analyzer time" card
+  show them.
+- Tests scan a 128 MiB text file and a 1 GiB sparse file with a bounded Python heap, files that
+  change after inventory or while they are analyzed, and FIFOs in the tree or swapped in for a
+  file.
+- Report schema 1.15: `metrics.analysis_budgets`.
+
 ### Fixed: found during the filesystem inventory work
+- A file replaced by a FIFO between its check and its open blocked the scan for good: hashing,
+  the signature sample and analyzer reads opened it without `O_NONBLOCK`, and an open of a FIFO
+  waits for a writer (no budget can interrupt it). The verified open now never waits, and
+  refuses anything but a regular file (PDT-421).
 - `python setup.py build_ext --inplace` and editable installs built the Rust walker unoptimized
   (setuptools-rust's default for in-place builds); it is now always a release build, which walks
   trees about 1.9 times faster (PDT-417).

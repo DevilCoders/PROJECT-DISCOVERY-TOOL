@@ -59,6 +59,11 @@ def _current() -> FileFacts | None:
     return getattr(_collector, "facts", None)
 
 
+def current_facts() -> FileFacts | None:
+    """The facts being collected on this thread, or None."""
+    return _current()
+
+
 def collecting() -> bool:
     """Whether a collector is active; analyzers skip fact extraction otherwise."""
     return _current() is not None

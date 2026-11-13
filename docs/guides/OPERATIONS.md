@@ -44,6 +44,7 @@ read its exit codes and performance data.
 | Prune directories explicitly | `--exclude-dir node_modules --exclude-dir build/cache` |
 | Prune dependency and cache trees by preset | `--exclude-profile dependencies,caches` |
 | Inventory dependency trees without reading them | `--development-trees inventory` (or `directory-only`) |
+| Bound slow or memory-hungry analyzers | `--analyzer-timeout 60 --analyzer-memory-mb 1024`; per domain `--domain-budget archives:timeout=300` |
 | CI gate | `pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color` |
 | Remote repository, downloaded | `pdt scan https://github.com/org/repo --output /reports/repo` |
 | Remote repository, not downloaded | `pdt scan https://github.com/org/repo --no-download --output /reports/repo` |
@@ -296,6 +297,39 @@ pdt query /reports/src --callers parse_config       # call sites of a function
 pdt query /reports/src --callees Engine.run --limit 50
 pdt query /reports/src --references TOKEN_TTL --json
 ```
+
+## Analyzer budgets
+
+Every built-in and in-process plugin analyzer call on a file runs under a time budget
+(`--analyzer-timeout`, default 120 seconds) and a memory budget (`--analyzer-memory-mb`,
+default 2048 MiB): how far the process's resident memory may grow during the call. A watchdog
+thread checks the running calls every 50 ms and stops one past either budget at its next
+Python bytecode, even if the analyzer catches `Exception`. The stopped call's findings and
+code facts for that file are discarded, and an `UNKNOWN` coverage finding (`Analyzer time
+budget exceeded: NAME: PATH`) takes their place, so `--strict` fails the scan. The other
+analyzers still run on the file. `0` disables a budget.
+
+`--domain-budget DOMAIN:timeout=S,memory=MB` overrides either budget for the analyzers of one
+domain, for example `--domain-budget archives:timeout=300 --domain-budget secrets:memory=0`.
+An analyzer in several domains gets the most permissive override of its domains.
+
+`metrics.analysis_budgets` reports the budgets, `memory_enforced`, the overrides, the stops by
+kind, up to 100 stopped calls (analyzer, file, budget, limit and the time or memory used) and,
+for each analyzer, its calls, total and longest time and largest sampled memory growth with
+the files they came from. The terminal summary has an `Analyzer budgets` row, the Markdown
+report an `Analyzer Budgets` section with the ten slowest analyzers, and the HTML report an
+`Analyzer time` card.
+
+Limits of the mechanism:
+
+- A single long call into C code (one regular-expression search over an already bounded
+  buffer, a blocking read) finishes before the stop takes effect.
+- Memory is sampled, so a spike shorter than 50 ms, or memory released before a sample, is not
+  seen; a call that allocates very fast can overshoot its budget before it is stopped. With the
+  thread executor (small scans and `--no-download`) the analyzers share one process, so the
+  growth includes concurrent calls; the process executor runs one call per worker. Where the
+  resident set cannot be read, only the time budget applies and `memory_enforced` is false.
+- Isolated plugins are limited by `--plugin-timeout` and `--plugin-memory-mb` instead.
 
 ## Third-party plugins
 

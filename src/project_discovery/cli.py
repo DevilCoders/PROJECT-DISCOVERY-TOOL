@@ -3,6 +3,7 @@ import argparse
 import heapq
 import importlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -10,6 +11,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter, deque
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,6 +58,9 @@ from .inventory.aggregates import inventory_aggregates
 from .inventory.cache import ScanCache
 from .inventory.entry_metadata import security_supported
 from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
+from .engine.budgets import DEFAULT_MEMORY_MB as DEFAULT_ANALYZER_MEMORY_MB
+from .engine.budgets import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ANALYZER_TIMEOUT
+from .engine.budgets import BudgetPolicy, parse_domain_budgets
 from .inventory.markers import TREE_MODES, describe_profiles, normalize_profiles, validate_tree_mode
 from .inventory.signatures import count_classification
 from .inventory.store import (
@@ -111,7 +116,7 @@ from .plugins.isolation import (
 from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
 from .reporting.writers import (
-    aggregate_summary, attribute_summary, development_summary, tree_mode_summary, type_summary,
+    aggregate_summary, attribute_summary, budget_summary, development_summary, tree_mode_summary, type_summary,
     write_remote_batch_summary, write_reports,
 )
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
@@ -240,6 +245,62 @@ def _print_security_findings(console: Console, findings, *, limit: int = 25) -> 
         console.print(
             f"[dim]... {omitted:,} additional security findings are available in the reports.[/dim]"
         )
+
+
+def _budget_policy(timeout: float, memory_mb: int, domain_budgets: Sequence[str]) -> BudgetPolicy:
+    """The analyzer budget policy from --analyzer-timeout, --analyzer-memory-mb and --domain-budget."""
+    # NaN would never trip a deadline, and infinity is spelled 0 (no limit).
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("--analyzer-timeout must be 0 (no limit) or a positive number of seconds")
+    if memory_mb < 0:
+        raise ValueError("--analyzer-memory-mb must be 0 (no limit) or a positive number of MiB")
+    from .catalog.domains import analyzer_domain_catalog
+
+    domains = {item["id"] for item in analyzer_domain_catalog()}
+    return BudgetPolicy(timeout or None, memory_mb or None, parse_domain_budgets(domain_budgets, domains))
+
+
+class _BudgetUsage:
+    """What each analyzer used across the scan's files, and the calls a budget stopped."""
+
+    MAX_STOPPED = 100
+
+    def __init__(self) -> None:
+        self.analyzers: dict[str, dict] = {}
+        self.stops: Counter = Counter()
+        self.stopped: list[dict] = []
+
+    def add(self, path: str, outcome) -> None:
+        for name, seconds, peak_mb in getattr(outcome, "budget_usage", None) or ():
+            entry = self.analyzers.setdefault(name, {
+                "calls": 0, "seconds": 0.0, "max_seconds": 0.0, "max_seconds_path": None,
+                "max_memory_mb": None, "max_memory_path": None,
+            })
+            entry["calls"] += 1
+            entry["seconds"] += seconds
+            if seconds > entry["max_seconds"]:
+                entry["max_seconds"], entry["max_seconds_path"] = seconds, path
+            if peak_mb is not None and (entry["max_memory_mb"] is None or peak_mb > entry["max_memory_mb"]):
+                entry["max_memory_mb"], entry["max_memory_path"] = peak_mb, path
+        for name, kind, limit, used in getattr(outcome, "budget_stops", None) or ():
+            self.stops[kind] += 1
+            if len(self.stopped) < self.MAX_STOPPED:
+                self.stopped.append({"analyzer": name, "path": path, "budget": kind,
+                                     "limit": limit, "used": round(used, 3)})
+
+    def metrics(self) -> dict:
+        analyzers = {
+            name: {
+                **entry, "seconds": round(entry["seconds"], 3), "max_seconds": round(entry["max_seconds"], 3),
+                "max_memory_mb": None if entry["max_memory_mb"] is None else round(entry["max_memory_mb"], 1),
+            }
+            for name, entry in sorted(self.analyzers.items(), key=lambda item: (-item[1]["seconds"], item[0]))
+        }
+        return {
+            "stops": {"time": self.stops.get("time", 0), "memory": self.stops.get("memory", 0)},
+            "stopped": self.stopped,
+            "analyzers": analyzers,
+        }
 
 
 def _describe_inventory_options(options: dict) -> dict[str, str]:
@@ -487,6 +548,9 @@ def run_scan(
     resume: bool = False, inventory_only: bool = False,
     plugin_isolation: str = "sandbox", plugin_timeout: float = DEFAULT_TIMEOUT_SECONDS,
     plugin_memory_mb: int = DEFAULT_MEMORY_LIMIT_MB,
+    analyzer_timeout: float = DEFAULT_ANALYZER_TIMEOUT,
+    analyzer_memory_mb: int = DEFAULT_ANALYZER_MEMORY_MB,
+    domain_budgets: Sequence[str] = (),
     source_metadata: dict | None = None,
     display_root: str | None = None,
     online_vulnerabilities: OnlineVulnerabilityOptions | None = None,
@@ -503,6 +567,7 @@ def run_scan(
         raise ValueError(f"--fail-on must be one of: {', '.join(SEVERITY_RANK)}")
     # Validates the plugin options before the (potentially long) inventory walk.
     PluginPolicy(plugin_isolation, plugin_timeout, plugin_memory_mb)
+    budget_policy = _budget_policy(analyzer_timeout, analyzer_memory_mb, domain_budgets)
     if memory_source is not None:
         # No-download mode: the root is a namespace for in-memory files, never a directory.
         if resume:
@@ -654,6 +719,7 @@ def run_scan(
         resumed_skipped = 0
         inventory_error_count = 0
         worker_gpu = [0, 0]   # GPU dispatches and fallbacks reported by worker processes
+        budget_usage = _BudgetUsage()
         cache_failures: list[str] = []
         counts = Counter()
         cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
@@ -706,7 +772,7 @@ def run_scan(
             engine = AnalysisExecutor(
                 executor, worker_count, analyzers,
                 file_count=len(records), vulnerability_db=vulnerability_db,
-                plugin_setup=(plugin_policy, analyzer_load.plugin_specs),
+                plugin_setup=(plugin_policy, analyzer_load.plugin_specs), budget_policy=budget_policy,
             )
         except BaseException:
             analyzer_load.close()
@@ -778,6 +844,7 @@ def run_scan(
                             worker_gpu[0] += outcome.gpu_counts[0]
                             worker_gpu[1] += outcome.gpu_counts[1]
                         cache_miss = item.digest_hint is None
+                        budget_usage.add(record.path, outcome)
                         try:
                             record.analyzed = outcome.analyzed
                             finding_store.extend_findings(outcome.findings)
@@ -840,6 +907,7 @@ def run_scan(
                         else:
                             record.analyzed = outcome.analyzed
                             record.sha256 = outcome.digest
+                            budget_usage.add(record.path, outcome)
                             finding_store.extend_findings(outcome.findings)
                             if outcome.facts:
                                 finding_store.extend_code_facts(record.path, outcome.facts)
@@ -1019,6 +1087,8 @@ def run_scan(
             "vcs_provider_categories": dict(sorted(vcs_provider_categories.items())),
             "native_backend": _with_worker_gpu(native_capabilities(), worker_gpu),
             "native_extension_available": native_available(),
+            # Per-analyzer time and memory budgets, what each analyzer used, and the stops.
+            "analysis_budgets": {**budget_policy.describe(), **budget_usage.metrics()},
             "execution": {
                 "mode": f"bounded-{engine.mode}-pool",
                 "executor": engine.mode,
@@ -1253,6 +1323,8 @@ def run_scan(
         summary.add_row("Findings", str(len(findings)))
         summary.add_row("Scan errors", str(len(errors) + metrics["walk_errors"]))
         summary.add_row("Large files skipped by request", str(metrics["oversized_files"]))
+        if not inventory_only:
+            summary.add_row("Analyzer budgets", budget_summary(metrics.get("analysis_budgets")))
         summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
         summary.add_row("Native backend", metrics["native_backend"]["backend"])
         summary.add_row("GPU acceleration", metrics["native_backend"].get("gpu_status", "cpu-fallback"))
@@ -1860,6 +1932,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--plugin-memory-mb", type=int, default=DEFAULT_MEMORY_LIMIT_MB, metavar="MB",
         help="Memory limit per plugin host on Linux and Windows; 0 disables it (default: 4096)",
     )
+    scan.add_argument(
+        "--analyzer-timeout", type=float, default=DEFAULT_ANALYZER_TIMEOUT, metavar="SECONDS",
+        help="Time budget per analyzer and file; a call that runs longer is stopped and reported "
+             f"as UNKNOWN. 0 disables it (default: {DEFAULT_ANALYZER_TIMEOUT:g})",
+    )
+    scan.add_argument(
+        "--analyzer-memory-mb", type=int, default=DEFAULT_ANALYZER_MEMORY_MB, metavar="MB",
+        help="Memory budget per analyzer and file: how far the process may grow during the call. "
+             f"0 disables it (default: {DEFAULT_ANALYZER_MEMORY_MB})",
+    )
+    scan.add_argument(
+        "--domain-budget", action="append", default=[], metavar="DOMAIN:timeout=S,memory=MB",
+        help="Override the analyzer budgets for the analyzers of one domain (archives, secrets, "
+             "firmware, ...; pdt capabilities --json lists each analyzer's domains); 0 means no limit; "
+             "repeatable",
+    )
     scan.add_argument("--quiet", action="store_true", help="Suppress console output except errors")
     scan.add_argument(
         "--no-color", action="store_true",
@@ -2263,6 +2351,9 @@ def main() -> None:
                 "plugin_isolation": args.plugin_isolation,
                 "plugin_timeout": args.plugin_timeout,
                 "plugin_memory_mb": args.plugin_memory_mb,
+                "analyzer_timeout": args.analyzer_timeout,
+                "analyzer_memory_mb": args.analyzer_memory_mb,
+                "domain_budgets": list(args.domain_budget),
                 "online_vulnerabilities": online_vulnerabilities,
             }
             if remote_scan:
@@ -2299,6 +2390,8 @@ def main() -> None:
                 exclude_profiles=set(args.exclude_profile), development_trees=args.development_trees,
                 plugin_isolation=args.plugin_isolation, plugin_timeout=args.plugin_timeout,
                 plugin_memory_mb=args.plugin_memory_mb,
+                analyzer_timeout=args.analyzer_timeout, analyzer_memory_mb=args.analyzer_memory_mb,
+                domain_budgets=list(args.domain_budget),
                 online_vulnerabilities=online_vulnerabilities,
             ))
 
