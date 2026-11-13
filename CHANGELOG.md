@@ -291,6 +291,10 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
 - Report schema 1.18: `gpu_enabled` and the `gpu_status` `disabled` in `metrics.native_backend`.
 
 ### Changed: store-backed results
+- `tools/read_pass_benchmark.py` measures what a large file's repeated reads cost: for a 64 MiB
+  text file the four analyzers that read it in full spend under 1% of their analysis time
+  re-reading and decoding it, so files past 4 MiB keep one streaming hash pass and bounded
+  per-analyzer windows.
 - The Python dependency graph of `pdt scan` writes its modules, edges, unresolved imports and
   skipped modules to the scan's SQLite inventory instead of holding them in lists, and the
   reports stream them (`StoredRows`): the JSON report has all of them, the HTML report up to
