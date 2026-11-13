@@ -71,8 +71,25 @@ This is parallel execution of independent per-file work, not a claim that every 
 - Target code is never imported, executed, compiled or contacted over the network.
 - Native functions accept explicit contiguous buffers; the extension does not open target paths or follow symlinks.
 - The OpenCL loader is optional and loaded dynamically; no GPU SDK is needed during installation.
-- The x86-64 Assembly routine follows the System V ABI and is only compiled on Linux x86-64.
+- The x86-64 Assembly routine follows the System V ABI and is only compiled for Linux x86-64: `setup.py` decides from the platform being built for (`sysconfig.get_platform()`, which a cross-build sets), not from the build host.
 - Windows and macOS use portable C for CPU counting; OpenCL is used only when a compatible runtime/device is present.
 - Native build integration is in setup.py, pyproject.toml and MANIFEST.in.
 
-Production release still requires fake/no-device and GPU-present tests, injected OpenCL failure coverage, sanitizer/fuzz work, cross-platform packaging validation and GPU-versus-CPU benchmarks across representative buffer sizes.
+## Verification
+
+- **Differential fuzzing** (`tests/engine/test_native_fuzz.py`, in every suite): seeded random input against the portable code each backend stands in for. The C byte counter is compared with `bytes.count` over bytes, bytearrays, offset memoryviews and arrays at lengths around the SIMD blocks and page boundaries; the C++ signature matcher with `signatures.python_match_rule` on samples carrying planted, corrupted and truncated magic bytes; the Rust walker with the Python walk on random trees (Unicode, long and case-varied names, nesting, symlinks on POSIX). Malformed arguments (wrong types, a needle out of range, strided buffers, negative or huge rule indexes) must raise. A scan with every native module withdrawn must report the same files, digests, directories, links and findings. `PDT_FUZZ_ITERATIONS` raises the effort and `PDT_FUZZ_SEED` replays a run.
+- **Sanitizers**: the `Native backends` workflow builds the C and C++ backends with AddressSanitizer and UndefinedBehaviorSanitizer, checks that the modules are instrumented, and runs the fuzzing (20,000 iterations), the native, fake-OpenCL, signature and scanner tests against them.
+- **Architectures**: CI builds and tests every backend natively on Linux, Windows and macOS (x86-64; macOS arm64); the workflow adds Linux aarch64 and Windows ARM64 runners with the full suite, and cross-compiles wheels with cibuildwheel: macOS x86_64 on an arm64 runner, tested under Rosetta 2, and Windows ARM64 on an x64 runner, which cannot run it. `tools/wheel_architecture.py` reads each native module's executable header (ELF, Mach-O, PE) in the wheels and fails when one is missing (the extensions are optional, so a failed cross-build would otherwise drop them silently) or built for another architecture.
+- **GPU**: the fake OpenCL loader and fault hook above; GPU and CPU counts agree on real hardware.
+
+Run the fuzzing longer, or under the sanitizers on Linux:
+
+```bash
+PDT_FUZZ_ITERATIONS=100000 pytest tests/engine/test_native_fuzz.py
+CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" CXXFLAGS="$CFLAGS" \
+  LDFLAGS="-fsanitize=address,undefined" python setup.py build_ext --inplace --force
+LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libubsan.so)" \
+  ASAN_OPTIONS=detect_leaks=0 pytest tests/engine/test_native_fuzz.py tests/engine/test_native_backend.py
+```
+
+A sanitized build only loads with the sanitizer runtimes preloaded; rebuild normally (`python setup.py build_ext --inplace --force`) afterwards. Large-corpus benchmarks are tracked in the roadmap.

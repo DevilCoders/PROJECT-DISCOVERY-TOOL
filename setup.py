@@ -1,8 +1,8 @@
 """Optional C, C++ and Rust native builds; Assembly acceleration on Linux x86-64."""
 from __future__ import annotations
 
-import platform
 import sys
+import sysconfig
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext as setuptools_build_ext
@@ -20,9 +20,17 @@ class PDTBuildExt(setuptools_build_ext):
         super().build_extensions()
 
 
+def target_platform() -> str:
+    """The platform being built for, which a cross-build sets (_PYTHON_HOST_PLATFORM, as
+    crossenv and cibuildwheel do): "linux-x86_64", "linux-aarch64", "win-arm64", ..."""
+    return sysconfig.get_platform().lower()
+
+
 native_sources = ["native/c/pdt_native.c"]
 macros = []
-if sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}:
+# The build host's architecture says nothing about a cross-build's target: x86-64 assembly in
+# an aarch64 build fails, and the optional extension would then be silently left out.
+if target_platform() in {"linux-x86_64", "linux-amd64"}:
     native_sources.append("native/asm/pdt_simd_x86_64.S")
     macros.append(("PDT_HAVE_X86_64_ASM", "1"))
 

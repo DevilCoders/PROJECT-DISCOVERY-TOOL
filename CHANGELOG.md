@@ -228,6 +228,22 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: native verification
+- `tests/engine/test_native_fuzz.py` fuzzes the native FFI boundaries against their Python
+  references with seeded random input: the C byte counter against `bytes.count` over every
+  contiguous buffer type and SIMD-edge length, the C++ signature matcher against the portable
+  matcher on planted, corrupted and truncated magic bytes, and the Rust walker against the
+  Python walk on random trees. Malformed arguments must raise, and a scan without any native
+  module must report what a native scan does (`PDT_FUZZ_ITERATIONS`, `PDT_FUZZ_SEED`).
+- A `Native backends` workflow fuzzes AddressSanitizer and UndefinedBehaviorSanitizer builds of
+  the C and C++ backends, runs the full suite on Linux aarch64 and Windows ARM64 runners, and
+  cross-compiles wheels (macOS x86_64 on arm64, tested under Rosetta 2; Windows ARM64 on x64).
+  `tools/wheel_architecture.py` fails a wheel whose native modules are missing or built for
+  another architecture.
+- `setup.py` compiles the x86-64 Assembly only when the build targets Linux x86-64, from
+  `sysconfig.get_platform()`: it went by the build host, so a cross-build to aarch64 on an x86-64
+  host compiled x86-64 Assembly, failed, and silently left the C backend out.
+
 ### Added: scan progress by phase
 - The terminal shows one live row per scan phase in place of the single analysis progress bar:
   inventory (entries, files and bytes walked, read from the walk's own counters), hashing (files

@@ -1,0 +1,156 @@
+name: Native backends
+
+# Beyond the native builds in CI: the C and C++ backends fuzzed under AddressSanitizer and
+# UndefinedBehaviorSanitizer, every backend built and tested on arm64 Linux and Windows, and
+# wheels cross-compiled for another architecture than the runner's (macOS arm64 -> x86_64,
+# tested under Rosetta 2; Windows x64 -> ARM64, checked by its executable headers).
+on:
+  push:
+    branches: [master, main, "feat/**"]
+    paths:
+      - "native/**"
+      - "setup.py"
+      - "pyproject.toml"
+      - "src/project_discovery/engine/native.py"
+      - "src/project_discovery/inventory/scanner.py"
+      - "src/project_discovery/inventory/signatures.py"
+      - "tests/engine/test_native_*.py"
+      - "tests/engine/test_fake_opencl.py"
+      - "tests/engine/test_wheel_architecture.py"
+      - "tools/wheel_architecture.py"
+      - ".github/workflows/native.yml"
+  pull_request:
+    branches: [master, main]
+    paths:
+      - "native/**"
+      - "setup.py"
+      - "pyproject.toml"
+      - "src/project_discovery/engine/native.py"
+      - "src/project_discovery/inventory/scanner.py"
+      - "src/project_discovery/inventory/signatures.py"
+      - "tests/engine/test_native_*.py"
+      - "tests/engine/test_fake_opencl.py"
+      - "tests/engine/test_wheel_architecture.py"
+      - "tools/wheel_architecture.py"
+      - ".github/workflows/native.yml"
+  schedule:
+    - cron: "17 4 * * 1"  # weekly: runner images and toolchains change underneath
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdt-native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install package and development tools
+        run: python -m pip install -e ".[dev]"
+      - name: Build the C and C++ backends with AddressSanitizer and UndefinedBehaviorSanitizer
+        env:
+          CFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g
+          CXXFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g
+          LDFLAGS: -fsanitize=address,undefined
+        # --force: the editable install may have left uninstrumented builds that look current.
+        run: |
+          python setup.py build_ext --inplace --force
+          for module in src/project_discovery/_native*.so; do
+            nm -D "$module" | grep -q __asan_report || { echo "$module is not instrumented"; exit 1; }
+          done
+      - name: Fuzz the native boundaries and run the native tests under the sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          PDT_FUZZ_ITERATIONS: "20000"
+        run: |
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libubsan.so)"
+          python -c "from project_discovery.engine import native as n; assert n.native_available() and n.signature_backend_available(), 'a sanitized backend did not load'"
+          pytest -p no:cacheprovider tests/engine/test_native_fuzz.py tests/engine/test_native_backend.py tests/engine/test_fake_opencl.py tests/inventory/test_signatures.py tests/inventory/test_scanner.py
+
+  arm64:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, windows-11-arm]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+          architecture: arm64
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install package and development tools
+        run: python -m pip install -e ".[dev]"
+      - name: Build the C, C++ and Rust backends
+        run: python setup.py build_ext --inplace
+      - name: Require every native backend
+        run: >-
+          python -c "import json, platform; from project_discovery.engine import native as n;
+          info = n.capabilities(); print(platform.machine(), json.dumps({k: info[k] for k in ('architecture', 'backend')}));
+          assert n.native_available() and n.signature_backend_available() and n.rust_walker_available(), 'a native backend did not build'"
+      - name: Fuzz the native boundaries
+        env:
+          PDT_FUZZ_ITERATIONS: "5000"
+        run: pytest -p no:cacheprovider tests/engine/test_native_fuzz.py tests/engine/test_native_backend.py tests/engine/test_wheel_architecture.py
+      - name: Run the test suite
+        run: pytest -p no:cacheprovider
+
+  cross-compile:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest  # an arm64 runner
+            arch: x86_64
+            rust-target: x86_64-apple-darwin
+          - os: windows-latest  # an x64 runner
+            arch: ARM64
+            rust-target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust-target }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - name: Install cibuildwheel
+        run: python -m pip install "cibuildwheel==3.4.1"
+      - name: Cross-compile a wheel for ${{ matrix.arch }}
+        env:
+          CIBW_BUILD: cp313-*
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_ENVIRONMENT_WINDOWS: CARGO_BUILD_TARGET=${{ matrix.rust-target }}
+          CIBW_TEST_REQUIRES: pytest
+          # macOS runs the x86_64 wheel's tests under Rosetta 2; an x64 Windows runner cannot
+          # run ARM64 code, so cibuildwheel skips them there (the arm64 job tests it natively).
+          CIBW_TEST_COMMAND: >-
+            python -c "from project_discovery.engine import native as n; assert n.native_available() and n.signature_backend_available() and n.rust_walker_available()"
+            && pytest -p no:cacheprovider {project}/tests/engine/test_native_fuzz.py {project}/tests/engine/test_native_backend.py
+        run: python -m cibuildwheel --output-dir wheelhouse
+      - name: Check every native module in the wheel is built for ${{ matrix.arch }}
+        shell: bash
+        run: python tools/wheel_architecture.py wheelhouse/*.whl --expect ${{ matrix.arch }}
