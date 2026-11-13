@@ -99,13 +99,15 @@ def verified_regular_file_stat(path: Path, expected=None) -> os.stat_result:
 def _budget_stop_finding(analyzer, record: FileRecord, stop: BudgetStop) -> Finding:
     if stop.kind == "time":
         what, limit = f"after {stop.used:.1f} s", f"{stop.limit:g}-second time budget"
+    elif stop.kind == "read":
+        what, limit = f"after reading {stop.used:,.1f} MiB", f"{stop.limit:,.0f} MiB read budget"
     else:
         what, limit = f"at {stop.used:,.0f} MiB of memory growth", f"{stop.limit:,.0f} MiB memory budget"
     return Finding(
         "analysis_coverage",
         f"Analyzer {stop.kind} budget exceeded: {analyzer.name}: {record.path}",
         f"The analyzer was stopped {what}: its {limit} per file (--analyzer-timeout, "
-        "--analyzer-memory-mb, --domain-budget). Its findings for the file were discarded, so "
+        "--analyzer-memory-mb, --analyzer-read-mb, --domain-budget). Its findings for the file were discarded, so "
         "absence of its findings is not evidence of absence.",
         confidence="UNKNOWN", evidence=[record.path], analyzer=analyzer.name, severity="LOW",
     )
@@ -130,7 +132,8 @@ def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: Fi
                     budget = None if isinstance(analyzer, _isolated_analyzer_type()) else policy.for_analyzer(analyzer)
                     facts = current_facts()
                     sizes = (len(facts.symbols), len(facts.calls), len(facts.facts)) if facts is not None else None
-                    with accounting() as account:
+                    read_limit = budget.read_mb * 1024 * 1024 if budget is not None and budget.read_mb else None
+                    with accounting(read_limit) as account:
                         run = budgets.run_with_budget(budget, partial(analyzer.analyze, path, record))
                     outcome.budget_usage.append((analyzer.name, run.seconds, run.peak_mb, account.bytes_read))
                     if run.stop is not None:

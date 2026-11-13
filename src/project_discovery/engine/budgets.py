@@ -37,8 +37,7 @@ SAMPLE_SECONDS = 0.05
 _MIB = 1024 * 1024
 
 
-class AnalyzerBudgetExceeded(BaseException):
-    """Raised inside an analyzer call that ran past its budget; not an Exception on purpose."""
+from ..core.limits import AnalyzerBudgetExceeded  # noqa: E402  (the readers raise it too)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,10 +46,11 @@ class AnalyzerBudget:
 
     timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS
     memory_mb: int | None = DEFAULT_MEMORY_MB
+    read_mb: int | None = None  # bytes read through the verified readers, in MiB
 
     @property
     def limited(self) -> bool:
-        return bool(self.timeout_seconds) or bool(self.memory_mb and memory_supported())
+        return bool(self.timeout_seconds) or bool(self.memory_mb and memory_supported()) or bool(self.read_mb)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +81,7 @@ class BudgetPolicy:
     timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS
     memory_mb: int | None = DEFAULT_MEMORY_MB
     overrides: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    read_mb: int | None = None
     _cache: dict[tuple[str, tuple[str, ...]], AnalyzerBudget] = field(default_factory=dict, repr=False)
 
     def for_analyzer(self, analyzer) -> AnalyzerBudget:
@@ -92,15 +93,19 @@ class BudgetPolicy:
         key = (getattr(analyzer, "name", ""), domains)
         budget = self._cache.get(key)
         if budget is None:
-            timeout, memory = self.timeout_seconds, self.memory_mb
+            timeout, memory, read = self.timeout_seconds, self.memory_mb, self.read_mb
             timeouts = [self.overrides[d]["timeout_seconds"] for d in domains
                         if "timeout_seconds" in self.overrides.get(d, {})]
             memories = [self.overrides[d]["memory_mb"] for d in domains if "memory_mb" in self.overrides.get(d, {})]
+            reads = [self.overrides[d]["read_mb"] for d in domains if "read_mb" in self.overrides.get(d, {})]
             if timeouts:
                 timeout = _most_permissive(timeouts)
             if memories:
                 memory = _most_permissive(memories)
-            budget = self._cache[key] = AnalyzerBudget(timeout or None, int(memory) if memory else None)
+            if reads:
+                read = _most_permissive(reads)
+            budget = self._cache[key] = AnalyzerBudget(timeout or None, int(memory) if memory else None,
+                                                       int(read) if read else None)
         return budget
 
     def describe(self) -> dict[str, Any]:
@@ -109,19 +114,20 @@ class BudgetPolicy:
             "timeout_seconds": self.timeout_seconds or None,
             "memory_mb": self.memory_mb or None,
             "memory_enforced": bool(self.memory_mb) and memory_supported(),
+            "read_mb": self.read_mb or None,
             "domain_overrides": {domain: dict(values) for domain, values in sorted(self.overrides.items())},
         }
 
 
 def parse_domain_budgets(values: Iterable[str], known_domains: Iterable[str]) -> dict[str, dict[str, float | None]]:
-    """--domain-budget DOMAIN:timeout=SECONDS,memory=MB values (0 means no limit)."""
+    """--domain-budget DOMAIN:timeout=SECONDS,memory=MB,read=MB values (0 means no limit)."""
     known = set(known_domains)
     overrides: dict[str, dict[str, float | None]] = {}
     for raw in values or ():
         domain, separator, settings = str(raw).partition(":")
         domain = domain.strip()
         if not separator or not settings.strip():
-            raise ValueError(f"--domain-budget {raw}: expected DOMAIN:timeout=SECONDS,memory=MB")
+            raise ValueError(f"--domain-budget {raw}: expected DOMAIN:timeout=SECONDS,memory=MB,read=MB")
         if domain not in known:
             import difflib
 
@@ -132,20 +138,23 @@ def parse_domain_budgets(values: Iterable[str], known_domains: Iterable[str]) ->
         for setting in settings.split(","):
             name, equals, value = setting.partition("=")
             name = name.strip().lower()
-            if not equals or name not in {"timeout", "memory"}:
-                raise ValueError(f"--domain-budget {raw}: settings are timeout=SECONDS and memory=MB")
+            if not equals or name not in {"timeout", "memory", "read"}:
+                raise ValueError(f"--domain-budget {raw}: settings are timeout=SECONDS, memory=MB and read=MB")
             try:
                 number = float(value)
             except ValueError:
                 raise ValueError(f"--domain-budget {raw}: {name} must be a number") from None
             # NaN would never trip a deadline, and infinity is spelled 0 here.
-            if not math.isfinite(number) or number < 0 or (name == "memory" and number != int(number)):
+            whole = name in {"memory", "read"}
+            if not math.isfinite(number) or number < 0 or (whole and number != int(number)):
                 raise ValueError(f"--domain-budget {raw}: {name} must be 0 (no limit) or a positive "
-                                 f"{'integer' if name == 'memory' else 'number'}")
+                                 f"{'integer' if whole else 'number'}")
             if name == "timeout":
                 entry["timeout_seconds"] = number or None
-            else:
+            elif name == "memory":
                 entry["memory_mb"] = int(number) or None
+            else:
+                entry["read_mb"] = int(number) or None
     return overrides
 
 
@@ -373,10 +382,13 @@ def run_with_budget(budget: AnalyzerBudget | None, function: Callable[[], Any]) 
             stop = _WATCHDOG.disarm(call)
             if stop is not None:
                 _deliver_pending_stop()  # raises it if the call did not receive it
-    except AnalyzerBudgetExceeded:
+    except AnalyzerBudgetExceeded as exc:
         # Delivered in the call, inside disarm() or by _deliver_pending_stop(): end the call
-        # (idempotent) first.
+        # (idempotent) first. The readers raise it themselves for the read budget.
         stop = _WATCHDOG.disarm(call) or call.stop
+        if stop is None and exc.stop is not None:
+            kind, limit, used = exc.stop
+            stop = BudgetStop(kind, limit / _MIB, used / _MIB)
         if stop is None:
             raise
         return BudgetRun(None, stop, time.perf_counter() - started, _peak(call))

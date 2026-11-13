@@ -237,6 +237,9 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   code facts for the file are discarded and an `UNKNOWN` `analysis_coverage` finding names the
   analyzer, the file and the budget. `0` disables a budget. Isolated plugins keep
   `--plugin-timeout` and `--plugin-memory-mb`.
+- `--analyzer-read-mb MB` adds an I/O budget per analyzer and file: the verified readers count
+  the bytes each call reads and stop it, at the read past the limit, with an `UNKNOWN`
+  `Analyzer read budget exceeded` finding (`read=MB` in `--domain-budget`; off by default).
 - `--domain-budget DOMAIN:timeout=S,memory=MB` (repeatable) overrides the budgets for the
   analyzers of one domain; an analyzer in several domains gets the most permissive override.
 - `metrics.analysis_budgets` records the budgets, the overrides, the stops and, per analyzer,

@@ -187,7 +187,8 @@ pdt scan --url repositories.txt --no-download --vuln-online --output ./api-repor
 |---|---|---|
 | `--analyzer-timeout SECONDS` | `120` | Time each analyzer may spend on one file. A call that runs longer is stopped, its findings and code facts for the file are discarded, and an `UNKNOWN` coverage finding names the analyzer, the file and the budget. `0` disables it. |
 | `--analyzer-memory-mb MB` | `2048` | How far the process's resident memory may grow during one analyzer call on one file, sampled every 50 ms on Linux, Windows and macOS (elsewhere only the time budget applies). A call past it is stopped the same way. `0` disables it. |
-| `--domain-budget DOMAIN:timeout=S,memory=MB` | none | Override either budget for the analyzers of one domain (`archives`, `secrets`, `firmware`, ...; `pdt capabilities --json` lists each analyzer's domains); `0` means no limit. An analyzer in several domains gets the most permissive override. Repeatable. |
+| `--analyzer-read-mb MB` | `0` | How many bytes each analyzer call may read from one file through the verified readers (an I/O budget). A call that reads more is stopped the same way. `0`, the default, sets no limit. |
+| `--domain-budget DOMAIN:timeout=S,memory=MB,read=MB` | none | Override any of the budgets for the analyzers of one domain (`archives`, `secrets`, `firmware`, ...; `pdt capabilities --json` lists each analyzer's domains); `0` means no limit. An analyzer in several domains gets the most permissive override. Repeatable. |
 
 Isolated plugins keep `--plugin-timeout` and `--plugin-memory-mb` instead. `metrics.analysis_budgets` records the budgets, the overrides, every stop, the content limits each analyzer declares and every one a call reached, and, per analyzer, its calls, total and longest time, bytes read and largest sampled memory growth; the terminal summary and the Markdown and HTML reports show them.
 

@@ -165,16 +165,18 @@ def budget_summary(budgets: dict[str, Any] | None) -> str:
     budgets = budgets or {}
     if not budgets:
         return "not recorded"
-    text = f"{_limit_text(budgets.get('timeout_seconds'), budgets.get('memory_mb'))} per analyzer and file"
+    read = budgets.get("read_mb")
+    text = (f"{_limit_text(budgets.get('timeout_seconds'), budgets.get('memory_mb'))}"
+            + (f" and {read:,} MiB read" if read else "") + " per analyzer and file")
     if budgets.get("memory_mb") and not budgets.get("memory_enforced"):
         text += " (memory is not measured on this platform)"
     overrides = budgets.get("domain_overrides") or {}
     if overrides:
         text += f"; {len(overrides)} domain override(s)"
     stops = budgets.get("stops") or {}
-    stopped = stops.get("time", 0) + stops.get("memory", 0)
-    text += (f"; {stopped:,} call(s) stopped (time {stops.get('time', 0):,}, memory {stops.get('memory', 0):,})"
-             if stopped else "; no call stopped")
+    stopped = stops.get("time", 0) + stops.get("memory", 0) + stops.get("read", 0)
+    text += (f"; {stopped:,} call(s) stopped (time {stops.get('time', 0):,}, memory {stops.get('memory', 0):,}, "
+             f"read {stops.get('read', 0):,})" if stopped else "; no call stopped")
     reached = budgets.get("limits_reached") or {}
     if reached:
         text += f"; {sum(reached.values()):,} content limit(s) reached (" + ", ".join(
@@ -192,7 +194,7 @@ def _write_markdown_budgets(line, budgets: dict[str, Any]) -> None:
             values.get("memory_mb", budgets.get("memory_mb")),
         )))
     for item in (budgets.get("stopped") or [])[:20]:
-        unit = "s" if item["budget"] == "time" else "MiB"
+        unit = "s" if item["budget"] == "time" else "MiB"  # memory growth or bytes read
         line(f"- Stopped: {_md(item['path'])}: {_md(item['analyzer'])}, {item['budget']} budget "
              f"{item['limit']:g} {unit}, at {item['used']:,.1f} {unit}")
     for item in (budgets.get("limited") or [])[:20]:

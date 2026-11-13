@@ -51,13 +51,26 @@ class AnalyzerLimits:
         return {"file_bytes": self.file_bytes, "reads": self.reads, "caps": dict(self.caps)}
 
 
+class AnalyzerBudgetExceeded(BaseException):
+    """Raised inside an analyzer call that ran past its budget; not an Exception on purpose.
+
+    The engine's watchdog raises it for the time and memory budgets; the verified readers
+    raise it with ``stop = ("read", limit bytes, bytes read)`` for the read budget.
+    """
+
+    def __init__(self, stop: tuple[str, int, int] | None = None) -> None:
+        super().__init__(stop)
+        self.stop = stop
+
+
 class CallAccount:
     """What one analyzer call read and which limits it reached."""
 
-    __slots__ = ("bytes_read", "limits")
+    __slots__ = ("bytes_read", "limits", "read_limit")
 
-    def __init__(self) -> None:
+    def __init__(self, read_limit: int | None = None) -> None:
         self.bytes_read = 0
+        self.read_limit = read_limit  # the call's read budget in bytes, or None
         self.limits: list[tuple[str, float, float | None]] = []  # (kind, limit, used or None)
 
 
@@ -70,10 +83,10 @@ def current_account() -> CallAccount | None:
 
 
 @contextmanager
-def accounting() -> Iterator[CallAccount]:
+def accounting(read_limit: int | None = None) -> Iterator[CallAccount]:
     """Account the reads and limits of one analyzer call on this thread."""
     previous = getattr(_local, "account", None)
-    account = _local.account = CallAccount()
+    account = _local.account = CallAccount(read_limit)
     try:
         yield account
     finally:
@@ -84,6 +97,9 @@ def count_read(size: int) -> None:
     account = getattr(_local, "account", None)
     if account is not None and size > 0:
         account.bytes_read += size
+        if account.read_limit is not None and account.bytes_read > account.read_limit:
+            limit, account.read_limit = account.read_limit, None  # stop once
+            raise AnalyzerBudgetExceeded(("read", limit, account.bytes_read))
 
 
 def limit_reached(kind: str, limit: float, used: float | None = None) -> None:

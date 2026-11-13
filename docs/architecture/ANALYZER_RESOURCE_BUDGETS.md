@@ -8,7 +8,8 @@ These are per-analyzer safety limits, not a global scan-size policy. Every analy
 |---|---:|---|---|
 | Time per analyzer and file | 120 s | `--analyzer-timeout SECONDS` (`0`: none) | Every built-in and in-process plugin analyzer call |
 | Resident-memory growth per analyzer and file | 2048 MiB | `--analyzer-memory-mb MB` (`0`: none) | The same calls, on Linux, Windows and macOS |
-| Per-domain override | none | `--domain-budget DOMAIN:timeout=S,memory=MB` | The analyzers of that domain; the most permissive override of an analyzer's domains applies |
+| Bytes read per analyzer and file | none | `--analyzer-read-mb MB` (`0`: none) | The same calls: the bytes they read through the verified readers, counted as they are read |
+| Per-domain override | none | `--domain-budget DOMAIN:timeout=S,memory=MB,read=MB` | The analyzers of that domain; the most permissive override of an analyzer's domains applies |
 | Isolated plugin hosts | 60 s per request, 4096 MiB per host (Linux and Windows) | `--plugin-timeout`, `--plugin-memory-mb` | Sandboxed and process-isolated plugins |
 
 A watchdog thread samples the running calls every 50 ms (`engine/budgets.py`). A call past a budget receives `AnalyzerBudgetExceeded`, a `BaseException`, at its next Python bytecode, so an analyzer's `except Exception` cannot swallow it. The engine discards the call's findings and code facts for the file and records an `UNKNOWN` `analysis_coverage` finding naming the analyzer, the file, the budget and what was used; the other analyzers still run. Memory is the growth of the process's resident set (Linux `/proc/self/statm`, Windows working set, macOS `task_info`) since the call started. `metrics.analysis_budgets` records the configuration, every stop and each analyzer's time and sampled memory; the terminal, Markdown and HTML reports show them.

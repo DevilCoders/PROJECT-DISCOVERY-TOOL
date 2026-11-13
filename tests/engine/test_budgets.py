@@ -44,6 +44,48 @@ def test_a_call_past_its_memory_budget_is_stopped():
     assert run.stop.kind == "memory" and run.stop.limit == 64 and run.stop.used > 64
 
 
+def test_a_call_past_its_read_budget_is_stopped_by_the_readers(tmp_path: Path):
+    from project_discovery.core.limits import accounting
+    from project_discovery.core.source_utils import open_verified_binary
+
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"x" * (3 * 1024 * 1024))
+
+    def reader():
+        with open_verified_binary(data) as stream:
+            while stream.read(64 * 1024):
+                pass
+        return "read it all"
+
+    with accounting(1024 * 1024) as account:  # the engine pairs the account with the budget
+        run = run_with_budget(AnalyzerBudget(None, None, 1), reader)
+    assert run.result is None and (run.stop.kind, run.stop.limit) == ("read", 1)
+    assert 1 < run.stop.used < 1.2 and account.bytes_read < 2 * 1024 * 1024
+
+
+def test_the_engine_reports_a_read_budget_stop(tmp_path: Path):
+    from project_discovery.core.source_utils import open_verified_binary
+
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"x" * (3 * 1024 * 1024))
+
+    def greedy():
+        with open_verified_binary(data) as stream:
+            stream.read()
+        return [Finding("security", "never kept", "detail", analyzer="greedy")]
+
+    record = FileRecord("data.bin", data.stat().st_size, ".bin", "Binary")
+    outcome = FileOutcome()
+    budgets.set_policy(BudgetPolicy(None, None, read_mb=2))
+    try:
+        _run_analyzers([_Analyzer("greedy", ("security",), greedy)], {}, record, data, outcome)
+    finally:
+        budgets.set_policy(None)
+    assert [item.title for item in outcome.findings] == ["Analyzer read budget exceeded: greedy: data.bin"]
+    assert "2 MiB read budget" in outcome.findings[0].detail
+    assert [(name, kind, limit) for name, kind, limit, _ in outcome.budget_stops] == [("greedy", "read", 2.0)]
+
+
 def test_calls_within_budget_return_their_result_and_leave_no_stop_behind():
     for value in range(300):
         assert run_with_budget(AnalyzerBudget(5, 512), lambda value=value: value).result == value
@@ -106,7 +148,8 @@ def test_domain_overrides_take_the_most_permissive_limit():
     for value, message in (
         ("archives", "expected DOMAIN:timeout=SECONDS,memory=MB"),
         ("archive:timeout=3", "unknown analyzer domain 'archive'; did you mean archives"),
-        ("archives:speed=3", "settings are timeout=SECONDS and memory=MB"),
+        ("archives:speed=3", "settings are timeout=SECONDS, memory=MB and read=MB"),
+        ("archives:read=1.5", "read must be 0 (no limit) or a positive integer"),
         ("archives:memory=1.5", "memory must be 0 (no limit) or a positive integer"),
         ("archives:timeout=-1", "timeout must be 0 (no limit) or a positive number"),
         ("archives:timeout=nan", "timeout must be 0 (no limit) or a positive number"),

@@ -309,7 +309,11 @@ code facts for that file are discarded, and an `UNKNOWN` coverage finding (`Anal
 budget exceeded: NAME: PATH`) takes their place, so `--strict` fails the scan. The other
 analyzers still run on the file. `0` disables a budget.
 
-`--domain-budget DOMAIN:timeout=S,memory=MB` overrides either budget for the analyzers of one
+`--analyzer-read-mb MB` adds an I/O budget: the verified readers count what each call reads and stop
+it, at the read that passes the limit, with an `Analyzer read budget exceeded` finding. It is off by
+default; the analyzers' own per-file byte limits already bound their reads.
+
+`--domain-budget DOMAIN:timeout=S,memory=MB,read=MB` overrides any budget for the analyzers of one
 domain, for example `--domain-budget archives:timeout=300 --domain-budget secrets:memory=0`.
 An analyzer in several domains gets the most permissive override of its domains.
 
