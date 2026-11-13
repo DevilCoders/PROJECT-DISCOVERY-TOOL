@@ -114,6 +114,60 @@ def test_gpu_capability_fields_are_available_with_or_without_hardware():
         assert info["gpu_backend"] == "none"
 
 
+def test_gpu_fallback_reasons_are_reported_with_or_without_hardware():
+    info = native_backend.capabilities()
+    reasons = info["gpu_fallback_reasons"]
+    if info["gpu_available"]:
+        assert info["gpu_unavailable_reason"] == ""
+    else:
+        assert info["gpu_unavailable_reason"] in {*native_backend.GPU_FALLBACK_REASONS, "native_extension"}
+    if native_backend.native_available():
+        assert set(reasons) == set(native_backend.GPU_FALLBACK_REASONS)
+        assert sum(reasons.values()) == info["gpu_fallbacks"]
+    else:
+        assert reasons == {}
+
+
+def test_every_gpu_fallback_is_counted_under_its_reason():
+    import pytest
+
+    payload = bytes(range(256)) * 32768 + b"\n"  # past the 8 MiB GPU threshold
+    expected = payload.count(b"\n")
+    for reason in native_backend.GPU_FALLBACK_REASONS:
+        if not native_backend.set_gpu_test_fault(reason):
+            pytest.skip("the C extension with the fault hook is not built")
+        try:
+            before = native_backend.capabilities()
+            assert native_backend.count_byte(payload, 10) == expected
+            after = native_backend.capabilities()
+        finally:
+            native_backend.set_gpu_test_fault(None)
+        assert after["gpu_fallbacks"] == before["gpu_fallbacks"] + 1
+        assert after["gpu_dispatches"] == before["gpu_dispatches"]
+        assert after["gpu_fallback_reasons"][reason] == before["gpu_fallback_reasons"][reason] + 1
+    # Small and mutable buffers never reach the GPU path, so they are no fallback.
+    before = native_backend.capabilities()["gpu_fallbacks"]
+    native_backend.count_byte(b"\n" * 1024, 10)
+    native_backend.count_byte(bytearray(payload), 10)
+    assert native_backend.capabilities()["gpu_fallbacks"] == before
+    with pytest.raises(ValueError, match="unknown GPU fallback reason"):
+        native_backend.set_gpu_test_fault("everything")
+
+
+def test_without_a_usable_gpu_large_buffers_fall_back_under_the_unavailable_reason():
+    import pytest
+
+    info = native_backend.capabilities()
+    if info["gpu_available"] or not native_backend.native_available():
+        pytest.skip("this machine has a usable OpenCL GPU, or no C extension")
+    reason = info["gpu_unavailable_reason"]
+    payload = bytes(range(256)) * 32768 + b"\n"
+    native_backend.count_byte(payload, 0)
+    after = native_backend.capabilities()
+    assert after["gpu_fallback_reasons"][reason] == info["gpu_fallback_reasons"][reason] + 1
+    assert after["gpu_fallbacks"] == info["gpu_fallbacks"] + 1
+
+
 def test_large_buffer_automatic_backend_matches_python_reference():
     payload = bytes(range(256)) * 32768 + b"\n\x00"
     assert len(payload) >= 8 * 1024 * 1024

@@ -81,7 +81,7 @@ Details: [Online Mode guide](docs/guides/ONLINE_MODE.md).
 
 ## Reports
 
-- **JSON** (schema 1.16): every finding, file record and metric, streamed for large scans.
+- **JSON** (schema 1.17): every finding, file record and metric, streamed for large scans.
 - **Markdown:** summaries, the scan source and findings with evidence, impact and remediation.
 - **HTML:** a standalone offline report with search, filters, pagination and collapsible findings; it loads no remote assets.
 

@@ -64,6 +64,7 @@ def _result() -> ScanResult:
                 "backend": "x86_64-sse2-popcnt-asm", "hardware_threads": 8,
                 "gpu_status": "online", "gpu_name": "Test GPU",
                 "gpu_dispatches": 3, "gpu_fallbacks": 1,
+                "gpu_unavailable_reason": "", "gpu_fallback_reasons": {"memory_limit": 1, "dispatch": 0},
             },
             "execution": {
                 "mode": "bounded-thread-pool", "worker_count": 4,
@@ -149,7 +150,7 @@ def test_markdown_includes_inventory_symlink_and_directory_sections(tmp_path: Pa
     assert "GPU status: online" in content
     assert "GPU device: Test GPU" in content
     assert "GPU byte-count dispatches: 3" in content
-    assert "GPU CPU fallbacks: 1" in content
+    assert "GPU CPU fallbacks: 1 (memory_limit 1)" in content
     assert content.startswith("# Project Discovery Report\n")
     assert content.endswith("\n")
     assert "\\n" not in content
@@ -171,7 +172,7 @@ def test_markdown_writer_streams_without_compatibility_string_builder(tmp_path: 
 def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
     path = write_reports(_result(), tmp_path, {"json"})[0]
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.16"
+    assert payload["schema_version"] == "1.17"
     assert payload["directories"][1]["path"] == "src"
     assert payload["symlinks"][0]["target_scope"] == "internal"
     assert payload["special_entries"][0]["entry_type"] == "fifo"
@@ -214,7 +215,7 @@ def test_json_and_html_report_writers_do_not_materialize_scanresult_dict(
     paths = write_reports(result, tmp_path, {"json", "html"})
     assert {path.suffix for path in paths} == {".json", ".html"}
     payload = json.loads((tmp_path / "discovery-report.json").read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.16"
+    assert payload["schema_version"] == "1.17"
     assert "const REPORT =" in (tmp_path / "discovery-report.html").read_text(encoding="utf-8")
 
 

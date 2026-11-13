@@ -269,6 +269,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
 - Report schema 1.16: `analyzer_limits`, `limits_reached`, `limited` and the per-analyzer byte
   counts in `metrics.analysis_budgets`.
 
+### Added: native engine
+- Every GPU fallback has a reason. `metrics.native_backend.gpu_unavailable_reason` names the first
+  OpenCL initialization step that failed (`loader`, `device`, `context`, `kernel_build`,
+  `host_memory`), and `gpu_fallback_reasons` counts each large immutable buffer counted on the CPU
+  by reason (also `memory_limit` and `dispatch`), summed over the analysis worker processes. The
+  terminal summary, the Markdown and HTML reports and `pdt capabilities` show them.
+- Report schema 1.17: `gpu_unavailable_reason` and `gpu_fallback_reasons` in
+  `metrics.native_backend`.
+
 ### Fixed: found during the filesystem inventory work
 - A budget stop that reached an analyzer call just as it returned was cleared with
   `PyThreadState_SetAsyncExc(id, NULL)`, which on Python 3.11 leaves the interpreter's

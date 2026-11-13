@@ -116,7 +116,8 @@ from .plugins.isolation import (
 from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
 from .reporting.writers import (
-    aggregate_summary, attribute_summary, budget_summary, development_summary, tree_mode_summary, type_summary,
+    aggregate_summary, attribute_summary, budget_summary, development_summary, gpu_fallback_text,
+    gpu_status_text, tree_mode_summary, type_summary,
     write_remote_batch_summary, write_reports,
 )
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
@@ -749,7 +750,8 @@ def run_scan(
         timer.lap("inventory")
         resumed_skipped = 0
         inventory_error_count = 0
-        worker_gpu = [0, 0]   # GPU dispatches and fallbacks reported by worker processes
+        # GPU dispatches, fallbacks and fallbacks by reason reported by worker processes
+        worker_gpu: list = [0, 0, Counter()]
         budget_usage = _BudgetUsage()
         cache_failures: list[str] = []
         counts = Counter()
@@ -874,6 +876,7 @@ def run_scan(
                         if outcome.gpu_counts:
                             worker_gpu[0] += outcome.gpu_counts[0]
                             worker_gpu[1] += outcome.gpu_counts[1]
+                            worker_gpu[2].update(outcome.gpu_counts[2])
                         cache_miss = item.digest_hint is None
                         budget_usage.add(record.path, outcome)
                         try:
@@ -1361,9 +1364,9 @@ def run_scan(
             summary.add_row("Analyzer budgets", budget_summary(metrics.get("analysis_budgets")))
         summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
         summary.add_row("Native backend", metrics["native_backend"]["backend"])
-        summary.add_row("GPU acceleration", metrics["native_backend"].get("gpu_status", "cpu-fallback"))
+        summary.add_row("GPU acceleration", gpu_status_text(metrics["native_backend"]))
         summary.add_row("GPU byte-count dispatches", str(metrics["native_backend"].get("gpu_dispatches", 0)))
-        summary.add_row("GPU CPU fallbacks", str(metrics["native_backend"].get("gpu_fallbacks", 0)))
+        summary.add_row("GPU CPU fallbacks", gpu_fallback_text(metrics["native_backend"]))
         summary.add_row(
             "Analysis workers",
             f"{metrics['execution']['worker_count']} ({metrics['execution']['executor']}s)",
@@ -1445,11 +1448,17 @@ def run_scan(
         return exit_code
 
 
-def _with_worker_gpu(native: dict, worker_gpu: list[int]) -> dict:
+def _with_worker_gpu(native: dict, worker_gpu: list) -> dict:
     """The coordinator's native counters plus those of the analysis worker processes."""
-    if any(worker_gpu):
-        native = {**native, "gpu_dispatches": int(native.get("gpu_dispatches", 0)) + worker_gpu[0],
-                  "gpu_fallbacks": int(native.get("gpu_fallbacks", 0)) + worker_gpu[1]}
+    dispatches, fallbacks, *rest = worker_gpu
+    reasons = rest[0] if rest else {}
+    if dispatches or fallbacks or reasons:
+        merged = dict(native.get("gpu_fallback_reasons") or {})
+        for name, count in reasons.items():
+            merged[name] = int(merged.get(name, 0)) + int(count)
+        native = {**native, "gpu_dispatches": int(native.get("gpu_dispatches", 0)) + dispatches,
+                  "gpu_fallbacks": int(native.get("gpu_fallbacks", 0)) + fallbacks,
+                  "gpu_fallback_reasons": merged}
     return native
 
 
@@ -2161,7 +2170,7 @@ def main() -> None:
             table.add_column("Status")
             table.add_row("Python / platform", f"{report['python']} / {report['platform']}")
             table.add_row("C byte counter", f"{native.get('backend')} (assembly: {native.get('assembly_compiled')})")
-            table.add_row("GPU (OpenCL)", f"{native.get('gpu_status')} {native.get('gpu_name') or ''}".strip())
+            table.add_row("GPU (OpenCL)", f"{gpu_status_text(native)} {native.get('gpu_name') or ''}".strip())
             table.add_row("C++ signature classifier", "online" if native.get("cpp_signature_classifier") else "fallback")
             table.add_row("Rust filesystem walker", "online" if native.get("rust_filesystem_walker") else "fallback")
             for backend, client in report["remote_vcs_clients"].items():

@@ -81,18 +81,27 @@ def test_gpu_counters_of_worker_processes_reach_the_scan_metrics(monkeypatch):
     import project_discovery.engine.executor as executor
     from project_discovery.cli import _with_worker_gpu
 
-    readings = iter([(3, 1), (7, 2)])
+    first, second = (3, 1, {"device": 1}), (7, 2, {"device": 1, "memory_limit": 1})
+    readings = iter([first, second])
     monkeypatch.setattr(executor, "_gpu_counters", lambda: next(readings))
     monkeypatch.setitem(executor._worker_state, "analyzers", [])
     outcomes = executor._analyze_batch_in_worker([])
     assert outcomes == []          # no outcome to carry the delta: nothing to report
-    readings = iter([(3, 1), (7, 2)])
+    readings = iter([first, second])
     monkeypatch.setattr(executor, "_gpu_counters", lambda: next(readings))
     monkeypatch.setattr(executor, "analyze_tasks", lambda *_args: [executor.FileOutcome(), executor.FileOutcome()])
     outcomes = executor._analyze_batch_in_worker([object(), object()])
-    assert outcomes[0].gpu_counts is None and outcomes[-1].gpu_counts == (4, 1)
-    merged = _with_worker_gpu({"gpu_dispatches": 1, "gpu_fallbacks": 0, "backend": "c"}, [4, 1])
-    assert (merged["gpu_dispatches"], merged["gpu_fallbacks"], merged["backend"]) == (5, 1, "c")
+    # The fallback reasons travel with the counts: only the reasons that changed.
+    assert outcomes[0].gpu_counts is None and outcomes[-1].gpu_counts == (4, 1, {"memory_limit": 1})
+    merged = _with_worker_gpu(
+        {"gpu_dispatches": 1, "gpu_fallbacks": 1, "gpu_fallback_reasons": {"dispatch": 1, "memory_limit": 0},
+         "backend": "c"},
+        [4, 1, {"memory_limit": 1}],
+    )
+    assert (merged["gpu_dispatches"], merged["gpu_fallbacks"], merged["backend"]) == (5, 2, "c")
+    assert merged["gpu_fallback_reasons"] == {"dispatch": 1, "memory_limit": 1}
+    # Counts without reasons (an older worker) still add up.
+    assert _with_worker_gpu({"gpu_dispatches": 1, "gpu_fallbacks": 0}, [4, 1])["gpu_fallbacks"] == 1
 
 
 def _exits_within(pid: int, handle, seconds: float) -> bool:

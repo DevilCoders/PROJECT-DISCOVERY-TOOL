@@ -67,7 +67,7 @@ class FileOutcome:
     facts: FileFacts | None = None
     # Process workers: (GPU dispatches, CPU fallbacks) during this batch, carried by its
     # last outcome. The native counters are per process, so the coordinator sums them.
-    gpu_counts: tuple[int, int] | None = None
+    gpu_counts: tuple[int, int, dict[str, int]] | None = None
     # (analyzer, seconds, sampled peak memory growth in MiB or None, bytes read) per analyzer
     # call; (analyzer, kind, limit, used) per call a time or memory budget stopped; and
     # (analyzer, kind, limit, used) per content limit a completed call reached.
@@ -311,11 +311,19 @@ def _parse_imports_batch(root: str, records: list[FileRecord]) -> list[tuple]:
     return [parse_python_imports(Path(root), record) for record in records]
 
 
-def _gpu_counters() -> tuple[int, int]:
+def _gpu_counters() -> tuple[int, int, dict[str, int]]:
     from .native import capabilities
 
     values = capabilities()
-    return int(values.get("gpu_dispatches", 0)), int(values.get("gpu_fallbacks", 0))
+    return (int(values.get("gpu_dispatches", 0)), int(values.get("gpu_fallbacks", 0)),
+            dict(values.get("gpu_fallback_reasons") or {}))
+
+
+def gpu_delta(before: tuple, after: tuple) -> tuple[int, int, dict[str, int]]:
+    """Dispatches, fallbacks and fallbacks by reason between two _gpu_counters() readings."""
+    reasons = {name: count - before[2].get(name, 0) for name, count in after[2].items()
+               if count != before[2].get(name, 0)}
+    return after[0] - before[0], after[1] - before[1], reasons
 
 
 def _analyze_batch_in_worker(tasks: list[FileTask]) -> list[FileOutcome]:
@@ -323,7 +331,7 @@ def _analyze_batch_in_worker(tasks: list[FileTask]) -> list[FileOutcome]:
     outcomes = analyze_tasks(_worker_state["analyzers"], {}, tasks)
     after = _gpu_counters()
     if outcomes and after != before:
-        outcomes[-1].gpu_counts = (after[0] - before[0], after[1] - before[1])
+        outcomes[-1].gpu_counts = gpu_delta(before, after)
     return outcomes
 
 

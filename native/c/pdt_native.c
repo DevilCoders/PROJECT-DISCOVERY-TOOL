@@ -130,6 +130,26 @@ static pdt_opencl_runtime pdt_opencl;
 static unsigned long long pdt_gpu_dispatches = 0;
 static unsigned long long pdt_gpu_fallbacks = 0;
 
+/* Why the GPU path is unavailable (set once by pdt_opencl_initialize) and why each large
+   immutable buffer fell back to the CPU. The names are reported in scan metrics. */
+enum {
+    PDT_GPU_REASON_LOADER = 0,     /* no OpenCL ICD loader, or a required symbol missing */
+    PDT_GPU_REASON_DEVICE,         /* no platform, no GPU device or unknown device limits */
+    PDT_GPU_REASON_CONTEXT,        /* context creation failed */
+    PDT_GPU_REASON_KERNEL_BUILD,   /* program creation or kernel compilation failed */
+    PDT_GPU_REASON_MEMORY_LIMIT,   /* the buffer exceeds the device allocation or memory budget */
+    PDT_GPU_REASON_HOST_MEMORY,    /* a host-side allocation failed */
+    PDT_GPU_REASON_DISPATCH,       /* queue, kernel, buffer, argument, enqueue, read or finish failed */
+    PDT_GPU_REASON_COUNT
+};
+static const char *const pdt_gpu_reason_names[PDT_GPU_REASON_COUNT] = {
+    "loader", "device", "context", "kernel_build", "memory_limit", "host_memory", "dispatch",
+};
+static int pdt_gpu_unavailable_reason = -1; /* -1: available or not yet initialized */
+static unsigned long long pdt_gpu_fallback_reasons[PDT_GPU_REASON_COUNT];
+/* Tests force a fallback reason for every eligible buffer (_set_gpu_test_fault); -1: none. */
+static int pdt_gpu_test_fault = -1;
+
 static void *pdt_load_library_symbol(pdt_library_handle library, const char *name) {
 #if defined(_WIN32)
     return (void *)GetProcAddress(library, name);
@@ -166,6 +186,7 @@ static pdt_library_handle pdt_opencl_library(void) {
     do {                                                                          \
         void *pdt_symbol = pdt_load_library_symbol(pdt_opencl.library, symbol_name); \
         if (pdt_symbol == NULL) {                                                  \
+            pdt_gpu_unavailable_reason = PDT_GPU_REASON_LOADER;                   \
             return 0;                                                             \
         }                                                                         \
         memcpy(&pdt_opencl.field, &pdt_symbol, sizeof(pdt_opencl.field));          \
@@ -198,6 +219,7 @@ static int pdt_opencl_initialize(void) {
     pdt_opencl.initialized = 1;
     pdt_opencl.library = pdt_opencl_library();
     if (pdt_opencl.library == NULL) {
+        pdt_gpu_unavailable_reason = PDT_GPU_REASON_LOADER;
         return 0;
     }
 
@@ -222,14 +244,17 @@ static int pdt_opencl_initialize(void) {
 
     if (pdt_opencl.get_platform_ids(0, NULL, &platform_count) != PDT_CL_SUCCESS ||
         platform_count == 0) {
+        pdt_gpu_unavailable_reason = PDT_GPU_REASON_DEVICE;
         return 0;
     }
     platforms = (pdt_cl_platform_id *)calloc(platform_count, sizeof(*platforms));
     if (platforms == NULL) {
+        pdt_gpu_unavailable_reason = PDT_GPU_REASON_HOST_MEMORY;
         return 0;
     }
     if (pdt_opencl.get_platform_ids(platform_count, platforms, NULL) != PDT_CL_SUCCESS) {
         free(platforms);
+        pdt_gpu_unavailable_reason = PDT_GPU_REASON_DEVICE;
         return 0;
     }
 
@@ -289,6 +314,7 @@ static int pdt_opencl_initialize(void) {
     }
     free(platforms);
     if (selected == NULL) {
+        pdt_gpu_unavailable_reason = PDT_GPU_REASON_DEVICE;
         return 0;
     }
 
@@ -315,6 +341,7 @@ static int pdt_opencl_initialize(void) {
         );
         if (status != PDT_CL_SUCCESS || pdt_opencl.context == NULL) {
             pdt_opencl.context = NULL;
+            pdt_gpu_unavailable_reason = PDT_GPU_REASON_CONTEXT;
             return 0;
         }
         pdt_opencl.program = pdt_opencl.create_program_with_source(
@@ -324,6 +351,7 @@ static int pdt_opencl_initialize(void) {
             pdt_opencl.release_context(pdt_opencl.context);
             pdt_opencl.context = NULL;
             pdt_opencl.program = NULL;
+            pdt_gpu_unavailable_reason = PDT_GPU_REASON_KERNEL_BUILD;
             return 0;
         }
         status = pdt_opencl.build_program(
@@ -334,17 +362,19 @@ static int pdt_opencl_initialize(void) {
             pdt_opencl.release_context(pdt_opencl.context);
             pdt_opencl.program = NULL;
             pdt_opencl.context = NULL;
+            pdt_gpu_unavailable_reason = PDT_GPU_REASON_KERNEL_BUILD;
             return 0;
         }
     }
 
     pdt_opencl.available = 1;
+    pdt_gpu_unavailable_reason = -1;
     return 1;
 }
 
 static int pdt_opencl_count_byte(
     const unsigned char *data, size_t length, unsigned char needle,
-    unsigned long long *result
+    unsigned long long *result, int *reason
 ) {
     const size_t local_size = 256;
     size_t groups;
@@ -360,11 +390,16 @@ static int pdt_opencl_count_byte(
     pdt_cl_uint index;
     unsigned long long total = 0;
 
-    if (!pdt_opencl.available || length < PDT_GPU_MIN_BYTES ||
-        (pdt_opencl.max_allocation_bytes != 0 &&
+    *reason = PDT_GPU_REASON_DISPATCH;
+    if (!pdt_opencl.available) {
+        *reason = pdt_gpu_unavailable_reason >= 0 ? pdt_gpu_unavailable_reason : PDT_GPU_REASON_DEVICE;
+        return 0;
+    }
+    if ((pdt_opencl.max_allocation_bytes != 0 &&
          (pdt_cl_ulong)length > pdt_opencl.max_allocation_bytes) ||
         (pdt_opencl.global_memory_bytes != 0 &&
          (pdt_cl_ulong)length > pdt_opencl.global_memory_bytes / 4)) {
+        *reason = PDT_GPU_REASON_MEMORY_LIMIT;
         return 0;
     }
 
@@ -375,6 +410,7 @@ static int pdt_opencl_count_byte(
     partial_bytes = groups * sizeof(pdt_cl_ulong);
     partials = (pdt_cl_ulong *)calloc(groups, sizeof(pdt_cl_ulong));
     if (partials == NULL) {
+        *reason = PDT_GPU_REASON_HOST_MEMORY;
         return 0;
     }
 
@@ -531,14 +567,24 @@ static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
        Use it only for immutable bytes; mutable exporters stay on the GIL-held CPU
        path so another Python thread cannot mutate their contents concurrently. */
     if (PyBytes_Check(object) && (size_t)view.len >= PDT_GPU_MIN_BYTES) {
-        if (pdt_opencl_initialize() && pdt_opencl_count_byte(
+        int reason = PDT_GPU_REASON_DISPATCH;
+        int dispatched = 0;
+        if (pdt_gpu_test_fault >= 0) {
+            reason = pdt_gpu_test_fault;
+        } else if (!pdt_opencl_initialize()) {
+            reason = pdt_gpu_unavailable_reason >= 0 ? pdt_gpu_unavailable_reason : PDT_GPU_REASON_DEVICE;
+        } else {
+            dispatched = pdt_opencl_count_byte(
                 (const unsigned char *)view.buf, (size_t)view.len,
-                (unsigned char)needle, &gpu_count
-            )) {
+                (unsigned char)needle, &gpu_count, &reason
+            );
+        }
+        if (dispatched) {
             count = (size_t)gpu_count;
             ++pdt_gpu_dispatches;
         } else {
             ++pdt_gpu_fallbacks;
+            ++pdt_gpu_fallback_reasons[reason];
             count = pdt_count_byte_cpu_buffer(
                 object, (const unsigned char *)view.buf, (size_t)view.len,
                 (unsigned char)needle
@@ -555,10 +601,52 @@ static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
     return PyLong_FromSize_t(count);
 }
 
+static PyObject *pdt_native_set_gpu_test_fault(PyObject *self, PyObject *args) {
+    const char *name = NULL;
+    int index;
+
+    (void)self;
+    if (!PyArg_ParseTuple(args, "z:_set_gpu_test_fault", &name)) {
+        return NULL;
+    }
+    if (name == NULL) {
+        pdt_gpu_test_fault = -1;
+        Py_RETURN_NONE;
+    }
+    for (index = 0; index < PDT_GPU_REASON_COUNT; ++index) {
+        if (strcmp(name, pdt_gpu_reason_names[index]) == 0) {
+            pdt_gpu_test_fault = index;
+            Py_RETURN_NONE;
+        }
+    }
+    PyErr_SetString(PyExc_ValueError, "unknown GPU fallback reason");
+    return NULL;
+}
+
+static PyObject *pdt_gpu_reason_counts(void) {
+    PyObject *counts = PyDict_New();
+    int index;
+
+    if (counts == NULL) {
+        return NULL;
+    }
+    for (index = 0; index < PDT_GPU_REASON_COUNT; ++index) {
+        PyObject *value = PyLong_FromUnsignedLongLong(pdt_gpu_fallback_reasons[index]);
+        if (value == NULL || PyDict_SetItemString(counts, pdt_gpu_reason_names[index], value) < 0) {
+            Py_XDECREF(value);
+            Py_DECREF(counts);
+            return NULL;
+        }
+        Py_DECREF(value);
+    }
+    return counts;
+}
+
 static PyObject *pdt_native_capabilities(PyObject *self, PyObject *Py_UNUSED(args)) {
     const char *architecture = "unknown";
     long hardware_threads = 1;
     int gpu_available;
+    PyObject *reasons;
 
     (void)self;
 #if defined(__x86_64__) || defined(_M_X64)
@@ -589,8 +677,12 @@ static PyObject *pdt_native_capabilities(PyObject *self, PyObject *Py_UNUSED(arg
 #endif
 
     gpu_available = pdt_opencl_initialize();
+    reasons = pdt_gpu_reason_counts();
+    if (reasons == NULL) {
+        return NULL;
+    }
     return Py_BuildValue(
-        "{s:s,s:s,s:l,s:O,s:O,s:O,s:s,s:s,s:I,s:s,s:K,s:K,s:K,s:K,s:K}",
+        "{s:s,s:s,s:l,s:O,s:O,s:O,s:s,s:s,s:I,s:s,s:K,s:K,s:K,s:K,s:K,s:s,s:N}",
         "architecture", architecture,
         "backend", pdt_backend_name(),
         "hardware_threads", hardware_threads,
@@ -607,7 +699,10 @@ static PyObject *pdt_native_capabilities(PyObject *self, PyObject *Py_UNUSED(arg
             (unsigned long long)(gpu_available ? pdt_opencl.max_allocation_bytes : 0),
         "gpu_threshold_bytes", (unsigned long long)PDT_GPU_MIN_BYTES,
         "gpu_dispatches", pdt_gpu_dispatches,
-        "gpu_fallbacks", pdt_gpu_fallbacks
+        "gpu_fallbacks", pdt_gpu_fallbacks,
+        "gpu_unavailable_reason",
+            gpu_available || pdt_gpu_unavailable_reason < 0 ? "" : pdt_gpu_reason_names[pdt_gpu_unavailable_reason],
+        "gpu_fallback_reasons", reasons
     );
 }
 
@@ -616,6 +711,8 @@ static PyMethodDef pdt_native_methods[] = {
      "Count a byte using automatic OpenCL GPU or runtime-selected CPU acceleration."},
     {"capabilities", pdt_native_capabilities, METH_NOARGS,
      "Return CPU, OpenCL GPU and native backend capability information."},
+    {"_set_gpu_test_fault", pdt_native_set_gpu_test_fault, METH_VARARGS,
+     "Tests only: force every eligible buffer onto the CPU with this fallback reason (None clears)."},
     {NULL, NULL, 0, NULL}
 };
 

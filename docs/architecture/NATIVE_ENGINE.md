@@ -28,6 +28,16 @@ If OpenCL is missing, no usable GPU is found, device limits are exceeded, or any
 
 Scope limitation: only byte counting/reduction is GPU-accelerated. Source parsing, security rules, archive analysis, dependency resolution and finding generation remain CPU-side. The 8MiB threshold is a conservative initial gate, not a performance claim; device-specific benchmark calibration is still required. GPU dispatch/fallback counters and non-sensitive device capability fields are recorded in scan metrics.
 
+Every fallback has a reason. `gpu_unavailable_reason` says why the GPU path is unusable on this host, from the
+first step that failed: `loader` (no OpenCL ICD loader, or a required symbol missing), `device` (no platform, no
+GPU device, or a device that does not report its limits), `context`, `kernel_build` (program creation or
+compilation) or `host_memory`; it is empty when the GPU is online, and `native_extension` without the C
+extension. `gpu_fallback_reasons` counts each large immutable buffer counted on the CPU under its reason:
+the unavailable reason, `memory_limit` (past the device's allocation limit or a quarter of its memory),
+`host_memory`, or `dispatch` (a queue, kernel, buffer, argument, enqueue, read-back or finish failure). The
+counts are summed over the analysis worker processes, and the terminal summary, the Markdown and HTML reports
+and `pdt capabilities` show them. Small and mutable buffers never take the GPU path, so they are not fallbacks.
+
 ## Bounded concurrent analysis
 
 The analysis engine runs per-file analyzers in worker processes or threads. `--executor auto` (the default) uses processes for inventories of 1,000 files or more and threads below that; `--executor process|thread` forces either. `--jobs 0` selects an automatic worker count (twice the hardware threads, at most 8); `--jobs N` sets 1–64 workers. Files are batched per task (up to 4 MiB of content per batch), at most twice the worker count of batches is pending, and results are collected in submission order so reports are deterministic. Each file up to 4 MiB is read once through the verified descriptor and served to every analyzer.

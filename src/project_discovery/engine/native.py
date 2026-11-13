@@ -36,6 +36,13 @@ def count_byte(data: bytes | bytearray | memoryview, needle: int) -> int:
     return memoryview(data).tobytes().count(bytes((needle,)))
 
 
+# Why a large immutable buffer was counted on the CPU instead of the GPU (the extension's
+# names): no OpenCL loader or symbol, no usable device, context creation, kernel build,
+# device memory limit, host allocation, or a failed dispatch.
+GPU_FALLBACK_REASONS = ("loader", "device", "context", "kernel_build", "memory_limit", "host_memory",
+                        "dispatch")
+
+
 def capabilities() -> dict[str, Any]:
     """Report CPU, GPU and optional native backends available on this machine."""
     if _native is not None:
@@ -59,6 +66,9 @@ def capabilities() -> dict[str, Any]:
             "gpu_threshold_bytes": 8 * 1024 * 1024,
             "gpu_dispatches": 0,
             "gpu_fallbacks": 0,
+            # Without the C extension nothing is dispatched or falls back: Python counts.
+            "gpu_unavailable_reason": "native_extension",
+            "gpu_fallback_reasons": {},
         }
     info["cpp_signature_classifier"] = signature_backend_available()
     # Loaded, but compiled from another signature catalog: the Python matcher is used.
@@ -66,7 +76,23 @@ def capabilities() -> dict[str, Any]:
     info["rust_filesystem_walker"] = _walker_current()
     info["rust_filesystem_walker_outdated"] = _walker is not None and not _walker_current()
     info["gpu_status"] = "online" if info.get("gpu_available") else "cpu-fallback"
+    # An extension built from older sources reports no reasons.
+    info.setdefault("gpu_unavailable_reason", "" if info.get("gpu_available") else "not_reported")
+    info["gpu_fallback_reasons"] = {str(name): int(count) for name, count in
+                                    (info.get("gpu_fallback_reasons") or {}).items()}
     return info
+
+
+def set_gpu_test_fault(reason: str | None) -> bool:
+    """Tests only: count every eligible buffer on the CPU with this fallback reason.
+
+    Returns False when the C extension (or this hook in it) is not available.
+    """
+    hook = getattr(_native, "_set_gpu_test_fault", None)
+    if hook is None:
+        return False
+    hook(reason)
+    return True
 
 
 def native_available() -> bool:

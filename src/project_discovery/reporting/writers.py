@@ -112,6 +112,20 @@ def _limit_text(timeout: Any, memory: Any) -> str:
     return f"{time_text} and {memory_text}"
 
 
+def gpu_status_text(native: dict[str, Any]) -> str:
+    """"online", or "cpu-fallback (loader)" with the reason the GPU path is unavailable."""
+    status = native.get("gpu_status", "cpu-fallback")
+    reason = native.get("gpu_unavailable_reason")
+    return f"{status} ({reason})" if reason and status != "online" else status
+
+
+def gpu_fallback_text(native: dict[str, Any]) -> str:
+    """"3 (dispatch 2, memory_limit 1)": CPU fallbacks of large buffers by reason."""
+    total = int(native.get("gpu_fallbacks", 0) or 0)
+    reasons = [f"{name} {count:,}" for name, count in (native.get("gpu_fallback_reasons") or {}).items() if count]
+    return f"{total:,}" + (f" ({', '.join(reasons)})" if reasons else "")
+
+
 def size_text(value: Any) -> str:
     """A byte count for people: "1.5 MiB", "640 bytes"."""
     value = float(value or 0)
@@ -863,10 +877,10 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
         f"- Analysis queue limit: {execution.get('max_pending_tasks', 'not reported')} pending batches",
         f"- Native CPU backend: {native.get('backend', 'not reported')}",
-        f"- GPU status: {native.get('gpu_status', 'not reported')}",
+        f"- GPU status: {gpu_status_text(native) if native else 'not reported'}",
         f"- GPU device: {_md(native.get('gpu_name') or 'not detected')}",
         f"- GPU byte-count dispatches: {native.get('gpu_dispatches', 0):,}",
-        f"- GPU CPU fallbacks: {native.get('gpu_fallbacks', 0):,}",
+        f"- GPU CPU fallbacks: {gpu_fallback_text(native)}",
         "",
     ):
         line(value)
