@@ -5,6 +5,7 @@ import os
 import socket
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -76,7 +77,10 @@ def test_reparse_tag_names():
 @pytest.mark.skipif(not hasattr(os, "makedev"), reason="POSIX device numbers")
 def test_device_numbers_use_the_platform_encoding():
     assert device_numbers(os.makedev(8, 17)) == (8, 17)
-    assert device_numbers(os.makedev(259, 70000)) == (259, 70000)
+    # Linux packs a 12-bit major and a 20-bit minor, macOS and the BSDs an 8-bit major and a
+    # 24-bit minor: a minor past 16 bits (and on Linux a major past 8) needs the real split.
+    major = 259 if sys.platform.startswith("linux") else 17
+    assert device_numbers(os.makedev(major, 70000)) == (major, 70000)
     assert device_numbers(None) == (None, None)
 
 
@@ -166,7 +170,10 @@ def _windows_unix_socket(path: Path) -> bool:
     if descriptor == ctypes.c_size_t(-1).value:
         return False
     try:
-        address = SockaddrUn(1, os.fsencode(path))
+        encoded = os.fsencode(path)
+        if len(encoded) >= 108:  # sun_path holds 108 bytes with the terminating NUL
+            return False
+        address = SockaddrUn(1, encoded)
         return ws2.bind(descriptor, ctypes.byref(address), ctypes.sizeof(address)) == 0
     finally:
         ws2.closesocket(descriptor)
@@ -177,7 +184,10 @@ def test_windows_sockets_junctions_and_reparse_tags(tmp_path: Path, monkeypatch)
     # Regression: an AF_UNIX socket (a reparse point) was inventoried as a regular file.
     (tmp_path / "target").mkdir()
     (tmp_path / "plain.txt").write_text("x", encoding="utf-8")
-    if not _windows_unix_socket(tmp_path / "s.sock"):
+    # A relative name keeps the socket path within sun_path's 108 bytes: CI runners' temporary
+    # directories are long enough to exceed it.
+    monkeypatch.chdir(tmp_path)
+    if not _windows_unix_socket(Path("s.sock")):
         pytest.skip("AF_UNIX sockets are not available")
     junction = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(tmp_path / "junction"), str(tmp_path / "target")], capture_output=True,

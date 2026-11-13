@@ -7,6 +7,7 @@ construct, and secure-code rules that rescanned a statement from every call they
 """
 from __future__ import annotations
 
+import gc
 import re
 import time
 from pathlib import Path
@@ -50,16 +51,26 @@ def _elapsed(tmp_path: Path, analyzer_class, name: str, unit: str, size: int) ->
     record = FileRecord(name, path.stat().st_size, Path(name).suffix, "Text", file_type="text")
     analyzer = analyzer_class()
     assert analyzer.supports(record), name
-    started = time.perf_counter()
-    analyzer.analyze(path, record)
-    return time.perf_counter() - started
+    # The collector is off while timing: collections that land in the larger run only made
+    # linear analyzers look super-linear on macOS runners (random.js grows x4 per 4x input).
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        started = time.perf_counter()
+        analyzer.analyze(path, record)
+        return time.perf_counter() - started
+    finally:
+        if enabled:
+            gc.enable()
 
 
 @pytest.mark.parametrize(("analyzer_class", "name", "unit"), SHAPES, ids=[item[1] for item in SHAPES])
 def test_analyzers_stay_linear_on_adversarial_shapes(tmp_path, analyzer_class, name, unit):
     small = _elapsed(tmp_path, analyzer_class, name, unit, 128 * 1024)
     large = _elapsed(tmp_path, analyzer_class, name, unit, 512 * 1024)
-    if large > 0.25 and large > 10 * small:  # linear is about 4x; confirm once on a busy runner
+    for _ in range(3):  # linear is about 4x; confirm on a busy runner, keeping the fastest runs
+        if not (large > 0.25 and large > 10 * small):
+            break
         small = min(small, _elapsed(tmp_path, analyzer_class, name, unit, 128 * 1024))
         large = min(large, _elapsed(tmp_path, analyzer_class, name, unit, 512 * 1024))
     assert large < 2.0, f"{name}: {large:.2f}s for 512 KiB"

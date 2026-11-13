@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import gc
 import importlib
 import pkgutil
 import re
@@ -32,8 +33,10 @@ SMALL_LIMIT_SECONDS = 0.1
 MEDIUM, LARGE = 4_000, 16_000
 # Linear patterns grow about 4x from MEDIUM to LARGE; quadratic ones about 16x.
 GROWTH_LIMIT = 10.0
-# Below this, timings are too small for a growth ratio to mean anything.
-GROWTH_FLOOR_SECONDS = 0.004
+# Below this, timings are too small for a growth ratio to mean anything: one scheduler
+# preemption on a shared runner (a few milliseconds) made linear patterns that finish in
+# microseconds read x13. A quadratic pattern takes seconds on LARGE characters.
+GROWTH_FLOOR_SECONDS = 0.02
 ABSOLUTE_LIMIT_SECONDS = 0.75
 # Patterns applied only with .match() at positions chosen by the caller; scanning them
 # from every start position is not how PDT uses them.
@@ -274,13 +277,22 @@ def _witness_units(pattern: re.Pattern[str]) -> list[tuple[str, str, str]]:
 
 
 def _scan(origin: str, pattern: re.Pattern[str], text: str) -> float:
-    started = time.perf_counter()
-    if origin in MATCH_ONLY or origin.endswith("(inline match)"):
-        pattern.match(text)
-    else:
-        for _ in pattern.finditer(text):
-            pass
-    return time.perf_counter() - started
+    # The collector is off while timing. Thousands of match objects trigger full collections
+    # of the whole imported package's heap in the larger runs only, which made linear patterns
+    # such as [^\n] look ten times slower on macOS runners, run after run.
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        started = time.perf_counter()
+        if origin in MATCH_ONLY or origin.endswith("(inline match)"):
+            pattern.match(text)
+        else:
+            for _ in pattern.finditer(text):
+                pass
+        return time.perf_counter() - started
+    finally:
+        if enabled:
+            gc.enable()
 
 
 def _slow(origin: str, pattern: re.Pattern[str], lead: str, unit: str, suffix: str) -> str | None:
