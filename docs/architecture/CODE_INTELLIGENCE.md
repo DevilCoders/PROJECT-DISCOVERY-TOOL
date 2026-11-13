@@ -34,6 +34,20 @@ anything of unknown class other than `None`, gets no type. Only classes of the m
 capitalized imported names count as classes. On 671 scikit-learn modules this resolves 79.8%
 of call sites instead of 70.7%.
 
+**Classes the code does not state.** A function or method without a return annotation returns
+a class when every `return` with a value gives that class: a constructor, a typed local, a call
+of another such function (computed in rounds until nothing changes), `cls(...)` in a class
+method, or `return self`, which returns the receiver's own class, so `Builder().where(x).build()`
+resolves on a subclass too. Recursive returns add nothing and `None` returns are ignored;
+generators, and functions returning two classes, get no type. What one file cannot know is
+completed by the code index from the defining module: the value an imported function or method
+returns (`make_store().run()`, `Store.open().run()`, chains of them), and a method a class
+inherits from a base class in any scanned module (`self.save()` defined in `Base`). The call
+graph and the cross-module taint join both use the completed targets. On pip 26.3 (441
+modules, 21,700 call sites) 34.0% of Python call sites resolve instead of 32.7%, and on
+pytest 9.2 with rich 15 (179 modules) 35.0% instead of 33.7%; a full scan of pip took the same
+time with and without the inference.
+
 The lexer is an approximation: it does not expand macros, resolve overloads or understand
 templates and generics. Hostile inputs (unterminated strings and comments, deep nesting) are
 covered by tests that bound the time per file.
@@ -79,7 +93,7 @@ pdt query OUTPUT --references parse_config
 ```
 
 `OUTPUT` is the scan's output directory (the index is `OUTPUT/.pdt-cache/inventory.sqlite3`).
-Names may be bare (`run`), qualified (`Engine.run`) or module-qualified as the call graph prints them (`pkg.engine.Engine.run`, matched against the defining file's path). Callers include calls resolved inside their own file (`self.run()`, `this.run()`). Each call row carries a `resolution`: `resolved`, `same file`, `receiver not resolved` (a call through an object whose type the index does not know) or `by name`. On a scan without a code index (an `--inventory-only` scan) `pdt query` warns and exits 3, since an empty answer would be unknown, not absent; on a truncated index it warns that results can be incomplete.
+Names may be bare (`run`), qualified (`Engine.run`) or module-qualified as the call graph prints them (`pkg.engine.Engine.run`, matched against the defining file's path). Callers include calls resolved inside their own file (`self.run()`, `this.run()`). Each call row carries a `resolution`: `resolved`, `same file`, `receiver not resolved` (a call through an object whose type the index does not know), `through a returned value` (a call on what another function returns, stored as written, for example `.store.make_store().run`; the call graph completes it) or `by name`. Callers are matched as the call is written, so a call on a returned value or of an inherited method is listed under the bare method name. On a scan without a code index (an `--inventory-only` scan) `pdt query` warns and exits 3, since an empty answer would be unknown, not absent; on a truncated index it warns that results can be incomplete.
 
 ## 3. Quality analyzers
 

@@ -66,6 +66,14 @@ class CodeIndexAnalyzer(Analyzer):
             target = call.target if python else _lexical_target(call.caller, call.callee, call.receiver)
             code_facts.emit_call(call.caller, call.callee, target, call.line)
         code_facts.emit_references(model.references)
+        types = getattr(model, "types", None) if python else None
+        if types is not None:
+            # Joined across modules by the code index: the class a function returns, and
+            # the bases of each class (inherited methods, imported factories).
+            for name, reference in sorted(types.returns.items()):
+                code_facts.emit_fact("py_return", name, type=reference)
+            for name, bases in sorted(types.class_bases().items()):
+                code_facts.emit_fact("py_class_bases", name, bases=bases)
         for item in model.imports:
             code_facts.emit_fact(
                 "import", item.target, line=item.line, level=item.level,

@@ -541,3 +541,33 @@ def test_positional_unsafe_yaml_loaders_are_sinks_and_flows_carry_impact(tmp_pat
     path.write_text(textwrap.dedent(source), encoding="utf-8")
     finding = DataFlowAnalyzer().analyze(path, FileRecord("views.py", path.stat().st_size, ".py", "Python"))[0]
     assert finding.impact  # Markdown and HTML show the attacker-impact section
+
+
+def test_python_flows_follow_objects_an_imported_factory_returns(tmp_path: Path):
+    # Regression: get_store().run(...) had no class, so the flow into Store.run's sink was
+    # not joined across modules.
+    project = tmp_path / "project"
+    (project / "shop").mkdir(parents=True)
+    (project / "shop" / "__init__.py").write_text("", encoding="utf-8")
+    (project / "shop" / "store.py").write_text(
+        "import sqlite3\n"
+        "class Store:\n"
+        "    def run(self, sql):\n"
+        "        return sqlite3.connect('x').execute(sql).fetchall()\n"
+        "def get_store():\n"
+        "    return Store()\n",
+        encoding="utf-8",
+    )
+    (project / "shop" / "views.py").write_text(
+        "from flask import request\nfrom .store import get_store\n"
+        "def search():\n"
+        "    return get_store().run(\"SELECT * FROM p WHERE name = '\" + request.args['q'] + \"'\")\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    cross = next(item for item in report["findings"] if item["title"] == "SQL injection across modules")
+    assert cross["evidence"] == [
+        "shop/views.py:4 `request.args` (line 4) -> shop.store.Store.run() -> `(...).execute` at shop/store.py:4",
+    ]

@@ -455,8 +455,8 @@ The release gates in §5 are unchanged. The large-corpus benchmarks now also mea
 
 ### Limits
 
-- Values whose class is only known at run time (factories without return annotations, dependency injection, `getattr`) are not typed.
-- Imported names count as classes only when capitalized, and an imported class's methods are resolved by name in its module, without its base classes.
+- Values whose class is only known at run time (factories without return annotations, dependency injection, `getattr`) are not typed. *Since 2026-11-13 (§14), unannotated factories are inferred and completed across modules.*
+- Imported names count as classes only when capitalized, and an imported class's methods are resolved by name in its module, without its base classes. *Since §14, the code index also looks up inherited methods in base classes.*
 
 ## 12. Re-audit of 2026-11-12
 
@@ -508,3 +508,28 @@ The four areas the first pass did not reach (the security analyzers, the two gro
 - Results stay structural: no types, overloads or macro expansion, and every result is `INFERRED`.
 - Grammars are versioned with `tree-sitter-language-pack`, and bundled tags queries change between releases. A pattern that a grammar version does not support is dropped, not fatal; the affected definitions then come from the lexer's rules only where the tree has no structure.
 - The refinement costs roughly as much as building the lexical model (about +65% model time on the npm corpus).
+
+## 14. Python classes the code does not state
+
+**Date:** 2026-11-13 · **Scope:** the next step named in the ROADMAP and in §11's limits: values whose class the code does not state, such as factories without return annotations and methods inherited from a base class.
+
+### What changed
+
+- `python_types.TypeTable` infers the return class of unannotated functions and methods: every value-return must give one class (a constructor, a typed local or attribute, another inferred function, `cls(...)`); `return self` is the receiver's own class. Rounds repeat only for functions that depend on a newly found type (through a call in their body, a `self` attribute assigned from such a call, or a module-level name), and cached scopes are dropped only where they used the old types.
+- What one file cannot know is deferred: the value an imported function or method returns is `<callable>()`, and a call on it targets `.store.make_store().run`. Each Python file records its return types (`py_return`) and base classes (`py_class_bases`) as code facts.
+- The code index completes those targets across modules, through temporary tables so memory stays bounded by distinct targets: a deferred value is resolved through the defining module's return type (chains up to eight calls deep), and a method a class does not define is looked up in its base classes, left to right and depth first. The call graph and the cross-module taint join use the completed targets; `pdt query` labels such calls `through a returned value`.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Unit tests | Factories, factories of factories, `None` and recursive returns, `cls(...)`, `return self` on a subclass, async functions, and deferred targets for imported factories; two classes and generators stay untyped (`tests/intelligence/test_code_model.py`). Calls through an imported factory, through `return self` and of an inherited method join in the call graph (`tests/intelligence/test_code_index.py`), and a taint flow through `get_store().run(...)` is joined across modules (`tests/analyzers/security/test_dataflow.py`). |
+| Effect | pip 26.3 (441 modules, 21,700 Python call sites): 34.0% resolved instead of 32.7% (+280). pytest 9.2 with rich 15 (179 modules): 35.0% instead of 33.7% (+167). |
+| Cost | Model building plus Python taint over 1,962 site-packages modules: 9.0 s instead of 8.2 s. A full single-threaded scan of pip took 26.3 s with the inference and 26.5 s without: within noise, because the model is a small part of each file's analysis. |
+
+### Limits
+
+- The inference is still flow-insensitive and conservative: a name or function with two classes gets none, and values known only at run time (dependency injection, `getattr`, factories returning parameters) stay untyped.
+- Base classes are searched depth first, left to right, which matches Python's method resolution order for single inheritance and simple mixins but not for every diamond.
+- The local taint engine does not yet use inherited methods; across modules, flows through imported factories are joined.
+- `pdt query --callers Qualified.name` matches calls as written; inherited and returned-value calls are listed under the bare method name.

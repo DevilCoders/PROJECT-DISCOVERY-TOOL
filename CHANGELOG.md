@@ -18,6 +18,10 @@ methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architec
   index, call graph with recursion cycles, unreferenced private functions, test-to-code links
   and a polyglot module graph (JavaScript/TypeScript, C/C++, JVM, Go, Rust, PHP, Dart).
 - `pdt query OUTPUT --symbol|--callers|--callees|--references NAME [--json]`.
+- Python classes the code does not state: return types of unannotated functions and methods
+  (factories, `cls(...)`, `return self` chains), and, completed by the code index across
+  modules, inherited methods and the values imported factories return. The call graph and the
+  cross-module taint join use them.
 
 - A Tree-sitter-backed code model: where a grammar is provisioned, the syntax tree supplies the
   symbols and calls of C, C++, CUDA, Arduino, Java, C#, Kotlin, Scala, Swift, JavaScript,

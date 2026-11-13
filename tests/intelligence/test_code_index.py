@@ -259,3 +259,30 @@ def test_calls_on_a_call_result_are_not_recursion(tmp_path: Path):
     assert "Wrapper.depth" in evidence
     for name in ("Wrapper.size", "Wrapper.exec", "Wrapper.build", "Facade.stop", "Service.Send", "Box.count", "Pool.len"):
         assert name not in evidence, name
+
+
+def test_calls_on_returned_values_and_inherited_methods_resolve_across_modules(tmp_path: Path):
+    # The defining file is what knows the class a factory returns and the methods a class
+    # inherits: make_store().run() and self.save() (defined in a base class of another
+    # module) were unresolved.
+    report, _ = _scan(tmp_path, {
+        "pkg/__init__.py": "",
+        "pkg/base.py": "class Base:\n    def save(self):\n        return 1\n",
+        "pkg/store.py": (
+            "from .base import Base\n"
+            "class Store(Base):\n"
+            "    def run(self):\n        return self.save()\n"
+            "    def configure(self):\n        return self\n"
+            "def make_store():\n    return Store()\n"
+        ),
+        "pkg/app.py": (
+            "from .store import make_store\n"
+            "def main():\n"
+            "    make_store().run()\n"
+            "    return make_store().configure().save()\n"
+        ),
+    })
+    fan_in = {item["target"]: item["calls"] for item in report["metrics"]["code_index"]["call_graph"]["top_fan_in"]}
+    assert fan_in["pkg.store.Store.run"] == 1
+    assert fan_in["pkg.base.Base.save"] == 2  # self.save() in Store.run, and through configure()
+    assert fan_in["pkg.store.make_store"] == 2

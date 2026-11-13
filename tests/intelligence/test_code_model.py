@@ -324,3 +324,83 @@ def test_definitions_that_were_missed_or_invented():
     assert ("method", "Service.IsValid") in _symbols(csharp)
     assert ("Service.IsValid", "Check") in _callers(csharp)
     assert ("<module>", "IsValid") not in _callers(csharp)
+
+
+def test_python_return_types_the_code_does_not_state():
+    # Factories without return annotations, return self, cls(...), recursion and None
+    # returns give the class; two classes or a generator give none. What the file cannot
+    # know (an inherited method, an imported factory) is deferred to the code index.
+    import re
+    import textwrap
+
+    source = textwrap.dedent('''
+        from .store import make_store, Store
+        import factory
+
+        class Repo:
+            def find(self, name): ...
+            def where(self, clause):
+                return self
+            @classmethod
+            def create(cls):
+                return cls()
+
+        class Child(Repo):
+            pass
+
+        def make():
+            return Repo()
+
+        def make_twice():
+            return make()
+
+        def maybe(flag):
+            if flag:
+                return Repo()
+            return None
+
+        def mixed(flag):
+            if flag:
+                return Repo()
+            return Store()
+
+        def countdown(n):
+            if n:
+                return countdown(n - 1)
+            return Repo()
+
+        def items():
+            yield Repo()
+
+        async def fetch():
+            return Repo()
+
+        async def main():
+            make().find(1)
+            make_twice().find(2)
+            maybe(True).find(3)
+            mixed(True).find(4)
+            countdown(3).find(5)
+            Repo.create().find(6)
+            Child().where("x").find(7)
+            make_store().run(8)
+            factory.build().run(9)
+            store = make_store()
+            store.run(10)
+            items().find(11)
+            (await fetch()).find(12)
+    ''')
+    model = build_python_model("pkg/app.py", source)
+    lines = source.splitlines()
+    marker = {
+        index + 1: int(found.group(1)) for index, line in enumerate(lines)
+        if (found := re.search(r"\.(?:find|run)\((\d+)\)", line))
+    }
+    targets = {marker[call.line]: call.target for call in model.calls if call.line in marker and call.callee in {"find", "run"}}
+    assert targets == {
+        1: "@Repo.find", 2: "@Repo.find", 3: "@Repo.find", 4: "", 5: "@Repo.find", 6: "@Repo.find",
+        7: "@Child.where().find", 8: ".store.make_store().run", 9: "factory.build().run",
+        10: ".store.make_store().run", 11: "", 12: "@Repo.find",
+    }
+    assert model.types.returns["Repo.where"] == "<self>"
+    assert model.types.class_bases() == {"Child": ["@Repo"]}

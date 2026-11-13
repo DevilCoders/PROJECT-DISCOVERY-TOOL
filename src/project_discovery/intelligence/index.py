@@ -137,6 +137,32 @@ class _Context:
             if len(owners) == 1 and alias not in modules
         }
         self.file_count = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        self._ambiguous: dict[str, list[str]] | None = None
+        self._python_types: _PythonTypes | None = None
+
+    @property
+    def ambiguous(self) -> dict[str, list[str]]:
+        if self._ambiguous is None:
+            self._ambiguous = _ambiguous_modules(self.db)
+        return self._ambiguous
+
+    def python_key(self, qualified: str, module: str, path: str) -> str:
+        """A definition's key, as ``py_defs`` names it (``path:qualified`` in a shared module)."""
+        return f"{path}:{qualified}" if module in self.ambiguous else f"{module}.{qualified}"
+
+    def python_fq(self, target: str, module: str, package: bool, path: str) -> str | None:
+        """A Python call target or type reference as a definition name, or None."""
+        resolved = _python_target(target, module, package)
+        if resolved:
+            resolved = _disambiguated(_namespace_resolved(resolved, self.namespace_aliases), path, self.ambiguous)
+        return resolved
+
+    @property
+    def python_types(self) -> _PythonTypes:
+        """Return and base classes across modules (needs ``py_defs`` from the call graph)."""
+        if self._python_types is None:
+            self._python_types = _PythonTypes(self)
+        return self._python_types
 
 
 def analyze_code_index(inventory_path: Path, records: Iterable[FileRecord]) -> tuple[dict, list[Finding]]:
@@ -228,6 +254,109 @@ def _python_target(target: str, module: str, package: bool) -> str | None:
         except (ImportError, ValueError):
             return None
     return target
+
+
+class _PythonTypes:
+    """Return classes and base classes of Python definitions, joined across modules.
+
+    The code model types what one file states. This completes call targets across files:
+    a method a class inherits (``app.B.save`` defined in base ``lib.A``), and a call on the
+    value an imported function or method returns (``pkg.store.make_store().run``).
+    Lookups go through temporary tables, so memory stays bounded by distinct targets.
+    """
+
+    _DEPTH = 8
+
+    def __init__(self, context: "_Context") -> None:
+        self.db = context.db
+        self._memo: dict[str, str | None] = {}
+        db = context.db
+        db.execute("CREATE TEMP TABLE IF NOT EXISTS py_returns (fq TEXT PRIMARY KEY, type TEXT) WITHOUT ROWID")
+        db.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS py_bases (cls TEXT, position INTEGER, base TEXT, PRIMARY KEY (cls, position))"
+            " WITHOUT ROWID"
+        )
+        returns, bases = [], []
+        for kind, name, detail, path, module, package in db.execute(
+            """SELECT c.kind, c.name, c.detail, c.path, f.module, f.package FROM code_facts c
+               JOIN files f ON f.path = c.path
+               WHERE c.kind IN ('py_return', 'py_class_bases') AND f.language = 'Python' AND f.module IS NOT NULL"""
+        ):
+            try:
+                data = json.loads(detail)
+            except (ValueError, TypeError):
+                continue
+            key = context.python_key(name, module, path)
+            if kind == "py_return":
+                reference = data.get("type")
+                value = reference if reference == "<self>" else (
+                    context.python_fq(reference, module, bool(package), path) if isinstance(reference, str) else None
+                )
+                if value:
+                    returns.append((key, value))
+            else:
+                for position, reference in enumerate(data.get("bases") or ()):
+                    value = context.python_fq(reference, module, bool(package), path) if isinstance(reference, str) else None
+                    if value:
+                        bases.append((key, position, value))
+        db.executemany("INSERT OR IGNORE INTO py_returns VALUES (?, ?)", returns)
+        db.executemany("INSERT OR IGNORE INTO py_bases VALUES (?, ?, ?)", bases)
+        self.empty = not returns and not bases
+
+    def _kind(self, fq: str) -> str | None:
+        row = self.db.execute("SELECT kind FROM py_defs WHERE fq = ?", (fq,)).fetchone()
+        return row[0] if row else None
+
+    def definition(self, fq: str, depth: int = 0) -> str | None:
+        """The definition ``fq`` names: itself, or the method a base class defines."""
+        if self._kind(fq) is not None:
+            return fq
+        owner, _, method = fq.rpartition(".")
+        if not owner or depth > self._DEPTH:
+            return None
+        for (base,) in self.db.execute("SELECT base FROM py_bases WHERE cls = ? ORDER BY position", (owner,)).fetchall():
+            found = self.definition(f"{base}.{method}", depth + 1)
+            if found is not None:
+                return found
+        return None
+
+    def value(self, expression: str, depth: int = 0) -> str | None:
+        """The class of a deferred value ``callable()``."""
+        if depth > self._DEPTH or not expression.endswith("()"):
+            return None
+        callable_ = expression[:-2]
+        if "()." in callable_:  # a method called on an earlier returned value
+            inner, _, method = callable_.rpartition("().")
+            receiver = self.value(inner + "()", depth + 1)
+            if receiver is None:
+                return None
+            callable_ = f"{receiver}.{method}"
+        defined = self.definition(callable_)
+        if defined is None:
+            return None
+        if self._kind(defined) == "class":
+            return defined  # calling a class constructs it
+        row = self.db.execute("SELECT type FROM py_returns WHERE fq = ?", (defined,)).fetchone()
+        if row is None:
+            return None
+        if row[0] == "<self>":
+            return callable_.rpartition(".")[0] or None  # the receiver's class, not the base's
+        return self.value(row[0], depth + 1) if row[0].endswith("()") else row[0]
+
+    def complete(self, target: str) -> str:
+        """``target`` completed through returned values and base classes, when the index can."""
+        if self.empty or target in self._memo:
+            return self._memo.get(target, target) or target
+        completed = target
+        if "()." in target:
+            inner, _, method = target.rpartition("().")
+            receiver = self.value(inner + "()")
+            completed = f"{receiver}.{method}" if receiver else target
+        if "()" not in completed:
+            completed = self.definition(completed) or completed
+        if len(self._memo) < 200_000:
+            self._memo[target] = completed
+        return completed
 
 
 def _ambiguous_modules(db: sqlite3.Connection) -> dict[str, list[str]]:
@@ -322,6 +451,18 @@ def _call_graph(context: _Context) -> tuple[dict, list[Finding]]:
                 batch.clear()
     db.executemany("INSERT INTO py_calls VALUES (?, ?, ?, ?)", batch)
     db.execute("CREATE INDEX temp.py_calls_target ON py_calls(target)")
+    # Calls the defining file could not finish: on a value another module's function
+    # returns, or of a method a class inherits.
+    types = context.python_types
+    if not types.empty:
+        pending = [
+            target for (target,) in db.execute(
+                """SELECT DISTINCT c.target FROM py_calls c
+                   WHERE NOT EXISTS (SELECT 1 FROM py_defs d WHERE d.fq = c.target)"""
+            ).fetchall()
+        ]
+        updates = [(completed, target) for target in pending if (completed := types.complete(target)) != target]
+        db.executemany("UPDATE py_calls SET target = ? WHERE target = ?", updates)
 
     total = db.execute("SELECT COUNT(*) FROM code_calls").fetchone()[0]
     python_total = db.execute(
@@ -983,9 +1124,13 @@ def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
             """SELECT f.name, f.detail, f.path, files.module, files.package FROM code_facts f
                JOIN files ON files.path = f.path WHERE f.kind = 'tainted_call' AND files.module IS NOT NULL"""
         ):
-            resolved = _python_target(target, module, bool(package))
-            if resolved:
-                resolved = _disambiguated(_namespace_resolved(resolved, context.namespace_aliases), path, ambiguous)
+            resolved = context.python_fq(target, module, bool(package), path)
+            if resolved and resolved not in summaries:
+                # A call on a returned value or an inherited method, completed across modules.
+                try:
+                    resolved = context.python_types.complete(resolved)
+                except sqlite3.OperationalError:  # the call-graph pass failed: no py_defs
+                    pass
             entries = summaries.get(resolved or "")
             if not entries:
                 continue
@@ -1488,6 +1633,10 @@ def _shown(row: dict) -> dict:
         return {**row, "target": target[1:], "resolution": "same file"}
     if target.startswith("~"):
         return {**row, "target": target[1:], "resolution": "receiver not resolved"}
+    if "()" in target:
+        # ``.store.make_store().run``: a call on a value another function returns; the call
+        # graph completes it across modules.
+        return {**row, "resolution": "through a returned value"}
     return {**row, "resolution": "resolved" if target else "by name"}
 
 
