@@ -1,8 +1,9 @@
-"""Loopback emulation of the GitHub, GitLab, Bitbucket Cloud and Gitea/Forgejo REST APIs.
+"""Loopback emulation of the GitHub, GitLab, Bitbucket Cloud and Data Center, and Gitea/Forgejo REST APIs.
 
-One fixture repository is served under four path prefixes (/github, /gitlab/api/v4,
-/bitbucket/2.0, /gitea/api/v1) so no-download scans exercise each provider client's real
-requests, pagination, authentication and error handling without external network access.
+One fixture repository is served under five path prefixes (/github, /gitlab/api/v4,
+/bitbucket/2.0, /bitbucket-server/rest/api/1.0, /gitea/api/v1) so no-download scans exercise
+each provider client's real requests, pagination, authentication and error handling without
+external network access.
 """
 from __future__ import annotations
 
@@ -143,7 +144,8 @@ class _Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(parsed.path)
         query = urllib.parse.parse_qs(parsed.query)
         for prefix, handler in (("/github", self._github), ("/gitlab/api/v4", self._gitlab),
-                                ("/bitbucket/2.0", self._bitbucket), ("/gitea/api/v1", self._gitea)):
+                                ("/bitbucket/2.0", self._bitbucket), ("/gitea/api/v1", self._gitea),
+                                ("/bitbucket-server/rest/api/1.0", self._bitbucket_server)):
             if path.startswith(prefix + "/"):
                 provider = prefix.strip("/").split("/")[0]
                 if not self._authorized(provider):
@@ -242,6 +244,39 @@ class _Handler(BaseHTTPRequestHandler):
             self._content(entry[0]) if entry else self._send(404, {"type": "error"})
         else:
             self._send(404, {"type": "error"})
+
+    # Bitbucket Data Center/Server ------------------------------------------
+    def _bitbucket_server(self, path, parsed, query):
+        service = self.service
+        repo = "/projects/PROJ/repos/fixture"
+        at = query.get("at", [""])[0]
+        if path == repo:
+            self._send(200, {"slug": "fixture", "name": "fixture", "public": not service.private,
+                             "project": {"key": "PROJ"}})
+        elif path == f"{repo}/default-branch":
+            branch = service.default_branches.get("bitbucket-server", "main")
+            self._send(200, {"id": f"refs/heads/{branch}", "displayId": branch, "type": "BRANCH"})
+        elif path == f"{repo}/commits":
+            if query.get("until", [""])[0] in {"main", "refs/heads/main", COMMIT}:
+                self._send(200, {"values": [{"id": COMMIT, "displayId": COMMIT[:11]}], "size": 1, "limit": 1,
+                                 "start": 0, "isLastPage": False, "nextPageStart": 1})
+            else:
+                self._send(404, {"errors": [{"message": "Commit not found"}]})
+        elif path == f"{repo}/files" and at == COMMIT:
+            # Every blob path, paged; the listing has no sizes, modes or submodules.
+            paths = sorted(service.files)
+            start, size = int(query.get("start", ["0"])[0]), service.page_size
+            values = paths[start:start + size]
+            body = {"values": values, "size": len(values), "start": start, "limit": size,
+                    "isLastPage": start + size >= len(paths)}
+            if not body["isLastPage"]:
+                body["nextPageStart"] = start + size
+            self._send(200, body)
+        elif path.startswith(f"{repo}/raw/") and at == COMMIT:
+            entry = service.files.get(path[len(f"{repo}/raw/"):])
+            self._content(entry[0]) if entry else self._send(404, {"errors": [{"message": "Not found"}]})
+        else:
+            self._send(404, {"errors": [{"message": "Not found"}]})
 
     # Gitea ----------------------------------------------------------------
     def _gitea(self, path, parsed, query):

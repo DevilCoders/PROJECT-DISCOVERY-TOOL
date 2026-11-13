@@ -214,7 +214,7 @@ Remote acquisition is read-only and non-interactive: PDT does not push, commit o
 
 #### Analyze without downloading (`--no-download`)
 
-Online mode has a second path that never clones or writes the repository to disk. `--no-download` reads one commit through the provider's REST API (GitHub and GitHub Enterprise Server, GitLab.com and self-managed GitLab, Bitbucket Cloud, Gitea/Forgejo/Codeberg), turns the tree listing into PDT's inventory and streams each file's content into the built-in analyzers in memory:
+Online mode has a second path that never clones or writes the repository to disk. `--no-download` reads one commit through the provider's REST API (GitHub and GitHub Enterprise Server, GitLab.com and self-managed GitLab, Bitbucket Cloud and Data Center/Server, Gitea/Forgejo/Codeberg), turns the tree listing into PDT's inventory and streams each file's content into the built-in analyzers in memory:
 
 ```bash
 pdt scan https://github.com/owner/repository --no-download
@@ -222,7 +222,7 @@ pdt scan https://gitlab.example.com/group/project --no-download --api-url https:
 pdt scan --url repositories.txt --no-download --vuln-online --output ./api-reports
 ```
 
-Tokens come only from host-bound variables (`PDT_API_TOKEN_<HOST>`, or `GITHUB_TOKEN`/`GITLAB_TOKEN`/`BITBUCKET_TOKEN`/`CODEBERG_TOKEN` for the public hosts) or, with `--use-credential-helper`, from your Git credential helper; they are never logged or written to reports. Work is bounded per repository by `--api-max-files`, `--api-max-mb`, `--api-max-file-mb`, `--api-max-requests` and `--api-workers`; a file left unfetched by a budget, a failed request or an exhausted rate limit stays in the inventory and is reported as an `UNKNOWN` coverage gap (so `--strict` reports the scan as incomplete). Third-party plugins are not run in this mode because their sandbox needs a file copy on disk. Details: [Online Mode guide](docs/guides/ONLINE_MODE.md#analyze-without-downloading---no-download).
+Tokens come only from host-bound variables (`PDT_API_TOKEN_<HOST>`, or `GITHUB_TOKEN`/`GITLAB_TOKEN`/`BITBUCKET_TOKEN`/`CODEBERG_TOKEN` for the public hosts) or, with `--use-credential-helper`, from your Git credential helper; they are never logged or written to reports. Work is bounded per repository by `--api-max-files`, `--api-max-mb`, `--api-max-file-mb`, `--api-max-requests` and `--api-workers`; a file left unfetched by a budget, a failed request or an exhausted rate limit stays in the inventory and is reported as an `UNKNOWN` coverage gap (so `--strict` reports the scan as incomplete). Third-party plugins run in this mode only with `--no-download-plugins`, which copies each file a sandboxed plugin analyzes into the plugin host's private folder under the output for that call and deletes it afterwards. Details: [Online Mode guide](docs/guides/ONLINE_MODE.md#analyze-without-downloading---no-download).
 
 The output directory must remain outside the analyzed project. PDT never changes target files.
 

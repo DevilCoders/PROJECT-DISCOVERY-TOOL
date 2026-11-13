@@ -72,12 +72,17 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   materializing. Batches write `batch-summary.json` and `.md` and exit with the worst outcome.
   The native-VCS adapters have not yet been verified against live servers.
 - **Analyze without downloading.** `--no-download` reads GitHub (including Enterprise), GitLab
-  (including self-managed), Bitbucket Cloud and Gitea/Forgejo repositories through their REST
+  (including self-managed), Bitbucket Cloud and Data Center/Server (REST API 1.0, `--api-provider
+  bitbucket-server`) and Gitea/Forgejo repositories through their REST
   APIs and analyzes the files in memory; nothing is written to disk. `--api-provider`,
   `--api-url` and the `--api-max-files`, `--api-max-mb`, `--api-max-file-mb`, `--api-max-requests`
   and `--api-workers` budgets apply. Unfetched files stay inventoried as `UNKNOWN` coverage gaps.
   Tokens are bound to their host (`PDT_API_TOKEN_<HOST>`, or `--use-credential-helper`). Third-party
-  plugins do not run in this mode, because their sandbox needs a file on disk.
+  plugins run only with `--no-download-plugins`: each file a sandboxed plugin analyzes is copied
+  into the plugin host's private folder under the output for that call and deleted after it, and
+  reports record the transient copies (`written_to_disk: true`, `disk_writes`). Bitbucket Data
+  Center clone URLs keep their `/scm/PROJ/repo` path in both modes (it was cut to `/scm/PROJ`),
+  browse pages map to their clone path, and a context path is kept for the API.
 - **Online vulnerability intelligence.** `--vuln-online` looks up every lockfile-resolved package
   in OSV.dev, next to or instead of `--vuln-db`, with optional NVD and GitHub Advisory enrichment
   (`--vuln-enrich nvd,ghsa`). Only ecosystem, package name and version are sent. Responses are

@@ -118,7 +118,7 @@ def resolve_credential(provider: str, host: str, *, use_helper: bool = False) ->
         filled = git_credential_fill(host)
         if filled is not None:
             username, password = filled
-            if provider in {"bitbucket", "gitea"} and username:
+            if provider in {"bitbucket", "bitbucket-server", "gitea"} and username:
                 return _basic_credential(username, password, "git-credential-helper")
             return _token_credential(provider, password, "git-credential-helper")
     return None

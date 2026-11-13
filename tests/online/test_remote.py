@@ -31,6 +31,26 @@ from project_discovery.online.repositories import RemoteScanError
             "https://bitbucket.org/workspace/project",
             "git",
         ),
+        # Bitbucket Data Center/Server: the clone path keeps /scm/PROJ/repo (it was cut to
+        # /scm/PROJ), also below a context path, and browse pages map to their clone path.
+        (
+            "https://bitbucket.example.com/scm/PROJ/service.git",
+            "Bitbucket Data Center",
+            "https://bitbucket.example.com/scm/PROJ/service.git",
+            "git",
+        ),
+        (
+            "https://bitbucket.example.com/projects/PROJ/repos/service/browse/src/main.py",
+            "Bitbucket Data Center",
+            "https://bitbucket.example.com/scm/PROJ/service.git",
+            "git",
+        ),
+        (
+            "https://bitbucket.example.com/tools/users/alice/repos/notes/browse",
+            "Bitbucket Data Center",
+            "https://bitbucket.example.com/tools/scm/~alice/notes.git",
+            "git",
+        ),
         (
             "https://dev.azure.com/acme/platform/_git/agent?path=/src",
             "Azure Repos",

@@ -23,7 +23,7 @@ from .credentials import ApiCredential
 from .http import HttpClient, NetworkError, RateLimiter, validate_service_url
 from .repositories import RemoteScanError
 
-API_PROVIDERS = ("auto", "github", "gitlab", "bitbucket", "gitea")
+API_PROVIDERS = ("auto", "github", "gitlab", "bitbucket", "bitbucket-server", "gitea")
 PUBLIC_API_URLS = {
     ("github", "github.com"): "https://api.github.com",
     ("gitlab", "gitlab.com"): "https://gitlab.com/api/v4",
@@ -32,7 +32,7 @@ PUBLIC_API_URLS = {
 _PROVIDER_BY_NAME = {
     "GitHub": "github", "GitHub Enterprise": "github",
     "GitLab": "gitlab", "GitLab self-managed": "gitlab",
-    "Bitbucket": "bitbucket",
+    "Bitbucket": "bitbucket", "Bitbucket Data Center": "bitbucket-server",
     "Gitea": "gitea", "Forgejo": "gitea", "Gogs": "gitea",
 }
 _HOST_VARIABLE = re.compile(r"[^A-Z0-9]")
@@ -89,9 +89,27 @@ def api_provider_for(target_provider: str, explicit: str = "auto") -> str:
     provider = _PROVIDER_BY_NAME.get(target_provider)
     if provider is None:
         raise ProviderError(
-            f"No-download mode supports GitHub, GitLab, Bitbucket Cloud and Gitea/Forgejo; "
-            f"{target_provider} repositories need --api-provider, or the download mode."
+            f"No-download mode supports GitHub, GitLab, Bitbucket Cloud and Data Center/Server, and "
+            f"Gitea/Forgejo; {target_provider} repositories need --api-provider, or the download mode."
         )
+    return provider
+
+
+def server_api_url(host: str, repository: str) -> str:
+    """Bitbucket Data Center's REST API 1.0, below the context path the repository URL shows."""
+    parts = [part for part in repository.split("/") if part]
+    lowered = [part.lower() for part in parts]
+    context = parts[:lowered.index("scm")] if "scm" in lowered else []
+    for marker in ("projects", "users"):
+        if not context and marker in lowered:
+            context = parts[:lowered.index(marker)]
+    return f"https://{host}/" + "".join(f"{urllib.parse.quote(part, safe='')}/" for part in context) + "rest/api/1.0"
+
+
+def provider_for_host(provider: str, host: str, explicit: str = "auto") -> str:
+    """Bitbucket on any host but bitbucket.org is Data Center/Server, whose API differs."""
+    if explicit == "auto" and provider == "bitbucket" and host.lower() != "bitbucket.org":
+        return "bitbucket-server"
     return provider
 
 
@@ -106,10 +124,10 @@ def default_api_url(provider: str, host: str) -> str:
         return public
     if provider == "bitbucket":
         raise ProviderError(
-            "Bitbucket Data Center/Server uses a different API; only Bitbucket Cloud "
-            "(bitbucket.org) is supported in no-download mode."
+            "The Bitbucket Cloud API serves only bitbucket.org; use --api-provider bitbucket-server "
+            "for Bitbucket Data Center/Server."
         )
-    suffix = {"github": "/api/v3", "gitlab": "/api/v4", "gitea": "/api/v1"}[provider]
+    suffix = {"github": "/api/v3", "gitlab": "/api/v4", "gitea": "/api/v1", "bitbucket-server": "/rest/api/1.0"}[provider]
     return f"https://{host}{suffix}"
 
 
@@ -446,6 +464,100 @@ class BitbucketClient(ProviderClient):
         return data
 
 
+def server_repository(repository: str) -> tuple[str, str]:
+    """(project key, repository slug) from a Bitbucket Data Center/Server repository path.
+
+    Clone URLs (``scm/PROJ/repo``), browse URLs (``projects/PROJ/repos/repo/browse``) and
+    personal repositories (``scm/~user/repo``, ``users/user/repos/repo``) are accepted.
+    """
+    parts = [part for part in repository.split("/") if part]
+    lowered = [part.lower() for part in parts]
+    if "scm" in lowered and len(parts) >= lowered.index("scm") + 3:
+        index = lowered.index("scm")  # after a context path such as /bitbucket
+        return parts[index + 1], parts[index + 2]
+    for marker, prefix in (("projects", ""), ("users", "~")):
+        if marker in lowered:
+            index = lowered.index(marker)
+            if len(parts) > index + 3 and lowered[index + 2] == "repos":
+                return prefix + parts[index + 1], parts[index + 3]
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    raise ProviderError(f"Cannot derive a Bitbucket project and repository from {repository!r}.")
+
+
+class BitbucketServerClient(ProviderClient):
+    """Bitbucket Data Center/Server through REST API 1.0 (``/rest/api/1.0``).
+
+    The ``files`` resource lists every file path, paged, without sizes or modes, so sizes
+    are learned when content is fetched, symlinks are inventoried as files (their content
+    is the target) and submodules are not listed.
+    """
+
+    name = "Bitbucket Data Center"
+
+    def _repo(self) -> str:
+        key, slug = server_repository(self.repository)
+        return f"/projects/{urllib.parse.quote(key, safe='~')}/repos/{urllib.parse.quote(slug, safe='')}"
+
+    def resolve(self, ref):
+        info, _ = self._json(self._repo(), not_found_ok=True)
+        if not isinstance(info, dict):
+            raise self._not_found()
+        default_branch = None
+        for resource in ("/default-branch", "/branches/default"):
+            branch, _ = self._json(self._repo() + resource, not_found_ok=True)
+            if isinstance(branch, dict):
+                name = branch.get("displayId")
+                if name is not None and not isinstance(name, str):
+                    raise ProviderError(f"The provider returned a malformed default branch: {type(name).__name__}")
+                default_branch = name
+                break
+        target = ref or default_branch
+        if not target:
+            raise ProviderError("The Bitbucket repository is empty (no default branch).")
+        page, _ = self._json(
+            f"{self._repo()}/commits?until={urllib.parse.quote(target, safe='')}&limit=1", not_found_ok=True,
+        )
+        values = page.get("values") if isinstance(page, dict) else None
+        commit = values[0] if isinstance(values, list) and values and isinstance(values[0], dict) else {}
+        if not isinstance(commit.get("id"), str):
+            raise ProviderError(f"Bitbucket ref {target!r} was not found in {self.repository}.")
+        public = info.get("public")
+        return ResolvedRevision(
+            commit["id"], target if ref is None or ref == default_branch else None,
+            default_branch, (not public) if isinstance(public, bool) else None,
+        )
+
+    def tree(self, revision):
+        entries: list[TreeEntry] = []
+        self._listed = entries  # kept when the listing stops early (see listing())
+        start, pages = 0, 0
+        while True:
+            payload, _ = self._json(
+                f"{self._repo()}/files?at={urllib.parse.quote(revision.revision, safe='')}&limit=1000&start={start}"
+            )
+            values = payload.get("values") if isinstance(payload, dict) else None
+            if not isinstance(values, list):
+                raise NetworkError("Bitbucket returned a malformed file listing", kind="protocol")
+            for item in values:
+                path = safe_tree_path(item)
+                entries.append(TreeEntry(path, "file", None, path, False) if path else TreeEntry(str(item)[:200], "invalid"))
+            pages += 1
+            if len(entries) > MAX_TREE_ENTRIES or pages >= MAX_TREE_PAGES:
+                return entries, True
+            following = payload.get("nextPageStart")
+            if payload.get("isLastPage") is not False or not isinstance(following, int) or following <= start:
+                return entries, False
+            start = following
+
+    def read(self, entry, revision, max_bytes):
+        _, data, _ = self._request(
+            f"{self._repo()}/raw/{_quote_path(entry.path)}?at={urllib.parse.quote(revision.revision, safe='')}",
+            accept="*/*", max_bytes=max_bytes,
+        )
+        return data
+
+
 class GiteaClient(ProviderClient):
     name = "Gitea"
 
@@ -513,7 +625,10 @@ class GiteaClient(ProviderClient):
         return data
 
 
-CLIENTS = {"github": GitHubClient, "gitlab": GitLabClient, "bitbucket": BitbucketClient, "gitea": GiteaClient}
+CLIENTS = {
+    "github": GitHubClient, "gitlab": GitLabClient, "bitbucket": BitbucketClient,
+    "bitbucket-server": BitbucketServerClient, "gitea": GiteaClient,
+}
 
 
 def symlink_scope(link_path: str, target: str) -> str:

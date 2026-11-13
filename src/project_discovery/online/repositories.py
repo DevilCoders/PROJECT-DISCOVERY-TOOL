@@ -259,6 +259,20 @@ def _provider(host: str) -> str:
     return "Git-compatible host"
 
 
+def _server_repository_parts(parts: list[str]) -> list[str] | None:
+    """A Bitbucket Data Center/Server clone path (``[context..., "scm", key, repo]``), or None."""
+    lowered = [part.lower() for part in parts]
+    if "scm" in lowered:
+        index = lowered.index("scm")
+        return parts[:index + 3] if len(parts) >= index + 3 else None
+    for marker, prefix in (("projects", ""), ("users", "~")):
+        if marker in lowered:
+            index = lowered.index(marker)
+            if len(parts) >= index + 4 and lowered[index + 2] == "repos":
+                return [*parts[:index], "scm", prefix + parts[index + 1], parts[index + 3] + ".git"]
+    return None
+
+
 def _canonical_git_path(host: str, path: str, provider: str) -> str:
     path = "/" + path.lstrip("/")
     parts = [part for part in path.split("/") if part]
@@ -277,6 +291,11 @@ def _canonical_git_path(host: str, path: str, provider: str) -> str:
                 if item in markers:
                     parts = parts[:index]
                     break
+    elif provider == "Bitbucket Data Center" and _server_repository_parts(parts) is not None:
+        # /scm/PROJ/repo.git, also below a context path (/bitbucket/scm/...); a browse page
+        # (/projects/PROJ/repos/repo/browse) or a personal one (/users/name/repos/repo) is
+        # turned into its clone path. Cutting these to two segments left /scm/PROJ.
+        parts = _server_repository_parts(parts)
     elif provider in {"Bitbucket", "Bitbucket Data Center"} and len(parts) >= 2:
         markers = {"src", "commits", "branches", "pull-requests", "issues",
                    "downloads", "pipelines", "deployments", "admin", "wiki"}

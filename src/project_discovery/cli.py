@@ -664,12 +664,15 @@ def run_scan(
         analyzer_load = load_analyzers(plugin_policy=plugin_policy)
         analyzers = analyzer_load.analyzers
         if memory_source is not None:
-            # Sandboxed plugins receive a copy of each file on disk; no-download mode never
-            # writes repository content, so only the built-in analyzers run.
+            # Sandboxed plugins receive a copy of each file on disk. No-download mode writes no
+            # repository content unless --no-download-plugins allows that one transient copy, in
+            # the plugin host's private folder under the output, deleted after each call.
             plugin_names = {item["name"] for item in analyzer_load.plugins if item.get("status") == "loaded"}
-            if plugin_names:
+            if plugin_names and not memory_source.options.plugins:
                 analyzers = [item for item in analyzers if item.name not in plugin_names]
                 memory_source.excluded_plugins = sorted(plugin_names)
+            elif plugin_names:
+                memory_source.staged_plugins = sorted(plugin_names)
         try:
             if vulnerability_db is not None:
                 analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
@@ -1641,6 +1644,12 @@ def main() -> None:
         help="Use a local OSV advisory SQLite database; scanning performs no network access",
     )
     scan.add_argument(
+        "--no-download-plugins", action="store_true",
+        help="With --no-download, also run sandboxed third-party plugins: each file a plugin analyzes "
+             "is copied into the plugin host's private folder under OUTPUT/.pdt-cache/plugins for that "
+             "call and deleted after it, and reports record the transient copies",
+    )
+    scan.add_argument(
         "--vuln-online", action="store_true",
         help="Opt in to looking up lockfile packages in OSV.dev (sends only ecosystem, package "
              "name and version; never file contents). Failures are reported as UNKNOWN coverage",
@@ -1987,6 +1996,7 @@ def main() -> None:
                 ("--api-max-requests", args.api_max_requests is not None),
                 ("--api-workers", args.api_workers is not None),
                 ("--use-credential-helper", args.use_credential_helper),
+                ("--no-download-plugins", args.no_download_plugins),
             )
             if not args.no_download:
                 for option, value in api_options:
@@ -2019,7 +2029,11 @@ def main() -> None:
                         parser.error(f"{option} must be between 1 and {upper:,}")
                 if args.network_timeout is not None and not 0 < args.network_timeout <= 600:
                     parser.error("--network-timeout must be greater than 0 and at most 600 seconds")
+                if args.no_download_plugins and args.plugin_isolation == "off":
+                    # In-process plugins open the path themselves; only sandbox hosts get a staged copy.
+                    parser.error("--no-download-plugins needs --plugin-isolation sandbox or process")
                 no_download_options = NoDownloadOptions(
+                    plugins=args.no_download_plugins,
                     provider=args.api_provider,
                     api_url=args.api_url,
                     use_credential_helper=args.use_credential_helper,

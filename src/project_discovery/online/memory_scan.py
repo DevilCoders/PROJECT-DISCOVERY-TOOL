@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -47,6 +48,8 @@ from .providers import (
     ResolvedRevision,
     TreeEntry,
     api_provider_for,
+    provider_for_host,
+    server_api_url,
     default_api_url,
     split_repository,
     symlink_scope,
@@ -88,6 +91,9 @@ class NoDownloadOptions:
     timeout: float = DEFAULT_TIMEOUT
     ca_bundle: Path | None = None
     limits: ApiLimits = ApiLimits()
+    # --no-download-plugins: sandboxed plugins run on a transient copy of each file, staged
+    # in the plugin host's private folder under the output and deleted after the call.
+    plugins: bool = False
 
 
 def _virtual_root(identity: str) -> Path:
@@ -116,8 +122,14 @@ class NoDownloadSource:
         self.options = options
         self.limits = options.limits
         self.host, self.repository = split_repository(target.clone_url)
-        self.provider = api_provider_for(target.provider, options.provider)
-        self.api_url = options.api_url or default_api_url(self.provider, self.host)
+        self.provider = provider_for_host(
+            api_provider_for(target.provider, options.provider), self.host, options.provider,
+        )
+        self.api_url = options.api_url or (
+            server_api_url(self.host, self.repository) if self.provider == "bitbucket-server"
+            and not os.environ.get("PDT_API_URL_" + re.sub(r"[^A-Z0-9]", "_", self.host.upper()))
+            else default_api_url(self.provider, self.host)
+        )
         self.credential: ApiCredential | None = resolve_credential(
             self.provider, self.host, use_helper=options.use_credential_helper,
         )
@@ -149,6 +161,7 @@ class NoDownloadSource:
         self.acquired_at = datetime.now(timezone.utc).isoformat()
         self.metadata: dict[str, Any] = {}
         self.excluded_plugins: list[str] = []
+        self.staged_plugins: list[str] = []
 
     @staticmethod
     def size_bucket(size: int) -> str:
@@ -528,12 +541,24 @@ class NoDownloadSource:
             f"{self.counters['submodules']:,} Git submodule(s) were inventoried but not fetched.", False)
         add("plugins_not_run", len(self.excluded_plugins),
             f"{len(self.excluded_plugins):,} third-party plugin(s) were not run ({', '.join(self.excluded_plugins)}): "
-            "sandboxed plugins need a file copy on disk, which no-download mode never writes.", True)
+            "sandboxed plugins need a file copy on disk, which no-download mode writes only with "
+            "--no-download-plugins.", True)
+        if self.staged_plugins:
+            self.metadata["written_to_disk"] = True
+            self.metadata["disk_writes"] = "transient plugin staging under OUTPUT/.pdt-cache/plugins"
         self.metadata.update({
             "coverage": coverage,
             "coverage_gaps": [item["detail"] for item in coverage if item["incomplete"]],
             "warnings": [item["detail"] for item in coverage]
-            + ["The repository was read through the provider API in memory; nothing was written to disk."],
+            + ([
+                f"{len(self.staged_plugins):,} third-party plugin(s) ran ({', '.join(self.staged_plugins)}) "
+                "with --no-download-plugins: each file they analyzed was copied into the plugin host's private "
+                "folder under the output for that call and deleted after it."
+            ] if self.staged_plugins else [])
+            + ["The repository was read through the provider API in memory; " + (
+                "only the transient copies for third-party plugins were written to disk."
+                if self.staged_plugins else "nothing was written to disk."
+            )],
             "acquisition_seconds": round(time.monotonic() - self.started, 3),
             "tree_entries": self.counters["tree_entries"],
             "files_fetched": self.counters["files_fetched"],

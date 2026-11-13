@@ -524,3 +524,120 @@ def test_a_rate_limit_while_listing_keeps_the_listed_entries(tmp_path: Path, mon
     assert [item["path"] for item in report["files"]] == ["README.md"]
     kinds = {item["kind"]: item for item in report["metrics"]["source"]["remote"]["coverage"]}
     assert "stopped early" in kinds["tree_truncated"]["detail"]
+
+
+MARKER_PLUGIN = """
+from project_discovery.analyzers.base import Analyzer
+from project_discovery.models import Finding
+
+
+class MarkerAnalyzer(Analyzer):
+    name = "fixture-marker"
+
+    def supports(self, record):
+        return record.path.endswith(".txt")
+
+    def analyze(self, path, record):
+        with open(path, "rb") as stream:
+            content = stream.read()
+        return [Finding("plugin_fixture", "Marker seen", "found" if b"NO-DOWNLOAD-MARKER" in content else "absent")]
+"""
+
+
+def test_plugins_run_in_no_download_mode_only_when_asked(tmp_path: Path, monkeypatch):
+    # Regression: third-party plugins never ran in no-download mode, because their sandbox
+    # needs a file copy on disk. --no-download-plugins stages one copy per call in the plugin
+    # host's private folder under the output and deletes it after the call.
+    from importlib.metadata import EntryPoint
+
+    import project_discovery.analyzers as registry
+
+    directory = tmp_path / "plugins"
+    directory.mkdir()
+    (directory / "pdt_fixture_marker.py").write_text(MARKER_PLUGIN, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(directory))
+    point = EntryPoint(name="marker", value="pdt_fixture_marker:MarkerAnalyzer", group="pdt.analyzers")
+    monkeypatch.setattr(registry, "entry_points", lambda **_kwargs: [point])
+    url, prefix, _variable, _header = PROVIDERS["github"]
+    with RunningProviders(ProviderService()) as running:
+        plain = tmp_path / "plain"
+        assert _main(monkeypatch, "scan", url, "--no-download", "--api-url", running.url + prefix,
+                     "--output", str(plain), "--quiet", "--plugin-isolation", "process") == cli.EXIT_OK
+        staged = tmp_path / "staged"
+        assert _main(monkeypatch, "scan", url, "--no-download", "--api-url", running.url + prefix,
+                     "--output", str(staged), "--quiet", "--plugin-isolation", "process",
+                     "--no-download-plugins") == cli.EXIT_OK
+    without = _report(plain)
+    assert not [item for item in without["findings"] if item["category"] == "plugin_fixture"]
+    gap = next(item for item in without["findings"] if item["title"].endswith("plugins not run"))
+    assert "--no-download-plugins" in gap["detail"]
+    assert without["metrics"]["source"]["remote"]["written_to_disk"] is False
+
+    report = _report(staged)
+    seen = [(item["title"], item["detail"]) for item in report["findings"] if item["category"] == "plugin_fixture"]
+    assert seen == [("Marker seen", "found")]  # notes/MARKER.txt, read from the staged copy
+    remote = report["metrics"]["source"]["remote"]
+    assert remote["written_to_disk"] is True
+    assert remote["disk_writes"] == "transient plugin staging under OUTPUT/.pdt-cache/plugins"
+    assert not any(item["title"].endswith("plugins not run") for item in report["findings"])
+    staging = staged / ".pdt-cache" / "plugins"
+    assert not staging.exists() or not [path for path in staging.rglob("*") if path.is_file()]
+
+
+def test_no_download_plugins_needs_no_download_and_a_plugin_host(tmp_path: Path, monkeypatch, capsys):
+    assert _main(monkeypatch, "scan", str(tmp_path), "--no-download-plugins", "--output", str(tmp_path / "o")) == 2
+    assert "--no-download-plugins requires --no-download" in capsys.readouterr().err
+    assert _main(monkeypatch, "scan", "https://github.com/acme/fixture", "--no-download", "--no-download-plugins",
+                 "--plugin-isolation", "off", "--output", str(tmp_path / "o")) == 2
+    assert "--no-download-plugins needs --plugin-isolation sandbox or process" in capsys.readouterr().err
+
+
+# Bitbucket Data Center/Server (REST API 1.0) ------------------------------------------
+@pytest.mark.parametrize("url", [
+    "https://bitbucket.example.com/scm/PROJ/fixture.git",
+    "https://bitbucket.example.com/projects/PROJ/repos/fixture/browse",
+])
+def test_no_download_reads_bitbucket_data_center(url, tmp_path: Path, monkeypatch):
+    # Regression: Bitbucket Data Center/Server was refused in no-download mode ("uses a
+    # different API"). Its REST API 1.0 lists files without sizes or modes.
+    service = ProviderService(auth={"bitbucket-server": f"Bearer {TOKEN}"}, private=True)
+    output = tmp_path / "report"
+    monkeypatch.setenv("PDT_API_TOKEN_BITBUCKET_EXAMPLE_COM", TOKEN)
+    with RunningProviders(service) as running:
+        _guard_disk_writes(monkeypatch, [output])
+        code = _main(
+            monkeypatch, "scan", url, "--no-download",
+            "--api-url", running.url + "/bitbucket-server/rest/api/1.0", "--output", str(output), "--quiet",
+        )
+        monkeypatch.undo()
+    assert code == cli.EXIT_OK
+    report = _report(output)
+    remote = report["metrics"]["source"]["remote"]
+    assert remote["api_provider"] == "Bitbucket Data Center" and remote["written_to_disk"] is False
+    assert remote["revision"] == COMMIT and remote["branch"] == "main" and remote["private"] is True
+    assert remote["credential_source"] == "env:PDT_API_TOKEN_BITBUCKET_EXAMPLE_COM"
+    files = {item["path"]: item for item in report["files"]}
+    assert set(files) == set(fixture_files())  # paged listing complete; no submodule entries
+    assert files["assets/big.bin"]["size_bytes"] == 1536 * 1024  # learned from the content
+    assert any("src/app.py" in " ".join(item["evidence"]) and item["category"] == "security"
+               for item in report["findings"])
+    raw = [item for item in service.requests if "/raw/" in item["path"]]
+    assert raw and all(item["headers"].get("authorization") == f"Bearer {TOKEN}" for item in raw)
+
+
+def test_bitbucket_repository_paths_and_provider_selection():
+    from project_discovery.online.providers import (
+        ProviderError, api_provider_for, provider_for_host, server_repository,
+    )
+
+    assert server_repository("scm/PROJ/repo") == ("PROJ", "repo")
+    assert server_repository("projects/PROJ/repos/repo/browse") == ("PROJ", "repo")
+    assert server_repository("scm/~alice/notes") == ("~alice", "notes")
+    assert server_repository("users/alice/repos/notes") == ("~alice", "notes")
+    with pytest.raises(ProviderError):
+        server_repository("a/b/c")
+    assert api_provider_for("Bitbucket Data Center") == "bitbucket-server"
+    assert api_provider_for("Bitbucket") == "bitbucket"
+    assert provider_for_host("bitbucket", "git.example.com") == "bitbucket-server"
+    assert provider_for_host("bitbucket", "bitbucket.org") == "bitbucket"
+    assert provider_for_host("bitbucket", "git.example.com", "bitbucket") == "bitbucket"
