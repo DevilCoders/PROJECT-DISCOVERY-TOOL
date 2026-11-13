@@ -287,3 +287,104 @@ def test_linker_maps_with_symbols_lowercase_units_and_comments(tmp_path: Path):
         "  FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 512k\n}\n"
     ))
     assert "RAM (xrw) at 0x20000000, 128 KiB" in ld["Memory map"][2] and "512 KiB" in ld["Memory map"][2]
+
+
+def test_generate_constructs_parameters_and_overrides_are_recorded(tmp_path: Path):
+    # Instances inside generate loops and branches carry their constructs; parameters and
+    # overrides are recorded for elaboration. Regressions: an instance right after
+    # endgenerate, or after a for header's begin, was missed, and a one-item branch
+    # (if (FAST) adder u (...);) was not an instance.
+    _, facts = run(HardwareDescriptionAnalyzer(), tmp_path, "gen.sv", (
+        "module gen #(parameter LANES = 4, localparam LAST = LANES - 1) (input clk);\n"
+        "  parameter IGNORED = 1;\n"
+        "  genvar i;\n"
+        "  generate\n"
+        "    for (i = 0; i < LANES; i = i + 1) begin : g\n"
+        "      lane #(.WIDTH(8 * (i + 1))) u_lane (.clk(clk));\n"
+        "    end\n"
+        "    if (LANES > 2) fast u_fast (.clk(clk)); else slow u_slow (.clk(clk));\n"
+        "  endgenerate\n"
+        "  tail u_tail (.clk(clk));\n"
+        "  cell u_arr [3:0] (.clk(clk));\n"
+        "  always @(posedge clk) for (int k = 0; k < 4; k++) r[k] <= 0;\n"
+        "endmodule\n"
+    ))
+    instances = {name: values["count"] for kind, name, values in facts if kind == "hdl_instance"}
+    assert instances == {"lane": 1, "fast": 1, "slow": 1, "tail": 1, "cell": 1}
+    parameters = next(values["parameters"] for kind, name, values in facts if kind == "hdl_parameters")
+    assert parameters == [["LANES", "4", True], ["LAST", "LANES - 1", False], ["IGNORED", "1", False]]
+    sites = {name: values for kind, name, values in facts if kind == "hdl_generate"}
+    assert sites["lane"]["constructs"] == [["for", "i", "0", "i < LANES", "i = i + 1"]]
+    assert sites["lane"]["overrides"] == {"WIDTH": "8 * (i + 1)"}
+    assert sites["fast"]["constructs"] == [["if", "LANES > 2", True]]
+    assert sites["slow"]["constructs"] == [["if", "LANES > 2", False]]
+    assert sites["cell"]["array"] == "3:0" and sites["cell"]["constructs"] == []
+    assert "tail" not in sites  # no construct, override or array: counted from hdl_instance
+
+
+def test_vhdl_generics_and_generate_regions_are_recorded(tmp_path: Path):
+    _, facts = run(HardwareDescriptionAnalyzer(), tmp_path, "core.vhd", (
+        "library ieee;\nuse ieee.std_logic_1164.all;\n"
+        "entity core is\n  generic (CHANNELS : integer := 3; WITH_DEBUG : boolean := false);\n"
+        "  port (clk : in std_logic);\nend entity;\n"
+        "architecture rtl of core is\nbegin\n"
+        "  gen_ch : for c in 0 to CHANNELS - 1 generate\n"
+        "    u_ch : entity work.channel generic map (ID => c) port map (clk => clk);\n"
+        "  end generate;\n"
+        "  gen_dbg : if WITH_DEBUG generate\n"
+        "    u_dbg : entity work.debug_unit port map (clk => clk);\n"
+        "  end generate;\n"
+        "end architecture;\n"
+    ))
+    parameters = next(values["parameters"] for kind, name, values in facts if kind == "hdl_parameters")
+    assert parameters == [["channels", "3", True], ["with_debug", "false", True]]
+    sites = {name: values for kind, name, values in facts if kind == "hdl_generate"}
+    assert sites["channel"]["constructs"] == [["range", "c", "0", "CHANNELS - 1", "to"]]
+    assert sites["channel"]["overrides"] == {"id": "c"}
+    assert sites["debug_unit"]["constructs"] == [["if", "WITH_DEBUG", True]]
+
+
+def test_scan_elaborates_the_design_hierarchy(tmp_path: Path):
+    project = tmp_path / "project"
+    (project / "rtl").mkdir(parents=True)
+    (project / "rtl" / "top.sv").write_text(
+        "module top #(parameter LANES = 4, parameter USE_FIFO = 0) (input clk);\n"
+        "  for (genvar i = 0; i < LANES; i++) begin : g_lane\n"
+        "    lane #(.WIDTH(8 * (i + 1))) u_lane (.clk(clk));\n"
+        "  end\n"
+        "  if (USE_FIFO) begin : g_fifo\n    fifo u_fifo (.clk(clk));\n  end\n"
+        "  else begin : g_reg\n    regbank u_reg (.clk(clk));\n  end\n"
+        "  tree #(.N(4)) u_tree (.clk(clk));\n"
+        "endmodule\n"
+        "module lane #(parameter WIDTH = 8) (input clk);\n"
+        "  for (genvar b = 0; b < WIDTH / 8; b++) begin\n    byte_unit u_b (.clk(clk));\n  end\n"
+        "endmodule\n"
+        "module byte_unit (input clk);\nendmodule\n"
+        "module fifo (input clk);\nendmodule\n"
+        "module regbank (input clk);\n  cell u_arr [3:0] (.clk(clk));\nendmodule\n"
+        "module cell (input clk);\nendmodule\n"
+        "module tree #(parameter N = 2) (input clk);\n"
+        "  if (N > 1) begin : g_split\n"
+        "    tree #(.N(N / 2)) left (.clk(clk));\n    tree #(.N(N / 2)) right (.clk(clk));\n"
+        "  end else begin : g_leaf\n    cell u_leaf (.clk(clk));\n  end\n"
+        "endmodule\n"
+        "module open_loop #(parameter N = 2) (input clk);\n"
+        "  for (genvar i = 0; i < MISSING; i++) begin\n    cell u (.clk(clk));\n  end\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    hdl = report["metrics"]["code_index"]["hdl"]
+    tops = {item["name"]: item for item in hdl["tops"]}
+    # 4 lanes with 1+2+3+4 byte units, regbank with a 4-cell array (USE_FIFO = 0), and a
+    # tree of 4 leaves (7 trees and 4 cells).
+    assert tops["top"] == {
+        "name": "top", "path": "rtl/top.sv", "depth": 5, "instances": 4 + 10 + 5 + 11,
+        "lexical_instances": 7, "elaboration": "complete",
+    }
+    assert tops["open_loop"]["elaboration"] == "partial" and tops["open_loop"]["instances"] == 1
+    assert any("generate loop not evaluated" in reason for reason in hdl["unelaborated"]["reasons"])
+    detail = next(item["detail"] for item in report["findings"] if item["title"] == "HDL design hierarchy")
+    assert "top (depth 5, 30 instances;" in detail and "Elaboration was partial for open_loop" in detail

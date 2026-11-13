@@ -22,6 +22,10 @@ methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architec
   (factories, `cls(...)`, `return self` chains), and, completed by the code index across
   modules, inherited methods and the values imported factories return. The call graph and the
   cross-module taint join use them.
+- HDL elaboration: the design hierarchy follows parameter defaults and overrides, generate
+  loops, branches and instance arrays (Verilog/SystemVerilog and VHDL), reports elaborated and
+  written instance counts, and names what it could not evaluate. Instances right after
+  `endgenerate`, after a loop's `begin`, and in one-item generate branches are no longer missed.
 
 - A Tree-sitter-backed code model: where a grammar is provisioned, the syntax tree supplies the
   symbols and calls of C, C++, CUDA, Arduino, Java, C#, Kotlin, Scala, Swift, JavaScript,

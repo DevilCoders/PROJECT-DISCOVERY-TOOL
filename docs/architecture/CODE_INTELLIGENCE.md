@@ -213,6 +213,22 @@ with the device family. The code index builds the **design hierarchy**: top-leve
 depth, instance counts, unresolved types (vendor primitives or IP outside the scan) and
 recursive instantiation.
 
+The hierarchy is **elaborated** (`intelligence.hdl_elaboration`). Each unit's parameters
+(Verilog `parameter`/`localparam` in the header and body, VHDL generics) start from their
+defaults, and each instance's overrides (`#(.N(8))`, positional `#(8)`, `generic map (N => 8)`)
+are evaluated in the parent's values. Generate loops (`for (genvar i = 0; i < N; i++)`,
+`for i in 0 to N - 1 generate`) repeat their instances once per iteration, with the loop
+variable available to overrides; generate branches (`if`/`else`, VHDL `if ... generate`) keep
+the taken one, and Verilog instance arrays (`cell u [7:0] (...)`) count each element.
+Expressions are integer constants: sized and based literals, arithmetic, shifts, comparisons,
+logical operators, the conditional operator and `$clog2`. Recursion that a generate condition
+ends (`tree #(.N(N / 2))` while `N > 1`) is followed. Everything is bounded (400-character
+expressions nested at most 64 levels, 62-bit values, 65,536 loop iterations, 200,000 instance
+sites and depth 64 per top-level unit), and a construct the evaluator cannot follow (an unknown
+parameter, a function, a generate `case`, `defparam`) keeps its written count: the top-level
+unit is then reported as `partial`, with the reasons in `metrics.code_index.hdl.unelaborated`.
+`tops[]` gives both `instances` (elaborated) and `lexical_instances` (as written).
+
 ### Graphics and shaders (`shaders`)
 
 GLSL (stage from the extension, including mesh, task and ray-tracing stages, or

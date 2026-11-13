@@ -42,9 +42,14 @@ _PARAMETER = re.compile(
     r"(?<![\w$])(?:parameter|localparam)\b(?:[ \t\r\n]++(?:int|integer|real|bit|logic|string|signed|unsigned|"
     r"type|longint|shortint|byte|\[[^\]\n]{0,60}+\]))*+[ \t\r\n]++([A-Za-z_][\w$]*+)"
 )
-_STATEMENT_HEAD = re.compile(r"(?:^|(?<=[;\n])|(?<=\bbegin)|(?<=\bend)|(?<=endgenerate))[ \t\r]*+([A-Za-z_][\w$]*+)"
-                             r"[ \t\r\n]*+(#)?")
-_INSTANCE_NAME = re.compile(r"[ \t\r\n]*+([A-Za-z_][\w$]*+)[ \t\r\n]*+(?:\[[^\]\n]{0,80}+\][ \t\r\n]*+)?\(")
+# A statement starts a line, follows ``;``, ``begin``/``end``, or the condition or ``else``
+# of a one-item generate branch (``if (FAST) adder u (...);``).
+_STATEMENT_HEAD = re.compile(r"(?:^|(?<=[;\n])|(?<=\bbegin)|(?<=\bend)|(?<=endgenerate)|(?<=\))|(?<=\belse))"
+                             # Whitespace is consumed only before ``#``: a keyword head (``begin``,
+                             # ``generate``) must not swallow the line break the next statement needs.
+                             r"[ \t\r]*+([A-Za-z_][\w$]*+)(?:[ \t\r\n]*+(#))?")
+# An instance name, with the range of an instance array (``cell u [7:0] (...)``).
+_INSTANCE_NAME = re.compile(r"[ \t\r\n]*+([A-Za-z_][\w$]*+)[ \t\r\n]*+(?:\[([^\]\n]{0,80}+)\][ \t\r\n]*+)?\(")
 _ALWAYS = re.compile(r"(?<![\w$])(always_ff|always_comb|always_latch|always)\b[ \t\r\n]*+(@[ \t\r\n]*+(?:\*|\(([^()]{0,400}+)\)))?")
 _EDGE = re.compile(r"(posedge|negedge)[ \t\r\n]++([A-Za-z_][\w$.]*+)")
 _BEGIN_END = re.compile(r"(?<![\w$])(begin|end|case|casex|casez|casez|endcase|fork|join|join_any|join_none)\b")
@@ -83,6 +88,253 @@ _VHDL_PORT_ITEM = re.compile(r"(?i)^[ \t\r\n]*+([\w, \t\r\n]{1,400}+):[ \t\r\n]*
 _VHDL_CLOCK = re.compile(r"(?i)(?:rising_edge|falling_edge)[ \t]*+\([ \t]*+(\w++)[ \t]*+\)|(?<!\w)(\w++)'event\b")
 _VHDL_PROCESS = re.compile(r"(?i)(?<![\w])process\b")
 _VHDL_NONSTANDARD = re.compile(r"(?i)\buse[ \t]++ieee\.(std_logic_arith|std_logic_unsigned|std_logic_signed)\b")
+_VHDL_GENERIC = re.compile(r"(?i)(?<![\w])generic[ \t\r\n]*+\(")
+_VHDL_GENERIC_MAP = re.compile(r"(?i)(?<![\w])generic[ \t\r\n]++map[ \t\r\n]*+\(")
+_VHDL_GENERATE = re.compile(r"(?i)(?<![\w])(end[ \t\r\n]++)?generate\b")
+
+# Generate constructs and parameters, which the code index elaborates (hdl_elaboration).
+_GENERATE_TOKEN = re.compile(
+    r"(?<![\w$])(for|if|else|case|always_ff|always_comb|always_latch|always|initial|final|function|task)\b"
+)
+_ROUTINE_END = {"function": re.compile(r"(?<![\w$])endfunction\b"), "task": re.compile(r"(?<![\w$])endtask\b")}
+_ENDCASE = re.compile(r"(?<![\w$])endcase\b")
+_BEGIN_OR_END = re.compile(r"(?<![\w$])(begin|end)\b")
+_PARAMETER_STATEMENT = re.compile(r"(?<![\w$])(parameter|localparam)\b")
+_GENVAR_INIT = re.compile(r"^[ \t\r\n]*+(?:genvar[ \t\r\n]++)?([A-Za-z_][\w$]*+)[ \t\r\n]*+=")
+_TYPE_WORDS = frozenset(
+    "int integer real realtime time bit logic reg signed unsigned longint shortint byte string type "
+    "natural positive boolean std_logic std_logic_vector".split()
+)
+MAX_GENERATE_SITES = 500   # instance sites per design unit, like the instance facts
+MAX_EXPRESSION_TEXT = 400
+MAX_ITEM = 64 * 1024       # one generate item that is a single statement
+MAX_NESTING = 16           # generate constructs recorded around one instance
+
+
+def _expression(text: str) -> str:
+    return " ".join(text.split())[:MAX_EXPRESSION_TEXT]
+
+
+def _block_pairs(clean: str, start: int, end: int) -> dict[int, int]:
+    """The end offset of the ``end`` matching each ``begin`` (one pass)."""
+    pairs: dict[int, int] = {}
+    stack: list[int] = []
+    for token in _BEGIN_OR_END.finditer(clean, start, end):
+        if token.group(1) == "begin":
+            stack.append(token.start())
+        elif stack:
+            pairs[stack.pop()] = token.end()
+    return pairs
+
+
+def _item_end(clean: str, start: int, limit: int, parens: dict[int, int], blocks: dict[int, int]) -> int:
+    """End of one generate item at ``start``: a ``begin``/``end`` block or one statement."""
+    head = re.match(r"[ \t\r\n]*+begin\b", clean[start:start + 200])
+    if head:
+        return blocks.get(start + head.end() - 5, limit)
+    position, stop = start, min(limit, start + MAX_ITEM)
+    while position < stop:
+        semicolon = clean.find(";", position, stop)
+        opening = clean.find("(", position, stop)
+        if semicolon == -1:
+            return stop
+        if opening == -1 or semicolon < opening:
+            return semicolon + 1
+        position = parens.get(opening, opening) + 1
+    return stop
+
+
+class _Enclosing:
+    """The constructs around increasing offsets, in one sweep over regions sorted by start."""
+
+    def __init__(self, regions: list[tuple[int, int, tuple]]) -> None:
+        self.regions = sorted(regions, key=lambda item: (item[0], -item[1]))
+        self.next = 0
+        self.active: list[tuple[int, int, tuple]] = []
+
+    def at(self, offset: int) -> list[list]:
+        while self.next < len(self.regions) and self.regions[self.next][0] <= offset:
+            self.active.append(self.regions[self.next])
+            self.next += 1
+        self.active = [region for region in self.active if region[1] > offset]
+        constructs = [list(construct) for _start, _end, construct in self.active[:MAX_NESTING]]
+        if len(self.active) > MAX_NESTING:  # recorded as a construct elaboration does not model
+            constructs.append(["case", f"generate nesting deeper than {MAX_NESTING} levels"])
+        return constructs
+
+
+def _verilog_generate_regions(clean: str, start: int, end: int, parens: dict[int, int]) -> list[tuple[int, int, tuple]]:
+    """(start, end, construct) for the generate loops and branches of a module body.
+
+    A ``for``, ``if`` or ``case`` outside always/initial blocks, functions and tasks is a
+    generate construct, with or without ``generate``/``endgenerate``. Constructs:
+    ``("for", variable, init, condition, step)``, ``("if", condition, taken)`` (taken is
+    False for the else branch) and ``("case", expression)``.
+    """
+    regions: list[tuple[int, int, tuple]] = []
+    blocks = _block_pairs(clean, start, end)
+    position = start
+    while len(regions) < 4 * MAX_GENERATE_SITES:
+        token = _GENERATE_TOKEN.search(clean, position, end)
+        if token is None:
+            break
+        word, position = token.group(1), token.end()
+        if word in _ROUTINE_END:
+            closing = _ROUTINE_END[word].search(clean, position, end)
+            position = closing.end() if closing else end
+            continue
+        if word.startswith("always") or word in {"initial", "final"}:
+            sensitivity = re.match(r"[ \t\r\n]*+@[ \t\r\n]*+", clean[position:position + 100])
+            if sensitivity:
+                position += sensitivity.end()
+                if position < end and clean[position] == "(":
+                    position = parens.get(position, position) + 1
+                else:
+                    word_end = re.match(r"\*|[A-Za-z_][\w$.]*+", clean[position:position + 200])
+                    position += word_end.end() if word_end else 0
+            position = HardwareDescriptionAnalyzer._block_end(clean, position, end)
+            continue
+        if word == "else":
+            continue  # handled with its if
+        opening = position + len(clean[position:position + 200]) - len(clean[position:position + 200].lstrip())
+        close = parens.get(opening) if opening < end and clean[opening] == "(" else None
+        if close is None:
+            continue
+        header = clean[opening + 1:close]
+        body_start = close + 1
+        if word == "case":
+            closing = _ENDCASE.search(clean, body_start, end)
+            body_end = closing.end() if closing else end
+            regions.append((body_start, body_end, ("case", _expression(header))))
+            position = body_start
+            continue
+        body_end = _item_end(clean, body_start, end, parens, blocks)
+        if word == "for":
+            parts = _split_depth(header, ";")
+            init = _GENVAR_INIT.match(parts[0]) if len(parts) == 3 else None
+            if init is not None:
+                regions.append((body_start, body_end, (
+                    "for", init.group(1), _expression(parts[0][init.end():]), _expression(parts[1]), _expression(parts[2]),
+                )))
+            position = body_start
+            continue
+        condition = _expression(header)
+        regions.append((body_start, body_end, ("if", condition, True)))
+        following = re.match(r"[ \t\r\n]*+else\b", clean[body_end:body_end + 200])
+        if following:
+            else_start = body_end + following.end()
+            regions.append((else_start, _item_end(clean, else_start, end, parens, blocks), ("if", condition, False)))
+        position = body_start
+    return regions
+
+
+def _parameter_items(text: str, overridable: bool) -> list[list]:
+    """``[name, default expression, overridable]`` for each name a parameter list declares."""
+    items: list[list] = []
+    can = overridable
+    for part in _split_depth(text, ","):
+        part = part.strip()
+        keyword = re.match(r"(parameter|localparam)\b", part)
+        if keyword:
+            can = overridable and keyword.group(1) == "parameter"
+            part = part[keyword.end():]
+        declared, equals, default = part.partition("=")
+        names = [name for name in _identifiers(declared) if name.lower() not in _TYPE_WORDS]
+        if names:
+            items.append([names[-1], _expression(default) if equals else "", can])
+    return items
+
+
+def _verilog_parameters(clean: str, header: str, body_start: int, end: int) -> list[list]:
+    """A module's parameters in declaration order; with a header parameter list, body
+    ``parameter`` declarations are local (IEEE 1800 6.20.1)."""
+    parameters: list[list] = []
+    header = header.lstrip()
+    if header.startswith("#"):
+        opening = header.find("(")
+        close = _pairs(header).get(opening) if opening != -1 else None
+        if close is not None:
+            parameters.extend(_parameter_items(header[opening + 1:close], True))
+    has_header = bool(parameters)
+    for statement in _PARAMETER_STATEMENT.finditer(clean, body_start, end):
+        stop = clean.find(";", statement.start(), end)
+        if stop == -1:
+            break
+        parameters.extend(_parameter_items(clean[statement.start():stop], not has_header))
+        if len(parameters) >= 200:
+            break
+    return parameters[:200]
+
+
+def _overrides(text: str, assigner: str) -> dict[str, str] | list[str]:
+    """Named (``.N(8)`` or ``N => 8``) or positional parameter overrides of an instance."""
+    named: dict[str, str] = {}
+    positional: list[str] = []
+    for part in _split_depth(text, ","):
+        part = part.strip()
+        if not part:
+            continue
+        if assigner == "." and part.startswith(".") and "(" in part and part.endswith(")"):
+            name = part[1:part.index("(")].strip()
+            named[name] = _expression(part[part.index("(") + 1:-1])
+        elif assigner == "=>" and "=>" in part:
+            name, _, value = part.partition("=>")
+            named[name.strip()] = _expression(value)
+        else:
+            positional.append(_expression(part))
+    return named or positional[:50]
+
+
+def _vhdl_generics(clean: str, start: int, limit: int, parens: dict[int, int]) -> list[list]:
+    """``[name, default, True]`` for an entity's generics."""
+    found = _VHDL_GENERIC.search(clean, start, limit)
+    port = _VHDL_PORT.search(clean, start, limit)
+    if found is None or (port is not None and port.start() < found.start()):
+        return []
+    close = parens.get(found.end() - 1)
+    if close is None:
+        return []
+    generics: list[list] = []
+    for item in _split_depth(clean[found.end():close], ";"):
+        declared, colon, rest = item.partition(":")
+        if not colon:
+            continue
+        _type, assign, default = rest.partition(":=")
+        for name in declared.split(","):
+            if name.strip():
+                generics.append([name.strip().lower(), _expression(default) if assign else "", True])
+    return generics[:200]
+
+
+def _vhdl_generate_regions(clean: str, start: int, end: int) -> list[tuple[int, int, tuple]]:
+    """(start, end, construct) for ``for ... generate`` and ``if ... generate`` regions."""
+    regions: list[tuple[int, int, tuple]] = []
+    stack: list[tuple[int, tuple]] = []
+    for match in _VHDL_GENERATE.finditer(clean, start, end):
+        if match.group(1):
+            if stack:
+                body_start, construct = stack.pop()
+                regions.append((body_start, match.start(), construct))
+            continue
+        window = clean[max(start, match.start() - MAX_EXPRESSION_TEXT):match.start()]
+        header = " ".join(window[window.rfind(":") + 1:].split())
+        lowered = header.lower()
+        construct: tuple = ("case", header[:MAX_EXPRESSION_TEXT])
+        if lowered.startswith("for ") and " in " in lowered:
+            variable = header[4:lowered.index(" in ")].strip()
+            bounds, bounds_lower = header[lowered.index(" in ") + 4:], lowered[lowered.index(" in ") + 4:]
+            for direction in (" downto ", " to "):
+                if direction in bounds_lower:
+                    split = bounds_lower.index(direction)
+                    construct = ("range", variable, _expression(bounds[:split]),
+                                 _expression(bounds[split + len(direction):]), direction.strip())
+                    break
+        elif lowered.startswith("if "):
+            construct = ("if", _expression(header[3:]), True)
+        stack.append((match.end(), construct))
+        if len(regions) + len(stack) > 4 * MAX_GENERATE_SITES:
+            break
+    return regions
 
 _PART_FAMILIES = (
     (re.compile(r"(?i)^xc7a"), "Xilinx Artix-7"), (re.compile(r"(?i)^xc7k"), "Xilinx Kintex-7"),
@@ -209,6 +461,9 @@ class HardwareDescriptionAnalyzer(Analyzer):
             body = clean[header_end + 1:end]
             ports = self._verilog_ports(clean, match.end(), header_end, body, parens)
             parameters = _PARAMETER.findall(clean, match.end(), end)
+            declared = _verilog_parameters(clean, clean[match.end():header_end], header_end + 1, end)
+            enclosing = _Enclosing(_verilog_generate_regions(clean, header_end + 1, end, parens))
+            sites: list[tuple[str, str, list, object, str | None]] = []
             children = Counter()
             primitives = 0
             for head in _STATEMENT_HEAD.finditer(clean, header_end + 1, end):
@@ -216,11 +471,13 @@ class HardwareDescriptionAnalyzer(Analyzer):
                 if type_name in _KEYWORDS:
                     continue
                 position = head.end()
+                overrides = None
                 if head.group(2):
                     opening = clean.find("(", position - 1, position + 2)
                     close = parens.get(opening)
                     if close is None:
                         continue
+                    overrides = _overrides(clean[opening + 1:close], ".")
                     position = close + 1
                 instance = _INSTANCE_NAME.match(clean, position)
                 if not instance or instance.group(1) in _KEYWORDS:
@@ -229,6 +486,11 @@ class HardwareDescriptionAnalyzer(Analyzer):
                     primitives += 1
                 else:
                     children[type_name] += 1
+                    constructs = enclosing.at(head.start(1))
+                    array = instance.group(2)
+                    if (constructs or overrides or array) and len(sites) < MAX_GENERATE_SITES:
+                        sites.append((type_name, instance.group(1), constructs, overrides,
+                                      _expression(array) if array else None))
             clocks, resets = Counter(), Counter()
             for always in _ALWAYS.finditer(clean, header_end + 1, end):
                 block_kind, sensitivity = always.group(1), always.group(3) or ""
@@ -262,6 +524,12 @@ class HardwareDescriptionAnalyzer(Analyzer):
                                  ports=len(ports), line=line_of(match.start()), clocks=sorted(clocks)[:8])
             for child, count in sorted(children.items())[:500]:
                 code_facts.emit_fact("hdl_instance", child, parent=name, count=count)
+            if declared:
+                code_facts.emit_fact("hdl_parameters", name, parameters=declared)
+            for child, instance_name, constructs, overrides, array in sites:
+                # The instance name keeps two identical sites (left and right) two facts.
+                code_facts.emit_fact("hdl_generate", child, parent=name, instance=instance_name,
+                                     constructs=constructs, overrides=overrides, array=array)
         return self._unit_findings(record, units, blocking, nonblocking, multi_clock, [])
 
     def _verilog_ports(self, clean, start, header_end, body, parens) -> list[tuple[str, str]]:
@@ -335,22 +603,37 @@ class HardwareDescriptionAnalyzer(Analyzer):
                             for port_name in declared.group(1).split(","):
                                 if port_name.strip():
                                     ports.append((declared.group(2).lower(), port_name.strip()))
-            entities[name.lower()] = (name, line_of(match.start()), ports)
+            entities[name.lower()] = (name, line_of(match.start()), ports,
+                                      _vhdl_generics(clean, match.end(), match.end() + 20000, parens))
         architectures = list(_VHDL_ARCHITECTURE.finditer(clean))
         bodies = {}
         for index, match in enumerate(architectures):
             end = architectures[index + 1].start() if index + 1 < len(architectures) else len(clean)
             bodies.setdefault(match.group(2).lower(), []).append((match.end(), end))
-        for key, (name, line, ports) in entities.items():
+        for key, (name, line, ports, generics) in entities.items():
             children, clocks = Counter(), Counter()
             processes = 0
+            sites: list[tuple[str, str, list, object]] = []
             for start, end in bodies.get(key, []):
                 region = clean[start:end]
-                for instance in _VHDL_ENTITY_INSTANCE.finditer(region):
-                    children[instance.group(3).lower()] += 1
-                for instance in _VHDL_COMPONENT_INSTANCE.finditer(region):
-                    if instance.group(2).lower() not in {"entity", "process", "block", "generate"}:
-                        children[instance.group(2).lower()] += 1
+                enclosing = _Enclosing(_vhdl_generate_regions(clean, start, end))
+                found = [(instance.start(), instance.group(3).lower(), instance.group(1).lower())
+                         for instance in _VHDL_ENTITY_INSTANCE.finditer(region)]
+                found.extend(
+                    (instance.start(), instance.group(2).lower(), instance.group(1).lower())
+                    for instance in _VHDL_COMPONENT_INSTANCE.finditer(region)
+                    if instance.group(2).lower() not in {"entity", "process", "block", "generate"}
+                )
+                for offset, child, label in sorted(found):
+                    children[child] += 1
+                    statement_end = clean.find(";", start + offset, end)
+                    statement_end = end if statement_end == -1 else statement_end
+                    mapping = _VHDL_GENERIC_MAP.search(clean, start + offset, statement_end)
+                    close = parens.get(mapping.end() - 1) if mapping else None
+                    overrides = _overrides(clean[mapping.end():close], "=>") if close is not None else None
+                    constructs = enclosing.at(start + offset)
+                    if (constructs or overrides) and len(sites) < MAX_GENERATE_SITES:
+                        sites.append((child, label, constructs, overrides))
                 processes += len(_VHDL_PROCESS.findall(region))
                 for clock in _VHDL_CLOCK.finditer(region):
                     clocks[(clock.group(1) or clock.group(2)).lower()] += 1
@@ -361,6 +644,12 @@ class HardwareDescriptionAnalyzer(Analyzer):
                                  ports=len(ports), line=line, clocks=sorted(clocks)[:8], processes=processes)
             for child, count in sorted(children.items())[:500]:
                 code_facts.emit_fact("hdl_instance", child, parent=name.lower(), count=count)
+            if generics:
+                code_facts.emit_fact("hdl_parameters", name.lower(), parameters=generics)
+            for child, label, constructs, overrides in sites:
+                code_facts.emit_fact("hdl_generate", child, parent=name.lower(), instance=label, constructs=constructs,
+                                     overrides={key.lower(): value for key, value in overrides.items()}
+                                     if isinstance(overrides, dict) else overrides, array=None)
         for match in _VHDL_PACKAGE.finditer(clean):
             units.append(("package", match.group(1), line_of(match.start()), [], [], Counter(), 0, Counter(),
                           Counter(), False))

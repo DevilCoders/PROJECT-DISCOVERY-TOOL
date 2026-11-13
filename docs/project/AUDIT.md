@@ -533,3 +533,28 @@ The four areas the first pass did not reach (the security analyzers, the two gro
 - Base classes are searched depth first, left to right, which matches Python's method resolution order for single inheritance and simple mixins but not for every diamond.
 - The local taint engine does not yet use inherited methods; across modules, flows through imported factories are joined.
 - `pdt query --callers Qualified.name` matches calls as written; inherited and returned-value calls are listed under the bare method name.
+
+## 15. HDL elaboration of generate blocks and parameters
+
+**Date:** 2026-11-13 · **Scope:** the next step named in the ROADMAP: the design hierarchy counted instances as written, so a generate loop of 64 lanes was one instance and both branches of a generate `if` were counted.
+
+### What changed
+
+- The HDL analyzer records each unit's parameters with their default expressions (Verilog header and body `parameter`/`localparam`, following IEEE 1800 6.20.1 on which are overridable; VHDL generics), and, for each instance inside a generate construct, with overrides or with an instance-array range, the constructs around it (`hdl_parameters` and `hdl_generate` facts). Generate constructs are `for`, `if`/`else` and `case` outside always and initial blocks, functions and tasks, and VHDL `for`/`if ... generate`.
+- `intelligence.hdl_elaboration` evaluates integer constant expressions (Verilog and VHDL literals and operators, the conditional operator, `$clog2`), follows generate loops and conditions, and elaborates each top-level unit top-down with overrides evaluated in the parent's values, memoized per unit and parameter values. Recursion that a generate condition ends is followed; recursion that repeats the same values is reported.
+- The hierarchy reports elaborated `instances` beside `lexical_instances`, and `elaboration: partial` with reasons when a construct keeps its written count.
+- Found while building it: the statement-head pattern consumed the line break after a keyword, so an instance right after `endgenerate` or after `for (...) begin` was missed, and an instance in a one-item branch (`if (FAST) adder u (...);`) was never a statement head.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Unit tests | Expressions in both languages, values that cannot be told (unknown names, x/z digits, division by zero, overflow, deep nesting), loops of every step form and their bounds, VHDL ranges, overrides, branches, arrays, bounded and unbounded recursion, and a 2^20-leaf tree in under two seconds (`tests/intelligence/test_hdl_elaboration.py`). |
+| Analyzer and scan | Constructs, parameters and overrides recorded for Verilog and VHDL, and a scanned design elaborated to 30 instances at depth 5 (7 as written), with a partial top for an unknown loop bound (`tests/analyzers/domains/test_domain_analyzers.py`). |
+| Hostile input | 40,000 unterminated generate `if`s (320 KB), 3,000 nested generate loops and 20,000 conditional instances (785 KB) each take under 0.3 s to analyze; the regular-expression test covers the new patterns. |
+
+### Limits
+
+- Only integer constants are evaluated: real, string and type parameters, user functions, `$bits` and packages' constants are unknown, and an expression that needs them keeps the written count.
+- Generate `case`, VHDL-2008 `elsif`/`else`/`case` generate branches, `defparam` and configurations are not elaborated (reported as partial).
+- Override names are matched without case across languages, and positional overrides follow the declared order of overridable parameters.

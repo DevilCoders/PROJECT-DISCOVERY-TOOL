@@ -1351,29 +1351,76 @@ def _hdl_hierarchy(context: _Context) -> tuple[dict, list[Finding]]:
         memo[node] = (depth, min(total, 10 ** 12))
         return memo[node]
 
+    # Elaboration: parameter defaults and overrides, generate loops and conditions.
+    from .hdl_elaboration import Elaborator
+
+    parameters = {
+        name.lower(): [item for item in values.get("parameters") or [] if isinstance(item, list) and len(item) == 3]
+        for name, _, values in _fact_rows(db, "hdl_parameters")
+    }
+    languages = {
+        name.lower(): "vhdl" if str(values.get("language", "")).upper() == "VHDL" else "verilog"
+        for name, _, values in _fact_rows(db, "hdl_module")
+    }
+    sites: dict[str, list] = defaultdict(list)
+    site_counts: dict[str, Counter] = defaultdict(Counter)
+    for child, _, values in _fact_rows(db, "hdl_generate"):
+        parent = str(values.get("parent", "")).lower()
+        constructs = [item for item in values.get("constructs") or [] if isinstance(item, list) and item]
+        array = values.get("array")
+        sites[parent].append((child.lower(), constructs, values.get("overrides"), array if isinstance(array, str) else None))
+        site_counts[parent][child.lower()] += 1
+    plain = {
+        parent: Counter({child: max(0, count - site_counts[parent][child]) for child, count in children.items()})
+        for parent, children in edges.items()
+    }
+    elaborator = Elaborator(set(modules), plain, sites, parameters, languages) if sites else None
+
     top_details = []
     for key in tops[:MAX_LISTED]:
-        depth, total = measure(key, frozenset({key}))
-        top_details.append((modules[key][0], modules[key][1], depth, total))
+        depth, lexical = measure(key, frozenset({key}))
+        if elaborator is None:
+            top_details.append((modules[key][0], modules[key][1], depth, lexical, lexical, True))
+            continue
+        elaborated = elaborator.top(key)
+        top_details.append((modules[key][0], modules[key][1], elaborated["depth"], elaborated["instances"],
+                            lexical, elaborated["complete"]))
     top_details.sort(key=lambda item: (-item[3], item[0]))
+    partial = [name for name, _, _, _, _, complete in top_details if not complete]
     clocks = sum(1 for _ in _fact_rows(db, "hdl_clock_constraint"))
     parts = sorted({(name, str(values.get("family", ""))) for name, _, values in _fact_rows(db, "fpga_part")})
     testbenches = sum(1 for _, _, testbench, _ in modules.values() if testbench)
     value = {
         "units": len(modules), "testbenches": testbenches,
-        "tops": [{"name": name, "path": path, "depth": depth, "instances": total} for name, path, depth, total in top_details],
+        "tops": [
+            {"name": name, "path": path, "depth": depth, "instances": total, "lexical_instances": lexical,
+             "elaboration": "complete" if complete else "partial"}
+            for name, path, depth, total, lexical, complete in top_details
+        ],
+        "generate_sites": sum(len(items) for items in sites.values()),
+        "unelaborated": {} if elaborator is None else {
+            "reasons": dict(sorted(elaborator.reasons.items(), key=lambda item: -item[1])[:10]),
+            "samples": elaborator.samples[:10],
+        },
         "unresolved_types": dict(unresolved.most_common(50)), "cycles": [component[:10] for component in cycles[:10]],
         "clock_constraints": clocks, "fpga_parts": [{"part": part, "family": family} for part, family in parts],
     }
     detail = (f"{len(modules):,} design unit(s) ({testbenches:,} testbench(es)); {len(tops):,} top-level unit(s): "
-              + ", ".join(f"{name} (depth {depth}, {total:,} instances)" for name, _, depth, total in top_details[:10])
-              + "." + (" Unresolved instance types (vendor primitives or IP not in the scan): "
+              + ", ".join(
+                  f"{name} (depth {depth}, {total:,} instances" + (f"; {lexical:,} as written" if lexical != total else "")
+                  + ")" for name, _, depth, total, lexical, _ in top_details[:10])
+              + "." + (" Instance counts are elaborated: parameter defaults and overrides, generate loops and "
+                       "conditions." if elaborator is not None else "")
+              + (" Elaboration was partial for " + ", ".join(partial[:10]) + " (an expression, loop or construct "
+                 "that could not be evaluated keeps its written count; see metrics.code_index.hdl.unelaborated)."
+                 if partial else "")
+              + (" Unresolved instance types (vendor primitives or IP not in the scan): "
                        + ", ".join(f"{name} ({count})" for name, count in unresolved.most_common(15)) + "."
                        if unresolved else "")
               + (" Targets: " + ", ".join(f"{part} ({family})" if family else part for part, family in parts[:8]) + "."
                  if parts else ""))
     findings = [Finding("hardware_description", "HDL design hierarchy", detail, confidence="INFERRED",
-                        analyzer="code-index", evidence=[f"{path}: {name}" for name, path, _, _ in top_details[:15]])]
+                        analyzer="code-index", evidence=[f"{path}: {name}" for name, path, *_ in top_details[:15]])]
     if cycles:
         findings.append(Finding(
             "hardware_description", "Recursive module instantiation",
