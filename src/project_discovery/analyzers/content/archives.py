@@ -33,10 +33,11 @@ _MAX_ARCHIVE_INDEX_BYTES = 64 * 1024 * 1024
 def _zip_index_hint(
     path: Path,
     expected_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = None,
+    data: bytes | None = None,
 ) -> tuple[int, int] | None:
-    """Read ZIP/ZIP64 bounds through a verified no-follow descriptor."""
+    """Read ZIP/ZIP64 bounds through a verified no-follow descriptor, or from a nested archive's bytes."""
     try:
-        with open_verified_binary(path, expected_identity) as stream:
+        with (open_verified_binary(path, expected_identity) if data is None else io.BytesIO(data)) as stream:
             stream.seek(0, 2)
             size = stream.tell()
             tail_size = min(size, 65_557)
@@ -81,6 +82,8 @@ _MAX_TAR_DECOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
 _MEMBER_SCAN_CHUNK = 64 * 1024
 # Members declaring more uncompressed bytes in total than this suggest an archive bomb.
 _MAX_DECLARED_UNCOMPRESSED_BYTES = 16 * 1024 * 1024 * 1024
+_MAX_NESTED_DEPTH = 1  # archives inside an archive are inspected one level down
+_MAX_NESTED_BYTES = 64 * 1024 * 1024  # nested archives one archive may buffer in memory, in total
 _HIGH_COMPRESSION_RATIO = 1000.0  # a member compressed more than this is flagged "high-ratio"
 _MIB = 1024 * 1024
 # `pdt scan --archive-limit NAME=VALUE`: option name -> (limit, unit in bytes or 1, whole number)
@@ -93,6 +96,8 @@ ARCHIVE_LIMIT_OPTIONS = {
     "decompressed_mb": ("tar_decompressed_bytes", _MIB, True),
     "uncompressed_mb": ("uncompressed_bytes", _MIB, True),
     "ratio": ("compression_ratio", 1, False),
+    "nested_depth": ("nested_depth", 1, True),
+    "nested_mb": ("nested_bytes", _MIB, True),
 }
 
 
@@ -116,7 +121,7 @@ def parse_archive_limits(values) -> dict[str, float]:
             raise ValueError(f"--archive-limit {raw}: {name} must be a number") from None
         whole = ARCHIVE_LIMIT_OPTIONS[name][2]
         if whole:
-            minimum = 0 if name in {"sample_mb", "member_sample_mb"} else 1
+            minimum = 0 if name in {"sample_mb", "member_sample_mb", "nested_depth", "nested_mb"} else 1
             if not math.isfinite(number) or number != int(number) or number < minimum:
                 raise ValueError(f"--archive-limit {raw}: {name} must be a whole number of at least {minimum}")
             limits[name] = int(number)
@@ -131,7 +136,8 @@ class _Limits:
     """One call's archive limits: the module defaults with the scan's --archive-limit values."""
 
     __slots__ = ("entries", "index_bytes", "member_sample_bytes", "archive_sample_bytes", "wall_seconds",
-                 "tar_decompressed_bytes", "uncompressed_bytes", "compression_ratio")
+                 "tar_decompressed_bytes", "uncompressed_bytes", "compression_ratio", "nested_depth",
+                 "nested_bytes")
 
     def __init__(self) -> None:
         # Read when a call starts, so the defaults are the module's current values.
@@ -143,6 +149,8 @@ class _Limits:
         self.tar_decompressed_bytes = _MAX_TAR_DECOMPRESSED_BYTES
         self.uncompressed_bytes = _MAX_DECLARED_UNCOMPRESSED_BYTES
         self.compression_ratio = _HIGH_COMPRESSION_RATIO
+        self.nested_depth = _MAX_NESTED_DEPTH
+        self.nested_bytes = _MAX_NESTED_BYTES
         for name, value in limit_overrides("archive-intelligence").items():
             attribute, unit, whole = ARCHIVE_LIMIT_OPTIONS[name]
             setattr(self, attribute, int(value * unit) if whole else float(value))
@@ -387,12 +395,36 @@ def _archive_format(record: FileRecord) -> str:
     return family_of(record.file_type) or record.extension.lstrip(".") or "unknown"
 
 
+class _Nested:
+    """The bytes of nested archives one top-level archive may still buffer in memory."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, budget: int) -> None:
+        self.remaining = budget
+
+
+_NESTED_ZIP_SUFFIXES = (".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg", ".nupkg")
+_NESTED_TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
+
+
+def _nested_kind(name: str) -> str | None:
+    """"zip" or "tar" for a member named like an archive these readers inspect, else None."""
+    lowered = name.lower()
+    if lowered.endswith(_NESTED_ZIP_SUFFIXES):
+        return "zip"
+    if lowered.endswith(_NESTED_TAR_SUFFIXES):
+        return "tar"
+    return None
+
+
 class _Inspection:
     """How far one archive's inspection got: its states, member counts and coverage, and
     every limit that stopped deeper inspection, recorded with ``emit_archive`` at the end."""
 
     def __init__(self, record: FileRecord, archive_format: str, limits: _Limits) -> None:
         self.record, self.format, self.limits_in_force = record, archive_format, limits
+        self.path = record.path  # a nested archive's record carries "outer.zip::inner.jar"
         self.declared: int | None = None  # members the archive's index declares
         self.index_read = False
         self.indexed = 0
@@ -421,8 +453,9 @@ class _Inspection:
         records = facts.archive_members
         for index in range(self._first_record, len(records)):
             item = records[index]
-            if item[1] in repeated:
-                records[index] = (*item[:7], ",".join(filter(None, (item[7], "duplicate"))), *item[8:])
+            # Only this archive's records: a nested archive's follow them in the same list.
+            if item[0] == self.path and item[2] in repeated:
+                records[index] = (*item[:8], ",".join(filter(None, (item[8], "duplicate"))), *item[9:])
 
     def limit(self, name: str, value, used=None, members: int | None = None) -> None:
         entry = self.limits.setdefault(name, {"limit": name, "value": value})
@@ -439,7 +472,7 @@ class _Inspection:
             self.regular_bytes += max(0, int(size or 0))
         # Permission bits only: the type is the record's own field (a ZIP mode carries both).
         permissions = stat.S_IMODE(mode) if mode else None
-        if emit_archive_member(ordinal, name, kind, size, compressed, permissions, mtime, flags,
+        if emit_archive_member(self.path, ordinal, name, kind, size, compressed, permissions, mtime, flags,
                                link_target, uid, gid, owner, group):
             self.records += 1
 
@@ -489,7 +522,7 @@ class _Inspection:
         }
         if self.malformed is not None:
             detail["error"] = self.malformed
-        emit_archive(self.format, state, states, **detail)
+        emit_archive(self.path, self.format, state, states, **detail)
 
 
 class ArchiveIntelligenceAnalyzer(Analyzer):
@@ -499,7 +532,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
     limits = AnalyzerLimits(
         None,
         "sampled",
-        {"entries": _MAX_ARCHIVE_ENTRIES, "index_bytes": _MAX_ARCHIVE_INDEX_BYTES, "member_sample_bytes": _MAX_MEMBER_SCAN_BYTES, "archive_sample_bytes": _MAX_ARCHIVE_SCAN_BYTES, "wall_seconds": _MAX_ARCHIVE_WALL_SECONDS, "tar_decompressed_bytes": _MAX_TAR_DECOMPRESSED_BYTES, "uncompressed_bytes": _MAX_DECLARED_UNCOMPRESSED_BYTES, "compression_ratio": int(_HIGH_COMPRESSION_RATIO)},
+        {"entries": _MAX_ARCHIVE_ENTRIES, "index_bytes": _MAX_ARCHIVE_INDEX_BYTES, "member_sample_bytes": _MAX_MEMBER_SCAN_BYTES, "archive_sample_bytes": _MAX_ARCHIVE_SCAN_BYTES, "wall_seconds": _MAX_ARCHIVE_WALL_SECONDS, "tar_decompressed_bytes": _MAX_TAR_DECOMPRESSED_BYTES, "uncompressed_bytes": _MAX_DECLARED_UNCOMPRESSED_BYTES, "compression_ratio": int(_HIGH_COMPRESSION_RATIO), "nested_depth": _MAX_NESTED_DEPTH, "nested_bytes": _MAX_NESTED_BYTES},
         outcome="UNKNOWN or partial finding at an index, entry, sample, decompression or wall-time limit",
     )
     domains = ("archives", "filesystem_inventory", "supply_chain")
@@ -538,10 +571,12 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         inspection.limit(f"analyzer_{stop.kind}", stop.limit, round(stop.used, 3))
         inspection.emit()
 
-    def _zip(self, path: Path, record: FileRecord, limits: _Limits | None = None) -> list[Finding]:
+    def _zip(self, path: Path, record: FileRecord, limits: _Limits | None = None, *, data: bytes | None = None,
+             depth: int = 0, nested: _Nested | None = None, deadline: float | None = None) -> list[Finding]:
         limits = limits or _Limits()
+        nested = nested or _Nested(limits.nested_bytes)
         inspection = _Inspection(record, "zip", limits)
-        index_hint = _zip_index_hint(path, record.analysis_identity)
+        index_hint = _zip_index_hint(path, record.analysis_identity, data)
         if index_hint is None:
             inspection.malformed = "the central directory could not be bounded from its ZIP/ZIP64 trailer"
             inspection.emit()
@@ -580,7 +615,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 analyzer=self.name,
                 severity="MEDIUM",
             )]
-        deadline = time.monotonic() + limits.wall_seconds
+        deadline = deadline if deadline is not None else time.monotonic() + limits.wall_seconds
         time_budget_reached = False
         counts: Counter[str] = Counter()
         unsafe_paths: list[str] = []
@@ -592,7 +627,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         content_bytes = 0
         content_truncated = 0
         try:
-            with open_verified_binary(path, record.analysis_identity) as archive_stream, zipfile.ZipFile(archive_stream, "r") as archive:
+            source = open_verified_binary(path, record.analysis_identity) if data is None else io.BytesIO(data)
+            with source as archive_stream, zipfile.ZipFile(archive_stream, "r") as archive:
                 infos = archive.infolist()
                 total = len(infos)
                 inspection.index_read, inspection.declared, inspection.compressed_bytes = True, total, 0
@@ -638,7 +674,31 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     inspection.compressed_bytes += info.compress_size
                     link_target = None
 
-                    if not encrypted_member and kind in {"file", "symlink"}:
+                    nested_kind = _nested_kind(info.filename) if kind == "file" and not encrypted_member else None
+                    inspect_nested = False
+                    if nested_kind is not None:
+                        flags.append("nested-archive")
+                        if depth >= limits.nested_depth:
+                            inspection.limit("nested_depth", limits.nested_depth, members=1)
+                        elif info.file_size > nested.remaining:
+                            inspection.limit("nested_bytes", limits.nested_bytes, members=1)
+                        else:
+                            inspect_nested = True
+                    if inspect_nested:
+                        # Read whole (it fits the nested budget) and inspected like a file, in memory.
+                        try:
+                            with archive.open(info, "r") as member_stream:
+                                inner = member_stream.read(info.file_size + 1)
+                            nested.remaining -= len(inner)
+                            content_findings.extend(self._nested(
+                                inner, f"{record.path}::{info.filename}", nested_kind, limits, depth + 1, nested, deadline,
+                            ))
+                            if time.monotonic() >= deadline:
+                                time_budget_reached = True
+                        except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile, EOFError):
+                            content_truncated += 1
+                            inspection.truncated += 1
+                    elif not encrypted_member and kind in {"file", "symlink"}:
                         remaining = limits.archive_sample_bytes - content_bytes
                         if remaining <= 0:
                             content_truncated += 1
@@ -770,7 +830,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             ))
         return findings
 
-    def _tar(self, path: Path, record: FileRecord, limits: _Limits | None = None) -> list[Finding]:
+    def _tar(self, path: Path, record: FileRecord, limits: _Limits | None = None, *, data: bytes | None = None,
+             depth: int = 0, nested: _Nested | None = None, deadline: float | None = None) -> list[Finding]:
         """Traverse every TAR header under budgets; content sampling never ends traversal.
 
         Stopping at the first large member would hide later traversal, link and setuid
@@ -778,8 +839,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         a budgeted reader that enforces wall time and decompressed bytes inside each read.
         """
         limits = limits or _Limits()
+        nested = nested or _Nested(limits.nested_bytes)
         inspection = _Inspection(record, "tar", limits)
-        deadline = time.monotonic() + limits.wall_seconds
+        deadline = deadline if deadline is not None else time.monotonic() + limits.wall_seconds
         time_budget_reached = False
         stop_reason: str | None = None
         counts: Counter[str] = Counter()
@@ -796,7 +858,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         declared_bytes = 0
         compressed = False
         try:
-            with open_verified_binary(path, record.analysis_identity) as archive_stream:
+            source = (open_verified_binary(path, record.analysis_identity) if data is None
+                      else io.BufferedReader(io.BytesIO(data)))  # buffered: the decompressor peeks
+            with source as archive_stream:
                 decompressor = _tar_decompressor(archive_stream)
                 if decompressor is None:
                     # Plain TAR on a seekable descriptor: headers are reached by seeking.
@@ -848,6 +912,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             for risk in _mode_risks(member.mode):
                                 risky_modes.append(f"{member.name} ({risk})")
                                 flags.append(risk)
+                            nested_kind = _nested_kind(member.name) if kind == "file" else None
+                            if nested_kind is not None:
+                                flags.append("nested-archive")
                             inspection.member(
                                 total - 1, member.name, kind, member.size, None, member.mode,
                                 _tar_time(member.mtime), flags, member.linkname if linked else None,
@@ -856,6 +923,25 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
                             if kind != "file":
                                 continue
+                            if nested_kind is not None:
+                                if depth >= limits.nested_depth:
+                                    inspection.limit("nested_depth", limits.nested_depth, members=1)
+                                elif member.size > nested.remaining:
+                                    inspection.limit("nested_bytes", limits.nested_bytes, members=1)
+                                else:
+                                    member_stream = archive.extractfile(member)
+                                    if member_stream is not None:
+                                        with member_stream:
+                                            inner = member_stream.read(member.size + 1)
+                                        nested.remaining -= len(inner)
+                                        content_findings.extend(self._nested(
+                                            inner, f"{record.path}::{member.name}", nested_kind, limits,
+                                            depth + 1, nested, deadline,
+                                        ))
+                                        if time.monotonic() >= deadline:
+                                            time_budget_reached = True
+                                            break
+                                    continue
                             remaining = limits.archive_sample_bytes - content_bytes
                             if remaining <= 0:
                                 content_truncated += 1
@@ -1002,6 +1088,16 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 severity="LOW",
             ))
         return findings
+
+    def _nested(self, data: bytes, display: str, kind: str, limits: _Limits, depth: int, nested: _Nested,
+                deadline: float) -> list[Finding]:
+        """Inspect a member that is itself an archive, from its bytes in memory; its archive and
+        member records and findings name it "outer.zip::inner.jar"."""
+        name = display.rsplit("::", 1)[-1]
+        record = FileRecord(display, len(data), PurePosixPath(name).suffix.lower(), "Archive",
+                            file_type="archive/zip" if kind == "zip" else "archive/tar")
+        inspect = self._zip if kind == "zip" else self._tar
+        return inspect(Path(name), record, limits, data=data, depth=depth, nested=nested, deadline=deadline)
 
     def _bomb_finding(self, record: FileRecord, declared_bytes: int, limits: _Limits) -> Finding:
         return Finding(

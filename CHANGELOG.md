@@ -228,6 +228,13 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: nested archives
+- ZIP and TAR members named like archives (`.jar` in a `.war`, `.tgz` in a `.zip`, ...) are
+  flagged `nested-archive` and inspected in memory: their own archive and member records and
+  findings, named `outer.war::WEB-INF/lib/inner.jar`, under the top-level archive's wall time.
+  `--archive-limit nested_depth=N` (1) bounds the levels and `nested_mb` (64) the nested bytes
+  buffered per archive; a member left uninspected is recorded with the limit and sampled as before.
+
 ### Added: configurable archive limits
 - `pdt scan --archive-limit NAME=VALUE` (repeatable) overrides an archive inspection limit for the
   scan: `entries`, `index_mb`, `member_sample_mb`, `sample_mb` (`0` reads no member content),

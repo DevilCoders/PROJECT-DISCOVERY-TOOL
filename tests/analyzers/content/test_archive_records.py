@@ -21,7 +21,7 @@ from project_discovery.engine.executor import FileOutcome, _run_analyzers
 from project_discovery.intelligence.facts import collecting_facts
 from project_discovery.models import FileRecord
 
-_MEMBER_FIELDS = ("ordinal", "path", "type", "size", "compressed_size", "mode", "mtime", "flags", "link_target",
+_MEMBER_FIELDS = ("archive", "ordinal", "path", "type", "size", "compressed_size", "mode", "mtime", "flags", "link_target",
                   "uid", "gid", "owner", "group")
 
 
@@ -29,18 +29,27 @@ def _record(path: Path, file_type: str) -> FileRecord:
     return FileRecord(path.name, path.stat().st_size, "".join(path.suffixes).lower(), "Archive", file_type=file_type)
 
 
-def _inspect(path: Path, file_type: str = "archive/zip"):
-    """Analyze one archive; returns (its summary, its member records by path, the findings)."""
+def _analyze(path: Path, file_type: str = "archive/zip"):
+    """Analyze one archive; returns ({archive: summary}, {archive: {member path: [records]}}, findings),
+    nested archives ("outer.zip::inner.jar") included."""
     with collecting_facts() as facts:
         findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, file_type))
-    [(archive_format, state, states, detail)] = facts.archives
-    summary = {"format": archive_format, "state": state, "states": states.split(","), **json.loads(detail)}
-    members = {}
+    summaries = {}
+    for archive, archive_format, state, states, detail in facts.archives:
+        summaries[archive] = {"format": archive_format, "state": state, "states": states.split(","),
+                              **json.loads(detail)}
+    members: dict = {}
     for row in facts.archive_members:
         item = dict(zip(_MEMBER_FIELDS, row, strict=True))
         item["flags"] = item["flags"].split(",") if item["flags"] else []
-        members.setdefault(item["path"], []).append(item)
-    return summary, members, findings
+        members.setdefault(item["archive"], {}).setdefault(item["path"], []).append(item)
+    return summaries, members, findings
+
+
+def _inspect(path: Path, file_type: str = "archive/zip"):
+    """The top-level archive's summary, its member records by path, and the findings."""
+    summaries, members, findings = _analyze(path, file_type)
+    return summaries[path.name], members.get(path.name, {}), findings
 
 
 def test_a_zip_records_every_members_type_sizes_mode_time_flags_and_link_target(tmp_path: Path):
@@ -219,8 +228,8 @@ def test_an_archive_the_engine_stops_is_recorded_as_budget_stopped(tmp_path: Pat
     finally:
         budgets.set_policy(None)
     assert [kind for _, kind, *_ in outcome.budget_stops] == ["time"]
-    [(archive_format, state, states, detail)] = facts.archives
-    assert (archive_format, state, states) == ("zip", "budget-stopped", "detected,budget-stopped")
+    [(archive, archive_format, state, states, detail)] = facts.archives
+    assert (archive, archive_format, state, states) == ("slow.zip", "zip", "budget-stopped", "detected,budget-stopped")
     [limit] = json.loads(detail)["limits"]
     assert limit["limit"] == "analyzer_time" and limit["value"] == 0.2
     assert facts.archive_members == []  # the stopped call's partial records were rolled back
@@ -347,3 +356,76 @@ def test_a_scans_archive_limits_reach_its_worker_processes(tmp_path: Path):
         2, 1024 * 1024, 10.0, 0)
     with pytest.raises(ValueError, match="--archive-limit nested=1"):
         run_scan(project, tmp_path / "bad", {"json"}, 128, quiet=True, archive_limits=["nested=1"])
+
+
+def _zip_bytes(members: dict) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def _tar_gz_bytes(members: dict) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data in members.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def test_archives_inside_archives_are_inspected_with_their_own_records(tmp_path: Path):
+    key = "API_KEY = '" + "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc'\n"
+    inner = _zip_bytes({"com/example/App.class": b"\xca\xfe\xba\xbe", "config.properties": key.encode()})
+    bundle = _tar_gz_bytes({"scripts/run.sh": b"echo run\n"})
+    path = tmp_path / "app.war"
+    path.write_bytes(_zip_bytes({"WEB-INF/lib/inner.jar": inner, "vendor/bundle.tgz": bundle, "index.html": b"<p/>"}))
+    summaries, members, findings = _analyze(path)
+    assert set(summaries) == {"app.war", "app.war::WEB-INF/lib/inner.jar", "app.war::vendor/bundle.tgz"}
+    assert {name: item["state"] for name, item in summaries.items()} == dict.fromkeys(summaries, "metadata-complete")
+    assert summaries["app.war::vendor/bundle.tgz"]["format"] == "tar+gzip"
+    assert set(members["app.war::WEB-INF/lib/inner.jar"]) == {"com/example/App.class", "config.properties"}
+    assert set(members["app.war::vendor/bundle.tgz"]) == {"scripts/run.sh"}
+    assert members["app.war"]["WEB-INF/lib/inner.jar"][0]["flags"] == ["nested-archive"]
+    # A secret inside the nested archive is reported against its nested path.
+    assert any("app.war::WEB-INF/lib/inner.jar" in item.title and item.category == "secrets" for item in findings)
+    assert any(item.title == "ZIP archive inventory: app.war::WEB-INF/lib/inner.jar" for item in findings)
+
+
+def test_a_zip_inside_a_tar_is_inspected_too(tmp_path: Path):
+    path = tmp_path / "release.tar"
+    with tarfile.open(path, "w") as archive:
+        data = _zip_bytes({"lib/module.py": b"print('x')\n"})
+        member = tarfile.TarInfo("dist/package.whl")
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+    summaries, members, _ = _analyze(path, "archive/tar")
+    assert summaries["release.tar::dist/package.whl"]["state"] == "metadata-complete"
+    assert set(members["release.tar::dist/package.whl"]) == {"lib/module.py"}
+    assert members["release.tar"]["dist/package.whl"][0]["flags"] == ["nested-archive"]
+
+
+def test_nesting_stops_at_its_depth_and_byte_budgets(tmp_path: Path, monkeypatch):
+    innermost = _zip_bytes({"deep.txt": b"deep"})
+    middle = _zip_bytes({"level2.zip": innermost})
+    path = tmp_path / "outer.zip"
+    path.write_bytes(_zip_bytes({"level1.zip": middle}))
+    summaries, members, _ = _analyze(path)
+    # One level by default: level1.zip is inspected, level2.zip inside it is not.
+    assert set(summaries) == {"outer.zip", "outer.zip::level1.zip"}
+    assert summaries["outer.zip::level1.zip"]["limits"] == [{"limit": "nested_depth", "value": 1, "members": 1}]
+    assert members["outer.zip::level1.zip"]["level2.zip"][0]["flags"] == ["nested-archive"]
+    monkeypatch.setattr(archives, "_MAX_NESTED_DEPTH", 2)
+    summaries, members, _ = _analyze(path)
+    assert set(members["outer.zip::level1.zip::level2.zip"]) == {"deep.txt"}
+    monkeypatch.setattr(archives, "_MAX_NESTED_BYTES", len(middle) - 1)
+    summaries, _, _ = _analyze(path)
+    assert set(summaries) == {"outer.zip"}
+    assert summaries["outer.zip"]["limits"] == [{"limit": "nested_bytes", "value": len(middle) - 1, "members": 1}]
+    monkeypatch.setattr(archives, "_MAX_NESTED_BYTES", 64 * 1024 * 1024)
+    monkeypatch.setattr(archives, "_MAX_NESTED_DEPTH", 0)
+    summaries, _, _ = _analyze(path)
+    assert set(summaries) == {"outer.zip"}
+    assert summaries["outer.zip"]["limits"] == [{"limit": "nested_depth", "value": 0, "members": 1}]

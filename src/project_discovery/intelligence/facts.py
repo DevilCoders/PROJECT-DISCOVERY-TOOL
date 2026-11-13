@@ -36,10 +36,11 @@ class FileFacts:
     references: set[str] = field(default_factory=set)
     # (kind, name, detail_json) for other domains (imports, components, HDL modules...)
     facts: list[tuple] = field(default_factory=list)
-    # The archive inspection of the file: (format, state, states_csv, detail_json)
+    # Each archive inspected in the file, nested ones too ("outer.zip::inner.jar"):
+    # (archive_path, format, state, states_csv, detail_json)
     archives: list[tuple] = field(default_factory=list)
-    # (ordinal, path, type, size, compressed_size, mode, mtime, flags_csv, link_target,
-    #  uid, gid, owner, group) per archive member, in archive order
+    # (archive_path, ordinal, path, type, size, compressed_size, mode, mtime, flags_csv,
+    #  link_target, uid, gid, owner, group) per archive member, in archive order
     archive_members: list[tuple] = field(default_factory=list)
     truncated: set[str] = field(default_factory=set)
 
@@ -127,17 +128,17 @@ def emit_fact(kind: str, name: str, /, **detail) -> None:
     ))
 
 
-def emit_archive(format: str, state: str, states: list[str], /, **detail) -> None:
+def emit_archive(archive: str, format: str, state: str, states: list[str], /, **detail) -> None:
     """Record how an archive was inspected: its primary ``state``, every state that applies
-    and the counts, coverage and limits in ``detail`` (one record per archive file)."""
+    and the counts, coverage and limits in ``detail`` (one record per archive, nested too)."""
     facts = _current()
     if facts is None:
         return
-    facts.archives[:] = [(format, state, ",".join(states),
-                          json.dumps(detail, ensure_ascii=True, sort_keys=True, separators=(",", ":")))]
+    facts.archives.append((_storable(archive), format, state, ",".join(states),
+                           json.dumps(detail, ensure_ascii=True, sort_keys=True, separators=(",", ":"))))
 
 
-def emit_archive_member(ordinal: int, path: str, kind: str, size: int | None, compressed_size: int | None,
+def emit_archive_member(archive: str, ordinal: int, path: str, kind: str, size: int | None, compressed_size: int | None,
                         mode: int | None, mtime: str | None, flags: list[str], link_target: str | None = None,
                         uid: int | None = None, gid: int | None = None, owner: str | None = None,
                         group: str | None = None) -> bool:
@@ -150,7 +151,7 @@ def emit_archive_member(ordinal: int, path: str, kind: str, size: int | None, co
         return False
     # Member names come from the archive, as bytes decoded by the reader: keep them storable.
     facts.archive_members.append((
-        ordinal, _storable(path)[:4096], kind, size, compressed_size, mode, mtime, ",".join(flags),
+        _storable(archive), ordinal, _storable(path)[:4096], kind, size, compressed_size, mode, mtime, ",".join(flags),
         None if link_target is None else _storable(link_target)[:4096], uid, gid,
         None if owner is None else _storable(owner)[:256], None if group is None else _storable(group)[:256],
     ))

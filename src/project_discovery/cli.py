@@ -2153,7 +2153,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--archive-limit", action="append", default=[], metavar="NAME=VALUE",
         help="Override an archive inspection limit for this scan: entries, index_mb, member_sample_mb, sample_mb, "
-             "wall_seconds, decompressed_mb, uncompressed_mb or ratio (byte limits in MiB); repeatable",
+             "wall_seconds, decompressed_mb, uncompressed_mb, ratio, nested_depth or nested_mb (byte limits in "
+             "MiB); repeatable",
     )
     scan.add_argument(
         "--max-memory-mb", type=int, default=0, metavar="MB",

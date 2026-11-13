@@ -423,8 +423,9 @@ class InventoryStore:
             "code_calls": [(*item, key) for item in facts.calls],
             "code_references": [(name, key) for name in sorted(facts.references)],
             "code_facts": [(*item, key) for item in facts.facts],
-            "archive_summaries": [(*item, key) for item in getattr(facts, "archives", ())],
-            "archive_members": [(*item, key) for item in getattr(facts, "archive_members", ())],
+            # Archive rows name their own archive (a nested one is "outer.zip::inner.jar").
+            "archive_summaries": [(*item[1:], sqlite_text(item[0])) for item in getattr(facts, "archives", ())],
+            "archive_members": [(*item[1:], sqlite_text(item[0])) for item in getattr(facts, "archive_members", ())],
         }
         for table, new_rows in rows.items():
             if not new_rows:

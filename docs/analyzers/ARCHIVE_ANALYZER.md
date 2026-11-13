@@ -45,9 +45,12 @@ These are the defaults; `pdt scan --archive-limit NAME=VALUE` overrides any of t
 - Wall time: 8 seconds per archive for metadata traversal and member sampling.
 - Declared uncompressed size: 16 GiB per archive. Members declaring more in total get an `INFERRED` HIGH "Archive declares more uncompressed data than its budget" finding (a possible archive bomb) and the archive record the `uncompressed_bytes` limit; traversal continues, since nothing is decompressed past the samples.
 - Compression ratio: members compressed more than 1,000:1, or to zero bytes, are flagged `high-ratio`.
+- Nested archives: one level (`nested_depth`) and 64 MiB of nested archives in memory per archive (`nested_mb`).
 - Evidence: at most 100 source/member references per finding.
 
-When a count, byte or time budget is reached, the analyzer records an explicit UNKNOWN finding. A partial archive result must not be interpreted as a complete clean scan. Nested archive recursion is not implemented.
+When a count, byte or time budget is reached, the analyzer records an explicit UNKNOWN finding. A partial archive result must not be interpreted as a complete clean scan. ## Nested archives
+
+A ZIP or TAR member named like an archive these readers inspect (`.zip`, `.jar`, `.war`, `.ear`, `.apk`, `.aab`, `.ipa`, `.whl`, `.egg`, `.nupkg`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz2`, `.tar.xz`, `.txz`) is flagged `nested-archive` and, within the budgets, read whole into memory and inspected the same way: it gets its own archive record, member records and findings, named `outer.war::WEB-INF/lib/inner.jar`, and shares the top-level archive's wall-time budget. Nesting stops at `nested_depth` levels (1 by default) and when the nested archives would exceed `nested_mb` (64 MiB per top-level archive in total); the archive that holds a member left uninspected records the `nested_depth` or `nested_bytes` limit, and the member is sampled like any other file. Nothing is written to disk.
 
 ## Evidence and checks
 
@@ -66,7 +69,6 @@ The member content scan is a conservative indicator scan, not malware detection,
 
 ## Production gates still open
 
-- A nesting-depth budget, with nested archive traversal.
 - Nested archive traversal under a shared recursion/decompression budget.
 - ZIP data-descriptor, self-extracting archive and malformed/truncated-header fixtures.
 - Additional metadata readers for 7z, RAR, CAB, ISO, Zstandard and package formats, using optional offline readers only.
