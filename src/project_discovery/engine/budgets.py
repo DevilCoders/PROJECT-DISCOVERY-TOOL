@@ -250,9 +250,11 @@ _SET_ASYNC_EXC.argtypes = (ctypes.c_ulong, ctypes.py_object)
 _SET_ASYNC_EXC.restype = ctypes.c_int
 
 
-def _raise_in(thread: int, exception: type[BaseException] | None) -> None:
-    # A NULL exception clears one that is pending and not yet delivered.
-    _SET_ASYNC_EXC(ctypes.c_ulong(thread), ctypes.py_object() if exception is None else ctypes.py_object(exception))
+def _raise_in(thread: int, exception: type[BaseException]) -> None:
+    # Never called with NULL to clear a pending exception: on Python 3.11 that still raises
+    # the interpreter's asynchronous-exception flag, which then never clears, and a traced
+    # process (coverage) spins at every function entry. A pending stop is delivered instead.
+    _SET_ASYNC_EXC(ctypes.c_ulong(thread), ctypes.py_object(exception))
 
 
 class _Call:
@@ -303,13 +305,11 @@ class _Watchdog:
         return call
 
     def disarm(self, call: _Call) -> BudgetStop | None:
-        """End a call; returns its stop if the watchdog fired, and clears an undelivered one."""
+        """End a call; returns its stop if the watchdog fired."""
         with self._lock:
             if call.running:
                 call.running = False
                 self._calls.pop(id(call), None)
-                if call.stop is not None:
-                    _raise_in(call.thread, None)
             return call.stop
 
     def _watch(self) -> None:
@@ -348,6 +348,17 @@ def _peak(call: _Call) -> float | None:
     return call.peak / _MIB if call.memory_limit and call.samples else None
 
 
+def _deliver_pending_stop() -> None:
+    """Take here a stop the watchdog raised just as the call returned.
+
+    The interpreter delivers an asynchronous exception at its next periodic check: loop
+    back-edges are such checks on every supported version, so a stop still pending
+    surfaces in this loop, inside the guarded region, never in the caller's code.
+    """
+    for _ in range(4):
+        pass
+
+
 def run_with_budget(budget: AnalyzerBudget | None, function: Callable[[], Any]) -> BudgetRun:
     """Run one analyzer call under its budget (no budget: just run it and time it)."""
     started = time.perf_counter()
@@ -360,8 +371,11 @@ def run_with_budget(budget: AnalyzerBudget | None, function: Callable[[], Any]) 
             result = function()
         finally:
             stop = _WATCHDOG.disarm(call)
+            if stop is not None:
+                _deliver_pending_stop()  # raises it if the call did not receive it
     except AnalyzerBudgetExceeded:
-        # Delivered after the call or inside disarm(): end the call (idempotent) first.
+        # Delivered in the call, inside disarm() or by _deliver_pending_stop(): end the call
+        # (idempotent) first.
         stop = _WATCHDOG.disarm(call) or call.stop
         if stop is None:
             raise

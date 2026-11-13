@@ -249,6 +249,11 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
 - Report schema 1.15: `metrics.analysis_budgets`.
 
 ### Fixed: found during the filesystem inventory work
+- A budget stop that reached an analyzer call just as it returned was cleared with
+  `PyThreadState_SetAsyncExc(id, NULL)`, which on Python 3.11 leaves the interpreter's
+  asynchronous-exception flag set for good: a traced process (coverage) hung, and an untraced
+  one took the interpreter's slow path from then on. Such a stop is now delivered inside the
+  guarded call (PDT-422).
 - A file replaced by a FIFO between its check and its open blocked the scan for good: hashing,
   the signature sample and analyzer reads opened it without `O_NONBLOCK`, and an open of a FIFO
   waits for a writer (no budget can interrupt it). The verified open now never waits, and
