@@ -1615,6 +1615,8 @@ def capabilities_report() -> dict:
     """Describe this installation: native backends, optional parsers and analyzers."""
     from importlib import metadata
 
+    from .analyzers.content.archive_formats import zstd_decompressor
+
     def version_of(distribution: str) -> str | None:
         try:
             return metadata.version(distribution)
@@ -1656,6 +1658,9 @@ def capabilities_report() -> dict:
             "pypdf": version_of("pypdf"),
             "python-docx": version_of("python-docx"),
             "PyYAML": version_of("PyYAML"),
+            # Zstandard archives: Python 3.14's compression.zstd, else the optional package.
+            "zstandard": ("built in (compression.zstd)" if zstd_decompressor() == "compression.zstd"
+                          else version_of("zstandard")),
         },
         "analyzers": [
             {"name": analyzer.name, "version": analyzer.version, "domains": list(analyzer.domains),

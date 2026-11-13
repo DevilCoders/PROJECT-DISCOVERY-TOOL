@@ -34,7 +34,7 @@ Requires Python 3.11 or later.
 
 ```bash
 python -m pip install -e .            # core
-python -m pip install -e ".[all]"     # Tree-sitter, PDF/DOCX and YAML integrations
+python -m pip install -e ".[all]"     # Tree-sitter, PDF/DOCX, YAML and Zstandard integrations
 python -m pip install -e ".[dev]"     # development (then run: pytest)
 ```
 

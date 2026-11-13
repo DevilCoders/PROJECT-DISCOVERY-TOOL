@@ -7,8 +7,15 @@ PDT inspects archive metadata and bounded member samples in memory. Archive memb
 | Format family | Current behavior |
 |---|---|
 | ZIP-based packages (ZIP, JAR, WAR, EAR, APK/AAB, IPA, WHL/EGG, NUPKG) | Central-directory preflight, bounded metadata inventory, link/permission/path checks, encrypted/duplicate/high-ratio indicators and bounded member content samples |
-| TAR and compressed TAR variants | Streaming metadata walk, symlink/hardlink/special-entry checks, mode-bit checks and bounded member content samples |
-| Standalone GZIP/BZIP2/XZ, Zstandard, 7z, RAR, CAB, ISO, DEB and RPM | Recognition/detection only unless the file is a TAR container readable by the standard-library TAR backend; no external extractor is invoked |
+| TAR and compressed TAR (gzip, bzip2, xz, Zstandard) | Streaming metadata walk, symlink/hardlink/special-entry checks, mode-bit checks and bounded member content samples |
+| ar: DEB/UDEB packages, static libraries (`.a`, `.lib`) | Member headers (common, GNU long-name table and thin archives, BSD `#1/` names; the symbol table is not a member); a DEB's package fields from its control file; members sampled in place; a DEB's `control.tar.*` and `data.tar.*` inspected as nested archives in place |
+| CAB (Microsoft Cabinet) | The file table: names, sizes and DOS times, and the folders' compression (MSZIP, LZX, Quantum, none); member data is not decompressed, so content is not sampled |
+| RPM | The lead and header: package fields and the file list (paths, sizes, modes, times, owners, groups, symlink targets, hardlinks by shared inode); the payload is not decompressed |
+| Standalone GZIP/BZIP2/XZ/Zstandard, 7z, RAR, ISO, cpio, xar, WIM and other recognized containers | Recognition only, recorded `unsupported`; no external extractor is invoked |
+
+Every reader is built in (the standard library), except Zstandard before Python 3.14: Python 3.14 has `compression.zstd`, and earlier versions need the optional `zstandard` package (`python -m pip install -e ".[archives]"`, also part of `[all]`). Without either, a `.tar.zst` (or a DEB's `data.tar.zst`) is recorded `unsupported` with an `unsupported_reason`, and `pdt capabilities` shows which decompressor a host has. Both decompressors refuse frames whose window exceeds libzstd's default limit (128 MiB).
+
+The reader follows the content's signature, then the name: a name decides unless the content is another archive format (a `.zip` that holds a RAR archive is not read as ZIP), and compressed content is read by name only as a TAR stream (`.tgz`, `.tar.zst`, `.ipk`). Content whose start is no archive at all (a `.jar` behind a launcher script, a self-extracting `.zip`) is read by its name.
 
 ## Inspection records
 
@@ -19,8 +26,8 @@ An archive's `state` is how far its inspection got, and `states` lists everythin
 | State | Meaning |
 |---|---|
 | `detected` | Recognized as an archive (always present) |
-| `unsupported` | No built-in metadata reader for the format (7z, RAR, CAB, ISO, standalone GZIP, ...) |
-| `index-read` | The member index (ZIP central directory, TAR headers) was read, at least in part |
+| `unsupported` | No built-in metadata reader for the format (7z, RAR, ISO, standalone GZIP, ...), or no decompressor for it in this installation (`unsupported_reason` says which) |
+| `index-read` | The member index (ZIP central directory, TAR or ar headers, cabinet file table, RPM header) was read, at least in part |
 | `metadata-complete` | Every member's metadata was read |
 | `sample-read` | Member content was sampled in memory |
 | `sample-truncated` | Some members' content was not read in full (a sample budget, an unreadable member) |
@@ -28,9 +35,9 @@ An archive's `state` is how far its inspection got, and `states` lists everythin
 | `malformed` | The archive could not be read; `error` says why |
 | `budget-stopped` | A limit stopped the metadata traversal: the entry, index-byte, wall-time or TAR decompression budget, or the engine's per-call budgets (`analyzer_time`, `analyzer_memory`, ...) |
 
-The primary `state` is the first of `malformed`, `unsupported`, `budget-stopped`, `metadata-complete`, `index-read`, `detected` that applies. Each record also holds `format` (`zip`, `tar`, `tar+gzip`, `tar+bzip2`, `tar+xz`, or the detected type), `archive_bytes`, `compressed_bytes`, `members_declared` (the ZIP central directory's count; for TAR, the count once every header was read), `members_indexed`, `member_coverage_pct`, `regular_members`, `member_bytes` (their uncompressed size), `members_sampled`, `members_fully_sampled`, `members_not_fully_sampled`, `member_bytes_sampled`, `content_coverage_pct` (the share of regular members' bytes sampled), `encrypted_members`, `member_records` and `limits`: every limit that prevented deeper inspection, with its `value` and, where known, what was `used` or how many `members` it affected.
+The primary `state` is the first of `malformed`, `unsupported`, `budget-stopped`, `metadata-complete`, `index-read`, `detected` that applies. Each record also holds `format` (`zip`, `tar`, `tar+gzip`, `tar+bzip2`, `tar+xz`, `tar+zstd`, `ar`, `deb`, `cab`, `rpm`, or the detected type), `archive_bytes`, `compressed_bytes` (for a cabinet the file, for an RPM its payload), `members_declared` (the count the ZIP central directory, the cabinet or the RPM header declares; for TAR and ar, the count once every header was read), `members_indexed`, `member_coverage_pct`, `regular_members`, `member_bytes` (their uncompressed size), `members_sampled`, `members_fully_sampled`, `members_not_fully_sampled`, `member_bytes_sampled`, `content_coverage_pct` (the share of regular members' bytes sampled), `encrypted_members`, `member_records` and `limits`: every limit that prevented deeper inspection, with its `value` and, where known, what was `used` or how many `members` it affected. Readers add what their format says: `deb` (`format_version`, `package`, `source`, `version`, `architecture`, `maintainer`, `installed_size`, `depends`, `pre_depends`, `section`, `priority`, `homepage`, `description` (the synopsis), or a `control_error`), `ar` (`variant`: `common`, `gnu` or `bsd`; `thin`; `symbol_table`), `cab` (`version`, `folders`, `compression`, `set_id`, `cabinet_index`, `cabinet_bytes`, `spans_cabinets`), `rpm` (`name`, `version`, `release`, `epoch`, `summary`, `license`, `url`, `arch`, `source_rpm`, `payload_format`, `payload_compressor`, `source_package`, `payload_bytes`) and, for cabinets and RPMs, whose members are compressed together, the archive's `compression_ratio`.
 
-A member record holds the `archive`, its `ordinal` in the archive, `path`, `type` (`file`, `directory`, `symlink`, `hardlink`, `special`), `size`, `compressed_size` (ZIP), `mode` (permission bits), `mtime`, `link_target`, `uid`, `gid`, `owner` and `group` (TAR) and `flags`: `unsafe-path` (absolute, drive-prefixed or parent-traversal path or link target), `setuid`, `setgid`, `world-writable`, `encrypted`, `high-ratio` (over 1000:1 or a zero compressed size), `duplicate` (the name occurs more than once), `nested-archive` and, for ZIP members, `header-mismatch`, `descriptor-mismatch`, `out-of-bounds` and `overlapping` (see below). ZIP times are the members' DOS timestamps, local time without a zone at two-second resolution; TAR times are UTC. Names that are not valid UTF-8 keep backslash escapes.
+A member record holds the `archive`, its `ordinal` in the archive, `path`, `type` (`file`, `directory`, `symlink`, `hardlink`, `special`), `size`, `compressed_size` (ZIP), `mode` (permission bits), `mtime`, `link_target` (TAR, ZIP, RPM symlinks; an RPM hardlink names the file it shares an inode with), `uid` and `gid` (TAR, ar), `owner` and `group` (TAR, RPM) and `flags`: `unsafe-path` (absolute, drive-prefixed or parent-traversal path or link target; an RPM installs its absolute paths from `/` and a DEB's tarballs install links as links, so there only a parent traversal or drive prefix in a path counts), `setuid`, `setgid`, `world-writable` (never for a symlink, whose own mode bits are unused), `encrypted`, `high-ratio` (over 1000:1 or a zero compressed size), `duplicate` (the name occurs more than once), `nested-archive` and, for ZIP members, `header-mismatch`, `descriptor-mismatch`, `out-of-bounds` and `overlapping` (see below). ZIP and cabinet times are the members' DOS timestamps, local time without a zone at two-second resolution; TAR, ar and RPM times are UTC. Names that are not valid UTF-8 keep backslash escapes.
 
 An archive keeps up to 200,000 member records (its entry limit) and a scan up to 1,000,000; past the scan's ceiling the archives keep their summaries, and `metrics.archives` reports the records dropped. `metrics.archives` also counts archives by state and format, sums the members and bytes with their coverage, and counts the archives each limit stopped. The Markdown report has an *Archives* section with the archives not fully inspected first, the HTML report an *Archives by inspection state* card, and the terminal summary an *Archives* row.
 
@@ -38,19 +45,24 @@ An archive keeps up to 200,000 member records (its entry limit) and a scan up to
 
 These are the defaults; `pdt scan --archive-limit NAME=VALUE` overrides any of them for a scan (`entries`, `index_mb`, `member_sample_mb`, `sample_mb`, `wall_seconds`, `decompressed_mb`, `uncompressed_mb`, `ratio`; byte limits in MiB). The overrides travel with the budget policy to every worker process, and `metrics.analysis_budgets` reports them (`analyzer_limit_overrides`) with the values in force (`analyzer_limits`):
 
+- Index: 200,000 entries (`entries`) for every format, and 64 MiB (`index_mb`) of ZIP central directory, ar long-name table, cabinet file table or RPM header structure; an index over it is not read and the archive is `budget-stopped` with an UNKNOWN finding. A DEB's control tarball is read for its fields up to 4 MiB, decompressing to at most 16 MiB.
 - ZIP central-directory preflight: 200,000 entries and 64 MiB of declared central-directory bytes. The ZIP64 record is read the way `zipfile` reads it (whenever its locator precedes the EOCD, from just before the locator), so a classic EOCD that understates the entry count cannot slip past. If a valid bounded index cannot be established from the EOCD/ZIP64 trailer, the analyzer returns UNKNOWN without materializing ZipFile.infolist().
 - Member sample: 1 MiB maximum per regular member.
 - Total member sample: 32 MiB maximum per archive.
-- Compressed TAR (gzip, bzip2, xz): decompressed through a budgeted reader capped at 4 GiB of output. The reader also enforces the wall-time budget inside each read.
+- Compressed TAR (gzip, bzip2, xz, Zstandard): decompressed through a budgeted reader capped at 4 GiB of output. The reader also enforces the wall-time budget inside each read.
 - Wall time: 8 seconds per archive for metadata traversal and member sampling.
 - Declared uncompressed size: 16 GiB per archive. Members declaring more in total get an `INFERRED` HIGH "Archive declares more uncompressed data than its budget" finding (a possible archive bomb) and the archive record the `uncompressed_bytes` limit; traversal continues, since nothing is decompressed past the samples.
-- Compression ratio: members compressed more than 1,000:1, or to zero bytes, are flagged `high-ratio`.
+- Compression ratio: members compressed more than 1,000:1, or to zero bytes, are flagged `high-ratio`; a cabinet or RPM, whose members are compressed together, gets a HIGH "High compression-ratio archive" finding when its members declare more than 1,000 times its compressed bytes.
 - Nested archives: one level (`nested_depth`) and 64 MiB of nested archives in memory per archive (`nested_mb`).
 - Evidence: at most 100 source/member references per finding.
 
-When a count, byte or time budget is reached, the analyzer records an explicit UNKNOWN finding. A partial archive result must not be interpreted as a complete clean scan. ## Nested archives
+When a count, byte or time budget is reached, the analyzer records an explicit UNKNOWN finding. A partial archive result must not be interpreted as a complete clean scan.
 
-A ZIP or TAR member named like an archive these readers inspect (`.zip`, `.jar`, `.war`, `.ear`, `.apk`, `.aab`, `.ipa`, `.whl`, `.egg`, `.nupkg`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz2`, `.tar.xz`, `.txz`) is flagged `nested-archive` and, within the budgets, read whole into memory and inspected the same way: it gets its own archive record, member records and findings, named `outer.war::WEB-INF/lib/inner.jar`, and shares the top-level archive's wall-time budget. Nesting stops at `nested_depth` levels (1 by default) and when the nested archives would exceed `nested_mb` (64 MiB per top-level archive in total); the archive that holds a member left uninspected records the `nested_depth` or `nested_bytes` limit, and the member is sampled like any other file. Nothing is written to disk.
+## Nested archives
+
+A ZIP, TAR or ar member named like an archive these readers inspect (`.zip`, `.jar`, `.war`, `.ear`, `.apk`, `.aab`, `.ipa`, `.whl`, `.egg`, `.nupkg`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz2`, `.tar.xz`, `.txz`, `.tar.zst`, `.tzst`) is flagged `nested-archive` and, within the budgets, read whole into memory and inspected the same way: it gets its own archive record, member records and findings, named `outer.war::WEB-INF/lib/inner.jar`, and shares the top-level archive's wall-time budget. Nesting stops at `nested_depth` levels (1 by default) and when the nested archives would exceed `nested_mb` (64 MiB per top-level archive in total); the archive that holds a member left uninspected records the `nested_depth` or `nested_bytes` limit, and the member is sampled like any other file. Nothing is written to disk.
+
+An ar archive stores its members uncompressed, so an archive inside one (a DEB's `control.tar.*` and `data.tar.*`) is read in place from the file, without buffering, and no `nested_mb` budget applies; the depth limit does. A DEB's tarballs are package payloads: `dpkg` installs their links as links, wherever they point, so their link targets are not checked for traversal (their member paths are).
 
 ## Evidence and checks
 
@@ -58,7 +70,7 @@ The current metadata/content checks include:
 
 - Absolute paths, drive-prefixed names and parent-traversal member paths.
 - ZIP symlink entries and TAR symlink/hardlink targets; links are reported but not followed.
-- TAR device/FIFO/socket-like special entries.
+- TAR and RPM device/FIFO/socket-like special entries, and RPM hardlinks (files that share an inode).
 - ZIP/TAR setuid, setgid and world-writable permission bits.
 - Duplicate ZIP member names, encrypted ZIP entries and ZIP compression ratios above 1000:1.
 - ZIP structure: each member's local header is read and compared with the central directory (name, compression method, CRC and sizes), and so is its data descriptor (bit 3; with or without the optional signature, 4-byte or ZIP64 8-byte sizes). A disagreement (`header-mismatch`, `descriptor-mismatch`) means tools that read local headers see another archive than tools that read the directory: a MEDIUM finding. Members whose data overlaps another's (`overlapping`), the construction of non-recursive zip bombs, are a HIGH finding and are not opened. Members whose data runs past the central directory or the end of the file (`out-of-bounds`) mark the archive `malformed`, and an end-of-directory entry count that disagrees with the directory (a truncated or rewritten directory) is reported, with `declared_entries` in the archive record and the coverage computed against the larger count. The record's `structure_issues` counts each kind.
@@ -72,5 +84,5 @@ The member content scan is a conservative indicator scan, not malware detection,
 
 - Nested archive traversal under a shared recursion/decompression budget.
 - Self-extracting archive fixtures (prepended data shifts every offset; `zipfile` adjusts them, untested here).
-- Additional metadata readers for 7z, RAR, CAB, ISO, Zstandard and package formats, using optional offline readers only.
+- Metadata readers for 7z, RAR, ISO, standalone Zstandard frames and language package formats (`.gem`, `.crate`, `.conda`), using optional offline readers only.
 - Adversarial archive corpus and CPU/memory/time benchmark results on large real-world archives.

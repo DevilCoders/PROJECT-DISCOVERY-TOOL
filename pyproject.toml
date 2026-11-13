@@ -26,11 +26,14 @@ dev = [
 polyglot = ["tree-sitter-language-pack>=1.23,<2"]
 infrastructure = ["PyYAML>=6.0,<7"]
 documents = ["pypdf>=5,<7", "python-docx>=1.1,<2"]
+# Zstandard archives (.tar.zst, DEB data.tar.zst): Python 3.14 has compression.zstd built in.
+archives = ["zstandard>=0.22,<1; python_version < '3.14'"]
 all = [
     "tree-sitter-language-pack>=1.23,<2",
     "pypdf>=5,<7",
     "python-docx>=1.1,<2",
     "PyYAML>=6.0,<7",
+    "zstandard>=0.22,<1; python_version < '3.14'",
 ]
 
 [tool.setuptools.packages.find]

@@ -228,6 +228,26 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: ar, DEB, Cabinet, RPM and Zstandard TAR readers
+- ar archives (common, GNU long names and thin archives, BSD names): member records, members
+  sampled in place, and for a DEB its package fields (`deb` in the archive record) and its control
+  and data tarballs inspected as nested archives in place, without buffering; their link
+  targets are not traversal findings, since dpkg installs links as links. Static libraries too.
+- Microsoft Cabinet: the file table's names, sizes and times and the folders' compression; RPM:
+  the header's package fields and file list (modes, owners, symlink targets, hardlinks by inode),
+  with absolute install paths not reported as traversal. Neither payload is decompressed; an
+  archive-level compression ratio over 1,000:1 is a HIGH finding. Malformed headers are
+  `malformed`; an index over `--archive-limit index_mb` is `budget-stopped`.
+- `.tar.zst` and other Zstandard TAR streams, through Python 3.14's `compression.zstd` or the
+  optional `zstandard` package (`pip install "project-discovery-tool[archives]"`, also in `[all]`);
+  without one the archive is `unsupported` with an `unsupported_reason`. `pdt capabilities` shows it.
+- The reader follows the content's signature before the name (a `.zip` that holds a RAR archive is
+  no longer read as ZIP).
+
+### Fixed: symlink mode bits
+- A symlink member's `0777` mode is no longer flagged `world-writable` (a HIGH "Risky archive
+  permissions" finding for every TAR or ZIP with a symlink): a link's own mode bits are unused.
+
 ### Added: ZIP structure validation
 - Every ZIP member's local header and data descriptor are checked against the central directory
   (name, method, CRC, sizes; 4-byte or ZIP64 descriptor sizes): a disagreement is a
