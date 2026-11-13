@@ -139,7 +139,7 @@ def test_json_reports_carry_the_scan_summary(tmp_path: Path):
         "remote": _result(remote=_remote_metadata(), online=_online_status()),
     }.items():
         payload = json.loads(write_reports(result, tmp_path / name, {"json"})[0].read_text(encoding="utf-8"))
-        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.10"
+        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.11"
         assert payload["scan"] == scan_summary(result.metrics)
     assert payload["scan"]["remote"]["url"] == "https://github.com/acme/widgets"
     assert payload["metrics"]["vulnerability_intelligence"]["online"]["cache"]["hits"] == 2
@@ -362,6 +362,14 @@ def test_reports_summarize_entry_attributes_and_security_metadata(tmp_path: Path
         " • security metadata: 7 entries, 1 with ACL entries of their own, 2 unreadable"
     )
     assert dump["file-rows"]["rows"][0][4] == "readonly / archive"
+    # Inventory aggregates: the fan-out card and the empty-directory and hard-link counts.
+    result.metrics["inventory_aggregates"] = {
+        "empty_directory_count": 3, "fan_out": {"buckets": {"0": 3, "1-9": 4}},
+        "hard_links": {"supported": True, "hard_linked_files": 2},
+    }
+    dump = _render_html_client(result, tmp_path / "aggregates")
+    assert [row[0] for row in dump["fan-out"]["rows"]] == ["1-9", "0"]
+    assert " • 3 empty directories • 2 hard-linked files" in dump["inventory-summary"]["text"]
     # A scan without the option shows neither, and says so in Markdown.
     plain = _result()
     markdown = write_reports(plain, tmp_path / "plain", {"markdown"})[0].read_text(encoding="utf-8")

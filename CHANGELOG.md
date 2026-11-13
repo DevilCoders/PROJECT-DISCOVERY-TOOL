@@ -158,6 +158,12 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   resolved physically and Windows `..` lexically; Windows and case-insensitive macOS volumes match
   names without regard to case. `metrics.symlink_states` counts the states, shown in the terminal,
   Markdown and HTML reports.
+- `metrics.inventory_aggregates`: empty directories, directory fan-out (largest, mean and a
+  histogram), hard links (files sharing a device and inode, or a Windows file ID, with another
+  inventoried file), owners and groups by uid and gid (and owner SIDs with `--security-metadata`),
+  and file modification times (oldest, newest, by year, in the future, before 1980), computed in
+  SQL over the stored inventory and shown in the terminal, Markdown and HTML reports.
+- Report schema 1.11: `metrics.inventory_aggregates`.
 - Report schema 1.10: the `target_state` values above, and `resolved_path`, `resolved_type` and
   `target_detail` on symlink records, and `metrics.symlink_states`.
 - Report schema 1.9: `mtime_ns` and `reparse_tag` on directory, symlink and special-entry

@@ -13,8 +13,10 @@ from typing import Any, Literal, Sequence
 # special-entry records (reparse_tag to file records), device_major and device_minor to
 # special entries, and metrics.reparse_tags. 1.10 resolves every symlink against the
 # inventory: target_state is resolved, broken, loop, external, unknown or unreadable, with
-# resolved_path, resolved_type and target_detail, and metrics.symlink_states.
-REPORT_SCHEMA_VERSION = "1.10"
+# resolved_path, resolved_type and target_detail, and metrics.symlink_states. 1.11 added
+# metrics.inventory_aggregates (empty directories, fan-out, hard links, owners, groups and
+# file timestamps).
+REPORT_SCHEMA_VERSION = "1.11"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

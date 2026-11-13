@@ -64,6 +64,8 @@ if(truncated.length){
 fillBars("file-types",metrics.file_types);fillBars("size-buckets",metrics.size_buckets);
 fillBars("development-dirs",metrics.development_directories);
 fillBars("entry-attributes",metrics.entry_attributes);
+const aggregates=metrics.inventory_aggregates||{};
+fillBars("fan-out",(aggregates.fan_out||{}).buckets);
 $("host-os").textContent=JSON.stringify({
  host:metrics.host_os||{},
  native_backend:metrics.native_backend||{backend:"not reported"}
@@ -253,6 +255,8 @@ $("inventory-summary").textContent=number(total("files"))+" files • "+
  (metrics.size_unknown_count?" (plus "+number(metrics.size_unknown_count)+" files of unknown size)":"")+" • "+number(metrics.hidden_entry_count||0)+
  " hidden entries • "+number(metrics.development_directory_count||0)+" development/cache trees • "+
  number(metrics.pruned_directory_count||0)+" explicitly pruned directories"+
+ (aggregates.empty_directory_count===undefined?"":" • "+number(aggregates.empty_directory_count)+" empty directories")+
+ ((aggregates.hard_links||{}).supported?" • "+number(aggregates.hard_links.hard_linked_files)+" hard-linked files":"")+
  (function(security){
   if(!security||!security.enabled)return "";
   return " • security metadata: "+number(security.entries||0)+" entries, "+number(security.explicit_acl_entries||0)+

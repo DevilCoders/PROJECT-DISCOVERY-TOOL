@@ -52,6 +52,7 @@ from .engine.native import native_available
 from .intelligence.architecture import analyze_project_architecture
 from .intelligence.index import QUERY_KINDS, analyze_code_index, code_index_state, query_code_index
 from .intelligence.python_graph import analyze_python_dependencies
+from .inventory.aggregates import inventory_aggregates
 from .inventory.cache import ScanCache
 from .inventory.entry_metadata import security_supported
 from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
@@ -107,7 +108,7 @@ from .plugins.isolation import (
 )
 from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
-from .reporting.writers import attribute_summary, write_remote_batch_summary, write_reports
+from .reporting.writers import aggregate_summary, attribute_summary, write_remote_batch_summary, write_reports
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
 
 
@@ -584,6 +585,7 @@ def run_scan(
         else:
             _status(console, "INFO", "Read-only discovery: " + str(root), "cyan")
         started = now()
+        scan_started_ns = time.time_ns()
         timer = PhaseTimer()
         inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
         storage_notes: list[str] = []  # moved-aside databases and unused exclusions: run diagnostics
@@ -917,6 +919,7 @@ def run_scan(
                 timer.lap("cache_maintenance")
 
             with InventoryStore(inventory_path) as finding_store:
+                aggregates = inventory_aggregates(finding_store, scan_started_ns=scan_started_ns)
                 if memory_source is not None:
                     memory_metadata = memory_source.finalize()
                     finding_store.extend_diagnostics(memory_metadata.get("coverage_gaps", []))
@@ -1074,6 +1077,8 @@ def run_scan(
                 for key, value in walk_stats.items() if key.startswith("size_bucket:") and value
             },
             "total_bytes": walk_stats.get("total_bytes", 0),
+            # Empty directories, fan-out, hard links, owners and groups, file timestamps.
+            "inventory_aggregates": aggregates,
             # Files whose size no listing gave and no read revealed (no-download, GitLab); they
             # are in the "unknown" size bucket and not in total_bytes.
             "size_unknown_count": walk_stats.get("size_unknown_count", 0),
@@ -1178,6 +1183,9 @@ def run_scan(
                 f"with own ACL entries / {security_summary['errors']:,} unreadable",
             )
         summary.add_row("Development/cache trees", str(metrics["development_directory_count"]))
+        for label, value in aggregate_summary(metrics["inventory_aggregates"]):
+            # The paths come from the scanned tree: no control sequence may reach the terminal.
+            summary.add_row(label, escape(neutralize_controls(value)))
         summary.add_row("Total size", f"{metrics['total_bytes']:,} bytes")
         summary.add_row("Languages / formats detected", str(len(counts)))
         summary.add_row("Findings", str(len(findings)))

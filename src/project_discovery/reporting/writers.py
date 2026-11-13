@@ -94,6 +94,51 @@ def _link_outcome(item) -> str:
     return f"{state}: {detail}" if detail else state
 
 
+def _utc_date(mtime_ns: int) -> str:
+    from datetime import datetime, timezone
+
+    try:
+        return datetime.fromtimestamp(mtime_ns / 1e9, tz=timezone.utc).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return f"{mtime_ns} ns"
+
+
+def aggregate_summary(aggregates: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """(label, text) lines for metrics.inventory_aggregates, shared by the terminal and Markdown."""
+    if not aggregates:
+        return []
+    if "error" in aggregates:
+        return [("Inventory aggregates", str(aggregates["error"]))]
+    lines = [("Empty directories", f"{aggregates.get('empty_directory_count', 0):,}")]
+    fan_out = aggregates.get("fan_out") or {}
+    if fan_out.get("max_path") is not None:
+        lines.append((
+            "Largest directory fan-out",
+            f"{fan_out['max']:,} entries in {fan_out['max_path']} (mean {fan_out.get('mean', 0)})",
+        ))
+    links = aggregates.get("hard_links") or {}
+    lines.append(("Hard-linked files", (
+        f"{links.get('hard_linked_files', 0):,} in {links.get('groups', 0):,} group(s)"
+        if links.get("supported") else "not determined: no file identities were recorded"
+    )))
+    for key, label in (("owners", "Owners (uid)"), ("groups", "Groups (gid)"), ("owner_sids", "Owners (SID)")):
+        if aggregates.get(key):
+            lines.append((label, attribute_summary(aggregates[key], limit=5)))
+    timestamps = aggregates.get("file_timestamps") or {}
+    if timestamps.get("oldest") and timestamps.get("newest"):
+        text = (
+            f"oldest {_utc_date(timestamps['oldest']['mtime_ns'])} ({timestamps['oldest']['path']}), "
+            f"newest {_utc_date(timestamps['newest']['mtime_ns'])} ({timestamps['newest']['path']})"
+        )
+        unusual = [
+            f"{timestamps[key]:,} {label}" for key, label in (
+                ("future_count", "in the future"), ("before_1980_count", "before 1980"),
+            ) if timestamps.get(key)
+        ]
+        lines.append(("File modification times", text + (f"; {', '.join(unusual)}" if unusual else "")))
+    return lines
+
+
 def security_metadata_summary(metrics: dict[str, Any]) -> str:
     """One line on the --security-metadata block of the scan metrics."""
     security = metrics.get("security_metadata") or {}
@@ -328,6 +373,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>File size distribution</h3><div id="size-buckets"></div></div>
      <div class="profile-card"><h3>Development dependency trees</h3><div id="development-dirs"></div></div>
      <div class="profile-card"><h3>Entry attributes</h3><div id="entry-attributes"></div></div>
+     <div class="profile-card"><h3>Directory fan-out</h3><div id="fan-out"></div></div>
      <div class="profile-card"><h3>Host & native engine</h3><div id="host-os" class="mono muted"></div></div>
      <div class="profile-card"><h3>Vulnerability intelligence</h3><div id="vuln-summary" class="mono muted"></div></div>
      <div class="profile-card"><h3>Source control & delivery</h3><div id="vcs-summary" class="mono muted"></div></div>
@@ -637,6 +683,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         *([f"- Windows reparse points: {_md(attribute_summary(metrics['reparse_tags']))}"]
           if metrics.get("reparse_tags") else []),
         f"- Development/cache trees: {metrics.get('development_directory_count', 0):,}",
+        *(f"- {label}: {_md(text)}" for label, text in aggregate_summary(metrics.get("inventory_aggregates"))),
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
         f"- Analysis queue limit: {execution.get('max_pending_tasks', 'not reported')} pending batches",
         f"- Native CPU backend: {native.get('backend', 'not reported')}",

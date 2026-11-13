@@ -151,6 +151,19 @@ target is inside the tree only along the root's real path (`/var` is not `/priva
 macOS). `target_scope` stays the lexical classification of the target text.
 `metrics.symlink_states` counts the states.
 
+## Inventory aggregates
+
+`metrics.inventory_aggregates` summarizes the stored inventory after every scan, local or online,
+fresh or resumed:
+
+| Field | Content |
+|---|---|
+| `empty_directory_count` | Directories with no entries; pruned and unreadable directories are not counted, because they were not listed. |
+| `fan_out` | Over the listed directories: the largest entry count and its path, the mean, and a histogram (`0`, `1-9`, `10-99`, `100-999`, `1000-9999`, `10000+`). |
+| `hard_links` | Files that share a device and inode (a volume and file ID on Windows) with another inventoried file: their number, the groups, the distinct inodes. `supported` is false when no identity was recorded, as in a Windows `--inventory-only` scan, which opens no file. |
+| `owners`, `groups`, `owner_sids` | Entries per uid and gid (POSIX), and per owner SID with `--security-metadata` (Windows); the 50 most common by name, the rest as `other`. |
+| `file_timestamps` | The oldest and newest file modification time with its path, files per year (UTC), and the number modified more than a day after the scan started or before 1980, which often marks clock problems, extracted archives or rewritten timestamps. |
+
 ## Code index and `pdt query`
 
 During analysis, PDT stores code facts (symbols, call sites, referenced names, imports and
