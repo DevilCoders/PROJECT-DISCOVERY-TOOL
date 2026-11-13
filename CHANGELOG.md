@@ -108,6 +108,9 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   container. See docs/guides/PLUGIN_SDK.md and §9 of docs/project/AUDIT.md.
 
 ### Changed
+- The README is a concise overview, and the CLI banner, `pdt --help` and the package
+  description name both scan modes (local directories and remote repositories) instead of
+  "local-first" and "offline", which online scans contradicted.
 - The package is organized into subpackages by responsibility (`inventory`, `engine`,
   `analyzers/<domain>`, `intelligence`, `vulnerabilities`, `plugins`, `online`, `reporting`,
   `projects`, `catalog`, `core`), and tests, docs and native sources are nested the same way.

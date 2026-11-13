@@ -1,14 +1,14 @@
 # Project Discovery Tool (PDT)
 
-**Local-first, read-only project intelligence for large, polyglot codebases.**
+**Read-only project intelligence for large, polyglot codebases, on local disks and in remote repositories.**
 
-PDT inventories every file, directory and link in a project, analyzes the content with independent, evidence-producing analyzers, and writes JSON, Markdown and offline HTML reports. It does not assume that a project is written in one language or that its documentation describes it accurately, and it never executes, imports or uploads the code it reads.
+PDT scans a local directory or a remote repository, inventories every file, directory and link, analyzes the content with independent, evidence-producing analyzers, and writes JSON, Markdown and offline HTML reports. It does not assume that a project is written in one language or that its documentation describes it accurately, and it never executes, modifies or uploads the code it reads.
 
 > **Status:** 0.2.0 release candidate, with substantial unreleased work on this branch (see the [changelog](CHANGELOG.md)). The open release gates are large-corpus benchmarks, CI on the final head and an independent security review: [AUDIT.md §5](docs/project/AUDIT.md#5-release-gates-that-remain-open).
 
 ## Guarantees
 
-- **Read-only and offline by default.** Target code is never imported, executed, compiled or installed. A local scan makes no network request, and PDT has no telemetry.
+- **Read-only, local or remote.** Target code is never imported, executed, compiled or installed, and remote repositories are never modified. A local scan makes no network request: the network is used only for a repository URL and for `--vuln-online`, and every report records which access the scan used. PDT has no telemetry.
 - **No silent gaps.** Budgets, parse failures and missing parsers are reported as `UNKNOWN` coverage findings, never as clean results; `--strict` turns them into a failing exit code.
 - **Redacted evidence.** Secrets and personal data are reported by category, path and line. Their values are removed from every report format.
 - **Safe traversal.** Symlinks are recorded, never followed. Archives are inspected in memory, never extracted. File reads are verified against the identity recorded at inventory time.

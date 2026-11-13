@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "project-discovery-tool"
 version = "0.2.0"
-description = "Local-first project intelligence and architecture analyzer"
+description = "Read-only project intelligence for local directories and remote repositories"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["rich>=13.7", "packaging>=23"]

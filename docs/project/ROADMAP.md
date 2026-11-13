@@ -2,7 +2,7 @@
 
 ## Mission
 
-PROJECT DISCOVERY TOOL (PDT) is a local-first, read-only, comprehensive polyglot project intelligence platform. It must discover the actual contents and structure of heterogeneous codebases—from multi-gigabyte repositories through 100GB+ workspaces—without assuming one programming language, one framework, one operating system, one architecture, or one deployment model.
+PROJECT DISCOVERY TOOL (PDT) is a read-only, comprehensive polyglot project intelligence platform for local directories and remote repositories. It must discover the actual contents and structure of heterogeneous codebases—from multi-gigabyte repositories through 100GB+ workspaces—without assuming one programming language, one framework, one operating system, one architecture, or one deployment model.
 
 The pipeline is:
 

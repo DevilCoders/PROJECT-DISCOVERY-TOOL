@@ -128,7 +128,7 @@ _BANNER = r"""
  ____  ____ _____     //  PROJECT DISCOVERY TOOL
 |  _ \/ ___|_   _|    POLYGLOT INTELLIGENCE CORE
 | |_) \___ \ | |     FILESYSTEM // SECURITY // ARCHITECTURE
-|  __/ ___) || |      LOCAL-FIRST // READ-ONLY // OFFLINE
+|  __/ ___) || |      LOCAL + REMOTE // READ-ONLY // NO TELEMETRY
 |_|   |____/ |_|      2GB -> 100GB+ // EVIDENCE-DRIVEN
 """
 
@@ -1538,7 +1538,7 @@ def _stdout_is_utf8() -> bool:
 def main() -> None:
     _tolerant_console_streams()
     parser = argparse.ArgumentParser(
-        prog="pdt", description="Local-first project intelligence analyzer"
+        prog="pdt", description="Read-only project intelligence for local directories and remote repositories"
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
