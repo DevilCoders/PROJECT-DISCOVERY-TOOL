@@ -6,18 +6,20 @@ import re
 from functools import lru_cache
 from importlib.resources import files as resource_files
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...catalog.languages import is_source_path, is_textual_path, known_extensions
 from ...core.source_utils import describe_error, open_verified_binary
 from ...models import FileRecord, Finding
 from ..base import Analyzer
+from .hostnames import is_subdomain, mixed_script_labels, normalize, registrable_domain, to_ascii, whatwg_ipv4
 
 _URI = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://[^\s<>\"']+", re.I)
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
-# Identifier characters on either side mean a scope operator or symbol, not an address.
-_IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:.])")
+# Identifier characters on either side mean a scope operator or symbol, not an address. A
+# link-local address may name its zone (fe80::1%eth0; fe80::1%25eth0 in a URL's brackets).
+_IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?:%[0-9A-Za-z._~-]{1,64})?(?![\w:.])")
 # Generic TLDs accepted for bare two-label names; other TLDs need a subdomain or URL.
 _COMMON_TLDS = frozenset({
     "com", "net", "org", "edu", "gov", "mil", "int", "io", "ai", "dev", "app", "cloud",
@@ -47,16 +49,18 @@ def _extension_labels() -> frozenset[str]:
     return known_extensions() | {"zip", "mov", "exe", "dll", "so", "bin", "log", "lock", "bak", "tmp"}
 
 
-def _plausible_hostname(domain: str) -> bool:
+def _plausible_hostname(domain: str, in_url: bool = False) -> bool:
+    """Whether a dotted name is a host name: a real TLD, not a file extension or a reverse-DNS
+    identifier, and three labels or a common TLD, unless a URL names it as its host."""
     labels = domain.split(".")
-    tld = labels[-1]
+    tld = to_ascii(labels[-1]) or labels[-1]  # an internationalized TLD by its xn-- form
     if tld not in iana_tlds() and tld not in _SPECIAL_USE_TLDS:
         return False
     if tld in _extension_labels():
         return False
     if len(labels) >= 3 and labels[0] in _REVERSE_DNS_ROOTS:
         return False  # reverse-DNS identifiers such as com.example.app
-    return len(labels) >= 3 or tld in _COMMON_TLDS
+    return len(labels) >= 3 or in_url or tld in _COMMON_TLDS
 
 
 # File names that end in a TLD-shaped extension (lcov.info, configure.in).
@@ -130,9 +134,11 @@ _HOST_PORT = re.compile(
 )
 _BARE_PORT = re.compile(r"""(?im)^[ \t]*(?:EXPOSE|listen)\s+(\d{1,5})\b""")
 # Matches start only where a dotted name begins (not after "label."), so a long dotted
-# run such as "a.a.a..." is tried once instead of once per label (quadratic).
+# run such as "a.a.a..." is tried once instead of once per label (quadratic). Labels may be
+# Unicode (bücher.de, пример.рф) or IDNA A-labels (xn--bcher-kva.de); no underscores.
 _DOMAIN = re.compile(
-    r"(?<![@\w-])(?<![A-Za-z0-9]\.)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\b"
+    r"(?<![@\w-])(?<![^\W_]\.)(?:[^\W_](?:(?:[^\W_]|-){0,61}[^\W_])?\.)+"
+    r"(?:[Xx][Nn]--[0-9A-Za-z-]{1,59}|[^\W\d_]{2,63})\b"
 )
 _PROTOCOL_PATTERNS = {
     "REST/HTTP": re.compile(r"\b(?:https?://|HTTP(?:S)?\s+(?:GET|POST|PUT|PATCH|DELETE)|application/json)\b", re.I),
@@ -190,6 +196,10 @@ def _authority(netloc: str) -> tuple[str | None, int | None]:
         return None, None
     if not host:
         return None, None
+    if ":" in host:
+        host = host.replace("%25", "%", 1)  # RFC 6874: a zone in a URL is "%25zone"
+    elif "%" in host:
+        host = unquote(host)  # browsers decode a percent-encoded host name
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -219,22 +229,35 @@ def _safe_uri(value: str) -> str | None:
 
 
 @lru_cache(maxsize=8192)
-def _parse_uri(raw_uri: str) -> tuple[str | None, str | None, int | None]:
-    """Return (redacted URI, non-IP host, port); memoized because URLs repeat heavily."""
+def _parse_uri(raw_uri: str) -> tuple[str | None, str | None, int | None, tuple[str, str] | None]:
+    """Return (redacted URI, non-IP host, port, hidden address); memoized because URLs repeat.
+
+    A hidden address is an IPv4 address the host spells in a form the address patterns do not
+    see but browsers and curl resolve: percent-encoded (%31%32%37.0.0.1) or a WHATWG number
+    form (2130706433, 0x7f.1, 0177.0.0.1, 127.1): (the address, the host as written)."""
     safe = _safe_uri(raw_uri)
     if not safe:
-        return None, None, None
+        return None, None, None, None
     try:
-        host, port = _authority(urlsplit(raw_uri.rstrip(".,;:)]}")).netloc)
+        netloc = urlsplit(raw_uri.rstrip(".,;:)]}")).netloc
+        host, port = _authority(netloc)
+        written = urlsplit("//" + re.split(r"[;\\,]", netloc, maxsplit=1)[0]).hostname or ""
     except ValueError:
-        return safe, None, None
+        return safe, None, None, None
+    hidden = None
     if host:
         try:
-            ipaddress.ip_address(host)
+            address = ipaddress.ip_address(host)
+            if address.version == 4 and "%" in written:
+                hidden = (str(address), written)
             host = None  # IP literals are reported as addresses, not hostnames
         except ValueError:
-            host = host.lower().rstrip(".")
-    return safe, host, port
+            numeric = whatwg_ipv4(host)
+            if numeric is not None:
+                hidden, host = (numeric, written), None
+            else:
+                host = normalize(host)
+    return safe, host, port, hidden
 
 
 class NetworkIndicatorAnalyzer(Analyzer):
@@ -275,6 +298,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
         ports: set[tuple[int, int]] = set()
         uris: set[tuple[str, int]] = set()
         domains: set[tuple[str, int]] = set()
+        hidden_addresses: set[tuple[str, int]] = set()
         protocols: dict[str, list[int]] = {}
         protocol_counts: dict[str, int] = {}
         unique_indicator_count = 0
@@ -388,6 +412,8 @@ class NetworkIndicatorAnalyzer(Analyzer):
                             candidate = match.group(0)
                             if spans is not None and not _in_spans(spans, match.start(), match.end()):
                                 continue
+                            if "%25" in candidate and match.start() and line[match.start() - 1] == "[":
+                                candidate = candidate.replace("%25", "%", 1)  # a zone inside a URL
                             if pattern is _IPV6 and not _plausible_ipv6(candidate, line, match.start()):
                                 continue
                             try:
@@ -425,14 +451,19 @@ class NetworkIndicatorAnalyzer(Analyzer):
                         break
 
                     for match in (_URI.finditer(line) if "://" in line else ()):
-                        safe, host, uri_port = _parse_uri(match.group(0).rstrip(".,;:)]}"))
+                        safe, host, uri_port, hidden = _parse_uri(match.group(0).rstrip(".,;:)]}"))
                         if safe:
                             if not retain(uris, (safe, line_number)):
                                 break
+                            if hidden is not None:
+                                address, written = hidden
+                                if not retain(addresses["IPv4"], (address, line_number)) or not retain(
+                                        hidden_addresses, (f"{written} = {address}", line_number)):
+                                    break
                             # A URI host is a hostname when it is a plausible DNS name; a bare
                             # label (http://api:8080) needs a port to be a service name.
                             if host and (
-                                _plausible_hostname(host) if "." in host
+                                _plausible_hostname(host, in_url=True) if "." in host
                                 else host == "localhost" or uri_port is not None
                             ) and not retain(domains, (host, line_number)):
                                 break
@@ -446,7 +477,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
 
                     key_end = 0 if source_code or not has_dot else _key_end(line)
                     for match in (_DOMAIN.finditer(line) if has_dot else ()):
-                        domain = match.group(0).lower().rstrip(".")
+                        domain = normalize(match.group(0))
                         if domain in {
                             "example.com", "example.org", "example.net",
                             "localhost.localdomain",
@@ -542,15 +573,34 @@ class NetworkIndicatorAnalyzer(Analyzer):
                 ],
                 analyzer=self.name,
             ))
+        if hidden_addresses:
+            findings.append(Finding(
+                "security",
+                f"IP addresses written to evade URL filters: {record.path}",
+                f"{len({value for value, _ in hidden_addresses}):,} URL host(s) spell an IPv4 address as a "
+                "number, in hex or octal, shortened or percent-encoded: forms browsers and curl resolve "
+                "but host filters often miss, a server-side request forgery and filter-evasion technique.",
+                confidence="INFERRED",
+                evidence=[
+                    f"{record.path}:{line} ({value})"
+                    for value, line in sorted(hidden_addresses)[:_MAX_NETWORK_EVIDENCE]
+                ],
+                analyzer=self.name,
+                severity="MEDIUM",
+            ))
         if domains:
             domain_values = {value for value, _ in domains}
-            subdomains = {value for value in domain_values if len(value.split(".")) > 2}
+            # Ownership by the bundled Public Suffix List: example.co.uk is a registrable
+            # domain, api.example.co.uk one of its subdomains, user.github.io a domain of its own.
+            subdomains = {value for value in domain_values if is_subdomain(value)}
+            registrable = {registrable_domain(value) for value in domain_values} - {None}
             findings.append(Finding(
                 "network",
                 f"Hostname and domain indicators: {record.path}",
-                f"Detected at least {len(domain_values):,} distinct FQDN/domain candidate(s), "
-                f"including {len(subdomains):,} probable subdomain(s) within the scanned portion. "
-                "Public suffixes and DNS ownership are not resolved.",
+                f"Detected at least {len(domain_values):,} distinct FQDN/domain candidate(s) under "
+                f"{len(registrable):,} registrable domain(s), {len(subdomains):,} of them subdomain(s), "
+                "within the scanned portion. Registrable domains follow the bundled Public Suffix List; "
+                "DNS ownership is not resolved.",
                 confidence="INFERRED",
                 evidence=[
                     f"{record.path}:{line} ({value})"
@@ -558,6 +608,37 @@ class NetworkIndicatorAnalyzer(Analyzer):
                 ],
                 analyzer=self.name,
             ))
+        international = sorted({(value, line) for value, line in domains if not value.isascii()})
+        if international:
+            findings.append(Finding(
+                "network",
+                f"Internationalized domain names: {record.path}",
+                f"{len({value for value, _ in international}):,} domain(s) use non-ASCII (IDNA) labels; DNS "
+                "resolves their ASCII (xn--) forms, given beside them.",
+                confidence="INFERRED",
+                evidence=[
+                    f"{record.path}:{line} ({value} = {to_ascii(value) or 'not a valid IDNA name'})"
+                    for value, line in international[:_MAX_NETWORK_EVIDENCE]
+                ],
+                analyzer=self.name,
+            ))
+            homographs = [(value, line, labels) for value, line in international
+                          if (labels := mixed_script_labels(value))]
+            if homographs:
+                findings.append(Finding(
+                    "security",
+                    f"Domain names that mix look-alike scripts: {record.path}",
+                    f"{len({value for value, _, _ in homographs}):,} domain(s) have a label that mixes Latin "
+                    "letters with Cyrillic, Greek, Armenian or Cherokee ones, which look alike: the way IDN "
+                    "homograph names imitate a known domain.",
+                    confidence="INFERRED",
+                    evidence=[
+                        f"{record.path}:{line} ({value} = {to_ascii(value) or value}; mixed: {', '.join(labels)})"
+                        for value, line, labels in homographs[:_MAX_NETWORK_EVIDENCE]
+                    ],
+                    analyzer=self.name,
+                    severity="MEDIUM",
+                ))
         if protocols:
             detected = sorted(protocols)
             findings.append(Finding(

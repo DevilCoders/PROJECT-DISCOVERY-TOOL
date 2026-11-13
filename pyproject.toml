@@ -47,4 +47,4 @@ addopts = "-q"
 line-length = 100
 target-version = "py311"
 [tool.setuptools.package-data]
-project_discovery = ["reporting/web/*.js", "data/*.txt"]
+project_discovery = ["reporting/web/*.js", "data/*.txt", "data/*.dat"]

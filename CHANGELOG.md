@@ -228,6 +228,19 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: network host-name edge cases
+- Zone-scoped IPv6 addresses keep their zone (`fe80::1%eth0`; `[fe80::1%25eth0]` in a URL).
+- Internationalized domain names: Unicode and IDNA (`xn--`) labels are one name, listed with the
+  ASCII form DNS resolves; a label mixing Latin with Cyrillic, Greek, Armenian or Cherokee
+  letters is a MEDIUM look-alike (IDN homograph) finding.
+- Subdomains are counted by a bundled, unmodified Public Suffix List snapshot (MPL-2.0):
+  `example.co.uk` is no longer a subdomain, `user.github.io` is a domain of its own.
+- URL hosts are read as browsers read them: percent-encoded hosts are decoded, and an IPv4 address
+  spelled as a number, in hex or octal, shortened or percent-encoded (`http://2130706433/`) is
+  reported as the address and as a MEDIUM "IP addresses written to evade URL filters" finding.
+- A URL's host under any real TLD is a host name (`https://example.pl/` was dropped as a bare
+  two-label name).
+
 ### Added: the malicious archive fixture set and the checks it needed
 - `tests/analyzers/content/test_archive_malicious.py`: archive bombs, high-ratio entries, nested bombs,
   malformed headers in every format, encrypted members and indexes, traversal, absolute paths, hard

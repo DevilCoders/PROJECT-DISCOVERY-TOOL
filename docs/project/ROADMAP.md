@@ -176,7 +176,7 @@ The baseline is not production-ready:
 - [x] URL/URI schemes and evidence redaction for userinfo, path, query and fragment.
 - [x] FQDN/domain and probable subdomain candidates without DNS requests.
 - [x] Common HTTP, WebSocket, gRPC, GraphQL, SOAP, MQTT, AMQP, Kafka, SSH and DNS markers.
-- [ ] Add IPv4-mapped IPv6, zone-scoped IPv6, bracketed literals, URL edge cases, Unicode/IDNA domains and public-suffix-aware subdomain classification. IPv4-mapped and bracketed IPv6 literals are handled; IDNA domains and public-suffix-aware classification are not.
+- [x] Add IPv4-mapped IPv6, zone-scoped IPv6, bracketed literals, URL edge cases, Unicode/IDNA domains and public-suffix-aware subdomain classification: zone-scoped addresses keep their zone (`fe80::1%eth0`, `[fe80::1%25eth0]` in URLs); URL hosts are read as browsers read them (percent-decoding, backslash and user-information rules, and WHATWG IPv4 number forms reported as addresses written to evade filters); Unicode and IDNA labels are one name with their ASCII form, and labels mixing look-alike scripts are a finding; registrable domains and subdomains follow a bundled, unmodified Public Suffix List snapshot.
 - [ ] Detect listen/bind/connect/accept/socket creation APIs and distinguish declaration/configuration from code call sites.
 - [ ] Correlate host, address, port, protocol and service declarations across Docker, Kubernetes, Compose, Terraform and source code.
 - [ ] Keep all network discovery passive: no DNS, scanning, probing or connection attempts. This holds by construction (analyzers import no network client and resolve no names), but no regression test enforces it.

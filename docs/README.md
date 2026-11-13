@@ -17,6 +17,7 @@
 - [Documentation formats](analyzers/DOCUMENTATION_FORMATS.md): structural extraction from documentation files.
 - [Licenses](analyzers/LICENSE_ANALYZER.md): SPDX headers and license declarations.
 - [Lockfiles](analyzers/LOCKFILE_ANALYZER.md): resolved dependencies and local OSV matching.
+- [Network indicators](analyzers/NETWORK_ANALYZER.md): addresses, URLs, host names, the Public Suffix List and protocol markers.
 - [ORM and data mapping](analyzers/ORM_ANALYZER.md): Prisma schemas.
 - [SQL and migrations](analyzers/SQL_ANALYZER.md): schema inventory and destructive statements.
 - [ROS](analyzers/ROS_ANALYZER.md): ROS 1 and ROS 2 packages, nodes and interfaces.
