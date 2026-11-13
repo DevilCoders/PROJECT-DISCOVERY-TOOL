@@ -132,3 +132,15 @@ def test_analyzer_error_details_go_through_describe_error():
         if path.parent != analyzers and 'f"{type(exc).__name__}: {exc}"' in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+def test_python_modules_beyond_the_syntax_tree_budget_are_not_parsed():
+    # Regression: a 5.6 MB generated module took 1.2 GB of memory to parse.
+    from project_discovery.core import source_utils
+
+    source = "x = 1\n" * (source_utils.MAX_PYTHON_SYNTAX_TREE_LINES + 1)
+    with pytest.raises(source_utils.PythonSourceTooLarge, match="syntax-tree budget"):
+        source_utils.parse_python(source, "generated.py")
+    with pytest.raises(MemoryError):  # memoized, and still a MemoryError for callers
+        source_utils.parse_python(source, "generated.py")
+    assert source_utils.parse_python("y = 2\n", "small.py").body

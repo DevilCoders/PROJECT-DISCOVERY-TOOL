@@ -111,3 +111,16 @@ def test_resx_and_properties_catalogs_are_supported(tmp_path: Path):
     assert "2 key(s)" in resx[0].detail
     assert "1 explicitly empty" in resx[0].detail
     assert "2 key(s)" in properties[0].detail
+
+
+def test_short_config_file_names_are_not_translation_catalogs():
+    # Regression: any 2-3 letter stem (app.json, pom.xml, web.xml, ci.yml) was a catalog.
+    analyzer = LocalizationAnalyzer()
+
+    def supported(relative):
+        return analyzer.supports(FileRecord(relative, 10, "." + relative.rsplit(".", 1)[1], "Data"))
+
+    for relative in ("app.json", "pom.xml", "web.xml", ".github/ci.yml", "src/api.json", "db.yaml"):
+        assert not supported(relative), relative
+    for relative in ("en.json", "fr-FR.json", "zh_Hant.yml", "locales/app.json", "i18n/xyz.json"):
+        assert supported(relative), relative

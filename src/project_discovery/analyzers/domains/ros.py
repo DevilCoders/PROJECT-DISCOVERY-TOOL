@@ -109,10 +109,11 @@ class ROSIntelligenceAnalyzer(Analyzer):
     def _python(self, source: str, record: FileRecord) -> list[Finding]:
         try:
             tree = parse_python(source, filename=record.path)
-        except SyntaxError as exc:
+        except (SyntaxError, RecursionError, MemoryError) as exc:
             return [Finding(
                 "robotics", f"ROS Python parse error: {record.path}",
-                str(exc), confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
+                describe_error(exc), confidence="UNKNOWN", evidence=[record.path], analyzer=self.name,
+                severity="LOW",
             )]
         imports: dict[str, int] = {}
         apis: list[tuple[str, str | None, int]] = []
@@ -143,7 +144,9 @@ class ROSIntelligenceAnalyzer(Analyzer):
                     kind, index = _COMMUNICATION[method]
                     target = _literal_string(item.args[index]) if len(item.args) > index else None
                     apis.append((kind, target, item.lineno))
-        if not imports and not apis and not nodes:
+        # Without an rclpy/rospy import a Node base class (anytree) and create_client()
+        # (Supabase, boto3) belong to other libraries.
+        if not imports:
             return []
         findings: list[Finding] = []
         if imports:

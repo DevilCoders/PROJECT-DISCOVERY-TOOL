@@ -1,7 +1,8 @@
 # ROS 1 and ROS 2 Intelligence
 
 The initial ROS analyzer recognizes package.xml manifests, selected CMake package
-references, ROS Python client imports and node inheritance, common publisher /
+references, ROS Python client imports and node inheritance (Python node classes and API calls
+count only in files that import rclpy or rospy), common publisher /
 subscription / service / action API call sites, C++ ROS includes and templated
 communication calls, launch-description file presence, and .msg/.srv/.action
 interface files.

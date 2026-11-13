@@ -283,3 +283,20 @@ def test_archive_members_use_the_file_scanners_rules(tmp_path: Path):
     assert any("Credential Url inside archive member" in item.title or "Credential URL" in item.title for item in findings)
     assert not any("Email-Shaped Value" in item.title for item in findings)
     assert "Fake-Zip-Pass1" not in repr([item.to_dict() for item in findings])
+
+
+def test_zip64_records_are_read_like_zipfile_reads_them(tmp_path: Path):
+    # Regression: a classic EOCD declaring 1 entry beside a ZIP64 record declaring 300,000
+    # passed the preflight, and zipfile then built every entry.
+    import struct
+
+    from project_discovery.analyzers.content.archives import _zip_index_hint
+
+    path = tmp_path / "spoof.zip"
+    record = struct.pack("<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0, 300_000, 300_000, 15_900_000, 0)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, 0, 1)
+    eocd = struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 1, 1, 50, 0, 0)
+    path.write_bytes(record + locator + eocd)
+    assert _zip_index_hint(path) == (300_000, 15_900_000)
+    findings = ArchiveIntelligenceAnalyzer().analyze(path, _record(path, "spoof.zip"))
+    assert any(item.title.startswith("ZIP central-directory budget exceeded") for item in findings)

@@ -266,3 +266,24 @@ def test_scan_summarizes_domains_in_the_code_index(tmp_path: Path):
     assert index["frontend"]["most_used"] == [{"name": "Nav", "uses": 1}]
     assert index["frontend"]["routes"] == {"Next.js": ["/about"]}
     assert index["embedded"]["memory_bytes"] == {"flash": 262144}
+
+
+def test_uimage_without_an_extension_is_analyzed(tmp_path: Path):
+    header = struct.pack(">IIIIIIIBBBB", 0x27051956, 0, 0, 1024, 0x80008000, 0x80008000, 0, 5, 2, 2, 0)
+    header += b"Linux-6.1.0".ljust(32, b"\0")
+    issues, _ = run(FirmwareAnalyzer(), tmp_path, "uImage", header + b"\0" * 64, file_type="binary/unclassified")
+    assert "Linux-6.1.0" in issues["U-Boot uImage"][2]
+
+
+def test_linker_maps_with_symbols_lowercase_units_and_comments(tmp_path: Path):
+    icf, regions = run(EmbeddedAnalyzer(), tmp_path, "app.icf", (
+        "define symbol __ICFEDIT_region_ROM_start__ = 0x08000000;\n"
+        "define symbol __ICFEDIT_region_ROM_end__   = 0x0807FFFF;\n"
+        "define region ROM_region = mem:[from __ICFEDIT_region_ROM_start__ to __ICFEDIT_region_ROM_end__];\n"
+    ))
+    assert "ROM_region at 0x8000000, 512 KiB" in icf["Memory map"][2]
+    ld, _ = run(EmbeddedAnalyzer(), tmp_path, "gcc.ld", (
+        "MEMORY\n{\n  RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 128K /* SRAM1 */\n"
+        "  FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 512k\n}\n"
+    ))
+    assert "RAM (xrw) at 0x20000000, 128 KiB" in ld["Memory map"][2] and "512 KiB" in ld["Memory map"][2]

@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
 from ..catalog.languages import detect_language, is_source_path, is_textual_path
-from ..core.source_utils import FileIdentity, as_identity, identity_matches, stat_identity
+from ..core.source_utils import FileIdentity, as_identity, identity_matches, stat_identity, text_encoding
 from ..engine.native import count_byte as native_count_byte
 from ..engine.native import create_walker as native_create_walker
 from ..engine.native import detect_signature as native_detect_signature
@@ -274,9 +274,30 @@ def _classify_file(
         return signature, opened_identity
     if is_source_path(relative_path):
         return "source", opened_identity
-    if is_textual_path(relative_path):
+    if is_textual_path(relative_path) or _looks_textual(head):
         return "text", opened_identity
     return "binary/unclassified", opened_identity
+
+
+def _looks_textual(head: bytes) -> bool:
+    """Whether a sample is text whatever the file is called.
+
+    .git-credentials, .pgpass, kubeconfig and *.tfstate have no catalogued extension; typed
+    binary, they were never secret-scanned and the report read clean. Text is a UTF-16/32
+    mark (or NUL-interleaved ASCII), or a sample without NUL bytes that decodes as UTF-8
+    (a character cut at the sample end is allowed).
+    """
+    if not head:
+        return False
+    if text_encoding(head) != "utf-8":
+        return True
+    if b"\x00" in head:
+        return False
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return exc.start >= len(head) - 3 and exc.reason == "unexpected end of data"
+    return True
 
 
 def _classify_name_only(

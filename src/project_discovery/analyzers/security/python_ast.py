@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-MAX_AST_FILE_BYTES = 16 * 1024 * 1024
+MAX_AST_FILE_BYTES = 4 * 1024 * 1024  # the syntax-tree budget
 
 _IMPACTS = {
     "dynamic_code_execution": (

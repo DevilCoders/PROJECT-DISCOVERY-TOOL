@@ -11,9 +11,9 @@ These are per-analyzer safety limits, not a global scan-size policy. They are cu
 | Identity intelligence | 16 MiB per file; 100 retained source locations per category | Reads at most limit + 1 bytes; PEP 263 decoding for Python; bounded location aggregation and line iteration | UNKNOWN on oversize/growth/decode/AST resource failure |
 | Data-exposure / PII indicators | 64 MiB per file; 256 KiB per line; 100 evidence line references; 20 code excerpts | Binary line streaming; redacted excerpts; bounded evidence retention | UNKNOWN/partial when byte budget is reached |
 | Secret-pattern analysis | 64 MiB per file; 8 MiB chunks; 4 KiB overlap; at most 10,000 findings | Binary chunk streaming with cross-chunk overlap | UNKNOWN/partial on byte or finding limits |
-| Python AST inventory/security | 16 MiB per file | PEP 263-aware source reads with AST parsing | UNKNOWN on indexed oversize or parse failure |
-| Python import graph | 16 MiB per module | AST extraction over inventoried source | UNKNOWN for skipped or over-budget modules |
-| Python API endpoint extraction | 16 MiB per Python AST file | PEP 263-aware limit + 1 byte read and AST parsing | UNKNOWN on oversize/growth/parser resource failure |
+| Python AST inventory/security | 4 MiB and 100,000 lines per file (a syntax tree costs 100-200 times its source; every Python parse shares this budget) | PEP 263-aware source reads with AST parsing | UNKNOWN on indexed oversize or parse failure |
+| Python import graph | 4 MiB and 100,000 lines per module | AST extraction over inventoried source | UNKNOWN for skipped or over-budget modules |
+| Python API endpoint extraction | 4 MiB and 100,000 lines per Python file | PEP 263-aware limit + 1 byte read and AST parsing | UNKNOWN on oversize/growth/parser resource failure |
 | Non-Python API endpoint scanning | 32 MiB per file; 256 KiB per line | Bounded line streaming | UNKNOWN/partial when scan byte limit is reached |
 | API-style classification | 32 MiB per file; 256 KiB per line; 20 evidence lines per style | Bounded byte/line streaming with bounded per-category samples | UNKNOWN/partial on byte or indicator cap |
 | Network indicators | 64 MiB per file; 256 KiB per line; 25,000 retained unique indicators; 100 evidence lines | Bounded line streaming; values reduced to hosts, addresses and ports | UNKNOWN/partial when a byte, line or indicator limit is reached |

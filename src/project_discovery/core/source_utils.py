@@ -273,20 +273,38 @@ _prefetch = threading.local()
 _parsed = threading.local()
 
 
+# A syntax tree costs about 100-200 times its source in memory: a 5.6 MB generated module
+# took 1.2 GB. Larger modules are reported instead of parsed.
+MAX_PYTHON_SYNTAX_TREE_CHARS = 4 * 1024 * 1024
+MAX_PYTHON_SYNTAX_TREE_LINES = 100_000
+
+
+class PythonSourceTooLarge(MemoryError):
+    """A Python module exceeds the syntax-tree budget (reported, never parsed)."""
+
+
 def parse_python(source: str, filename: str = "<unknown>") -> ast.AST:
     """``ast.parse`` with a one-entry per-thread memo so analyzers of a file share a tree.
 
     Several analyzers parse the same module back to back; the tree (or the parse error)
     is reused when the source text is identical. Callers must treat trees as read-only.
+    Modules beyond MAX_PYTHON_SYNTAX_TREE_CHARS or _LINES raise PythonSourceTooLarge.
     """
     cached = getattr(_parsed, "entry", None)
     if cached is not None and (cached[0] is source or cached[0] == source):
         result = cached[1]
     else:
-        try:
-            result = ast.parse(source, filename=filename)
-        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
-            result = exc
+        lines = source.count("\n") + 1
+        if len(source) > MAX_PYTHON_SYNTAX_TREE_CHARS or lines > MAX_PYTHON_SYNTAX_TREE_LINES:
+            result = PythonSourceTooLarge(
+                f"{len(source):,} characters and {lines:,} lines exceed the Python syntax-tree budget "
+                f"({MAX_PYTHON_SYNTAX_TREE_CHARS:,} characters, {MAX_PYTHON_SYNTAX_TREE_LINES:,} lines)"
+            )
+        else:
+            try:
+                result = ast.parse(source, filename=filename)
+            except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+                result = exc
         _parsed.entry = (source, result)
     if isinstance(result, BaseException):
         # Raise a fresh instance so repeated failures do not chain tracebacks.

@@ -18,7 +18,7 @@ from ...models import FileRecord, Finding
 from ..base import Analyzer
 
 _SOURCE_EXTENSIONS = source_extensions()
-MAX_PYTHON_ENDPOINT_AST_BYTES = 16 * 1024 * 1024
+MAX_PYTHON_ENDPOINT_AST_BYTES = 4 * 1024 * 1024  # the syntax-tree budget
 MAX_SOURCE_ENDPOINT_SCAN_BYTES = 32 * 1024 * 1024
 MAX_ENDPOINT_LINE_CHARS = 256 * 1024
 MAX_ENDPOINT_FACTS = 500

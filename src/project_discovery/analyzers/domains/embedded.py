@@ -98,10 +98,13 @@ _LD_REGION = re.compile(
     r"([A-Za-z_][\w.]{0,60}+)[ \t]*+(?:\(([!rwxailRWXAIL]{1,8}+)\))?[ \t]*+:[ \t]*+(?:ORIGIN|org|o)[ \t]*+=[ \t]*+"
     r"([^,\r\n]{1,80}+),[ \t]*+(?:LENGTH|len|l)[ \t]*+=[ \t]*+([^\r\n;]{1,80}+)"
 )
+# Bounds are hex literals or symbols defined elsewhere (the IAR ICF editor writes
+# from __ICFEDIT_region_ROM_start__ to __ICFEDIT_region_ROM_end__).
 _ICF_REGION = re.compile(
-    r"define[ \t]++region[ \t]++([A-Za-z_]\w{0,60}+)[ \t]*+=[ \t]*+mem:\[[ \t]*+from[ \t]++(0x[0-9A-Fa-f]{1,16}+)"
-    r"[ \t]++(?:to[ \t]++(0x[0-9A-Fa-f]{1,16}+)|size[ \t]++(0x[0-9A-Fa-f]{1,16}+))"
+    r"define[ \t]++region[ \t]++([A-Za-z_]\w{0,60}+)[ \t]*+=[ \t]*+mem:\[[ \t]*+from[ \t]++(0x[0-9A-Fa-f]{1,16}+|\w{1,80}+)"
+    r"[ \t]++(?:to[ \t]++(0x[0-9A-Fa-f]{1,16}+|\w{1,80}+)|size[ \t]++(0x[0-9A-Fa-f]{1,16}+|\w{1,80}+))"
 )
+_ICF_SYMBOL = re.compile(r"define[ \t]++(?:exported[ \t]++)?symbol[ \t]++(\w{1,80}+)[ \t]*+=[ \t]*+(0x[0-9A-Fa-f]{1,16}+|\d{1,12}+)")
 _SCATTER_REGION = re.compile(
     r"(?m)^[ \t]*+([A-Za-z_]\w{0,60}+)[ \t]++(0x[0-9A-Fa-f]{1,16}+)[ \t]++(0x[0-9A-Fa-f]{1,16}+)[ \t]*+\{"
 )
@@ -111,7 +114,8 @@ _DTS_MODEL = re.compile(r"(?m)^[ \t]*+model[ \t]*+=[ \t]*+\"([^\"\r\n]{1,200}+)\
 _DTS_COMPATIBLE = re.compile(r"(?<![\w-])compatible[ \t]*+=[ \t]*+((?:\"[^\"\r\n]{1,120}+\"[ \t]*+,?[ \t]*+){1,8}+)")
 _DTS_STATUS_OK = re.compile(r"status[ \t]*+=[ \t]*+\"(?:okay|ok)\"")
 _QUOTED = re.compile(r"\"([^\"\r\n]{1,120}+)\"")
-_SIZE = re.compile(r"^\(?[ \t]*+(0x[0-9A-Fa-f]++|\d++)[ \t]*+([KMG])?(?:[Bb])?[ \t]*+\)?$")
+# GNU ld accepts K, M and G in either case (512k).
+_SIZE = re.compile(r"^\(?[ \t]*+(0x[0-9A-Fa-f]++|\d++)[ \t]*+([KMGkmg])?(?:[Bb])?[ \t]*+\)?$")
 
 
 def _strip_block_comments(text: str) -> str:
@@ -139,7 +143,8 @@ def _number(text: str) -> int | None:
     if not match:
         return None
     number = int(match.group(1), 16) if match.group(1).lower().startswith("0x") else int(match.group(1))
-    return number * {None: 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}[match.group(2)]
+    unit = match.group(2).upper() if match.group(2) else None
+    return number * {None: 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}[unit]
 
 
 def _size(value: int | None) -> str:
@@ -343,13 +348,26 @@ class EmbeddedAnalyzer(Analyzer):
 
     def _linker(self, record: FileRecord, text: str) -> list[Finding]:
         regions: list[tuple[str, str, int | None, int | None]] = []
+        # Comments inside MEMORY (CubeMX writes "LENGTH = 128K /* SRAM1 */") hid sizes.
+        text = _strip_block_comments(text)
         block = _LD_MEMORY_BLOCK.search(text)
         if block:
             for name, attributes, origin, length in _LD_REGION.findall(block.group(1)):
                 regions.append((name, attributes or "", _number(origin), _number(length)))
+        icf_symbols = {name: value for name, value in _ICF_SYMBOL.findall(text)}
+
+        def icf_value(token: str) -> int | None:
+            token = icf_symbols.get(token, token)
+            if token.lower().startswith("0x"):
+                return int(token, 16)
+            return int(token) if token.isdigit() else None
+
         for name, start, end, size in _ICF_REGION.findall(text):
-            origin = int(start, 16)
-            length = int(size, 16) if size else int(end, 16) - origin + 1
+            origin = icf_value(start)
+            if origin is None:
+                continue
+            bound = icf_value(size) if size else icf_value(end)
+            length = None if bound is None else (bound if size else bound - origin + 1)
             regions.append((name, "", origin, length))
         if not regions and record.path.lower().endswith(".sct"):
             for name, origin, length in _SCATTER_REGION.findall(text):

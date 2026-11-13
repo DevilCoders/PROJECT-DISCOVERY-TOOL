@@ -9,7 +9,9 @@ read its exit codes and performance data.
    C++ signatures, Rust walker), optional parsers and every analyzer. Use `--json` to keep the
    output with your scan records.
 2. **Place the output outside the target.** PDT refuses an output directory inside the scanned
-   tree. Use a fast local disk with free space of roughly 1–2% of the scanned size for the
+   tree, and one output directory takes one scan at a time: a second scan into a directory whose
+   scan is still running is refused with the running process named (`.pdt-cache/scan.lock`, an
+   operating-system lock released when that process ends). Use a fast local disk with free space of roughly 1–2% of the scanned size for the
    inventory database and reports, plus up to about 5 GB for the code index of a very large
    source tree (see [Code index and `pdt query`](#code-index-and-pdt-query)).
 3. **Antivirus on Windows.** Microsoft Defender scans each file the first time it is opened.

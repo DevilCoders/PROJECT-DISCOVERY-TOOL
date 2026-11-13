@@ -119,6 +119,10 @@ def _kind(record: FileRecord) -> str | None:
         return "binary"
     if suffix in _BINARY_EXTENSIONS and not record.file_type.startswith(_NOT_FIRMWARE_TYPES):
         return "binary"
+    # mkimage and kernel builds name images without an extension (uImage, zImage, Image);
+    # _binary identifies them by their magic.
+    if lower in {"uimage", "zimage", "bzimage", "image", "fitimage", "vmlinuz"} and record.file_type.startswith("binary"):
+        return "binary"
     if lower in {"partitions.csv", "partition_table.csv"} or (lower.startswith("partitions") and suffix == ".csv"):
         return "partitions"
     if suffix in {".bb", ".bbappend", ".bbclass"}:

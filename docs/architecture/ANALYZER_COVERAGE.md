@@ -29,12 +29,12 @@ The coverage analyzer reads LCOV, Cobertura, JaCoCo, Clover (the project's own `
 
 ## Implemented accessibility markup slice
 
-The built-in accessibility analyzer checks HTML and common component-template files for missing document language, image alternative-text attributes, iframe titles, form-control labels, button names and link names. Findings are inferred from static markup and do not replace browser accessibility-tree inspection, keyboard testing or assistive-technology testing.
+The built-in accessibility analyzer checks HTML and common component-template files for missing document language, image alternative-text attributes, iframe titles, form-control labels, button names and link names. In JSX, Vue, Svelte and Astro, PascalCase tags are components rather than native controls and `htmlFor` labels a control. Findings are inferred from static markup and do not replace browser accessibility-tree inspection, keyboard testing or assistive-technology testing.
 
 
 ## Implemented localization catalog slice
 
-The localization analyzer inventories Gettext PO/POT, ARB, nested JSON, XLIFF, Android string XML, Apple strings, Fluent, RESX and Java properties catalogs. It counts keys and explicitly empty translations without copying translated values into findings. It does not yet perform cross-locale key parity, plural-rule validation, placeholder parity or runtime fallback resolution.
+The localization analyzer inventories Gettext PO/POT, ARB, nested JSON, XLIFF, Android string XML, Apple strings, Fluent, RESX and Java properties catalogs. A JSON, YAML, XML or properties file is a catalog when it lives in a locale directory or its name is a language code (`en.json`, `pt-BR.yml`), so `app.json`, `pom.xml` and `ci.yml` are not. It counts keys and explicitly empty translations without copying translated values into findings. It does not yet perform cross-locale key parity, plural-rule validation, placeholder parity or runtime fallback resolution.
 
 
 ## Expanded non-relational and vector datastore inventory

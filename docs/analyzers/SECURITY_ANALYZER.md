@@ -1,6 +1,6 @@
 # Security Analyzer Coverage
 
-The built-in secret scanner (`secret-patterns`) streams every textual source, configuration and documentation file, plus `.env` variants and key files (`.pem`, `.key`, `id_rsa`, …), in 8 MiB chunks up to 64 MiB per file. It reports:
+The built-in secret scanner (`secret-patterns`) streams every textual source, configuration and documentation file, every file whose content is text whatever its name (no NUL bytes in the first 512 bytes, or a UTF-16/32 byte-order mark), `.env` variants, key files (`.pem`, `.key`, `id_rsa`, …) and credential stores (`.git-credentials`, `.pgpass`, `.htpasswd`, `.s3cfg`, kubeconfig, `*.tfstate`, `*.tfvars`, shell histories, `*.log`, `*.conf`), in 8 MiB chunks up to 64 MiB per file. It reports:
 
 - **Private-key blocks**: PEM, OpenSSH and PGP `PRIVATE KEY` markers.
 - **Provider credential formats**: more than 30 high-confidence formats from one shared registry (`core/secret_patterns.py`), including GitHub, GitLab, AWS, Google, Slack, Stripe, OpenAI, Anthropic, Hugging Face, npm, PyPI, Docker, Azure storage and SAS keys, Vault, Doppler, age keys and JWTs. The same registry drives redaction, so every detected format is also removed from report excerpts.

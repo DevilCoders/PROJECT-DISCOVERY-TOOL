@@ -11,10 +11,10 @@ from importlib.util import resolve_name
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ..core.source_utils import SourceBudgetExceeded, read_python_source_bounded
+from ..core.source_utils import SourceBudgetExceeded, parse_python, read_python_source_bounded
 from ..models import FileRecord, Finding
 
-MAX_GRAPH_AST_FILE_BYTES = 16 * 1024 * 1024
+MAX_GRAPH_AST_FILE_BYTES = 4 * 1024 * 1024  # the syntax-tree budget
 MAX_GRAPH_MODULES = 25_000
 MAX_GRAPH_EDGES = 100_000
 MAX_GRAPH_UNRESOLVED = 100_000
@@ -119,7 +119,7 @@ def parse_python_imports(root: Path, record: FileRecord) -> tuple:
     except (OSError, ValueError, SyntaxError, LookupError) as exc:
         return ("read_error", type(exc).__name__, getattr(exc, "lineno", None))
     try:
-        tree = ast.parse(source_text, filename=record.path)
+        tree = parse_python(source_text, filename=record.path)
     except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
         return ("parse_error", type(exc).__name__, getattr(exc, "lineno", None))
     statements = []

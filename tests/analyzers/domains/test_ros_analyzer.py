@@ -73,3 +73,15 @@ def test_malformed_ros_package_is_unknown(tmp_path: Path):
     path.write_text("<package>", encoding="utf-8")
     findings = ROSIntelligenceAnalyzer().analyze(path, _record(path, "package.xml"))
     assert findings[0].confidence == "UNKNOWN"
+
+
+def test_ros_findings_need_a_ros_client_import(tmp_path: Path):
+    # Regression: an anytree Node subclass and Supabase/boto3 create_client() under src/ were
+    # CONFIRMED ROS nodes and communication APIs.
+    path = tmp_path / "src_tree.py"
+    path.write_text(
+        "from anytree import Node\nfrom supabase import create_client\n"
+        "class Category(Node):\n    pass\nclient = create_client(url, key)\n",
+        encoding="utf-8",
+    )
+    assert ROSIntelligenceAnalyzer().analyze(path, _record(path, "src/tree.py")) == []

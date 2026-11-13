@@ -3,7 +3,7 @@ import ast
 import io
 from pathlib import Path
 
-MAX_AST_FILE_BYTES = 16 * 1024 * 1024
+MAX_AST_FILE_BYTES = 4 * 1024 * 1024  # the syntax-tree budget
 MAX_SYMBOL_EVIDENCE = 200
 from ...core.source_utils import SourceBudgetExceeded, parse_python, read_python_source_bounded
 from ...models import FileRecord, Finding

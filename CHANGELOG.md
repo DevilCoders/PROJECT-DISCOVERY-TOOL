@@ -297,6 +297,13 @@ Findings and their status are in the second-round section of
 - Risky settings in quoted and framework syntaxes (PDT-378), configuration files parsed by name
   (PDT-379), network indicators without keys, versions and invalid hosts (PDT-380), and a bounded
   operating-system analyzer (PDT-381).
+- One scan per output directory (PDT-385); text files are secret-scanned whatever their names,
+  credential stores included (PDT-386); Python modules beyond 4 MiB or 100,000 lines are
+  reported instead of parsed (PDT-387).
+- ZIP64 records are read as zipfile reads them (PDT-388); ROS findings need a ROS import
+  (PDT-389); JSX components and `htmlFor` (PDT-390); `uImage` files (PDT-391); IAR symbols and
+  GNU ld units and comments in memory maps (PDT-392); short config names are not catalogs
+  (PDT-393).
 
 ## 0.2.0 — 2026-11-05
 

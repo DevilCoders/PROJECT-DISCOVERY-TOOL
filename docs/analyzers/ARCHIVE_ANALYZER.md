@@ -14,7 +14,7 @@ PDT inspects archive metadata and bounded member samples in memory. Archive memb
 
 The current implementation has hard safety limits:
 
-- ZIP central-directory preflight: 200,000 entries and 64 MiB of declared central-directory bytes. If a valid bounded index cannot be established from the EOCD/ZIP64 trailer, the analyzer returns UNKNOWN without materializing ZipFile.infolist().
+- ZIP central-directory preflight: 200,000 entries and 64 MiB of declared central-directory bytes. The ZIP64 record is read the way `zipfile` reads it (whenever its locator precedes the EOCD, from just before the locator), so a classic EOCD that understates the entry count cannot slip past. If a valid bounded index cannot be established from the EOCD/ZIP64 trailer, the analyzer returns UNKNOWN without materializing ZipFile.infolist().
 - Member sample: 1 MiB maximum per regular member.
 - Total member sample: 32 MiB maximum per archive.
 - Compressed TAR (gzip, bzip2, xz): decompressed through a budgeted reader capped at 4 GiB of output. The reader also enforces the wall-time budget inside each read.

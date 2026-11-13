@@ -67,11 +67,17 @@ _PLACEHOLDERS = {
     "***", "todo", "replace_me", "replace-this", "set_me", "notasecret", "not-a-secret",
     "fake", "test", "testing", "sample", "foobar", "secret123", "password123",
 }
+# Credential stores and secret-bearing files whatever the inventory typed them.
 _SENSITIVE_FILENAMES = {
     ".env", ".npmrc", ".pypirc", ".netrc", "id_rsa", "id_ed25519",
-    "id_ecdsa", "id_dsa", "credentials",
+    "id_ecdsa", "id_dsa", "credentials", ".git-credentials", ".pgpass", ".htpasswd", ".s3cfg",
+    ".boto", ".dockercfg", "kubeconfig", ".bash_history", ".zsh_history", ".psql_history",
+    ".mysql_history",
 }
-_SENSITIVE_EXTENSIONS = {".pem", ".key", ".p12", ".pfx"}
+_SENSITIVE_EXTENSIONS = {
+    ".pem", ".key", ".p12", ".pfx", ".tfstate", ".tfvars", ".ppk", ".ovpn", ".har", ".log",
+    ".conf", ".cnf", ".config", ".bak",
+}
 # Paths whose credentials are usually fixtures or documentation; findings are kept but
 # downgraded one severity level and labeled so real exposures stand out.
 _LOW_RISK_PATH_PARTS = {
@@ -229,10 +235,11 @@ class SecretPatternAnalyzer(Analyzer):
             or name.startswith(".env.")
             or Path(record.path).suffix.lower() in _SENSITIVE_EXTENSIONS
         )
+        kube = "/.kube/" in "/" + record.path.replace("\\", "/").lower()
         return (
             record.error is None
             and record.content_skipped_reason is None
-            and (is_textual_path(record.path) or is_env_or_credential_file)
+            and (is_textual_path(record.path) or is_env_or_credential_file or kube or record.file_type == "text")
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:

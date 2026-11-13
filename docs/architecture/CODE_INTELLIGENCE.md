@@ -156,7 +156,8 @@ PlatformIO environments; ESP-IDF `sdkconfig` (target, flash size, secure boot an
 encryption, reported LOW when off outside `sdkconfig.defaults`); Zephyr `prj.conf`, board
 `.conf` and `west.yml`; STM32CubeMX `.ioc` (MCU, peripherals, pins, toolchain); Rust
 `.cargo/config.toml` bare-metal targets; `FreeRTOSConfig.h` (stack-overflow checking off is
-LOW); linker memory maps (GNU ld `MEMORY`, IAR `.icf`, Keil scatter), with overlapping regions;
+LOW); linker memory maps (GNU ld `MEMORY` with K/M/G in either case and inline comments, IAR `.icf`
+with region bounds given by `define symbol`, Keil scatter), with overlapping regions;
 device trees (model, `compatible` strings, enabled nodes). In C, C++, Arduino and Rust sources:
 interrupt handlers (CMSIS vector names, `*_isr`, STM32 HAL callbacks, AVR `ISR()`,
 `__attribute__((interrupt))`, `IRAM_ATTR`, `#[interrupt]`), RTOS and HAL usage, direct register

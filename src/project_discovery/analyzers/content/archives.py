@@ -47,17 +47,26 @@ def _zip_index_hint(
                 return None
             entry_count = struct.unpack_from("<H", tail, eocd + 10)[0]
             directory_size = struct.unpack_from("<I", tail, eocd + 12)[0]
-            if entry_count == 0xFFFF or directory_size == 0xFFFFFFFF:
-                locator = eocd - 20
-                if locator < 0 or tail[locator:locator + 4] != b"PK\x06\x07":
+            saturated = entry_count == 0xFFFF or directory_size == 0xFFFFFFFF
+            # zipfile applies a ZIP64 record whenever its locator precedes the EOCD, and reads
+            # the record just before the locator (not at the locator's offset). An archive
+            # whose classic EOCD declares one entry but whose ZIP64 record declares millions
+            # passed this preflight and infolist() built them all, so the record is read the
+            # way zipfile reads it, saturated fields or not.
+            locator = eocd - 20
+            if locator >= 0 and tail[locator:locator + 4] == b"PK\x06\x07":
+                record_start = size - tail_size + locator - 56
+                if record_start < 0:
                     return None
-                zip64_offset = struct.unpack_from("<Q", tail, locator + 8)[0]
-                stream.seek(zip64_offset)
+                stream.seek(record_start)
                 zip64 = stream.read(56)
-                if len(zip64) < 56 or zip64[:4] != b"PK\x06\x06":
+                if len(zip64) == 56 and zip64[:4] == b"PK\x06\x06":
+                    entry_count = struct.unpack_from("<Q", zip64, 32)[0]
+                    directory_size = struct.unpack_from("<Q", zip64, 40)[0]
+                elif saturated:
                     return None
-                entry_count = struct.unpack_from("<Q", zip64, 32)[0]
-                directory_size = struct.unpack_from("<Q", zip64, 40)[0]
+            elif saturated:
+                return None
             return int(entry_count), int(directory_size)
     except (OSError, ValueError, struct.error):
         return None

@@ -117,6 +117,26 @@ def _xml_summary(source: str, extension: str) -> tuple[list[str], int]:
     return keys, empty
 
 
+# ISO 639-1 language codes. A bare two-letter stem must be one (en.json, fr.yml); three
+# letters and anything else need a locale directory, so app.json, pom.xml, web.xml and
+# ci.yml are not translation catalogs.
+_LANGUAGE_CODES = frozenset("""
+aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br bs ca ce ch co cr cs cu cv cy da de dv dz
+ee el en eo es et eu fa ff fi fj fo fr fy ga gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik
+io is it iu ja jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi mk ml
+mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps pt qu rm rn ro ru rw sa sc sd
+se sg si sk sl sm sn so sq sr ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi
+vo wa wo xh yi yo za zh zu
+""".split())
+
+
+def _locale_stem(stem: str) -> bool:
+    """en, pt-BR, zh_Hant: a language code with an optional region or script subtag."""
+    if not _LOCALE_STEM.fullmatch(stem):
+        return False
+    return stem.replace("_", "-").split("-", 1)[0].lower() in _LANGUAGE_CODES
+
+
 class LocalizationAnalyzer(Analyzer):
     """Inventory translation catalogs without disclosing translated values."""
 
@@ -138,7 +158,7 @@ class LocalizationAnalyzer(Analyzer):
             part in _LOCALE_DIRS or part.startswith("values-")
             for part in parents
         )
-        locale_filename = bool(_LOCALE_STEM.fullmatch(path.stem))
+        locale_filename = _locale_stem(path.stem)
         if extension in _STRONG_EXTENSIONS:
             return True
         if name in _KNOWN_NAMES:

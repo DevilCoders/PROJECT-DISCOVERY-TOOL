@@ -48,3 +48,16 @@ def test_component_markup_is_supported_and_non_markup_is_skipped(tmp_path: Path)
     assert any("Image has no alt" in item.title for item in findings)
     record = FileRecord("src/app.ts", 20, ".ts", "TypeScript")
     assert not AccessibilityAnalyzer().supports(record)
+
+
+def test_jsx_components_and_htmlfor_are_understood(tmp_path: Path):
+    # Regression: PascalCase components became native controls and htmlFor was ignored, so
+    # ordinary React forms reported unlabelled controls.
+    findings = _scan(tmp_path, "Login.jsx", (
+        "export const Login = () => (<form>\n"
+        '  <label htmlFor="email">Email</label>\n  <input id="email" type="email" />\n'
+        '  <Input name="password" />\n  <Select options={choices} />\n</form>);\n'
+    ))
+    assert not any("no static accessible label" in item.title.lower() or "label" in item.title.lower() for item in findings)
+    native = _scan(tmp_path, "page.html", "<form><input name=\"q\"></form>\n")
+    assert any("label" in item.title.lower() for item in native)

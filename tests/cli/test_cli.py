@@ -854,3 +854,34 @@ def test_strict_fails_on_files_the_analyzers_could_not_parse(tmp_path: Path):
         assert run_scan(project, tmp_path / f"{project.name}-out", {"json"}, 1, quiet=True, strict=True) == 3, name
         report = _json_report(tmp_path / f"{project.name}-out")
         assert any(item["confidence"] == "UNKNOWN" and item["severity"] == "LOW" for item in report["findings"]), name
+
+
+def test_a_second_scan_into_a_busy_output_is_refused(tmp_path: Path):
+    # Regression: a second scan cleared the shared inventory under the first, and both
+    # reports mixed two roots.
+    import pytest
+
+    from project_discovery.core.output_lock import OutputInUse, output_lock
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "a.py").write_text("x = 1\n", encoding="utf-8")
+    output = tmp_path / "out"
+    with output_lock(output), pytest.raises(OutputInUse, match="Another PDT scan is writing"):
+        run_scan(project, output, {"json"}, 1, quiet=True)
+    assert run_scan(project, output, {"json"}, 1, quiet=True) == 0
+
+
+def test_text_files_with_uncatalogued_names_are_secret_scanned(tmp_path: Path):
+    # Regression: .git-credentials, .pgpass, kubeconfig and *.tfstate were typed binary,
+    # never secret-scanned, and the report read clean.
+    token = "ghp_" + "D" * 36
+    project = tmp_path / "project"
+    (project / ".kube").mkdir(parents=True)
+    for name in (".git-credentials", ".pgpass", ".kube/config", "terraform.tfstate", "notes.unknownext"):
+        (project / name).write_text(f"credential = {token}\n", encoding="utf-8")
+    assert run_scan(project, tmp_path / "out", {"json"}, 1, quiet=True) == 0
+    report = _json_report(tmp_path / "out")
+    found = {item["evidence"][0].rsplit(":", 1)[0] for item in report["findings"]
+             if item["title"] == "Potential hardcoded credential: github_token"}
+    assert found == {".git-credentials", ".pgpass", ".kube/config", "terraform.tfstate", "notes.unknownext"}

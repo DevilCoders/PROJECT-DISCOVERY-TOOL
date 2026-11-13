@@ -14,8 +14,11 @@ _CONTROLS = {"input", "select", "textarea"}
 
 
 class _AccessibilityParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, components: bool = False) -> None:
         super().__init__(convert_charrefs=True)
+        # JSX, Vue, Svelte and Astro: PascalCase tags are components, not native elements
+        # (HTMLParser lowercases names, so <Input> became an unlabelled <input>).
+        self.components = components
         self.issues: dict[str, list[int]] = defaultdict(list)
         self.labels: set[str] = set()
         self.controls: list[tuple[int, dict[str, str | None], bool]] = []
@@ -25,8 +28,14 @@ class _AccessibilityParser(HTMLParser):
         self.issues[code].append(self.getpos()[0])
 
     def handle_starttag(self, tag: str, attrs_list) -> None:
+        if self.components:
+            raw = (self.get_starttag_text() or "")[1:].split(None, 1)[0].rstrip("/>")
+            if raw[:1].isupper():
+                return
         tag = tag.lower()
         attrs = {key.lower(): value for key, value in attrs_list if key}
+        if "htmlfor" in attrs and "for" not in attrs:
+            attrs["for"] = attrs["htmlfor"]  # JSX spells the label's for attribute htmlFor
         line = self.getpos()[0]
         if tag == "html" and not attrs.get("lang"):
             self._issue("document_language_missing")
@@ -78,6 +87,8 @@ class _AccessibilityParser(HTMLParser):
             self.issues[code].append(int(frame["line"]))
 
     def handle_endtag(self, tag: str) -> None:
+        if self.components and tag[:1].isupper():
+            return
         tag = tag.lower()
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index]["tag"] == tag:
@@ -117,7 +128,7 @@ class AccessibilityAnalyzer(Analyzer):
                 path, 16 * 1024 * 1024,
                 expected_identity=record.analysis_identity,
             )
-            parser = _AccessibilityParser()
+            parser = _AccessibilityParser(components=record.extension.lower() not in {".html", ".htm"})
             parser.feed(source)
             issues = parser.finish()
         except (OSError, UnicodeDecodeError, ValueError) as exc:
