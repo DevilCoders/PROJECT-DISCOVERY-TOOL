@@ -97,7 +97,7 @@ How the analyzers read:
 
 | Subsystem | Limit | Input strategy | Limit outcome |
 |---|---:|---|---|
-| Python import graph | 4 MiB and 100,000 lines per module | AST extraction over inventoried source | UNKNOWN for skipped or over-budget modules |
+| Python import graph | 4 MiB and 100,000 lines per module; per scan 250,000 modules, 10,000,000 edges, 5,000,000 unresolved imports and 1,000,000 skipped modules | AST extraction over inventoried source; the graph's lists are rows of the scan database, streamed into the JSON report and sampled (10,000 each) into the HTML report | UNKNOWN for skipped or over-budget modules and for a list past its ceiling |
 | Shared code model | 4 MiB per file | Bounded read; Python syntax tree or linear-time structural lexer, built once per file and worker | Each analyzer using the model records the limit; `code-index` reports the file as UNKNOWN |
 | Code facts | Per file: 5,000 symbols, 20,000 call sites, 10,000 references, 5,000 domain facts. Per table: 5M symbols, 10M calls, 20M references, 5M facts | Stored with the file's findings in bounded SQLite batches | "Code index truncated" UNKNOWN finding; index-based results incomplete |
 | Code index passes | 500,000 resolved call-graph edges for cycle detection; 5,000 items per integration list | Read-only connection and temporary tables | Edge limit recorded in `metrics.code_index`; per-pass errors become UNKNOWN findings |
@@ -118,7 +118,7 @@ An analyzer may apply its own specialized budget regardless of --skip. Such a re
 - The archive wall-time limit is cooperative. It is checked between metadata/member operations and regex matches; it cannot preempt a blocked filesystem read or interrupt a single in-progress Python regular-expression call.
 - The archive implementation does not yet impose a shared nested-archive depth or total-uncompressed-size budget because recursive nested archive inspection is not implemented.
 - The vulnerability lockfile limit is a format-parser admission limit, not a streaming parser; files below the limit may still need significant memory.
-- Inventory records, findings, diagnostics and code facts are persisted in SQLite and read back lazily, the JSON report is streamed, and the HTML report embeds bounded subsets (`embedded_limits` in the payload). Report metrics, the Python import graph (within its caps) and each per-file analyzer's working set are still held in memory. Tests scan a 128 MiB text file and a 1 GiB sparse file with a bounded Python heap, refuse files that change after inventory or during analysis, and finish with FIFOs in the tree or swapped in for a file. Bounded-memory behavior at 100 GB+ is unverified until the large-corpus benchmarks run.
+- Inventory records, findings, diagnostics and code facts are persisted in SQLite and read back lazily, the JSON report is streamed, and the HTML report embeds bounded subsets (`embedded_limits` in the payload). The Python import graph's lists are store rows (its module indexes and a compact integer adjacency stay in memory); the other report metrics and each per-file analyzer's working set are still held in memory. Tests scan a 128 MiB text file and a 1 GiB sparse file with a bounded Python heap, refuse files that change after inventory or during analysis, and finish with FIFOs in the tree or swapped in for a file. Bounded-memory behavior at 100 GB+ is unverified until the large-corpus benchmarks run.
 
 ## Release requirements
 

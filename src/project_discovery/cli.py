@@ -1083,7 +1083,7 @@ def run_scan(
                     graph_findings = []
                 else:
                     python_graph, graph_findings = analyze_python_dependencies(
-                        root, records, finding_sink=finding_store.append_finding,
+                        root, records, finding_sink=finding_store.append_finding, store=finding_store,
                         import_parser=(
                             (lambda items: engine.map_python_imports(root, items)) if memory_source is None
                             else (lambda items: (

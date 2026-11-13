@@ -290,6 +290,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   started, so a library caller's second scan reported the first one's too.
 - Report schema 1.18: `gpu_enabled` and the `gpu_status` `disabled` in `metrics.native_backend`.
 
+### Changed: store-backed results
+- The Python dependency graph of `pdt scan` writes its modules, edges, unresolved imports and
+  skipped modules to the scan's SQLite inventory instead of holding them in lists, and the
+  reports stream them (`StoredRows`): the JSON report has all of them, the HTML report up to
+  10,000 of each (`embedded_limits.graph_rows`). Edges are de-duplicated per module and cycles
+  are found on integer adjacency arrays, so only the module indexes stay in memory. The ceilings
+  rose from 25,000 modules and 100,000 edges to 250,000 modules, 10,000,000 edges, 5,000,000
+  unresolved imports and 1,000,000 skipped modules; the report's graph is unchanged.
+
 ### Fixed: found during the filesystem inventory work
 - A budget stop that reached an analyzer call just as it returned was cleared with
   `PyThreadState_SetAsyncExc(id, NULL)`, which on Python 3.11 leaves the interpreter's

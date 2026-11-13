@@ -31,7 +31,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Avro IDL | schema | inventory | — | — | — | 0 |
 | Batch | source | inventory | — | — | — | 0 |
 | BitBake | build | inventory | — | — | secret-patterns | 1 |
-| C | source | structure | structural lexer, refined by Tree-sitter `c` | c | code-index, concurrency, dataflow, embedded, performance-hotspots, resource-management, tree-sitter-polyglot | 13 |
+| C | source | structure | structural lexer, refined by Tree-sitter `c` | c | code-index, concurrency, dataflow, embedded, performance-hotspots, resource-management, tree-sitter-polyglot | 14 |
 | C# | source | structure | structural lexer, refined by Tree-sitter `csharp` | csharp | code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 13 |
 | C++ | source | structure | structural lexer, refined by Tree-sitter `cpp` | cpp | code-index, concurrency, dataflow, embedded, performance-hotspots, resource-management, ros-intelligence, tree-sitter-polyglot | 4 |
 | C/C++ Header | source | structure | structural lexer, refined by Tree-sitter `cpp` | — | code-index, concurrency, dataflow, embedded, performance-hotspots, resource-management | 6 |
@@ -70,12 +70,12 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Haskell | source | optional parser | — | haskell | tree-sitter-polyglot | 1 |
 | HCL | configuration | optional parser | — | hcl | secret-patterns, tree-sitter-polyglot | 4 |
 | HLSL | shader | structure | structural lexer | hlsl | code-index, concurrency, dataflow, performance-hotspots, resource-management, shaders, tree-sitter-polyglot | 1 |
-| HTML | markup | optional parser | — | html | accessibility-markup, secret-patterns, tree-sitter-polyglot | 6 |
+| HTML | markup | optional parser | — | html | accessibility-markup, secret-patterns, tree-sitter-polyglot | 7 |
 | INI | configuration | inventory | — | — | secret-patterns | 9 |
 | Intel HEX | firmware | inventory | — | — | — | 2 |
 | Java | source | structure | structural lexer, refined by Tree-sitter `java` | java | code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 10 |
 | JavaScript | source | structure | structural lexer, refined by Tree-sitter `javascript` | javascript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 28 |
-| JSON | data | optional parser | — | json | ai-ml-intelligence, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 41 |
+| JSON | data | optional parser | — | json | ai-ml-intelligence, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 42 |
 | Julia | source | optional parser | — | julia | tree-sitter-polyglot | 4 |
 | Jupyter Notebook | notebook | inventory | — | — | ai-ml-intelligence, secret-patterns | 1 |
 | Kconfig | configuration | inventory | — | — | secret-patterns | 1 |
@@ -106,7 +106,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | PowerShell | source | optional parser | — | powershell | tree-sitter-polyglot | 2 |
 | Prisma | schema | inventory | — | — | prisma-schema | 2 |
 | Protocol Buffers | schema | optional parser | — | proto | tree-sitter-polyglot | 2 |
-| Python | source | semantic | syntax tree | — | ai-ml-intelligence, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 50 |
+| Python | source | semantic | syntax tree | — | ai-ml-intelligence, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 51 |
 | R | source | optional parser | — | r | tree-sitter-polyglot | 1 |
 | ReasonML | source | inventory | — | — | — | 0 |
 | Ren'Py | game_source | inventory | — | — | game-engine-intelligence | 1 |

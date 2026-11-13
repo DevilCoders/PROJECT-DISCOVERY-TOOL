@@ -64,7 +64,7 @@ The analysis engine runs per-file analyzers in worker processes or threads. `--e
 
 Worker processes never write to the scan databases: the coordinator persists inventory records, findings, diagnostics and code facts in bounded SQLite batches (`OUTPUT/.pdt-cache/inventory.sqlite3`), and later phases read them back as lazy sequences. If a worker process dies, the pool restarts and the affected batch is re-run file by file. Ctrl-C terminates workers immediately and keeps what was persisted, and `--resume` continues an interrupted scan. A worker whose coordinator is killed outright exits by itself within about a second. Analyzer plugins that set `concurrent_safe = False` are serialized with a lock in thread mode.
 
-This is parallel execution of independent per-file work, not a claim that every analyzer is internally asynchronous. Report metrics, the Python import graph (within its caps) and each per-file analyzer's working set are still held in memory; bounded-memory behavior at 100 GB+ is unverified until the large-corpus benchmarks run.
+This is parallel execution of independent per-file work, not a claim that every analyzer is internally asynchronous. The Python import graph's lists are store rows (its module indexes and a compact integer adjacency stay in memory); the other report metrics and each per-file analyzer's working set are still held in memory; bounded-memory behavior at 100 GB+ is unverified until the large-corpus benchmarks run.
 
 ## Safety and portability
 

@@ -259,6 +259,15 @@ class SpecialEntryRecord:
         return asdict(self)
 
 
+def _materialized(value: Any) -> Any:
+    """A metrics tree with its lazily stored row lists (the Python graph's) read into lists."""
+    if isinstance(value, dict):
+        return {key: _materialized(item) for key, item in value.items()}
+    if type(value).__name__ == "StoredRows":
+        return list(value)
+    return value
+
+
 @dataclass(slots=True)
 class ScanResult:
     root: str
@@ -288,7 +297,7 @@ class ScanResult:
             "symlinks": [item.to_dict() for item in self.symlinks],
             "special_entries": [item.to_dict() for item in self.special_entries],
             "findings": [item.to_dict() for item in self.findings],
-            "metrics": self.metrics,
+            "metrics": _materialized(self.metrics),
             "errors": list(self.errors),
             "analyzers": self.analyzer_names,
         }

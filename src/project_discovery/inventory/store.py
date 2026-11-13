@@ -18,7 +18,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # string annotations only; models imports this module lazily
     from ..models import FileRecord, Finding
 
-_RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding", "diagnostic"})
+_RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding", "diagnostic"} | {
+    # The Python dependency graph's lists (intelligence.python_graph), read back lazily.
+    "graph_module", "graph_edge", "graph_unresolved", "graph_skipped",
+})
 # Cross-file code facts (see code_facts). Rows are idempotent, so re-analysing a file
 # after --resume cannot duplicate them. Each table stops growing at its ceiling.
 _CODE_TABLES = {
@@ -748,6 +751,15 @@ class InventoryStore:
         ).fetchone()
         return default if row is None else json.loads(row[0])
 
+    def discard(self, kind: str) -> None:
+        """Delete every record of one kind (a result list rebuilt by each scan)."""
+        if self._closed:
+            raise RuntimeError("inventory store is closed")
+        kind = self._kind(kind)
+        self.flush()
+        with self.db:
+            self.db.execute("DELETE FROM inventory_records WHERE kind=?", (kind,))
+
     def clear(self) -> None:
         if self._closed:
             raise RuntimeError("inventory store is closed")
@@ -932,6 +944,60 @@ class StoredRecordSequence(Sequence[Any]):
                 raise IndexError("inventory record index out of range") from exc
         finally:
             iterator.close()
+
+class StoredRows(Sequence[dict]):
+    """Lazy rows of one result kind (the Python graph's edges, ...) in sort-key order.
+
+    Each record is ``{"path": unique key, "row": the row}``; iteration pages through
+    the store like the inventory sequences, so a report can stream millions of rows.
+    """
+
+    def __init__(self, database_path: Path, kind: str, *, fetch_size: int = 256) -> None:
+        if kind not in _RECORD_KINDS:
+            raise ValueError(f"unsupported inventory record kind: {kind}")
+        self.database_path = Path(database_path).expanduser().absolute()
+        self.kind = kind
+        self.fetch_size = fetch_size
+
+    def __len__(self) -> int:
+        with InventoryStore(self.database_path) as store:
+            return store.count(self.kind)
+
+    def __iter__(self) -> Iterator[dict]:
+        with InventoryStore(self.database_path) as store:
+            payloads = store.iter_records(self.kind, fetch_size=self.fetch_size)
+            try:
+                for payload in payloads:
+                    yield payload["row"]
+            finally:
+                payloads.close()
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            iterator = iter(self)
+            try:
+                return list(islice(iterator, start, stop, step)) if step > 0 else list(self)[index]
+            finally:
+                iterator.close()
+        if not isinstance(index, int):
+            raise TypeError("row indices must be integers or slices")
+        if index < 0:
+            index += len(self)
+        iterator = iter(self)
+        try:
+            try:
+                return next(islice(iterator, index, index + 1)) if index >= 0 else next(iter(()))
+            except StopIteration as exc:
+                raise IndexError("row index out of range") from exc
+        finally:
+            iterator.close()
+
+    def __eq__(self, other: object) -> bool:
+        return list(self) == list(other) if isinstance(other, (list, tuple, StoredRows)) else NotImplemented
+
+    __hash__ = None  # type: ignore[assignment]
+
 
 class StoredFindingRecords(Sequence["Finding"]):
     """Lazy, deduplicated finding sequence backed by the scan's SQLite store."""

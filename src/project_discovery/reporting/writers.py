@@ -26,6 +26,9 @@ HTML_MAX_EMBEDDED = {
     "symlinks": 50_000,
     "special_entries": 50_000,
     "errors": 10_000,
+    # Each stored list inside the metrics (the Python dependency graph's modules, edges,
+    # unresolved imports and skipped modules); the graph summary keeps the true counts.
+    "graph_rows": 10_000,
 }
 # Each dedicated HTML view (vulnerabilities, VCS/providers) embeds up to this many findings.
 _HTML_VIEW_SAMPLE = 200
@@ -656,6 +659,37 @@ def _write_json_value(stream: TextIO, value: Any, *, script_safe: bool = False) 
         stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
 
+def _json_key(key: Any) -> str:
+    # json.dumps's spelling of non-string keys: null, true and false, numbers as text.
+    if key is None or isinstance(key, bool):
+        return json.dumps(key)
+    return str(key)
+
+
+def _write_metrics(stream: TextIO, value: Any, *, script_safe: bool = False, rows_limit: int | None = None) -> None:
+    """Write the metrics, streaming the stored row lists they hold (the Python graph's).
+
+    StoredRows are read from the scan store page by page, all of them into the JSON report
+    and at most ``rows_limit`` each into the HTML payload.
+    """
+    from ..inventory.store import StoredRows
+
+    if isinstance(value, StoredRows):
+        _write_json_array(stream, value if rows_limit is None else islice(value, rows_limit), lambda item: item,
+                          script_safe=script_safe)
+    elif isinstance(value, dict):
+        stream.write("{")
+        for index, (key, item) in enumerate(value.items()):
+            if index:
+                stream.write(",")
+            _write_json_value(stream, _json_key(key), script_safe=script_safe)
+            stream.write(":")
+            _write_metrics(stream, item, script_safe=script_safe, rows_limit=rows_limit)
+        stream.write("}")
+    else:
+        _write_json_value(stream, value, script_safe=script_safe)
+
+
 def _write_json_array(
     stream: TextIO,
     values,
@@ -753,7 +787,7 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
         script_safe=True,
     )
     stream.write(',"metrics":')
-    _write_json_value(stream, result.metrics, script_safe=True)
+    _write_metrics(stream, result.metrics, script_safe=True, rows_limit=HTML_MAX_EMBEDDED["graph_rows"])
     stream.write(',"errors":')
     _write_json_array(stream, bounded("errors", result.errors), lambda item: item, script_safe=True)
     stream.write(',"analyzers":')
@@ -781,7 +815,7 @@ def _write_json_report(stream: TextIO, result: ScanResult) -> None:
     stream.write(',"findings":')
     _write_json_array(stream, result.findings, lambda item: item.to_dict())
     stream.write(',"metrics":')
-    _write_json_value(stream, result.metrics)
+    _write_metrics(stream, result.metrics)
     stream.write(',"errors":')
     _write_json_array(stream, result.errors, lambda item: item)
     stream.write(',"analyzers":')
