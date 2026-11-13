@@ -18,6 +18,14 @@ try:
 except ImportError:
     _walker = None
 
+# A walker build that yields fewer fields than the scanner records (an extension built from
+# older sources) is not used: the Python fallback reports every field.
+WALKER_ENTRY_FIELDS = 15
+
+
+def _walker_current() -> bool:
+    return _walker is not None and getattr(_walker, "ENTRY_FIELDS", 12) >= WALKER_ENTRY_FIELDS
+
 
 def count_byte(data: bytes | bytearray | memoryview, needle: int) -> int:
     """Count a byte using automatic large-buffer GPU dispatch or CPU fallback."""
@@ -53,7 +61,8 @@ def capabilities() -> dict[str, Any]:
             "gpu_fallbacks": 0,
         }
     info["cpp_signature_classifier"] = _native_cpp is not None
-    info["rust_filesystem_walker"] = _walker is not None
+    info["rust_filesystem_walker"] = _walker_current()
+    info["rust_filesystem_walker_outdated"] = _walker is not None and not _walker_current()
     info["gpu_status"] = "online" if info.get("gpu_available") else "cpu-fallback"
     return info
 
@@ -76,16 +85,17 @@ def signature_backend_available() -> bool:
 
 
 def rust_walker_available() -> bool:
-    """Return whether the compiled Rust filesystem walker is loaded."""
-    return _walker is not None
+    """Return whether the compiled Rust filesystem walker is loaded and current."""
+    return _walker_current()
 
 
 def create_walker(root, excluded_names, excluded_paths):
-    """Create the Rust no-follow walker, or return None for the Python fallback."""
-    if _walker is None:
+    """Create the Rust no-follow walker, or return None for the Python fallback.
+
+    The caller decides exclusions (with full Unicode case folding) and calls
+    skip_directory(); the walker's own to_lowercase() matching would disagree, so it gets
+    no exclusions of its own.
+    """
+    if not _walker_current():
         return None
-    if hasattr(_walker.Walker, "skip_directory"):
-        # The caller decides exclusions (with full Unicode case folding) and calls
-        # skip_directory(); the walker's own to_lowercase() matching would disagree.
-        return _walker.Walker(str(root), [], [])
-    return _walker.Walker(str(root), sorted(excluded_names), sorted(excluded_paths))
+    return _walker.Walker(str(root), [], [])

@@ -53,6 +53,7 @@ from .intelligence.architecture import analyze_project_architecture
 from .intelligence.index import QUERY_KINDS, analyze_code_index, code_index_state, query_code_index
 from .intelligence.python_graph import analyze_python_dependencies
 from .inventory.cache import ScanCache
+from .inventory.entry_metadata import security_supported
 from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
 from .inventory.store import (
     InventoryStore,
@@ -106,7 +107,7 @@ from .plugins.isolation import (
 )
 from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
-from .reporting.writers import write_remote_batch_summary, write_reports
+from .reporting.writers import attribute_summary, write_remote_batch_summary, write_reports
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
 
 
@@ -243,6 +244,7 @@ def _describe_inventory_options(options: dict) -> dict[str, str]:
         "analysis": "full analysis" if options.get("read_signatures") else "--inventory-only",
         "size skip": f"--skip --max-file-mb {megabytes}" if options.get("skip_oversized") else "no --skip",
         "--exclude-dir": ", ".join(exclusions) or "none",
+        "--security-metadata": "on" if options.get("security_metadata") else "off",
     }
 
 
@@ -479,6 +481,7 @@ def run_scan(
     display_root: str | None = None,
     online_vulnerabilities: OnlineVulnerabilityOptions | None = None,
     memory_source: NoDownloadSource | None = None,
+    security_metadata: bool = False,
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -492,6 +495,8 @@ def run_scan(
         # No-download mode: the root is a namespace for in-memory files, never a directory.
         if resume:
             raise ValueError("--resume is not available in no-download mode")
+        if security_metadata:
+            raise ValueError("--security-metadata reads a filesystem; it is not available in no-download mode")
         if output is None:
             raise ValueError("no-download scans need an output directory")
         root = memory_source.virtual_root
@@ -519,6 +524,7 @@ def run_scan(
         read_signatures=not inventory_only, skip_oversized=skip_oversized,
         max_file_bytes=max_file_mb * 1024 * 1024,
         excluded_names=excluded_names, excluded_paths=excluded_paths,
+        security_metadata=security_metadata,
     )
 
     # One scan per output directory: a second scan cleared the shared inventory under the
@@ -619,6 +625,7 @@ def run_scan(
                         ignores=ignores,
                         store=inventory_store,
                         read_signatures=not inventory_only,
+                        security_metadata=security_metadata,
                     )
             for value in unused_exclusions(walk_stats, excluded_names, excluded_paths):
                 note = f"--exclude-dir {value} matched no directory, so nothing was pruned for it."
@@ -1032,6 +1039,17 @@ def run_scan(
             "pruned_directory_count": walk_stats.get("pruned_directory_count", 0),
             "entry_count": walk_stats.get("entry_count", 0) + 1,
             "hidden_entry_count": walk_stats.get("hidden_entry_count", 0),
+            # Windows FILE_ATTRIBUTE_* or macOS file-flag names, counted over every entry.
+            "entry_attributes": dict(sorted(
+                (key.split(":", 1)[1], value)
+                for key, value in walk_stats.items() if key.startswith("attribute:") and value
+            )),
+            "security_metadata": {
+                "enabled": security_metadata,
+                "entries": walk_stats.get("security_metadata_entries", 0),
+                "explicit_acl_entries": walk_stats.get("security_explicit_acl_entries", 0),
+                "errors": walk_stats.get("security_metadata_errors", 0),
+            },
             "development_directory_count": walk_stats.get("development_directory_count", 0),
             "development_directories": {
                 key.split(":", 1)[1]: value
@@ -1138,6 +1156,15 @@ def run_scan(
         summary.add_row("Special filesystem entries", str(metrics["special_entry_count"]))
         summary.add_row("Explicitly pruned directories", str(metrics["pruned_directory_count"]))
         summary.add_row("Hidden entries", str(metrics["hidden_entry_count"]))
+        if metrics["entry_attributes"]:
+            summary.add_row("Entry attributes", escape(attribute_summary(metrics["entry_attributes"])))
+        security_summary = metrics["security_metadata"]
+        if security_summary["enabled"]:
+            summary.add_row(
+                "Security metadata",
+                f"{security_summary['entries']:,} entries / {security_summary['explicit_acl_entries']:,} "
+                f"with own ACL entries / {security_summary['errors']:,} unreadable",
+            )
         summary.add_row("Development/cache trees", str(metrics["development_directory_count"]))
         summary.add_row("Total size", f"{metrics['total_bytes']:,} bytes")
         summary.add_row("Languages / formats detected", str(len(counts)))
@@ -1199,13 +1226,16 @@ def run_scan(
             # Completeness: errors, and UNKNOWN coverage findings (budgets, parse failures,
             # unreadable lockfiles, unfetched remote content) above INFO.
             gaps = sum(1 for finding in findings if finding.confidence == "UNKNOWN" and finding.severity != "INFO")
-            if error_count or metrics["walk_errors"] or gaps:
+            # Requested security metadata that could not be read leaves the inventory incomplete.
+            security_errors = metrics["security_metadata"]["errors"]
+            if error_count or metrics["walk_errors"] or gaps or security_errors:
                 exit_code = EXIT_INCOMPLETE
                 reasons = [
                     f"{count:,} {label}" for count, label in (
                         (error_count, "file/analyzer error(s)"),
                         (metrics["walk_errors"], "traversal error(s)"),
                         (gaps, "UNKNOWN coverage finding(s)"),
+                        (security_errors, "security metadata read error(s)"),
                     ) if count
                 ]
                 _status(gate_console, "FAILED", f"--strict: the scan is incomplete: {', '.join(reasons)}.", "red")
@@ -1715,6 +1745,12 @@ def build_parser() -> argparse.ArgumentParser:
              "(no hashing or content analyzers)",
     )
     scan.add_argument(
+        "--security-metadata", action="store_true",
+        help="Also record each entry's security metadata: owner and group SIDs and the DACL on "
+             "Windows (one read-control handle per entry), or the POSIX access and default "
+             "ACLs on Linux. Links are never followed",
+    )
+    scan.add_argument(
         "--plugin-isolation", choices=ISOLATION_MODES, default="sandbox",
         help="How third-party analyzer plugins run: sandbox (a separate process under a "
              "verified OS sandbox; refused where it cannot be applied), process (a separate "
@@ -1995,6 +2031,11 @@ def main() -> None:
             remote_scan = args.url is not None or is_remote_target(args.path or "")
             if args.resume and remote_scan:
                 parser.error("--resume is supported for local scan roots, not temporary remote checkouts")
+            if args.security_metadata and not security_supported():
+                parser.error(
+                    "--security-metadata reads Windows security descriptors and Linux POSIX ACLs; "
+                    f"it is not available on {sys.platform}"
+                )
             if not remote_scan:
                 for option, value in (
                     ("--vcs", args.vcs != "auto"), ("--ref", args.ref is not None),
@@ -2035,6 +2076,7 @@ def main() -> None:
                     ("--remote-workdir", args.remote_workdir is not None),
                     ("--remote-max-gb", args.remote_max_gb is not None),
                     ("--allow-insecure-transport", args.allow_insecure_transport),
+                    ("--security-metadata", args.security_metadata),
                 ):
                     if value:
                         parser.error(f"{option} applies to the download mode, not --no-download")
@@ -2120,6 +2162,7 @@ def main() -> None:
                 "executor": args.executor,
                 "resume": args.resume,
                 "inventory_only": args.inventory_only,
+                "security_metadata": args.security_metadata,
                 "plugin_isolation": args.plugin_isolation,
                 "plugin_timeout": args.plugin_timeout,
                 "plugin_memory_mb": args.plugin_memory_mb,
@@ -2155,6 +2198,7 @@ def main() -> None:
                 fail_on=args.fail_on, strict=args.strict,
                 quiet=args.quiet, no_color=args.no_color, executor=args.executor,
                 resume=args.resume, inventory_only=args.inventory_only,
+                security_metadata=args.security_metadata,
                 plugin_isolation=args.plugin_isolation, plugin_timeout=args.plugin_timeout,
                 plugin_memory_mb=args.plugin_memory_mb,
                 online_vulnerabilities=online_vulnerabilities,

@@ -38,6 +38,7 @@ read its exit codes and performance data.
 |---|---|
 | Full analysis | `pdt scan /src --output /reports/src` |
 | Fast metadata inventory (no content reads) | `pdt scan /src --output /reports/src --inventory-only` |
+| Owners, attributes and ACLs of every entry | add `--security-metadata` (Windows and Linux) |
 | Continue an interrupted scan | rerun the same command with `--resume` |
 | Skip content of huge files | `--skip --max-file-mb 512` (skipped files stay inventoried; `--max-file-mb` requires `--skip`) |
 | Prune directories explicitly | `--exclude-dir node_modules --exclude-dir build/cache` |
@@ -78,13 +79,41 @@ rebuilt. Files whose analysis failed in the interrupted run (for example a shari
 terminated worker) keep their error and are not retried; run a fresh scan to retry them. Files added or removed after the original traversal are not picked up: run a fresh
 scan for a current view. When no resumable inventory exists, PDT warns and starts a fresh scan.
 The inventory-shaping options must match the original command: `--inventory-only`, `--skip` with
-its `--max-file-mb`, and the `--exclude-dir` values (however they are spelled). When one differs,
+its `--max-file-mb`, the `--exclude-dir` values (however they are spelled) and `--security-metadata`. When one differs,
 `--resume` stops with exit 2 and names it; rerun with the original options, or without `--resume`.
 A file that was being analyzed when the process died is analyzed again, and its code-index rows
 and truncation are stored and counted once.
 An inventory or fingerprint database that SQLite cannot read (a damaged file) is moved aside as
 `NAME.corrupt-<timestamp>` with a warning and a scan diagnostic, and the scan rebuilds it; a
 locked database is never treated as damaged.
+
+## Ownership, attributes and security metadata
+
+Every inventory record carries `uid` and `gid` (the POSIX owner and group; null on Windows) and
+`attributes`: the Windows `FILE_ATTRIBUTE_*` names, without the `FILE_ATTRIBUTE_` prefix and in
+lower case (`readonly`, `hidden`, `system`, `archive`, `reparse_point`, `offline`,
+`recall_on_data_access`, ...), or the macOS file flags (`uf_immutable`, `uf_hidden`, `sf_append`,
+...). `directory` and `normal` are left out, because the record type says them. A bit without a
+name is kept as its hexadecimal value. Linux records no attributes: inode flags (`chattr`) are not
+read. Both values come from the same no-follow metadata read as the rest of the record, so they
+cost nothing extra.
+
+`--security-metadata` adds a `security` block per entry:
+
+| Platform | `security` |
+|---|---|
+| Windows | `owner_sid`, `group_sid`, and `dacl`: `protected` (inheritance from the parent is disabled), `explicit_entries` (each with `type`, `sid`, `access_mask` and `flags`) and `inherited_entry_count`. `dacl` is null when the descriptor has no DACL, which grants everyone full access. |
+| Linux | `posix_acl` and, for directories, `posix_default_acl`: the entries in getfacl's text form with numeric IDs (`user:1000:r--`), or null when the entry has no such ACL. Links carry no ACL on Linux. |
+| macOS | not available: the option is refused. |
+
+Windows opens one READ_CONTROL handle per entry, with the flags that open a link or junction
+itself and never recall offline data; Linux reads one extended attribute per entry and two per
+directory. Expect a slower inventory on very large trees. An access mask is the Windows
+`ACCESS_MASK`; for example 2032127 (`0x1F01FF`) is full control and 1179817 (`0x1200A9`) read and
+execute. SIDs and numeric IDs are recorded as they are; account names are not looked up. An entry
+whose metadata cannot be read gets `{"error": "..."}`, and `--strict` exits 3.
+`metrics.security_metadata` counts the entries read, those with ACL entries of their own and the
+read errors.
 
 ## Code index and `pdt query`
 

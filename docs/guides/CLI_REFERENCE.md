@@ -63,12 +63,14 @@ pdt scan --url repositories.txt --output ./remote-reports
 | `--exclude-dir NAME` | none | Prune a directory, which stays in the inventory with its prune reason. A bare name (`node_modules`) prunes that name at any depth; a path relative to the scan root (`build/cache`, `./web`, `web\src`) or an absolute path inside it prunes one directory. Matching ignores case. A value outside the root, or the root itself, is a usage error; one that matches nothing prints a warning. Repeat the option for several directories. |
 | `--skip` | off | Skip content analysis for files larger than `--max-file-mb`; they stay in the inventory with an explicit skip reason. Without `--skip`, no file is skipped by size. |
 | `--max-file-mb MB` | `128` | The `--skip` threshold, at least 1. Requires `--skip`. |
-| `--resume` | off | Continue an interrupted scan of the same root into the same `--output`: the stored inventory and findings are reused and only files not yet analyzed are analyzed. The inventory options (`--inventory-only`, `--skip`/`--max-file-mb`, `--exclude-dir`) must match the original command, or the scan stops with exit 2. Files that failed are not retried, and files added after the original walk are not picked up; run a fresh scan for both. Local roots only. |
+| `--security-metadata` | off | Also record each entry's security metadata in its `security` field. Windows: the owner and group SIDs and the DACL (whether inheritance is disabled, every explicit entry with its type, SID, access mask and flags, and how many entries are inherited), read through one READ_CONTROL handle per entry. Linux: the POSIX access ACL and, for directories, the default ACL, in getfacl's text form with numeric IDs. Links are never followed and no file content is read. An entry whose metadata cannot be read gets `{"error": ...}` and counts for `--strict`. Not available on macOS or with `--no-download`. Owner and group IDs and platform attributes are recorded without this option. |
+| `--resume` | off | Continue an interrupted scan of the same root into the same `--output`: the stored inventory and findings are reused and only files not yet analyzed are analyzed. The inventory options (`--inventory-only`, `--skip`/`--max-file-mb`, `--exclude-dir`, `--security-metadata`) must match the original command, or the scan stops with exit 2. Files that failed are not retried, and files added after the original walk are not picked up; run a fresh scan for both. Local roots only. |
 
 ```bash
 pdt scan ./monorepo --inventory-only                          # a fast metadata census
 pdt scan ./monorepo --exclude-dir node_modules --exclude-dir ./build/cache
 pdt scan ./data-lake --skip --max-file-mb 512                 # leave very large files unread
+pdt scan ./share --inventory-only --security-metadata         # owners, attributes and ACLs of every entry
 pdt scan ./monorepo --output ../reports/mono --resume         # after Ctrl-C or a crash
 ```
 
@@ -234,7 +236,7 @@ pdt compare a-report/discovery-report.json b-report/discovery-report.json --outp
 pdt capabilities [--json]
 ```
 
-Shows the Python version and platform, the native backends (C byte counter, OpenCL GPU, C++ signature classifier, Rust walker), the remote VCS clients found, the optional integrations (Tree-sitter grammars provisioned, PDF, DOCX, YAML), the loaded analyzers and plugins, and what the plugin sandbox verifies on this host.
+Shows the Python version and platform, the native backends (C byte counter, OpenCL GPU, C++ signature classifier, Rust walker; a walker built from older sources is reported as outdated and not used), the remote VCS clients found, the optional integrations (Tree-sitter grammars provisioned, PDF, DOCX, YAML), the loaded analyzers and plugins, and what the plugin sandbox verifies on this host.
 
 | Option | Default | Description |
 |---|---|---|

@@ -1,4 +1,4 @@
-"""JSON, Markdown and HTML reports for local and online scans (schema 1.7).
+"""JSON, Markdown and HTML reports for local and online scans (schema 1.7 and later).
 
 The HTML client is executed with Node.js against a minimal DOM so the rendered text of the
 scan-source and vulnerability-provenance views is checked, not just the template.
@@ -139,7 +139,7 @@ def test_json_reports_carry_the_scan_summary(tmp_path: Path):
         "remote": _result(remote=_remote_metadata(), online=_online_status()),
     }.items():
         payload = json.loads(write_reports(result, tmp_path / name, {"json"})[0].read_text(encoding="utf-8"))
-        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.7"
+        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.8"
         assert payload["scan"] == scan_summary(result.metrics)
     assert payload["scan"]["remote"]["url"] == "https://github.com/acme/widgets"
     assert payload["metrics"]["vulnerability_intelligence"]["online"]["cache"]["hits"] == 2
@@ -346,3 +346,27 @@ def test_html_views_count_every_finding_when_the_slice_is_truncated(tmp_path: Pa
     assert "1 vulnerability finding(s)" in dump["vuln-summary"]["text"]
     assert dump["vcs-summary"]["text"].startswith("2 evidence item(s)")
     assert "GitHub" in dump["vcs-summary"]["text"] and "GitLab" in dump["vcs-summary"]["text"]
+
+
+def test_reports_summarize_entry_attributes_and_security_metadata(tmp_path: Path):
+    result = _result()
+    result.metrics["entry_attributes"] = {"archive": 5, "readonly": 2}
+    result.metrics["security_metadata"] = {"enabled": True, "entries": 7, "explicit_acl_entries": 1, "errors": 2}
+    result.files[0].attributes = ["readonly", "archive"]
+    markdown = write_reports(result, tmp_path, {"markdown"})[0].read_text(encoding="utf-8")
+    assert "- Entry attributes: archive 5, readonly 2" in markdown
+    assert "- Security metadata: 7 entries read, 1 with ACL entries of their own, 2 unreadable" in markdown
+    dump = _render_html_client(result, tmp_path)
+    assert [row[0] for row in dump["entry-attributes"]["rows"]] == ["archive", "readonly"]
+    assert dump["inventory-summary"]["text"].endswith(
+        " • security metadata: 7 entries, 1 with ACL entries of their own, 2 unreadable"
+    )
+    assert dump["file-rows"]["rows"][0][4] == "readonly / archive"
+    # A scan without the option shows neither, and says so in Markdown.
+    plain = _result()
+    markdown = write_reports(plain, tmp_path / "plain", {"markdown"})[0].read_text(encoding="utf-8")
+    assert "- Entry attributes: none recorded" in markdown
+    assert "- Security metadata: not recorded (pdt scan --security-metadata records owners and ACLs)" in markdown
+    dump = _render_html_client(plain, tmp_path / "plain")
+    assert dump["entry-attributes"]["text"] == "No entries"
+    assert "security metadata" not in dump["inventory-summary"]["text"]

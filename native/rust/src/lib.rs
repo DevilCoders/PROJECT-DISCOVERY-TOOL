@@ -1,4 +1,6 @@
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
+use pyo3::IntoPyObjectExt;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, ReadDir};
@@ -74,6 +76,32 @@ fn modified_ns(metadata: &fs::Metadata) -> i64 {
     }
 }
 
+/// (owner uid, group gid, attribute bits): POSIX ownership; Windows FILE_ATTRIBUTE_* bits,
+/// or BSD/macOS st_flags. Python turns the bits into names.
+fn ownership(metadata: &fs::Metadata) -> (Option<u32>, Option<u32>, Option<u32>) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return (None, None, Some(metadata.file_attributes()));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt as MacMetadataExt;
+        use std::os::unix::fs::MetadataExt;
+        return (Some(metadata.uid()), Some(metadata.gid()), Some(metadata.st_flags()));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return (Some(metadata.uid()), Some(metadata.gid()), None);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        (None, None, None)
+    }
+}
+
 fn identity_ns(metadata: &fs::Metadata) -> (Option<u64>, Option<u64>, Option<u64>) {
     #[cfg(unix)]
     {
@@ -87,6 +115,55 @@ fn identity_ns(metadata: &fs::Metadata) -> (Option<u64>, Option<u64>, Option<u64
     {
         let _ = metadata;
         (None, None, None)
+    }
+}
+
+/// One walked entry. PyO3 converts Rust tuples of at most 12 items, so the entry is handed
+/// to Python as a flat tuple built here: (relative path, kind, size, mode, mtime_ns, hidden,
+/// link target, error, depth, device, inode, ctime_ns, owner uid, group gid, attribute bits).
+struct Entry {
+    rel: OsString,
+    kind: &'static str,
+    size: u64,
+    mode: Option<u32>,
+    mtime: i64,
+    hidden: bool,
+    target: OsString,
+    error: Option<String>,
+    depth: usize,
+    identity: (Option<u64>, Option<u64>, Option<u64>),
+    ownership: (Option<u32>, Option<u32>, Option<u32>),
+}
+
+impl Entry {
+    /// An entry whose metadata could not be read.
+    fn failed(rel: OsString, kind: &'static str, error: String, depth: usize) -> Self {
+        Self {
+            rel, kind, size: 0, mode: None, mtime: 0, hidden: false, target: OsString::new(),
+            error: Some(error), depth, identity: (None, None, None), ownership: (None, None, None),
+        }
+    }
+
+    fn into_tuple(self, py: Python<'_>) -> PyResult<Bound<'_, PyTuple>> {
+        let (device, inode, changed) = self.identity;
+        let (owner, group, attributes) = self.ownership;
+        PyTuple::new(py, [
+            self.rel.into_bound_py_any(py)?,
+            self.kind.into_bound_py_any(py)?,
+            self.size.into_bound_py_any(py)?,
+            self.mode.into_bound_py_any(py)?,
+            self.mtime.into_bound_py_any(py)?,
+            self.hidden.into_bound_py_any(py)?,
+            self.target.into_bound_py_any(py)?,
+            self.error.into_bound_py_any(py)?,
+            self.depth.into_bound_py_any(py)?,
+            device.into_bound_py_any(py)?,
+            inode.into_bound_py_any(py)?,
+            changed.into_bound_py_any(py)?,
+            owner.into_bound_py_any(py)?,
+            group.into_bound_py_any(py)?,
+            attributes.into_bound_py_any(py)?,
+        ])
     }
 }
 
@@ -123,13 +200,22 @@ impl Walker {
         slf
     }
 
-    #[allow(clippy::type_complexity)]
-    fn __next__(&mut self) -> PyResult<Option<(OsString, String, u64, Option<u32>, i64, bool, OsString, Option<String>, usize, Option<u64>, Option<u64>, Option<u64>)>> {
+    /// The next entry as a flat tuple (see Entry), or None when the walk is complete.
+    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        match self.next_entry() {
+            Some(entry) => entry.into_tuple(py).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+impl Walker {
+    fn next_entry(&mut self) -> Option<Entry> {
         self.last_pushed = None;
         loop {
             let (parent, next_entry, parent_depth) = match self.stack.last_mut() {
                 Some((path, entries, depth)) => (path.clone(), entries.next(), *depth),
-                None => return Ok(None),
+                None => return None,
             };
 
             let entry = match next_entry {
@@ -141,9 +227,7 @@ impl Walker {
                     } else {
                         relative_path(&self.root, &parent)
                     };
-                    return Ok(Some((rel, "directory_error".to_string(), 0, None, 0, false,
-                                    OsString::new(), Some(error.to_string()), parent_depth,
-                                    None, None, None)));
+                    return Some(Entry::failed(rel, "directory_error", error.to_string(), parent_depth));
                 }
                 None => {
                     self.stack.pop();
@@ -157,9 +241,7 @@ impl Walker {
             let metadata = match fs::symlink_metadata(&path) {
                 Ok(value) => value,
                 Err(error) => {
-                    return Ok(Some((rel, "entry_error".to_string(), 0, None, 0, false,
-                                    OsString::new(), Some(error.to_string()), depth,
-                                    None, None, None)));
+                    return Some(Entry::failed(rel, "entry_error", error.to_string(), depth));
                 }
             };
 
@@ -170,6 +252,7 @@ impl Walker {
             let mode = mode_bits(&metadata);
             let mtime = modified_ns(&metadata);
             let (device, inode, changed) = identity_ns(&metadata);
+            let (owner, group, attributes) = ownership(&metadata);
             let mut target = OsString::new();
             let mut error = None;
             let kind = if file_type.is_symlink() {
@@ -210,8 +293,10 @@ impl Walker {
                 }
             };
 
-            return Ok(Some((rel, kind.to_string(), size, mode, mtime, hidden,
-                            target, error, depth, device, inode, changed)));
+            return Some(Entry {
+                rel, kind, size, mode, mtime, hidden, target, error, depth,
+                identity: (device, inode, changed), ownership: (owner, group, attributes),
+            });
         }
     }
 }
@@ -219,5 +304,7 @@ impl Walker {
 #[pymodule]
 fn _walker(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Walker>()?;
+    // Python uses a build only when it yields every field it records (see Entry).
+    module.add("ENTRY_FIELDS", 15usize)?;
     Ok(())
 }

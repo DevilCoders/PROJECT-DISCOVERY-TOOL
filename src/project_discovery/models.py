@@ -7,8 +7,10 @@ from typing import Any, Literal, Sequence
 # Report schema: minor versions are additive, so any 1.x reader can load 1.y reports.
 # 1.7 added the top-level "scan" summary (mode, source, network access, remote source and
 # vulnerability sources) and the online advisory provenance under
-# metrics.vulnerability_intelligence.
-REPORT_SCHEMA_VERSION = "1.7"
+# metrics.vulnerability_intelligence. 1.8 added uid, gid, attributes and security to every
+# file, directory, symlink and special-entry record, and metrics.entry_attributes and
+# metrics.security_metadata.
+REPORT_SCHEMA_VERSION = "1.8"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -92,6 +94,13 @@ class FileRecord:
     permissions: int | None = None
     mtime_ns: int | None = None
     content_skipped_reason: str | None = None
+    # POSIX owner and group IDs (None on Windows), the platform attribute names (Windows
+    # FILE_ATTRIBUTE_* bits or macOS file flags) and, with --security-metadata, the owner,
+    # group and DACL (Windows) or POSIX ACLs (Linux). The other records carry the same four.
+    uid: int | None = None
+    gid: int | None = None
+    attributes: list[str] = field(default_factory=list)
+    security: dict[str, Any] | None = None
     # Private scan-time identity used to pin analyzer reads. It is excluded from
     # public reports but retained by the private SQLite inventory store.
     analysis_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = field(
@@ -144,6 +153,10 @@ class DirectoryRecord:
     pruned: bool = False
     prune_reason: str | None = None
     error: str | None = None
+    uid: int | None = None
+    gid: int | None = None
+    attributes: list[str] = field(default_factory=list)
+    security: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -157,6 +170,10 @@ class SymlinkRecord:
     target_state: str = "unverified"
     is_hidden: bool = False
     permissions: int | None = None
+    uid: int | None = None
+    gid: int | None = None
+    attributes: list[str] = field(default_factory=list)
+    security: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -169,6 +186,10 @@ class SpecialEntryRecord:
     is_hidden: bool = False
     permissions: int | None = None
     size_bytes: int = 0
+    uid: int | None = None
+    gid: int | None = None
+    attributes: list[str] = field(default_factory=list)
+    security: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

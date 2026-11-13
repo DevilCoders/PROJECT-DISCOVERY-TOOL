@@ -105,7 +105,7 @@ On Linux, `/tmp` is often a RAM-backed `tmpfs`; use `--remote-workdir` on a disk
 
 Each repository gets its own report directory (`OUTPUT/<repository>-<id>/` in a batch, `OUTPUT` or `./<repository>-<id>-pdt-report` for a single URL) with the usual JSON, Markdown and HTML reports. Every `--url FILE` run is a batch, also when the file lists one repository or its lines collapse to one (case or trailing-slash variants of a URL), so a generated URL file always gets the batch layout, summary and exit codes. The report root is the credential-free repository URL.
 
-Every report, local or online, starts from the same scan summary. In the JSON report (schema 1.7) it is the top-level `scan` block:
+Every report, local or online, starts from the same scan summary. In the JSON report (schema 1.7 and later) it is the top-level `scan` block:
 
 ```json
 "scan": {

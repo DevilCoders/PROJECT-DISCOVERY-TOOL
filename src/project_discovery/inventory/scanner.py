@@ -15,6 +15,7 @@ from ..engine.native import count_byte as native_count_byte
 from ..engine.native import create_walker as native_create_walker
 from ..engine.native import detect_signature as native_detect_signature
 from ..models import DirectoryRecord, FileRecord, SpecialEntryRecord, SymlinkRecord
+from .entry_metadata import attribute_names, has_explicit_acl, read_security, security_supported, stat_ownership
 from .store import InventoryStore, StoredFileRecords, StoredRecordSequence
 
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
@@ -131,6 +132,19 @@ def _is_hidden(name: str, info: os.stat_result) -> bool:
         return True
     attributes = getattr(info, "st_file_attributes", 0)
     return bool(attributes & 0x2)
+
+
+def _record_metadata(record, path: str, kind: str, stats: Counter[str], security: bool) -> None:
+    """Count a record's attributes; with --security-metadata, read its security metadata."""
+    for name in record.attributes:
+        stats[f"attribute:{name}"] += 1
+    if security:
+        record.security = read_security(path, kind)
+        stats["security_metadata_entries"] += 1
+        if "error" in record.security:
+            stats["security_metadata_errors"] += 1
+        elif has_explicit_acl(record.security):
+            stats["security_explicit_acl_entries"] += 1
 
 
 def _is_link_like(info: os.stat_result) -> bool:
@@ -459,7 +473,7 @@ def unused_exclusions(stats, excluded_names: set[str], excluded_paths: set[str])
 
 def inventory_options(
     *, read_signatures: bool, skip_oversized: bool, max_file_bytes: int,
-    excluded_names: set[str], excluded_paths: set[str],
+    excluded_names: set[str], excluded_paths: set[str], security_metadata: bool = False,
 ) -> dict:
     """The options that shape a stored inventory; --resume continues only an identical one."""
     return {
@@ -468,6 +482,7 @@ def inventory_options(
         "max_file_bytes": int(max_file_bytes) if skip_oversized else None,
         "exclude_names": sorted(excluded_names),
         "exclude_paths": sorted(excluded_paths),
+        "security_metadata": bool(security_metadata),
     }
 
 
@@ -515,6 +530,7 @@ def _discover_with_rust(
     stats: Counter[str],
     store: InventoryStore | None = None,
     classify=None,
+    security_metadata: bool = False,
 ) -> bool:
     """Consume the optional Rust directory iterator; return False if unavailable."""
     try:
@@ -529,7 +545,10 @@ def _discover_with_rust(
         return True
     if walker is None:
         return False
-    for relative, kind, size, mode, mtime_ns, hidden, target, error, depth, device_id, inode_id, ctime_ns in walker:
+    for item in walker:
+        relative, kind, size, mode, mtime_ns, hidden, target, error, depth, device_id, inode_id, ctime_ns = item[:12]
+        # Owner uid, group gid and the Windows attribute or macOS flag bits.
+        uid, gid, attribute_bits = item[12:15] if len(item) >= 15 else (None, None, None)
         # The walker returns lossless OS strings with native separators. A backslash is
         # a legal POSIX file-name character, so only Windows separators are rewritten.
         if os.sep == "\\":
@@ -579,7 +598,9 @@ def _discover_with_rust(
             link_record = SymlinkRecord(
                 relative, target, scope, target_state=state,
                 is_hidden=hidden, permissions=mode,
+                uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
             )
+            _record_metadata(link_record, os.path.join(root, relative), kind, stats, security_metadata)
             if store is None:
                 symlinks.append(link_record)
             else:
@@ -596,7 +617,9 @@ def _discover_with_rust(
                 relative, depth, is_hidden=hidden, permissions=mode,
                 development_marker=marker, pruned=exclusion is not None,
                 prune_reason=exclusion, error=error,
+                uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
             )
+            _record_metadata(record, os.path.join(root, relative), kind, stats, security_metadata)
             if store is None:
                 directories_by_path[relative] = record
             else:
@@ -626,10 +649,12 @@ def _discover_with_rust(
                 relative, size, Path(relative).suffix.lower(), language,
                 file_type=file_type, size_bucket=_size_bucket(size),
                 is_hidden=hidden, permissions=mode, mtime_ns=mtime_ns,
+                uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
                 # Prefer the descriptor-verified identity; the Windows walker
                 # cannot report a file ID itself.
                 analysis_identity=opened_identity or file_identity,
             )
+            _record_metadata(record, str(path), kind, stats, security_metadata)
             if size > max_file_bytes and skip_oversized:
                 record.content_skipped_reason = (
                     f"Explicit --skip: exceeds {max_file_bytes} bytes"
@@ -647,7 +672,9 @@ def _discover_with_rust(
             continue
         special_record = SpecialEntryRecord(
             relative, kind, is_hidden=hidden, permissions=mode, size_bytes=size,
+            uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
         )
+        _record_metadata(special_record, os.path.join(root, relative), kind, stats, security_metadata)
         if store is None:
             special_entries.append(special_record)
         else:
@@ -681,6 +708,7 @@ def discover_inventory(
     ignores: set[str] | None = None,
     store: InventoryStore | None = None,
     read_signatures: bool = True,
+    security_metadata: bool = False,
 ) -> tuple[
     Sequence[FileRecord],
     Sequence[DirectoryRecord],
@@ -695,7 +723,12 @@ def discover_inventory(
     SQLite-backed sequences. Directory counters and errors are updated incrementally
     in SQLite; only the active Python fallback iterator stack remains depth-bounded in
     memory. Analyzer findings and report aggregation still have separate memory gates.
+
+    Every record carries its owner and group IDs and platform attributes;
+    ``security_metadata`` also reads each entry's ACLs (see ``entry_metadata``).
     """
+    if security_metadata and not security_supported():
+        raise ValueError("--security-metadata reads Windows security descriptors and Linux POSIX ACLs only")
     root = root.expanduser().absolute()
     root_info = root.lstat()
     if stat.S_ISLNK(root_info.st_mode):
@@ -712,8 +745,10 @@ def discover_inventory(
         root_info = root.stat()
         root_mode = _mode(root_info)
         root_hidden = _is_hidden(root.name, root_info) if root.name else False
+        root_uid, root_gid, root_attributes = stat_ownership(root_info)
     except OSError:
         root_mode, root_hidden = None, False
+        root_uid, root_gid, root_attributes = None, None, []
     if store is not None:
         store.clear()
         stats["inventory_store_enabled"] = 1
@@ -724,9 +759,14 @@ def discover_inventory(
                 read_signatures=read_signatures, skip_oversized=skip_oversized,
                 max_file_bytes=max_file_bytes,
                 excluded_names=excluded_names, excluded_paths=excluded_paths,
+                security_metadata=security_metadata,
             ),
         })
-    root_directory = DirectoryRecord(".", 0, permissions=root_mode, is_hidden=root_hidden)
+    root_directory = DirectoryRecord(
+        ".", 0, permissions=root_mode, is_hidden=root_hidden,
+        uid=root_uid, gid=root_gid, attributes=root_attributes,
+    )
+    _record_metadata(root_directory, str(root), "directory", stats, security_metadata)
     directories_by_path: dict[str, DirectoryRecord] = {}
     if store is None:
         directories_by_path["."] = root_directory
@@ -741,6 +781,7 @@ def discover_inventory(
     used_rust = _discover_with_rust(
         root, excluded_names, excluded_paths, max_file_bytes, skip_oversized,
         directories_by_path, files, symlinks, special_entries, stats, store, classify,
+        security_metadata,
     )
     scandir_stack = []
     if not used_rust:
@@ -784,6 +825,7 @@ def discover_inventory(
         try:
             info = entry.stat(follow_symlinks=False)
             hidden = _is_hidden(entry.name, info)
+            uid, gid, attributes = stat_ownership(info)
             if hidden:
                 stats["hidden_entry_count"] += 1
 
@@ -801,8 +843,9 @@ def discover_inventory(
                     scope, state = _symlink_scope(root, Path(entry.path), target), "unverified"
                 link_record = SymlinkRecord(
                     relative, target, scope, target_state=state, is_hidden=hidden,
-                    permissions=_mode(info),
+                    permissions=_mode(info), uid=uid, gid=gid, attributes=attributes,
                 )
+                _record_metadata(link_record, entry.path, "symlink", stats, security_metadata)
                 if store is None:
                     symlinks.append(link_record)
                 else:
@@ -825,7 +868,11 @@ def discover_inventory(
                     development_marker=marker,
                     pruned=exclusion is not None,
                     prune_reason=exclusion,
+                    uid=uid,
+                    gid=gid,
+                    attributes=attributes,
                 )
+                _record_metadata(record, entry.path, "directory", stats, security_metadata)
                 if store is None:
                     directories_by_path[relative] = record
                 else:
@@ -867,8 +914,12 @@ def discover_inventory(
                     is_hidden=hidden,
                     permissions=_mode(info),
                     mtime_ns=info.st_mtime_ns,
+                    uid=uid,
+                    gid=gid,
+                    attributes=attributes,
                     analysis_identity=opened_identity or stat_identity(info),
                 )
+                _record_metadata(file_record, entry.path, "file", stats, security_metadata)
                 if size > max_file_bytes and skip_oversized:
                     file_record.content_skipped_reason = (
                         f"Explicit --skip: exceeds {max_file_bytes} bytes"
@@ -901,7 +952,11 @@ def discover_inventory(
                 is_hidden=hidden,
                 permissions=_mode(info),
                 size_bytes=getattr(info, "st_size", 0),
+                uid=uid,
+                gid=gid,
+                attributes=attributes,
             )
+            _record_metadata(special_record, entry.path, kind, stats, security_metadata)
             if store is None:
                 special_entries.append(special_record)
             else:

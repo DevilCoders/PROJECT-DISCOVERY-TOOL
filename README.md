@@ -18,7 +18,7 @@ PDT scans a local directory or a remote repository, inventories every file, dire
 
 | Area | What PDT reports |
 |---|---|
-| Inventory | Files, directories, symlinks and special entries with sizes, permissions, signatures, hidden entries, development and cache trees, and explicit prunes, in a resumable SQLite store |
+| Inventory | Files, directories, symlinks and special entries with sizes, permissions, owners, Windows attributes and macOS file flags, signatures, hidden entries, development and cache trees, and explicit prunes, in a resumable SQLite store; `--security-metadata` adds Windows security descriptors or POSIX ACLs |
 | Code intelligence | A shared code model (Python syntax tree; a structural lexer for about 25 brace languages, refined by Tree-sitter grammars where provisioned), symbol index, call graph, recursion, unreferenced code, test links and module graph, queried with `pdt query` |
 | Security | Secrets in 30+ provider formats, secure-code rules, Python AST checks, and taint from untrusted input to injection, path, SSRF, XSS and redirect sinks (Python across modules); identity and privacy indicators |
 | Dependencies | Manifests, lockfiles and licenses; vulnerability matching against a local OSV snapshot (`--vuln-db`) or OSV.dev (`--vuln-online`) |
@@ -81,7 +81,7 @@ Details: [Online Mode guide](docs/guides/ONLINE_MODE.md).
 
 ## Reports
 
-- **JSON** (schema 1.7): every finding, file record and metric, streamed for large scans.
+- **JSON** (schema 1.8): every finding, file record and metric, streamed for large scans.
 - **Markdown:** summaries, the scan source and findings with evidence, impact and remediation.
 - **HTML:** a standalone offline report with search, filters, pagination and collapsible findings; it loads no remote assets.
 

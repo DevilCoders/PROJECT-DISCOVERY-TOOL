@@ -1011,3 +1011,65 @@ def test_text_capabilities_list_the_analyzers(capsys, monkeypatch):
     assert raised.value.code == 0
     out = capsys.readouterr().out
     assert "loaded:" in out and "secret-patterns" in out
+
+
+def test_security_metadata_reaches_every_report_and_strict(tmp_path: Path, capsys, monkeypatch):
+    from project_discovery.inventory import scanner
+    from project_discovery.inventory.entry_metadata import security_supported
+
+    if not security_supported():
+        pytest.skip("security metadata is read on Windows and Linux")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("print(1)\n", encoding="utf-8")
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json", "markdown", "html"}, 128, quiet=True, security_metadata=True) == 0
+    report = _json_report(output)
+    assert report["schema_version"] == "1.8"
+    security = report["metrics"]["security_metadata"]
+    assert (security["enabled"], security["entries"], security["errors"]) == (True, 2, 0)
+    for record in (report["files"][0], report["directories"][0]):
+        assert set(record) >= {"uid", "gid", "attributes", "security"}
+        assert record["security"] and "error" not in record["security"]
+    markdown = (output / "discovery-report.md").read_text(encoding="utf-8")
+    assert "- Security metadata: 2 entries read, " in markdown
+    assert '"security_metadata"' in (output / "discovery-report.html").read_text(encoding="utf-8")
+    # Metadata that cannot be read leaves the scan incomplete for --strict; it is not fatal.
+    monkeypatch.setattr(scanner, "read_security", lambda path, kind: {"error": "PermissionError: denied"})
+    capsys.readouterr()
+    assert run_scan(project, tmp_path / "strict", {"json"}, 128, quiet=True, strict=True, security_metadata=True) == 3
+    assert "2 security metadata read error(s)" in " ".join(capsys.readouterr().err.split())
+    assert _json_report(tmp_path / "strict")["files"][0]["security"] == {"error": "PermissionError: denied"}
+    # Without the option nothing is read, and the reports say so.
+    assert run_scan(project, tmp_path / "plain", {"json", "markdown"}, 128, quiet=True) == 0
+    plain = _json_report(tmp_path / "plain")
+    assert plain["metrics"]["security_metadata"] == {"enabled": False, "entries": 0, "explicit_acl_entries": 0, "errors": 0}
+    assert plain["files"][0]["security"] is None
+    assert "- Security metadata: not recorded" in (tmp_path / "plain" / "discovery-report.md").read_text(encoding="utf-8")
+
+
+def test_security_metadata_option_is_validated(tmp_path: Path, capsys, monkeypatch):
+    from project_discovery import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "main.py").write_text("print(1)\n", encoding="utf-8")
+    output = tmp_path / "out"
+    monkeypatch.setattr(cli, "security_supported", lambda: True)
+    code, err = _run_main(capsys, monkeypatch, [
+        "scan", "https://github.com/acme/widgets", "--no-download", "--security-metadata",
+    ])
+    assert code == 2 and "--security-metadata applies to the download mode, not --no-download" in err
+    # --resume continues only an inventory made with the same --security-metadata setting.
+    from project_discovery.inventory.entry_metadata import security_supported
+
+    if security_supported():
+        assert run_scan(project, output, {"json"}, 128, quiet=True) == 0
+        code, err = _run_main(capsys, monkeypatch, [
+            "scan", str(project), "--output", str(output), "--resume", "--security-metadata", "--quiet",
+        ])
+        assert code == 2 and "--security-metadata: stored off, now on" in err
+    monkeypatch.setattr(cli, "security_supported", lambda: False)
+    code, err = _run_main(capsys, monkeypatch, ["scan", str(project), "--security-metadata"])
+    assert code == 2
+    assert "--security-metadata reads Windows security descriptors and Linux POSIX ACLs" in err

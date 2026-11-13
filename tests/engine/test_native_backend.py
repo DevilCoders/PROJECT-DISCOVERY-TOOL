@@ -51,6 +51,22 @@ def test_cpp_signature_classifier_is_compiled_and_recognizes_binary_formats():
 
 def test_rust_filesystem_walker_is_built_and_available():
     assert native_backend.rust_walker_available()
+    assert native_backend.capabilities()["rust_filesystem_walker_outdated"] is False
+
+
+def test_an_outdated_walker_build_falls_back_to_python(monkeypatch):
+    # A walker built from older sources yields fewer fields than the scanner records; the
+    # Python fallback is used instead, and capabilities say why.
+    from types import SimpleNamespace
+
+    def walker(*_args):
+        raise AssertionError("an outdated walker build was used")
+
+    monkeypatch.setattr(native_backend, "_walker", SimpleNamespace(Walker=walker))
+    assert native_backend.create_walker(".", set(), set()) is None
+    assert native_backend.rust_walker_available() is False
+    info = native_backend.capabilities()
+    assert (info["rust_filesystem_walker"], info["rust_filesystem_walker_outdated"]) == (False, True)
 
 
 def test_gpu_capability_fields_are_available_with_or_without_hardware():

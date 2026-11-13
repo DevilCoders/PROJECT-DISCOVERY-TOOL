@@ -124,6 +124,24 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   and `prisma-schema` analyzers declare the languages they read (`analyzers[].languages` in
   reports and `pdt capabilities --json`).
 
+### Added: filesystem inventory
+- Every file, directory, symlink and special-entry record carries `uid` and `gid` (the POSIX
+  owner and group; null on Windows) and `attributes`: the Windows `FILE_ATTRIBUTE_*` names
+  (`readonly`, `hidden`, `system`, `archive`, `reparse_point`, `offline`, ...) or the macOS file
+  flags (`uf_immutable`, `sf_append`, ...), counted in `metrics.entry_attributes` and shown in the
+  terminal, Markdown and HTML summaries. The Rust walker and the Python fallback record the same
+  values. A Rust walker built from older sources is no longer used; `pdt capabilities --json`
+  reports it as `rust_filesystem_walker_outdated`.
+- `pdt scan --security-metadata` adds a `security` block to every record: the owner and group
+  SIDs and the DACL on Windows (inheritance protection, each explicit entry's type, SID, access
+  mask and flags, and the number of inherited entries), read through a READ_CONTROL handle on the
+  entry itself, never a link target; the POSIX access ACL, and a directory's default ACL, on
+  Linux. `metrics.security_metadata` counts the entries read, those with ACL entries of their own
+  and read errors; read errors make `--strict` exit 3. `--resume` requires the same setting. It is
+  refused on macOS and with `--no-download`.
+- Report schema 1.8: `uid`, `gid`, `attributes` and `security` on every inventory record, and
+  `metrics.entry_attributes` and `metrics.security_metadata`.
+
 ### Changed
 - The README is a concise overview, and the CLI banner, `pdt --help` and the package
   description name both scan modes (local directories and remote repositories) instead of

@@ -27,7 +27,12 @@ def test_inventory_models_serialize_additive_metadata():
         special_entries=[SpecialEntryRecord("events.pipe", "fifo", permissions=0o600)],
     )
     payload = result.to_dict()
-    assert payload["schema_version"] == "1.7"
+    assert payload["schema_version"] == "1.8"
+    # Schema 1.8: ownership, platform attributes and the opt-in security block on every record.
+    for kind in ("files", "directories", "symlinks", "special_entries"):
+        assert {key: payload[kind][0][key] for key in ("uid", "gid", "attributes", "security")} == {
+            "uid": None, "gid": None, "attributes": [], "security": None,
+        }
     assert payload["files"][0]["file_type"] == "text"
     assert payload["directories"][0]["total_bytes"] == 42
     assert payload["symlinks"][0]["target_scope"] == "internal"

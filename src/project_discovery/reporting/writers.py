@@ -76,6 +76,26 @@ def public_url(value: Any) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
+def attribute_summary(counts: dict[str, int], limit: int = 8) -> str:
+    """The most common entry attributes with their counts, such as "archive 1,204, readonly 3"."""
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    text = ", ".join(f"{name} {count:,}" for name, count in ranked[:limit])
+    if len(ranked) > limit:
+        text += f", and {len(ranked) - limit} more"
+    return text or "none recorded"
+
+
+def security_metadata_summary(metrics: dict[str, Any]) -> str:
+    """One line on the --security-metadata block of the scan metrics."""
+    security = metrics.get("security_metadata") or {}
+    if not security.get("enabled"):
+        return "not recorded (pdt scan --security-metadata records owners and ACLs)"
+    return (
+        f"{security.get('entries', 0):,} entries read, {security.get('explicit_acl_entries', 0):,} "
+        f"with ACL entries of their own, {security.get('errors', 0):,} unreadable"
+    )
+
+
 def scan_summary(metrics: dict[str, Any]) -> dict[str, Any]:
     """Describe how a scan obtained its data: local or online, and every network use.
 
@@ -298,6 +318,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>File type distribution</h3><div id="file-types"></div></div>
      <div class="profile-card"><h3>File size distribution</h3><div id="size-buckets"></div></div>
      <div class="profile-card"><h3>Development dependency trees</h3><div id="development-dirs"></div></div>
+     <div class="profile-card"><h3>Entry attributes</h3><div id="entry-attributes"></div></div>
      <div class="profile-card"><h3>Host & native engine</h3><div id="host-os" class="mono muted"></div></div>
      <div class="profile-card"><h3>Vulnerability intelligence</h3><div id="vuln-summary" class="mono muted"></div></div>
      <div class="profile-card"><h3>Source control & delivery</h3><div id="vcs-summary" class="mono muted"></div></div>
@@ -463,6 +484,7 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
             "size_bucket": item.size_bucket,
             "is_hidden": item.is_hidden,
             "permissions": item.permissions,
+            "attributes": item.attributes,
             "content_skipped_reason": item.content_skipped_reason,
             "error": item.error,
         },
@@ -599,6 +621,8 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
             if metrics.get("size_unknown_count") else ""
         ),
         f"- Hidden entries: {metrics.get('hidden_entry_count', 0):,}",
+        f"- Entry attributes: {_md(attribute_summary(metrics.get('entry_attributes') or {}))}",
+        f"- Security metadata: {_md(security_metadata_summary(metrics))}",
         f"- Development/cache trees: {metrics.get('development_directory_count', 0):,}",
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
         f"- Analysis queue limit: {execution.get('max_pending_tasks', 'not reported')} pending batches",
@@ -659,8 +683,9 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     else:
         for item in result.special_entries:
             mode = "unknown" if item.permissions is None else oct(item.permissions)
+            owner = "unknown" if item.uid is None else f"{item.uid}:{item.gid}"
             line(
-                f"- {_md(item.path)} — {_md(item.entry_type)}, permissions {mode}, "
+                f"- {_md(item.path)} — {_md(item.entry_type)}, permissions {mode}, owner {owner}, "
                 f"hidden: {item.is_hidden}, size: {item.size_bytes:,} bytes"
             )
     _write_markdown_vulnerabilities(line, result, metrics.get("vulnerability_intelligence") or {})

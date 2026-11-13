@@ -23,6 +23,14 @@ function fillBars(targetId,values){
   row.append(name,track,count);target.append(row);
  }
 }
+// State flags, then platform attributes (Windows FILE_ATTRIBUTE_* or macOS file flags), once each.
+function entryFlags(flags,attributes){
+ const seen=new Set(),names=[];
+ for(const name of flags.concat(Array.isArray(attributes)?attributes:[])){
+  if(name&&!seen.has(name)){seen.add(name);names.push(String(name));}
+ }
+ return names.join(" / ")||"—";
+}
 const metrics=REPORT.metrics||{};
 // Large reports embed bounded slices; totals always describe the complete scan.
 const totals=REPORT.totals||{};
@@ -49,6 +57,7 @@ if(truncated.length){
 }
 fillBars("file-types",metrics.file_types);fillBars("size-buckets",metrics.size_buckets);
 fillBars("development-dirs",metrics.development_directories);
+fillBars("entry-attributes",metrics.entry_attributes);
 $("host-os").textContent=JSON.stringify({
  host:metrics.host_os||{},
  native_backend:metrics.native_backend||{backend:"not reported"}
@@ -237,7 +246,12 @@ $("inventory-summary").textContent=number(total("files"))+" files • "+
  " links • "+number(total("special_entries"))+" special entries • "+formatBytes(metrics.total_bytes)+
  (metrics.size_unknown_count?" (plus "+number(metrics.size_unknown_count)+" files of unknown size)":"")+" • "+number(metrics.hidden_entry_count||0)+
  " hidden entries • "+number(metrics.development_directory_count||0)+" development/cache trees • "+
- number(metrics.pruned_directory_count||0)+" explicitly pruned directories";
+ number(metrics.pruned_directory_count||0)+" explicitly pruned directories"+
+ (function(security){
+  if(!security||!security.enabled)return "";
+  return " • security metadata: "+number(security.entries||0)+" entries, "+number(security.explicit_acl_entries||0)+
+   " with ACL entries of their own, "+number(security.errors||0)+" unreadable";
+ })(metrics.security_metadata);
 $("raw-metrics").textContent=JSON.stringify(metrics,null,2);
 $("raw-errors").textContent=JSON.stringify(REPORT.errors||[],null,2);
 $("raw-analyzers").textContent=JSON.stringify(REPORT.analyzers||[],null,2);
@@ -255,7 +269,7 @@ for(const item of REPORT.directories){
 }
 for(const item of topDirectories){
  const tr=document.createElement("tr");
- const marker=[item.development_marker,item.pruned?"pruned":null,item.is_hidden?"hidden":null].filter(Boolean).join(" / ")||"—";
+ const marker=entryFlags([item.development_marker,item.pruned?"pruned":null,item.is_hidden?"hidden":null],item.attributes);
  for(const pair of [[item.path,"path"],[item.depth,""],[number(item.file_count),""],[formatBytes(item.total_bytes),""],[marker,""]]){
   const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
  }
@@ -326,7 +340,7 @@ function renderFiles(reset){
   const item=files[fileScanIndex++];
   if(!fileMatchesFilter(item,query,kind))continue;
   const tr=document.createElement("tr");
-  const flags=[item.is_hidden?"hidden":null,item.content_skipped_reason?"content skipped":null,item.error?"error":null].filter(Boolean).join(" / ")||"—";
+  const flags=entryFlags([item.is_hidden?"hidden":null,item.content_skipped_reason?"content skipped":null,item.error?"error":null],item.attributes);
   for(const pair of [[item.path,"path"],[formatBytes(item.size_bytes),""],[item.file_type||"unknown",""],[item.language,""],[flags,""]]){
    const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
   }
