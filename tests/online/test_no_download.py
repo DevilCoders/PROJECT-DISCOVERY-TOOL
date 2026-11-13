@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from provider_server import COMMIT, MARKER, ProviderService, RunningProviders, fixture_files
+from provider_server import COMMIT, MARKER, ProviderService, RunningProviders, blob_sha, fixture_files
 
 from project_discovery import cli
 from project_discovery.online import credentials
@@ -145,6 +145,36 @@ def test_private_repository_without_a_token_is_a_clear_fatal_error(tmp_path: Pat
     assert code == cli.EXIT_USAGE
     # --quiet still prints errors (Rich may wrap the line).
     assert "not found or is not accessible" in " ".join(capsys.readouterr().err.split())
+
+
+@pytest.mark.parametrize("mode", ["inventory", "directory-only"])
+def test_development_trees_apply_to_the_tree_listing(mode, tmp_path: Path, monkeypatch):
+    files = fixture_files()
+    files["node_modules/.package-lock.json"] = (b"{}\n", "100644")
+    files["node_modules/left-pad/index.js"] = (b"module.exports = 1;\n", "100644")
+    output = tmp_path / "out"
+    with RunningProviders(ProviderService(files=files)) as running:
+        code = _main(monkeypatch, "scan", PROVIDERS["github"][0], "--no-download", "--api-url", running.url + "/github",
+                     "--output", str(output), "--quiet", "--format", "json", "--development-trees", mode)
+        fetched = {item["path"] for item in running.service.requests}
+    assert code == cli.EXIT_OK
+    report = _report(output)
+    tree = next(item for item in report["directories"] if item["path"] == "node_modules")
+    assert (tree["marker_confidence"], tree["marker_evidence"]) == ("confirmed", ".package-lock.json")
+    # Nothing inside the tree is fetched (GitHub content requests name the blob SHA).
+    tree_blobs = {blob_sha(files[path][0]) for path in files if path.startswith("node_modules/")}
+    assert not any(sha in path for path in fetched for sha in tree_blobs)
+    assert any(blob_sha(files["src/app.py"][0]) in path for path in fetched)  # files outside it are
+    tree_files = [item for item in report["files"] if item["path"].startswith("node_modules/")]
+    trees = report["metrics"]["development_trees"]
+    if mode == "inventory":
+        assert {item["content_skipped_reason"] for item in tree_files} == {
+            "--development-trees inventory: inside the dependencies tree node_modules (node_modules, confirmed)",
+        }
+        assert trees["files_not_read"] == 2 and tree["contents_recorded"] is True
+    else:
+        assert tree_files == [] and tree["contents_recorded"] is False
+        assert (tree["file_count"], trees["files_not_recorded"]) == (2, 2)
 
 
 def test_public_repository_needs_no_token_and_tokens_stay_host_bound(tmp_path: Path, monkeypatch):

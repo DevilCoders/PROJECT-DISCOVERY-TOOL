@@ -207,6 +207,14 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   confirmed and distinctively named trees are pruned, never a possible one; each keeps its record
   with a reason naming the preset and the marker, and `metrics.pruned_by_profile` counts them.
   `--resume` requires the same presets.
+- `pdt scan --development-trees MODE` sets what happens inside the confirmed and distinctively
+  named development trees no option pruned: `deep` (the default) inventories and analyzes them;
+  `inventory` records every entry but reads no file content (types from names, the tree named in
+  `content_skipped_reason`); `directory-only` records their directories, with files, links and
+  special entries counted in the directory totals but not recorded. Links into a directory-only
+  tree resolve as `unknown`. `metrics.development_trees` reports the mode and what was not read or
+  recorded; no-download scans apply it to the tree listing and fetch nothing inside such a tree.
+- Report schema 1.14: `contents_recorded` on directory records and `metrics.development_trees`.
 - Report schema 1.13: `marker_category`, `marker_ecosystem`, `marker_confidence` and
   `marker_evidence` on directory records, and `metrics.development_categories`,
   `metrics.development_confidence` and `metrics.pruned_by_profile`.

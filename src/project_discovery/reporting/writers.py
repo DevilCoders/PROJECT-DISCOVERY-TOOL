@@ -106,6 +106,22 @@ def development_summary(metrics: dict[str, Any]) -> str:
     return f"{count:,}" + (f" ({', '.join(parts)})" if parts else "")
 
 
+def tree_mode_summary(trees: dict[str, Any] | None) -> str:
+    """What --development-trees did, such as "directory-only: 3 trees, 120,412 files not recorded"."""
+    trees = trees or {}
+    mode = trees.get("mode") or "deep"
+    if mode == "deep":
+        return "deep: inventoried and analyzed like any other directory"
+    count = trees.get("trees", 0)
+    if mode == "inventory":
+        return f"inventory: {count:,} tree(s), {trees.get('files_not_read', 0):,} files recorded but not read"
+    return (
+        f"directory-only: {count:,} tree(s), {trees.get('files_not_recorded', 0):,} files "
+        f"({trees.get('bytes_not_recorded', 0):,} bytes) and "
+        f"{trees.get('links_and_special_entries_not_recorded', 0):,} links or special entries counted, not recorded"
+    )
+
+
 def _marker_label(item) -> str:
     """"node_modules: dependencies, confirmed by .package-lock.json" for a marked directory."""
     confidence = getattr(item, "marker_confidence", None)
@@ -735,6 +751,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         *([f"- Windows reparse points: {_md(attribute_summary(metrics['reparse_tags']))}"]
           if metrics.get("reparse_tags") else []),
         f"- Development/cache trees: {development_summary(metrics)}",
+        f"- Development trees: {tree_mode_summary(metrics.get('development_trees'))}",
         *(f"- {label}: {_md(text)}" for label, text in aggregate_summary(metrics.get("inventory_aggregates"))),
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
         f"- Analysis queue limit: {execution.get('max_pending_tasks', 'not reported')} pending batches",

@@ -56,7 +56,7 @@ from .inventory.aggregates import inventory_aggregates
 from .inventory.cache import ScanCache
 from .inventory.entry_metadata import security_supported
 from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
-from .inventory.markers import describe_profiles, normalize_profiles
+from .inventory.markers import TREE_MODES, describe_profiles, normalize_profiles, validate_tree_mode
 from .inventory.signatures import count_classification
 from .inventory.store import (
     InventoryStore,
@@ -111,8 +111,8 @@ from .plugins.isolation import (
 from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
 from .reporting.writers import (
-    aggregate_summary, attribute_summary, development_summary, type_summary, write_remote_batch_summary,
-    write_reports,
+    aggregate_summary, attribute_summary, development_summary, tree_mode_summary, type_summary,
+    write_remote_batch_summary, write_reports,
 )
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
 
@@ -251,6 +251,7 @@ def _describe_inventory_options(options: dict) -> dict[str, str]:
         "size skip": f"--skip --max-file-mb {megabytes}" if options.get("skip_oversized") else "no --skip",
         "--exclude-dir": ", ".join(exclusions) or "none",
         "--exclude-profile": ", ".join(options.get("exclude_profiles") or []) or "none",
+        "--development-trees": options.get("development_trees") or "deep",
         "--security-metadata": "on" if options.get("security_metadata") else "off",
     }
 
@@ -492,6 +493,7 @@ def run_scan(
     memory_source: NoDownloadSource | None = None,
     security_metadata: bool = False,
     exclude_profiles: set[str] | frozenset[str] = frozenset(),
+    development_trees: str = "deep",
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -531,11 +533,13 @@ def run_scan(
     # usage error instead of a scan that silently prunes nothing.
     excluded_names, excluded_paths = normalize_exclusions(ignores, None if memory_source is not None else root)
     exclude_profiles = normalize_profiles(exclude_profiles)
+    validate_tree_mode(development_trees)
     requested_inventory = inventory_options(
         read_signatures=not inventory_only, skip_oversized=skip_oversized,
         max_file_bytes=max_file_mb * 1024 * 1024,
         excluded_names=excluded_names, excluded_paths=excluded_paths,
         security_metadata=security_metadata, exclude_profiles=exclude_profiles,
+        development_trees=development_trees,
     )
 
     # One scan per output directory: a second scan cleared the shared inventory under the
@@ -628,7 +632,7 @@ def run_scan(
                     records, directories, symlinks, special_entries, walk_stats = memory_source.build_inventory(
                         inventory_store, ignores=ignores,
                         max_file_bytes=max_file_mb * 1024 * 1024, skip_oversized=skip_oversized,
-                        exclude_profiles=exclude_profiles,
+                        exclude_profiles=exclude_profiles, development_trees=development_trees,
                     )
                 else:
                     records, directories, symlinks, special_entries, walk_stats = discover_inventory(
@@ -640,6 +644,7 @@ def run_scan(
                         read_signatures=not inventory_only,
                         security_metadata=security_metadata,
                         exclude_profiles=exclude_profiles,
+                        development_trees=development_trees,
                     )
             for value in unused_exclusions(walk_stats, excluded_names, excluded_paths):
                 note = f"--exclude-dir {value} matched no directory, so nothing was pruned for it."
@@ -950,9 +955,9 @@ def run_scan(
                         finding_store.append_finding(Finding(
                             "vulnerabilities",
                             f"Lockfile(s) not checked against the local advisory database: {len(skipped_lockfiles):,}",
-                            f"{len(skipped_lockfiles):,} lockfile(s) were skipped by --skip/--max-file-mb, so their "
-                            "packages were not matched. This is not evidence that they are free of known "
-                            "vulnerabilities.",
+                            f"{len(skipped_lockfiles):,} lockfile(s) were not read (--skip/--max-file-mb, or "
+                            "--development-trees inventory), so their packages were not matched. This is not "
+                            "evidence that they are free of known vulnerabilities.",
                             confidence="UNKNOWN", evidence=skipped_lockfiles[:20],
                             analyzer="local-vulnerability-intelligence", severity="LOW",
                         ))
@@ -1084,6 +1089,15 @@ def run_scan(
             "development_directories": {
                 key.split(":", 1)[1]: value
                 for key, value in walk_stats.items() if key.startswith("development_dir:")
+            },
+            # What --development-trees did inside the confirmed and distinctively named trees.
+            "development_trees": {
+                "mode": development_trees,
+                "trees": walk_stats.get("development_tree_count", 0),
+                "files_not_read": walk_stats.get("development_tree_unread_files", 0),
+                "files_not_recorded": walk_stats.get("development_tree_unrecorded_files", 0),
+                "bytes_not_recorded": walk_stats.get("development_tree_unrecorded_bytes", 0),
+                "links_and_special_entries_not_recorded": walk_stats.get("development_tree_unrecorded_entries", 0),
             },
             # The same marked directories by category and by how sure the marker is.
             "development_categories": {
@@ -1227,6 +1241,8 @@ def run_scan(
                 f"with own ACL entries / {security_summary['errors']:,} unreadable",
             )
         summary.add_row("Development/cache trees", development_summary(metrics))
+        if metrics["development_trees"]["mode"] != "deep":
+            summary.add_row("Development trees", tree_mode_summary(metrics["development_trees"]))
         for label, value in aggregate_summary(metrics["inventory_aggregates"]):
             # The paths come from the scanned tree: no control sequence may reach the terminal.
             summary.add_row(label, escape(neutralize_controls(value)))
@@ -1747,6 +1763,13 @@ def build_parser() -> argparse.ArgumentParser:
              "such as a build/ that may be source; repeatable or comma-separated",
     )
     scan.add_argument(
+        "--development-trees", choices=TREE_MODES, default="deep",
+        help="What happens inside the development trees no option pruned (confirmed or distinctively "
+             "named, such as node_modules): deep inventories and analyzes them (the default); inventory "
+             "records every entry but reads no file content; directory-only records their directories, "
+             "with files, links and special entries counted in the directory totals",
+    )
+    scan.add_argument(
         "--exclude-dir", action="append", default=[],
         metavar="NAME",
         help="Explicitly prune a directory name (at any depth), or one directory by its path relative "
@@ -2236,6 +2259,7 @@ def main() -> None:
                 "inventory_only": args.inventory_only,
                 "security_metadata": args.security_metadata,
                 "exclude_profiles": set(args.exclude_profile),
+                "development_trees": args.development_trees,
                 "plugin_isolation": args.plugin_isolation,
                 "plugin_timeout": args.plugin_timeout,
                 "plugin_memory_mb": args.plugin_memory_mb,
@@ -2272,7 +2296,7 @@ def main() -> None:
                 quiet=args.quiet, no_color=args.no_color, executor=args.executor,
                 resume=args.resume, inventory_only=args.inventory_only,
                 security_metadata=args.security_metadata,
-                exclude_profiles=set(args.exclude_profile),
+                exclude_profiles=set(args.exclude_profile), development_trees=args.development_trees,
                 plugin_isolation=args.plugin_isolation, plugin_timeout=args.plugin_timeout,
                 plugin_memory_mb=args.plugin_memory_mb,
                 online_vulnerabilities=online_vulnerabilities,

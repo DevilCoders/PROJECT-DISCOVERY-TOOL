@@ -259,6 +259,8 @@ $("inventory-summary").textContent=number(total("files"))+" files • "+
  (aggregates.empty_directory_count===undefined?"":" • "+number(aggregates.empty_directory_count)+" empty directories")+
  ((metrics.type_mismatches||{}).count?" • "+number(metrics.type_mismatches.count)+" name/content type mismatches":"")+
  (metrics.git_lfs_pointer_count?" • "+number(metrics.git_lfs_pointer_count)+" Git LFS pointers":"")+
+ ((metrics.development_trees||{}).mode==="inventory"?" • development trees: "+number(metrics.development_trees.files_not_read)+" files not read":"")+
+ ((metrics.development_trees||{}).mode==="directory-only"?" • development trees: "+number(metrics.development_trees.files_not_recorded)+" files not recorded":"")+
  ((aggregates.hard_links||{}).supported?" • "+number(aggregates.hard_links.hard_linked_files)+" hard-linked files":"")+
  (function(security){
   if(!security||!security.enabled)return "";

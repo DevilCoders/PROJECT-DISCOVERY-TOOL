@@ -21,8 +21,10 @@ from typing import Any, Literal, Sequence
 # metrics.mime_types, metrics.type_mismatches and metrics.git_lfs_pointer_count. 1.13 added
 # marker_category, marker_ecosystem, marker_confidence and marker_evidence to directory
 # records (development_marker is the marker catalog's key), metrics.development_categories,
-# metrics.development_confidence and metrics.pruned_by_profile.
-REPORT_SCHEMA_VERSION = "1.13"
+# metrics.development_confidence and metrics.pruned_by_profile. 1.14 added contents_recorded
+# to directory records (false inside a --development-trees directory-only tree) and
+# metrics.development_trees.
+REPORT_SCHEMA_VERSION = "1.14"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -193,6 +195,9 @@ class DirectoryRecord:
     marker_ecosystem: str | None = None
     marker_confidence: str | None = None
     marker_evidence: str | None = None
+    # False inside a --development-trees directory-only tree: the directory's files, links
+    # and special entries are counted in its totals but have no records of their own.
+    contents_recorded: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

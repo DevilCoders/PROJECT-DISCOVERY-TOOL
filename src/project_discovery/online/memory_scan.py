@@ -37,7 +37,7 @@ from ..intelligence.python_graph import MAX_GRAPH_AST_FILE_BYTES, parse_python_i
 from ..inventory.scanner import (
     _exclusion_match, _size_bucket, normalize_exclusions,
 )
-from ..inventory.markers import apply_marker, count_marker, detect_marker
+from ..inventory.markers import TreeScope, apply_marker, count_marker, detect_marker, tree_scope
 from ..inventory.signatures import apply_classification, classify, classify_content
 from ..inventory.links import Flavor, classify_links, store_lookup, stored_links
 from ..inventory.store import InventoryStore, StoredFileRecords, StoredRecordSequence
@@ -216,7 +216,7 @@ class NoDownloadSource:
     # ------------------------------------------------------------------
     def build_inventory(self, store: InventoryStore, *, ignores: set[str] | None = None,
                         max_file_bytes: int, skip_oversized: bool,
-                        exclude_profiles: frozenset[str] = frozenset()):
+                        exclude_profiles: frozenset[str] = frozenset(), development_trees: str = "deep"):
         """Persist the commit tree as PDT inventory records (no content is read)."""
         assert self.revision is not None, "open() must be called first"
         # A file whose size the listing lacks (GitLab) is checked against --skip when read.
@@ -237,6 +237,7 @@ class NoDownloadSource:
         directories: dict[str, DirectoryRecord] = {}
         invalid = 0
         pruned_prefixes: list[str] = []
+        scopes: dict[str, TreeScope] = {}  # directories inside an inventory or directory-only tree
 
         def pruned(path: str) -> bool:
             return any(path == prefix or path.startswith(prefix + "/") for prefix in pruned_prefixes)
@@ -258,6 +259,13 @@ class NoDownloadSource:
                 pruned=exclusion is not None, prune_reason=exclusion,
             )
             apply_marker(record, marker)
+            scope = None if match else tree_scope(development_trees, scopes.get(parent), marker, path)
+            if scope is not None:
+                scopes[path] = scope
+                if scope.root == path:
+                    stats["development_tree_count"] += 1
+                if scope.mode == "directory-only":
+                    record.contents_recorded = False
             directories[path] = record
             store.append("directory", record)
             store.adjust_directory(parent if parent not in {"", "."} else ".", direct_child_delta=1)
@@ -292,6 +300,11 @@ class NoDownloadSource:
             if hidden:
                 stats["hidden_entry_count"] += 1
             store.adjust_directory(parent if parent not in {"", "."} else ".", direct_child_delta=1)
+            tree = scopes.get(parent)
+            directory_only = tree is not None and tree.mode == "directory-only"
+            if directory_only and entry.kind == "symlink":
+                stats["development_tree_unrecorded_entries"] += 1
+                continue
             if entry.kind == "symlink":
                 target = self._symlink_target(entry)
                 scope = symlink_scope(entry.path, target) if target else "unknown"
@@ -305,6 +318,19 @@ class NoDownloadSource:
             # GitLab's tree listing has no sizes. Such a file keeps size 0 in the unknown
             # bucket, out of the totals, until its content arrives (see listed_size).
             size = entry.size if entry.size is not None else 0
+            if directory_only:
+                # Counted in the directory totals; no record, and the content is never fetched.
+                ancestor = PurePosixPath(entry.path).parent
+                while True:
+                    key = ancestor.as_posix() or "."
+                    store.adjust_directory(key, file_count_delta=1, total_bytes_delta=size)
+                    if key == ".":
+                        break
+                    ancestor = ancestor.parent
+                stats["total_bytes"] += size
+                stats["development_tree_unrecorded_files"] += 1
+                stats["development_tree_unrecorded_bytes"] += size
+                continue
             record = FileRecord(
                 entry.path, size, PurePosixPath(name).suffix.lower(), detect_language(entry.path),
                 size_bucket=_size_bucket(size) if entry.size is not None else "unknown",
@@ -314,7 +340,10 @@ class NoDownloadSource:
             apply_classification(record, classify(None, entry.path))
             if entry.size is None:
                 stats["size_unknown_count"] += 1
-            if size > max_file_bytes and skip_oversized:
+            if tree is not None:
+                record.content_skipped_reason = tree.reason
+                stats["development_tree_unread_files"] += 1
+            elif size > max_file_bytes and skip_oversized:
                 record.content_skipped_reason = f"Explicit --skip: exceeds {max_file_bytes} bytes"
                 stats["oversized_content_skipped"] += 1
             store.append("file", record)

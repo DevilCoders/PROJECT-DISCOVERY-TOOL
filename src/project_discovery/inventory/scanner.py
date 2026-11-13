@@ -25,7 +25,16 @@ from .entry_metadata import (
 )
 from .links import classify_links, local_flavor, memory_lookup, root_components, store_lookup, stored_links
 from .markers import CATALOG_VERSION as MARKER_CATALOG_VERSION
-from .markers import Marker, apply_marker, count_marker, detect_marker, profile_match
+from .markers import (
+    Marker,
+    TreeScope,
+    apply_marker,
+    count_marker,
+    detect_marker,
+    profile_match,
+    tree_scope,
+    validate_tree_mode,
+)
 from .signatures import (
     CATALOG_VERSION,
     SAMPLE_BYTES,
@@ -364,7 +373,7 @@ def unused_exclusions(stats, excluded_names: set[str], excluded_paths: set[str])
 def inventory_options(
     *, read_signatures: bool, skip_oversized: bool, max_file_bytes: int,
     excluded_names: set[str], excluded_paths: set[str], security_metadata: bool = False,
-    exclude_profiles: frozenset[str] | set[str] = frozenset(),
+    exclude_profiles: frozenset[str] | set[str] = frozenset(), development_trees: str = "deep",
 ) -> dict:
     """The options that shape a stored inventory; --resume continues only an identical one."""
     return {
@@ -374,6 +383,7 @@ def inventory_options(
         "exclude_names": sorted(excluded_names),
         "exclude_paths": sorted(excluded_paths),
         "exclude_profiles": sorted(exclude_profiles),
+        "development_trees": development_trees,
         "security_metadata": bool(security_metadata),
         # File types and markers from another catalog version would mix with this one's.
         "signature_catalog": CATALOG_VERSION,
@@ -428,8 +438,10 @@ def _discover_with_rust(
     classify=None,
     security_metadata: bool = False,
     profiles: frozenset[str] = frozenset(),
+    development_trees: str = "deep",
 ) -> bool:
     """Consume the optional Rust directory iterator; return False if unavailable."""
+    scopes: dict[str, TreeScope] = {}  # directories inside an inventory or directory-only tree
     try:
         walker = native_create_walker(root, excluded_names, excluded_paths)
     except OSError as exc:
@@ -492,6 +504,10 @@ def _discover_with_rust(
                 store.append("file", entry_record)
                 _update_file_ancestor_totals(relative, 0, store)
             continue
+        tree = scopes.get(parent)
+        if tree is not None and tree.mode == "directory-only" and kind != "directory":
+            _unrecorded_entry(relative, size, kind, store, directories_by_path, stats)
+            continue
         if kind == "symlink":
             if error:
                 # The target could not be read: the link is inventoried, its target is not.
@@ -525,6 +541,8 @@ def _discover_with_rust(
                 mtime_ns=mtime_ns, reparse_tag=reparse_tag_name(reparse_tag),
             )
             apply_marker(record, marker)
+            if not match:
+                _enter_scope(record, tree_scope(development_trees, tree, marker, relative), scopes, stats)
             _record_metadata(record, os.path.join(root, relative), kind, stats, security_metadata)
             if store is None:
                 directories_by_path[relative] = record
@@ -547,7 +565,9 @@ def _discover_with_rust(
             file_identity = (
                 device_id, inode_id, size, mtime_ns, ctime_ns,
             ) if device_id is not None and inode_id is not None else None
-            classification, opened_identity = (classify or _classify_file)(path, relative, file_identity)
+            # Inside an inventory-mode development tree no content is read, not even a sample.
+            reader = _classify_name_only if tree is not None else (classify or _classify_file)
+            classification, opened_identity = reader(path, relative, file_identity)
             language = detect_language(relative)
             record = FileRecord(
                 relative, size, Path(relative).suffix.lower(), language,
@@ -561,7 +581,10 @@ def _discover_with_rust(
             )
             apply_classification(record, classification)
             _record_metadata(record, str(path), kind, stats, security_metadata)
-            if size > max_file_bytes and skip_oversized:
+            if tree is not None:
+                record.content_skipped_reason = tree.reason
+                stats["development_tree_unread_files"] += 1
+            elif size > max_file_bytes and skip_oversized:
                 record.content_skipped_reason = (
                     f"Explicit --skip: exceeds {max_file_bytes} bytes"
                 )
@@ -594,6 +617,46 @@ def _discover_with_rust(
 
 
 
+def _unrecorded_entry(
+    relative_path: str, size_bytes: int, kind: str, store: InventoryStore | None,
+    directories_by_path: dict[str, DirectoryRecord], stats: Counter[str],
+) -> None:
+    """Count an entry of a directory-only development tree in the totals, without a record."""
+    if kind != "file":
+        stats["development_tree_unrecorded_entries"] += 1
+        return
+    stats["total_bytes"] += size_bytes
+    stats["development_tree_unrecorded_files"] += 1
+    stats["development_tree_unrecorded_bytes"] += size_bytes
+    if store is not None:
+        _update_file_ancestor_totals(relative_path, size_bytes, store)
+        return
+    # The no-store path aggregates from its file list at the end, which these files are not in.
+    parent = PurePosixPath(relative_path).parent
+    while True:
+        key = parent.as_posix() or "."
+        record = directories_by_path.get(key)
+        if record is not None:
+            record.file_count += 1
+            record.total_bytes += size_bytes
+        if key == ".":
+            break
+        parent = parent.parent
+
+
+def _enter_scope(
+    record: DirectoryRecord, scope: TreeScope | None, scopes: dict[str, TreeScope], stats: Counter[str],
+) -> None:
+    """Remember a directory's development-tree scope for its entries, before it is stored."""
+    if scope is None:
+        return
+    scopes[record.path] = scope
+    if scope.root == record.path:
+        stats["development_tree_count"] += 1
+    if scope.mode == "directory-only":
+        record.contents_recorded = False
+
+
 def _update_file_ancestor_totals(
     relative_path: str,
     size_bytes: int,
@@ -619,6 +682,7 @@ def discover_inventory(
     read_signatures: bool = True,
     security_metadata: bool = False,
     exclude_profiles: frozenset[str] = frozenset(),
+    development_trees: str = "deep",
 ) -> tuple[
     Sequence[FileRecord],
     Sequence[DirectoryRecord],
@@ -637,7 +701,8 @@ def discover_inventory(
     Every record carries its owner and group IDs and platform attributes;
     ``security_metadata`` also reads each entry's ACLs (see ``entry_metadata``).
     ``exclude_profiles`` prunes the confirmed and distinctively named development trees of
-    those --exclude-profile presets (see ``markers``).
+    those --exclude-profile presets (see ``markers``); ``development_trees`` (deep, inventory
+    or directory-only) decides what is recorded and read inside the other such trees.
     """
     if security_metadata and not security_supported():
         raise ValueError("--security-metadata reads Windows security descriptors and Linux POSIX ACLs only")
@@ -650,6 +715,7 @@ def discover_inventory(
         raise NotADirectoryError(f"The scan root is not a directory: {root}")
     if max_file_bytes < 1:
         raise ValueError("max_file_bytes must be >= 1")
+    validate_tree_mode(development_trees)
 
     excluded_names, excluded_paths = normalize_exclusions(ignores, root)
     stats: Counter[str] = Counter()
@@ -674,6 +740,7 @@ def discover_inventory(
                 max_file_bytes=max_file_bytes,
                 excluded_names=excluded_names, excluded_paths=excluded_paths,
                 security_metadata=security_metadata, exclude_profiles=exclude_profiles,
+                development_trees=development_trees,
             ),
         })
     root_directory = DirectoryRecord(
@@ -696,8 +763,9 @@ def discover_inventory(
     used_rust = _discover_with_rust(
         root, excluded_names, excluded_paths, max_file_bytes, skip_oversized,
         directories_by_path, files, symlinks, special_entries, stats, store, classify,
-        security_metadata, exclude_profiles,
+        security_metadata, exclude_profiles, development_trees,
     )
+    scopes: dict[str, TreeScope] = {}  # directories inside an inventory or directory-only tree
     scandir_stack = []
     if not used_rust:
         try:
@@ -745,8 +813,13 @@ def discover_inventory(
             tag_name = reparse_tag_name(reparse_tag)
             if hidden:
                 stats["hidden_entry_count"] += 1
+            tree = scopes.get(relative_dir)
+            directory_only = tree is not None and tree.mode == "directory-only"
 
             if _is_link_like(info):
+                if directory_only:
+                    _unrecorded_entry(relative, 0, "symlink", store, directories_by_path, stats)
+                    continue
                 try:
                     target = _user_form_target(os.readlink(entry.path))
                 except (OSError, ValueError):
@@ -794,6 +867,8 @@ def discover_inventory(
                     reparse_tag=tag_name,
                 )
                 apply_marker(record, marker)
+                if not match:
+                    _enter_scope(record, tree_scope(development_trees, tree, marker, relative), scopes, stats)
                 _record_metadata(record, entry.path, "directory", stats, security_metadata)
                 if store is None:
                     directories_by_path[relative] = record
@@ -822,7 +897,12 @@ def discover_inventory(
 
             if stat.S_ISREG(info.st_mode) and windows_special is None:
                 size = info.st_size
-                classification, opened_identity = classify(Path(entry.path), relative, info)
+                if directory_only:
+                    _unrecorded_entry(relative, size, "file", store, directories_by_path, stats)
+                    continue
+                # Inside an inventory-mode development tree no content is read, not even a sample.
+                reader = _classify_name_only if tree is not None else classify
+                classification, opened_identity = reader(Path(entry.path), relative, info)
                 language = detect_language(relative)
                 file_record = FileRecord(
                     relative,
@@ -841,7 +921,10 @@ def discover_inventory(
                 )
                 apply_classification(file_record, classification)
                 _record_metadata(file_record, entry.path, "file", stats, security_metadata)
-                if size > max_file_bytes and skip_oversized:
+                if tree is not None:
+                    file_record.content_skipped_reason = tree.reason
+                    stats["development_tree_unread_files"] += 1
+                elif size > max_file_bytes and skip_oversized:
                     file_record.content_skipped_reason = (
                         f"Explicit --skip: exceeds {max_file_bytes} bytes"
                     )
@@ -858,6 +941,9 @@ def discover_inventory(
                 continue
 
             kind = windows_special or _special_kind(info.st_mode)
+            if directory_only:
+                _unrecorded_entry(relative, 0, kind, store, directories_by_path, stats)
+                continue
             major, minor = (None, None) if windows_special else device_numbers(
                 getattr(info, "st_rdev", None) if kind in {"block_device", "character_device"} else None
             )

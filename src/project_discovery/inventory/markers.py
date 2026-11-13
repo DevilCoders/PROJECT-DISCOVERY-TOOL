@@ -27,6 +27,11 @@ ACTIONABLE = frozenset({"confirmed", "name"})
 CATEGORIES = (
     "vcs", "dependencies", "build", "generated", "cache", "ide", "test-output", "fuzzing", "models",
 )
+# --development-trees: what happens inside the confirmed and distinctively named trees that
+# no option pruned. deep: inventoried and analyzed like any other directory; inventory: every
+# entry is recorded but no file content is read; directory-only: only directories are
+# recorded, and their files, links and special entries are counted in the directory totals.
+TREE_MODES = ("deep", "inventory", "directory-only")
 # --exclude-profile presets: the marker categories each one prunes.
 PROFILES: dict[str, frozenset[str]] = {
     "vcs": frozenset({"vcs"}),
@@ -382,6 +387,35 @@ def profile_match(marker: Marker | None, profiles: frozenset[str] | set[str]) ->
         if marker.category in PROFILES[profile]:
             return f"exclusion_used:profile:{profile}", f"--exclude-profile {profile}: {describe(marker)}"
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class TreeScope:
+    """The --development-trees mode of a directory inside a development tree, and why."""
+
+    mode: str  # inventory or directory-only
+    root: str  # the tree's top directory
+    marker: Marker
+
+    @property
+    def reason(self) -> str:
+        return (f"--development-trees {self.mode}: inside the {self.marker.category} tree {self.root} "
+                f"({self.marker.key}, {self.marker.confidence})")
+
+
+def tree_scope(mode: str, inherited: TreeScope | None, marker: Marker | None, path: str) -> TreeScope | None:
+    """The scope of a directory: its parent's, or a new tree when its own marker is actionable."""
+    if inherited is not None:
+        return inherited
+    if mode == "deep" or marker is None or not marker.actionable:
+        return None
+    return TreeScope(mode, path, marker)
+
+
+def validate_tree_mode(mode: str) -> str:
+    if mode not in TREE_MODES:
+        raise ValueError(f"--development-trees {mode}: choose from {', '.join(TREE_MODES)}")
+    return mode
 
 
 def describe_profiles() -> str:

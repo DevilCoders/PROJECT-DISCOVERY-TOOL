@@ -4,8 +4,9 @@ The walk records each link's target text without following it. Once the walk is 
 every link is resolved here by looking its target up in the inventory itself: a link that
 names a missing entry is ``broken``, a chain that repeats itself (or exceeds the platform's
 link limit) is a ``loop``, a target that leaves the scanned tree is ``external`` and is not
-examined, a target behind a pruned or unreadable directory or an unreadable link is
-``unknown``, and anything else is ``resolved`` to the inventoried entry it reaches. Nothing
+examined, a target behind a pruned or unreadable directory, an unreadable link, or inside a
+directory-only development tree (whose files are not recorded) is ``unknown``, and anything
+else is ``resolved`` to the inventoried entry it reaches. Nothing
 is opened, stat-ed or followed, so the result has no races: it describes the inventory.
 
 Resolution follows the platform's rules. POSIX resolves ``..`` physically, after each
@@ -95,6 +96,7 @@ def memory_lookup(records: Iterable[tuple[str, Any]], fold) -> _Lookup:
             "target": getattr(record, "target", None), "target_state": getattr(record, "target_state", None),
             "pruned": getattr(record, "pruned", False), "error": getattr(record, "error", None),
             "entry_type": getattr(record, "entry_type", None),
+            "contents_recorded": getattr(record, "contents_recorded", True),
         }
         exact[record.path] = (kind, record.path, fields)
         if fold is not None:
@@ -223,6 +225,12 @@ class _Resolver:
             relative = "/".join(current[len(root_parts):] + [name])
             found = self.lookup.get(relative)
             if found is None:
+                # Inside a --development-trees directory-only tree, files and links have no records.
+                holder = self.lookup.get("/".join(current[len(root_parts):]) or ".")
+                if holder is not None and holder[2].get("contents_recorded") is False:
+                    return Resolution(
+                        "unknown", detail=f"{holder[1]} is a directory-only development tree: its files are not recorded",
+                    )
                 missing = "/".join([relative, *remaining])
                 return Resolution("broken", path=missing, detail=f"{relative} does not exist")
             kind, stored, fields = found

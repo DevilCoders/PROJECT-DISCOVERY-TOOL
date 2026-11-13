@@ -43,6 +43,7 @@ read its exit codes and performance data.
 | Skip content of huge files | `--skip --max-file-mb 512` (skipped files stay inventoried; `--max-file-mb` requires `--skip`) |
 | Prune directories explicitly | `--exclude-dir node_modules --exclude-dir build/cache` |
 | Prune dependency and cache trees by preset | `--exclude-profile dependencies,caches` |
+| Inventory dependency trees without reading them | `--development-trees inventory` (or `directory-only`) |
 | CI gate | `pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color` |
 | Remote repository, downloaded | `pdt scan https://github.com/org/repo --output /reports/repo` |
 | Remote repository, not downloaded | `pdt scan https://github.com/org/repo --no-download --output /reports/repo` |
@@ -81,7 +82,7 @@ terminated worker) keep their error and are not retried; run a fresh scan to ret
 scan for a current view. When no resumable inventory exists, PDT warns and starts a fresh scan.
 The inventory-shaping options must match the original command: `--inventory-only`, `--skip` with
 its `--max-file-mb`, the `--exclude-dir` values (however they are spelled), the `--exclude-profile`
-presets and `--security-metadata`. When one differs,
+presets, `--development-trees` and `--security-metadata`. When one differs,
 `--resume` stops with exit 2 and names it; rerun with the original options, or without `--resume`.
 A file that was being analyzed when the process died is analyzed again, and its code-index rows
 and truncation are stored and counted once.
@@ -186,6 +187,23 @@ preset and the marker (`--exclude-profile dependencies: node_modules: dependenci
 (npm/pnpm/Yarn/Bun), confirmed by .package-lock.json`); `metrics.pruned_by_profile` counts the
 directories each preset pruned. `--resume` requires the same presets, and an inventory marked
 with another catalog version is not resumed.
+
+`--development-trees MODE` decides what happens inside the confirmed and distinctively named
+trees that no option pruned. The top marked directory starts the tree; everything below it
+follows the same mode, and a `possible` marker never starts one.
+
+| Mode | Directories | Files | Links and special entries | Content |
+|---|---|---|---|---|
+| `deep` (default) | recorded | recorded | recorded | read and analyzed like any other file |
+| `inventory` | recorded | recorded, with type from the name and `content_skipped_reason` naming the tree | recorded | not read: no signature sample, hash or analyzer |
+| `directory-only` | recorded, with `contents_recorded: false` | counted in `file_count` and `total_bytes` of every ancestor, no record | counted in `direct_child_count`, no record | not read |
+
+Errors are recorded in every mode. In a `directory-only` tree, a link that points at one of its
+files resolves as `unknown`, not `broken`, and file-type, size-bucket, hard-link and timestamp
+figures cover recorded files only; `total_bytes` and the directory totals include everything.
+`metrics.development_trees` reports the mode, the number of trees, and the files and bytes
+not read or not recorded. In no-download scans the same modes apply to the tree listing, and
+nothing inside such a tree is fetched. `--resume` requires the same mode.
 
 ## Inventory aggregates
 
