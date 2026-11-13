@@ -46,6 +46,9 @@ rust_walker = RustExtension(
     "project_discovery._walker",
     path="native/rust/Cargo.toml",
     binding=Binding.PyO3,
+    # setuptools-rust builds in-place and editable extensions unoptimized unless told
+    # otherwise; the walker is on the inventory hot path.
+    debug=False,
     optional=True,
 )
 

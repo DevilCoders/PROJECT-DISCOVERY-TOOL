@@ -142,6 +142,14 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
 - Report schema 1.8: `uid`, `gid`, `attributes` and `security` on every inventory record, and
   `metrics.entry_attributes` and `metrics.security_metadata`.
 
+### Fixed: found during the filesystem inventory work
+- `python setup.py build_ext --inplace` and editable installs built the Rust walker unoptimized
+  (setuptools-rust's default for in-place builds); it is now always a release build, which walks
+  trees about 1.9 times faster (PDT-417).
+- Analysis worker processes outlived a coordinator that was killed outright (not stopped with
+  Ctrl-C), waiting on the task queue for good; each worker now exits within about a second of
+  losing its coordinator (PDT-418).
+
 ### Changed
 - The README is a concise overview, and the CLI banner, `pdt --help` and the package
   description name both scan modes (local directories and remote repositories) instead of

@@ -7,10 +7,12 @@ that the coordinator persists in deterministic submission order.
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import signal
 import stat
 import threading
+import time
 from collections import deque
 from concurrent.futures import CancelledError, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -165,12 +167,52 @@ def analyze_tasks(analyzers, locks, tasks: Sequence[FileTask]) -> list[FileOutco
 _worker_state: dict[str, Any] = {}
 
 
+def _watch_coordinator() -> None:
+    """Exit this worker process when the coordinator is gone.
+
+    A coordinator that is killed, rather than stopped with Ctrl-C, cannot terminate its
+    pool, and its workers would wait on the task queue for good, holding memory and the
+    native extensions open. Two signals cover every start method:
+
+    - the parent sentinel multiprocessing gives each child: a handle to the coordinator
+      (Windows), or a pipe whose write end only the coordinator holds (spawn, forkserver);
+      it becomes ready when the coordinator ends. A forkserver outlives the coordinator,
+      because every worker holds its "alive" pipe, so the worker's parent never changes.
+    - getppid(): with fork, the sibling workers inherit each other's sentinel pipes, but
+      the parent is the coordinator, and POSIX reparents an orphan.
+    """
+    from multiprocessing.connection import wait
+
+    parent = multiprocessing.parent_process()
+    sentinel = None if parent is None else parent.sentinel
+    parent_pid = os.getppid()
+
+    def watch() -> None:
+        while True:
+            try:
+                if sentinel is not None and wait([sentinel], timeout=1.0):
+                    os._exit(0)
+            except (OSError, ValueError):  # an unusable sentinel: rely on getppid()
+                break
+            if sentinel is None:
+                time.sleep(1.0)
+            if os.name != "nt" and os.getppid() != parent_pid:
+                os._exit(0)
+        while True:
+            time.sleep(1.0)
+            if os.name != "nt" and os.getppid() != parent_pid:
+                os._exit(0)
+
+    threading.Thread(target=watch, name="pdt-coordinator-watch", daemon=True).start()
+
+
 def _initialize_worker(vulnerability_db: str | None, plugin_setup=None) -> None:
     """Load this worker process's own analyzer instances (built-ins and plugins)."""
     # Ctrl-C reaches the whole process group. Only the coordinator handles it and stops
     # the workers itself, so workers do not die mid-queue printing KeyboardInterrupt
     # tracebacks or hand interrupts back as task results.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _watch_coordinator()
     from ..analyzers import load_analyzers
     from ..analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
 

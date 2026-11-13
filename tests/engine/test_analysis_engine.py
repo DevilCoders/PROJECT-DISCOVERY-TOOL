@@ -93,3 +93,71 @@ def test_gpu_counters_of_worker_processes_reach_the_scan_metrics(monkeypatch):
     assert outcomes[0].gpu_counts is None and outcomes[-1].gpu_counts == (4, 1)
     merged = _with_worker_gpu({"gpu_dispatches": 1, "gpu_fallbacks": 0, "backend": "c"}, [4, 1])
     assert (merged["gpu_dispatches"], merged["gpu_fallbacks"], merged["backend"]) == (5, 1, "c")
+
+
+def _exits_within(pid: int, handle, seconds: float) -> bool:
+    """Whether process ``pid`` ends within ``seconds`` (a zombie counts as ended)."""
+    import os
+    import subprocess
+
+    if os.name == "nt":
+        import ctypes
+
+        return ctypes.WinDLL("kernel32").WaitForSingleObject(handle, int(seconds * 1000)) == 0
+    deadline = time.monotonic() + seconds
+    while True:
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        if not state or state.startswith("Z"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def test_worker_processes_exit_when_the_coordinator_is_killed(tmp_path):
+    # Regression: a coordinator killed outright (Task Manager, SIGKILL, a CI timeout) left its
+    # analysis workers waiting on the task queue for good, holding the native extensions open.
+    import ctypes
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    script = tmp_path / "coordinator.py"
+    script.write_text(textwrap.dedent("""
+        import os
+        import time
+        from concurrent.futures import ProcessPoolExecutor
+
+        from project_discovery.engine.executor import _initialize_worker
+
+        if __name__ == "__main__":
+            pool = ProcessPoolExecutor(max_workers=1, initializer=_initialize_worker, initargs=(None, None))
+            print(pool.submit(os.getpid).result(), flush=True)
+            time.sleep(600)
+    """), encoding="utf-8")
+    coordinator = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, text=True)
+    worker = handle = None
+    try:
+        worker = int(coordinator.stdout.readline())
+        if os.name == "nt":
+            # Opened before the kill, so a reused process ID cannot answer for the worker.
+            kernel32 = ctypes.WinDLL("kernel32")
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            handle = kernel32.OpenProcess(0x00100000 | 0x0001, False, worker)  # SYNCHRONIZE, TERMINATE
+            assert handle
+        coordinator.kill()
+        coordinator.wait(30)
+        assert _exits_within(worker, handle, 30), "the worker outlived its coordinator"
+    finally:
+        if coordinator.poll() is None:
+            coordinator.kill()
+        coordinator.stdout.close()
+        # A failing run must not leave the orphan behind.
+        if worker is not None and not _exits_within(worker, handle, 0):
+            if os.name == "nt":
+                kernel32.TerminateProcess(ctypes.c_void_p(handle), 1)
+            else:
+                os.kill(worker, signal.SIGKILL)
+        if handle:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))

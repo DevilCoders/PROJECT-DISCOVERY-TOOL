@@ -106,7 +106,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | PowerShell | source | optional parser | — | powershell | tree-sitter-polyglot | 2 |
 | Prisma | schema | inventory | — | — | prisma-schema | 2 |
 | Protocol Buffers | schema | optional parser | — | proto | tree-sitter-polyglot | 2 |
-| Python | source | semantic | syntax tree | — | ai-ml-intelligence, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 45 |
+| Python | source | semantic | syntax tree | — | ai-ml-intelligence, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 46 |
 | R | source | optional parser | — | r | tree-sitter-polyglot | 1 |
 | ReasonML | source | inventory | — | — | — | 0 |
 | Ren'Py | game_source | inventory | — | — | game-engine-intelligence | 1 |
