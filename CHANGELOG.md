@@ -327,9 +327,10 @@ Findings and their status are in the second-round section of
   impact (PDT-399); the security docs describe taint sources and rounds as implemented (PDT-400);
   PKCS#12 and Java keystores are reported by name (PDT-401).
 - Test declarations for unittest, Spock, Rust attributes, PHPUnit attributes and docblocks, and
-  Pest (PDT-402); CI jobs from the parsed pipeline, Maven plugins, `.cmake` modules and non-object
-  `package.json` files (PDT-403); function and method coverage counters and merged Go profiles
-  (PDT-404); malformed XML property lists (PDT-405); Jupyter notebooks (PDT-406).
+  Pest (PDT-402); CI jobs from the parsed pipeline (line by line without PyYAML), Maven plugins,
+  `.cmake` modules and non-object `package.json` files (PDT-403); function and method coverage
+  counters and merged Go profiles (PDT-404); malformed XML property lists (PDT-405); Jupyter
+  notebooks (PDT-406).
 - `--resume` counts re-analyzed files' code-index rows and truncations once (PDT-407) and refuses
   an inventory made with other options (PDT-409); calls on a call's result are not recursion
   (PDT-408); every `--exclude-dir` spelling works, impossible values are errors and `--max-file-mb`

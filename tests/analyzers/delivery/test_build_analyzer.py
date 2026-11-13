@@ -238,3 +238,30 @@ def test_ci_jobs_come_from_the_parsed_pipeline(tmp_path: Path):
     array = scan("package.json", "[1, 2]")
     assert array.title.startswith("Build manifest:")
     assert "Detected 0 build targets/jobs" in array.detail
+
+
+def test_ci_jobs_without_pyyaml_are_read_line_by_line(tmp_path: Path, monkeypatch):
+    # Regression: with PyYAML missing (it is an optional extra) the parsed-YAML job lists
+    # were empty, so a core install reported no jobs at all.
+    import sys
+
+    monkeypatch.setitem(sys.modules, "yaml", None)  # import yaml now raises ImportError
+    analyzer = BuildManifestAnalyzer()
+
+    def scan(relative, content):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        record = FileRecord(relative, path.stat().st_size, path.suffix, "Build")
+        return analyzer.analyze(path, record)[0]
+
+    github = scan(
+        ".github/workflows/ci.yml",
+        "on:\n  push:\n  pull_request:\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: make\n  test:   # unit tests\n    runs-on: ubuntu-latest\n",
+    )
+    assert [item for item in github.evidence if item.startswith("job:")] == ["job: build", "job: test"]
+    assert "PyYAML" in github.detail
+    gitlab = scan(".gitlab-ci.yml", "stages:\n  - build\n.template:\n  script: [echo]\ncompile:\n  stage: build\n")
+    assert [item for item in gitlab.evidence if item.startswith("job:")] == ["job: compile"]
+    assert "PyYAML" in gitlab.detail

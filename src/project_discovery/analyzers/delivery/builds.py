@@ -49,8 +49,40 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _workflow_jobs(content: str, provider: str) -> list[str]:
-    """Job names of a GitHub, GitLab or Azure pipeline (empty when the YAML does not parse)."""
+# PyYAML is optional (the infrastructure extra); without it, jobs are read line by line.
+_NO_YAML = "jobs read line by line: PyYAML (the infrastructure extra) is not installed"
+# A key starts at a word boundary, so a search inside a long identifier run fails at once.
+_MAPPING_KEY = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]++)[ \t]*+:(?:[ \t]|$)")
+
+
+def _mapping_keys(content: str, parent: str) -> list[str]:
+    """Keys directly below the top-level ``parent:`` mapping, read line by line."""
+    keys: list[str] = []
+    inside, indent = False, None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line[0].isspace():
+            inside = stripped.split("#", 1)[0].rstrip() == f"{parent}:"
+            indent = None
+            continue
+        if inside:
+            width = len(line) - len(line.lstrip())
+            indent = width if indent is None else indent
+            key = _MAPPING_KEY.match(stripped)
+            if width == indent and key:
+                keys.append(key.group(1))
+    return keys
+
+
+def _workflow_jobs(content: str, provider: str) -> list[str] | None:
+    """Job names of a GitHub, GitLab or Azure pipeline: empty when the YAML does not parse,
+    None when PyYAML is not installed (the caller then reads the jobs line by line)."""
+    try:
+        import yaml  # noqa: F401 - availability check for the optional extra
+    except ImportError:
+        return None
     from ...core.safe_parsers import safe_yaml_load
     from .deployment import _azure_jobs, _gitlab_jobs
 
@@ -211,27 +243,36 @@ class BuildManifestAnalyzer(Analyzer):
                 metadata.append("Jenkins pipeline script")
             elif record.path.startswith(".github/workflows/"):
                 # Jobs are the keys of the jobs mapping, not every indented key (triggers).
-                targets = [f"job: {job}" for job in _workflow_jobs(content, "github")]
+                jobs = _workflow_jobs(content, "github")
+                if jobs is None:
+                    jobs = _mapping_keys(content, "jobs")
+                    metadata.append(_NO_YAML)
+                targets = [f"job: {job}" for job in jobs]
                 metadata.append("GitHub Actions workflow")
             elif name in {
                 ".gitlab-ci.yml", "azure-pipelines.yml", "azure-pipelines.yaml",
                 "bitbucket-pipelines.yml", ".travis.yml", "appveyor.yml",
             }:
+                ci_jobs = None
                 if name in {".gitlab-ci.yml", "azure-pipelines.yml", "azure-pipelines.yaml"}:
                     ci_jobs = _workflow_jobs(content, "gitlab" if name == ".gitlab-ci.yml" else "azure")
-                else:
+                    if ci_jobs is None:
+                        metadata.append(_NO_YAML)
+                if ci_jobs is None:
                     ci_jobs = re.findall(
                         r"(?m)^[ \t]*-\s*job:\s*([A-Za-z0-9_.-]+)\s*$", content
                     )
                     ci_jobs.extend(re.findall(
                         r"(?m)^([A-Za-z0-9_.-]+):\s*$", content
                     ))
+                    # Hidden keys (.template) are GitLab templates, not jobs.
+                    ci_jobs = [job for job in ci_jobs if not job.startswith(".")]
                 targets = [
                     f"job: {job}" for job in dict.fromkeys(ci_jobs)
                     if job not in {
                         "name", "on", "permissions", "env", "defaults", "stages",
                         "variables", "image", "services", "cache", "before_script",
-                        "after_script", "workflow", "jobs", "steps", "trigger",
+                        "after_script", "workflow", "jobs", "steps", "trigger", "default", "include",
                     }
                 ]
                 metadata.append("CI pipeline manifest")
