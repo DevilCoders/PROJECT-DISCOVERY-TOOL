@@ -116,11 +116,11 @@ def _xml_summary(root: ET.Element) -> dict[str, tuple[int, int]] | None:
         for element in root.iter():
             if element.tag.rsplit("}", 1)[-1].lower() == "counter":
                 kind = element.attrib.get("type", "").upper()
-                if kind in {"LINE", "BRANCH"}:
+                if kind in {"LINE", "BRANCH", "METHOD"}:
                     covered = int(element.attrib.get("covered", 0))
                     missed = int(element.attrib.get("missed", 0))
-                    label = "lines" if kind == "LINE" else "branches"
-                    counters[label] = (covered, covered + missed)
+                    label = {"LINE": "lines", "BRANCH": "branches", "METHOD": "methods"}[kind]
+                    counters[label] = (covered, covered + missed)  # the report's own counter comes last
         if counters:
             return counters
 
@@ -158,6 +158,10 @@ def _xml_summary(root: ET.Element) -> dict[str, tuple[int, int]] | None:
             covered = int(element.attrib.get("visitedBranchPoints", 0))
             if total:
                 result["branches"] = (covered, total)
+            total = int(element.attrib.get("numMethods", 0))
+            covered = int(element.attrib.get("visitedMethods", 0))
+            if total:
+                result["methods"] = (covered, total)
             if result:
                 return result
         if local == "metrics":
@@ -177,11 +181,12 @@ def _xml_summary(root: ET.Element) -> dict[str, tuple[int, int]] | None:
 
 
 def _lcov_summary(source: str) -> dict[str, tuple[int, int]] | None:
-    totals = {"lines": [0, 0], "branches": [0, 0]}
+    totals = {"lines": [0, 0], "branches": [0, 0], "functions": [0, 0]}
     for line in io.StringIO(source, newline=None):
         for prefix, key, index in (
             ("LF:", "lines", 1), ("LH:", "lines", 0),
             ("BRF:", "branches", 1), ("BRH:", "branches", 0),
+            ("FNF:", "functions", 1), ("FNH:", "functions", 0),
         ):
             if line.startswith(prefix):
                 totals[key][index] += int(line[len(prefix):])
@@ -191,15 +196,18 @@ def _lcov_summary(source: str) -> dict[str, tuple[int, int]] | None:
 
 
 def _go_profile_summary(source: str) -> dict[str, tuple[int, int]] | None:
-    total = covered = 0
-    pattern = re.compile(r"^\S+:\d+\.\d+,\d+\.\d+\s+(\d+)\s+(\d+)\s*$")
+    # go test -coverpkg lists a block once per test binary; a block counts once and is
+    # covered when any binary ran it.
+    blocks: dict[str, tuple[int, bool]] = {}
+    pattern = re.compile(r"^(\S+:\d+\.\d+,\d+\.\d+)\s+(\d+)\s+(\d+)\s*$")
     for line in io.StringIO(source, newline=None):
         match = pattern.match(line.strip())
         if match:
-            statements, count = map(int, match.groups())
-            total += statements
-            if count > 0:
-                covered += statements
+            block, statements, count = match.group(1), int(match.group(2)), int(match.group(3))
+            known = blocks.get(block)
+            blocks[block] = (statements, count > 0 or (known is not None and known[1]))
+    total = sum(statements for statements, _ in blocks.values())
+    covered = sum(statements for statements, hit in blocks.values() if hit)
     return {"statements": (covered, total)} if total else None
 
 

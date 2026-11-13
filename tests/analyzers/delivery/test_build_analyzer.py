@@ -194,3 +194,47 @@ def test_build_manifest_reports_growth_as_unknown_and_redacts_parse_errors(tmp_p
     error = BuildManifestAnalyzer().analyze(path, record)
     assert error[0].confidence == "UNKNOWN"
     assert "build-parser-secret" not in error[0].detail
+
+
+def test_ci_jobs_come_from_the_parsed_pipeline(tmp_path: Path):
+    # Regressions: GitHub triggers (push, pull_request) were jobs, GitLab keywords and hidden
+    # templates were jobs, .cmake modules were unsupported, pom.xml listed bare "plugin"
+    # tags, and a package.json array crashed the analyzer.
+    analyzer = BuildManifestAnalyzer()
+
+    def scan(relative, content):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        record = FileRecord(relative, path.stat().st_size, path.suffix, "Build")
+        assert analyzer.supports(record)
+        return analyzer.analyze(path, record)[0]
+
+    github = scan(
+        ".github/workflows/ci.yml",
+        "on:\n  push:\n  pull_request:\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+        "  test:\n    runs-on: ubuntu-latest\n",
+    )
+    assert [item for item in github.evidence if item.startswith("job:")] == ["job: build", "job: test"]
+    gitlab = scan(
+        ".gitlab-ci.yml",
+        "stages: [build]\nvariables:\n  A: b\n.template:\n  script: [echo]\n"
+        "compile:\n  stage: build\n  script:\n    - !reference [.template, script]\n",
+    )
+    assert [item for item in gitlab.evidence if item.startswith("job:")] == ["job: compile"]
+    azure = scan(
+        "azure-pipelines.yml",
+        "stages:\n  - stage: Build\n    jobs:\n      - job: Compile\n        steps: []\n",
+    )
+    assert "job: Compile" in azure.evidence
+    cmake = scan("cmake/Targets.cmake", "add_library(core STATIC core.c)\n")
+    assert "add_library: core" in cmake.evidence
+    pom = scan(
+        "pom.xml",
+        "<project><build><plugins><plugin><groupId>org.apache.maven.plugins</groupId>"
+        "<artifactId>maven-compiler-plugin</artifactId></plugin></plugins></build></project>",
+    )
+    assert "plugin: maven-compiler-plugin" in pom.evidence
+    array = scan("package.json", "[1, 2]")
+    assert array.title.startswith("Build manifest:")
+    assert "Detected 0 build targets/jobs" in array.detail

@@ -35,7 +35,8 @@ TOKEN_FORMATS: tuple[TokenFormat, ...] = (
     TokenFormat("stripe_secret_key", r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b", anchors=('_live_', '_test_')),
     TokenFormat("sendgrid_api_key", r"\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b", anchors=('SG.',)),
     TokenFormat("anthropic_api_key", r"\bsk-ant-[A-Za-z0-9_-]{20,}\b", anchors=('sk-ant-',)),
-    TokenFormat("openai_api_key", r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}\b", anchors=('sk-',)),
+    # sk-ant- keys are Anthropic's (above); one key is one finding.
+    TokenFormat("openai_api_key", r"\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}\b", anchors=('sk-',)),
     TokenFormat("huggingface_token", r"\bhf_[A-Za-z0-9]{30,}\b", anchors=('hf_',)),
     TokenFormat("npm_token", r"\bnpm_[A-Za-z0-9]{30,}\b", anchors=('npm_',)),
     TokenFormat("pypi_token", r"\bpypi-[A-Za-z0-9_-]{40,}\b", anchors=('pypi-',)),

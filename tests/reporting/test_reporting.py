@@ -423,3 +423,13 @@ def test_an_online_lookup_that_sent_nothing_is_not_network_use():
     assert scan_summary(idle)["mode"] == "local"
     used = {"vulnerability_intelligence": {"online": {"coverage": "complete", "requests": {"requests": 3}}}}
     assert scan_summary(used)["network_access"] == ["osv.dev"]
+
+
+def test_html_inventory_summary_shows_the_pruned_count():
+    # Regression: terminal, Markdown and JSON reported explicitly pruned directories, the
+    # HTML summary did not.
+    from importlib import resources
+
+    script = resources.files("project_discovery.reporting.web").joinpath("report.js").read_text(encoding="utf-8")
+    assert "metrics.pruned_directory_count" in script
+    assert "explicitly pruned directories" in script

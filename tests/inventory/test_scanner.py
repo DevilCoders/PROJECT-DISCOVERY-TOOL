@@ -714,3 +714,20 @@ def test_both_walkers_report_windows_modes_and_dot_names_alike(tmp_path):
     (tmp_path / "file.txt").write_text("x", encoding="utf-8")
     info = (tmp_path / "file.txt").stat()
     assert _mode(info) == (None if os.name == "nt" else info.st_mode & 0o7777)
+
+
+def test_development_markers_are_casefolded_and_generic_names_need_evidence(tmp_path: Path, monkeypatch):
+    # Regressions: Pods, Carthage and DerivedData never matched (the set held capitals),
+    # while a monorepo's packages/, a Go source tree go/ and the Gradle wrapper gradle/
+    # were counted as development/cache trees.
+    for name in ("Pods", "Carthage", "DerivedData", "packages/app-core", "go/cmd", "gradle/wrapper", "env",
+                 "gopath/go/pkg/mod", "tools/env"):
+        (tmp_path / name).mkdir(parents=True)
+    (tmp_path / "tools" / "env" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    for walker in _walkers(monkeypatch):
+        _, directories, _, _, stats = discover_inventory(tmp_path)
+        markers = {item.path: item.development_marker for item in directories if item.development_marker}
+        assert markers == {
+            "Pods": "pods", "Carthage": "carthage", "DerivedData": "deriveddata",
+            "gopath/go": "go", "tools/env": "env",
+        }, walker

@@ -33,7 +33,9 @@ from ..core.source_utils import prefetched_content
 from ..engine.executor import FileOutcome, _run_analyzers
 from ..intelligence.facts import collecting_facts
 from ..intelligence.python_graph import MAX_GRAPH_AST_FILE_BYTES, parse_python_imports
-from ..inventory.scanner import _DEVELOPMENT_MARKERS, _classify_head, _size_bucket
+from ..inventory.scanner import (
+    _classify_head, _exclusion_match, _size_bucket, development_marker, normalize_exclusions,
+)
 from ..inventory.store import InventoryStore, StoredFileRecords, StoredRecordSequence
 from ..models import DirectoryRecord, FileRecord, SpecialEntryRecord, SymlinkRecord
 from .credentials import ApiCredential, resolve_credential
@@ -206,7 +208,10 @@ class NoDownloadSource:
         if listing_error is not None:
             # Content requests would hit the same exhausted limit: stop them now.
             self._listing_cause = self._stop_for(listing_error)
-        excluded = {item.replace("\\", "/").strip("/").casefold() for item in ignores or () if item.strip("/")}
+        # The same spellings and matching as a local walk; an absolute path is a usage error.
+        excluded_names, excluded_paths = normalize_exclusions(ignores)
+        # Corroborates generic development-tree names (go/pkg/mod, env/pyvenv.cfg).
+        listed = {entry.path for entry in entries}
         stats: Counter[str] = Counter()
         store.clear()
         stats["inventory_store_enabled"] = 1
@@ -225,10 +230,9 @@ class NoDownloadSource:
             parent = PurePosixPath(path).parent.as_posix()
             ensure_directory(parent if parent != "." else "")
             name = PurePosixPath(path).name
-            exclusion = None
-            if name.casefold() in excluded or path.casefold() in excluded:
-                exclusion = f"explicit --exclude-dir: {path}"
-            marker = name.casefold() if name.casefold() in _DEVELOPMENT_MARKERS else None
+            match = _exclusion_match(path, name, excluded_names, excluded_paths)
+            exclusion = match[1] if match else None
+            marker = development_marker(name, lambda relative: f"{path}/{relative}" in listed)
             record = DirectoryRecord(
                 path, path.count("/") + 1, is_hidden=name.startswith("."),
                 development_marker=marker, pruned=exclusion is not None, prune_reason=exclusion,
@@ -242,8 +246,10 @@ class NoDownloadSource:
             if marker:
                 stats["development_directory_count"] += 1
                 stats[f"development_dir:{marker}"] += 1
-            if exclusion:
+            if match:
                 stats["pruned_directory_count"] += 1
+                stats[f"pruned_dir:{name.casefold()}"] += 1
+                stats[match[0]] += 1
                 pruned_prefixes.append(path)
 
         for entry in sorted(entries, key=lambda item: (item.path.casefold(), item.path)):

@@ -1,19 +1,20 @@
 # Security Analyzer Coverage
 
-The built-in secret scanner (`secret-patterns`) streams every textual source, configuration and documentation file, every file whose content is text whatever its name (no NUL bytes in the first 512 bytes, or a UTF-16/32 byte-order mark), `.env` variants, key files (`.pem`, `.key`, `id_rsa`, …) and credential stores (`.git-credentials`, `.pgpass`, `.htpasswd`, `.s3cfg`, kubeconfig, `*.tfstate`, `*.tfvars`, shell histories, `*.log`, `*.conf`), in 8 MiB chunks up to 64 MiB per file. It reports:
+The built-in secret scanner (`secret-patterns`) streams every textual source, configuration and documentation file, every file whose content is text whatever its name (no NUL bytes in the first 512 bytes, or a UTF-16/32 byte-order mark), `.env` variants, key files (`.pem`, `.key`, `id_rsa`, …), key containers (`.p12`, `.pfx`, `.jks`, `.keystore`, `.bks`) and credential stores (`.git-credentials`, `.pgpass`, `.htpasswd`, `.s3cfg`, kubeconfig, `*.tfstate`, `*.tfvars`, shell histories, `*.log`, `*.conf`), in 8 MiB chunks up to 64 MiB per file. It reports:
 
 - **Private-key blocks**: PEM, OpenSSH and PGP `PRIVATE KEY` markers.
+- **Private-key containers**: PKCS#12 (`.p12`, `.pfx`), Java (`.jks`, `.keystore`) and Bouncy Castle (`.bks`) keystores are reported by name as `Private-key container: PATH` (HIGH). Their content is binary and usually encrypted, so it is not decoded.
 - **Provider credential formats**: more than 30 high-confidence formats from one shared registry (`core/secret_patterns.py`), including GitHub, GitLab, AWS, Google, Slack, Stripe, OpenAI, Anthropic, Hugging Face, npm, PyPI, Docker, Azure storage and SAS keys, Vault, Doppler, age keys and JWTs. The same registry drives redaction, so every detected format is also removed from report excerpts.
 - **Credential URLs**: URLs whose user-info part (before `@`) carries both a user name and a password.
 - **Generic credential assignments**: a key containing `password`, `secret`, `token`, `api_key` and similar, assigned a value of at least 6 characters. Supported forms include `key = value`, `key: value`, `"key": value`, `'key' => value`, Go `:=` and typed defaults such as `secret: str = "…"`.
   - In programming languages, only string literals count, because an unquoted right-hand side is an expression.
   - In configuration, environment and shell files, unquoted values are literals and count too.
   - Separators never span a line break.
-  - When a specific provider format matches on a line, it replaces the generic finding, so one secret yields one finding.
+  - When a specific provider format or a credential URL matches on a line, it replaces the generic finding, so one secret yields one finding. An Anthropic `sk-ant-` key is not also an OpenAI key.
 
 Filtering:
 - Placeholders are ignored, including `changeme`, `your_api_key`, `<token>`, `${VAR}`, `{{ secrets.X }}`, `os.getenv(...)` and values made of one or two repeated characters. Plain URLs and filesystem paths (`token_url: https://…`, `secret_file: /run/secrets/db`) are also ignored.
-- Findings in test, fixture, example, sample, mock and documentation locations are kept but lowered one severity level, and the detail says so.
+- Findings in test, fixture, example, sample, mock and documentation locations are kept but lowered one severity level, and the detail says so. A file name with an `example`, `sample`, `template`, `tmpl`, `dist` or `defaults` part counts too (`.env.example`, `config.sample.yml`, `app.yml.dist`).
 
 Safety properties:
 - Matched values are never copied into findings or reports. Excerpts pass through the redactor, which knows every key name and assignment form the scanner reports (typed defaults, `:=`, `=>`, quoted and subscripted keys), and again through the `CodeEvidence` model boundary for every analyzer, including third-party ones. On a line that names a credential field, every quoted literal is hidden, so positional values (an SQL `INSERT ... VALUES` row) are not shown either. PDT also redacts every text field of every plugin finding, in every isolation mode, and parse-error details name the error and its position, never the file's content.

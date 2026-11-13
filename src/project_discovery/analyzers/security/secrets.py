@@ -75,9 +75,11 @@ _SENSITIVE_FILENAMES = {
     ".mysql_history",
 }
 _SENSITIVE_EXTENSIONS = {
-    ".pem", ".key", ".p12", ".pfx", ".tfstate", ".tfvars", ".ppk", ".ovpn", ".har", ".log",
-    ".conf", ".cnf", ".config", ".bak",
+    ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".bks", ".tfstate", ".tfvars", ".ppk",
+    ".ovpn", ".har", ".log", ".conf", ".cnf", ".config", ".bak",
 }
+# Binary key containers (PKCS#12, Java keystores): reported by name, never text-scanned.
+_KEY_CONTAINERS = {".p12", ".pfx", ".jks", ".keystore", ".bks"}
 # Paths whose credentials are usually fixtures or documentation; findings are kept but
 # downgraded one severity level and labeled so real exposures stand out.
 _LOW_RISK_PATH_PARTS = {
@@ -123,7 +125,11 @@ def _low_risk_path(relative: str) -> bool:
     path = PurePosixPath(relative.replace("\\", "/"))
     parts = {part.lower() for part in path.parts[:-1]}
     stem = path.name.lower()
-    return bool(parts & _LOW_RISK_PATH_PARTS) or stem.startswith(("test_", "example", "sample")) or (
+    # .env.example, config.example.yml, settings.sample.json, app.yml.dist
+    segments = set(stem.split("."))
+    return bool(parts & _LOW_RISK_PATH_PARTS) or stem.startswith(("test_", "example", "sample")) or bool(
+        segments & {"example", "sample", "template", "tmpl", "dist", "defaults"}
+    ) or (
         stem.endswith(("_test.py", ".test.js", ".test.ts", ".spec.js", ".spec.ts", "_test.go"))
     ) or path.suffix.lower() in {".md", ".rst", ".adoc", ".txt"}
 
@@ -243,6 +249,25 @@ class SecretPatternAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if Path(record.path).suffix.lower() in _KEY_CONTAINERS:
+            low_risk = _low_risk_path(record.path)
+            return [Finding(
+                "security",
+                f"Private-key container: {record.path}",
+                "A PKCS#12 or Java keystore file is part of the repository. It usually holds a "
+                "private key and certificate chain behind a password; its contents are not read."
+                + (" The file is in a test, fixture, example or documentation location, so severity "
+                   "was lowered one level." if low_risk else ""),
+                confidence="INFERRED",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity=_DOWNGRADE["HIGH"] if low_risk else "HIGH",
+                impact=_credential_impact("private_key"),
+                recommendation=(
+                    "Remove committed keystores, rotate the keys they hold, and load them at run time "
+                    "from a secret manager."
+                ),
+            )]
         findings: list[Finding] = []
         seen: set[tuple[str, int]] = set()
         specific_lines: set[int] = set()
@@ -293,7 +318,9 @@ class SecretPatternAnalyzer(Analyzer):
                             if pattern_name == "credential_assignment" and line_number in specific_lines:
                                 continue
                             seen.add(key)
-                            if pattern_name not in {"credential_assignment", "credential_url"}:
+                            # A provider format or credential URL on the line supersedes the
+                            # generic assignment (DATABASE_URL = postgres://user:pass@...).
+                            if pattern_name != "credential_assignment":
                                 specific_lines.add(line_number)
                             severity = _SEVERITY.get(pattern_name, "MEDIUM")
                             if low_risk:

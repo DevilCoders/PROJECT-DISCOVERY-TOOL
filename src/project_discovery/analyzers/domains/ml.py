@@ -93,13 +93,39 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
-def _python_evidence(
-    path: Path, relative: str, expected_identity=None,
-) -> list[Finding]:
-    try:
-        source = read_python_source_bounded(
-            path, 16 * 1024 * 1024, expected_identity=expected_identity,
+def _notebook_source(path: Path, expected_identity=None) -> tuple[str, list[tuple[int, int]]]:
+    """A notebook's code cells as one Python module, and the (cell, line) of each module line.
+
+    IPython magics (%, %%), shell escapes (!) and help requests (?) are blanked: they are
+    not Python, and a blank line keeps the remaining line numbers aligned.
+    """
+    notebook = json.loads(read_text_bounded(path, 16 * 1024 * 1024, expected_identity=expected_identity))
+    cells = notebook.get("cells") if isinstance(notebook, dict) else None
+    lines: list[str] = []
+    positions: list[tuple[int, int]] = []
+    for number, cell in enumerate(cells if isinstance(cells, list) else [], 1):
+        if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+            continue
+        source = cell.get("source")
+        text = "".join(item for item in source if isinstance(item, str)) if isinstance(source, list) else (
+            source if isinstance(source, str) else ""
         )
+        for line_number, line in enumerate(text.splitlines(), 1):
+            stripped = line.lstrip()
+            lines.append("" if stripped.startswith(("%", "!", "?")) else line)
+            positions.append((number, line_number))
+    return "\n".join(lines) + "\n", positions
+
+
+def _python_evidence(
+    path: Path, relative: str, expected_identity=None, notebook: bool = False,
+) -> list[Finding]:
+    positions: list[tuple[int, int]] = []
+    try:
+        if notebook:
+            source, positions = _notebook_source(path, expected_identity)
+        else:
+            source = read_python_source_bounded(path, 16 * 1024 * 1024, expected_identity=expected_identity)
         tree = parse_python(source, filename=relative)
     except (OSError, ValueError, SyntaxError, LookupError, RecursionError, MemoryError) as exc:
         return [Finding(
@@ -110,6 +136,13 @@ def _python_evidence(
             evidence=[relative],
             analyzer="ai-ml-intelligence",
         )]
+
+    def at(line: int) -> str:
+        """Notebook evidence names the cell: the module line is not a line of the JSON file."""
+        if positions and 0 < line <= len(positions):
+            cell, cell_line = positions[line - 1]
+            return f"{relative}:cell {cell} line {cell_line}"
+        return f"{relative}:{line}"
 
     imports: dict[str, int] = {}
     calls: list[tuple[str, int]] = []
@@ -142,7 +175,7 @@ def _python_evidence(
             "Statically observed imports: " + ", ".join(names) + ". Import presence "
             "does not prove that a model is trained or executed.",
             confidence="CONFIRMED",
-            evidence=[f"{relative}:{line} ({name})" for name, line in detected],
+            evidence=[f"{at(line)} ({name})" for name, line in detected],
             analyzer="ai-ml-intelligence",
         ))
 
@@ -158,9 +191,9 @@ def _python_evidence(
         or name.lower() in _TRAINING_CALLS
     ]
     if training or any("trainer" in name for name in base_names):
-        evidence = [f"{relative}:{line} ({name})" for name, line in training[:50]]
+        evidence = [f"{at(line)} ({name})" for name, line in training[:50]]
         evidence.extend(
-            f"{relative}:{line} (base {name})"
+            f"{at(line)} (base {name})"
             for name, line in class_bases if "trainer" in name.lower()
         )
         findings.append(Finding(
@@ -184,7 +217,7 @@ def _python_evidence(
             f"Model inference/export operations: {relative}",
             f"Observed {len(inference)} inference, generation, loading or export call sites.",
             confidence="INFERRED",
-            evidence=[f"{relative}:{line} ({name})" for name, line in inference[:50]],
+            evidence=[f"{at(line)} ({name})" for name, line in inference[:50]],
             analyzer="ai-ml-intelligence",
         ))
 
@@ -198,7 +231,7 @@ def _python_evidence(
             f"Dataset pipeline references: {relative}",
             f"Observed {len(data_calls)} dataset or input-pipeline call sites.",
             confidence="INFERRED",
-            evidence=[f"{relative}:{line} ({name})" for name, line in data_calls[:50]],
+            evidence=[f"{at(line)} ({name})" for name, line in data_calls[:50]],
             analyzer="ai-ml-intelligence",
         ))
 
@@ -213,7 +246,7 @@ def _python_evidence(
             f"Accelerator/device references: {relative}",
             f"Observed {len(gpu_refs)} device or accelerator-related call sites.",
             confidence="INFERRED",
-            evidence=[f"{relative}:{line} ({name})" for name, line in gpu_refs[:50]],
+            evidence=[f"{at(line)} ({name})" for name, line in gpu_refs[:50]],
             analyzer="ai-ml-intelligence",
         ))
     return findings
@@ -232,7 +265,7 @@ class AIMLIntelligenceAnalyzer(Analyzer):
         name = Path(record.path).name.lower()
         path_parts = {part.lower() for part in Path(record.path).parts}
         return (
-            record.extension in {".py", ".pyi"}
+            record.extension in {".py", ".pyi", ".ipynb"}
             or record.extension in _MODEL_EXTENSIONS
             or record.extension in _DATA_EXTENSIONS
             or name in _MODEL_METADATA_NAMES
@@ -244,6 +277,8 @@ class AIMLIntelligenceAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         if record.extension in {".py", ".pyi"}:
             return _python_evidence(path, record.path, record.analysis_identity)
+        if record.extension == ".ipynb":
+            return _python_evidence(path, record.path, record.analysis_identity, notebook=True)
 
         name = Path(record.path).name.lower()
         if record.extension in _MODEL_EXTENSIONS:

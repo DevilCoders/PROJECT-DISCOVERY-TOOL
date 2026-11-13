@@ -325,3 +325,25 @@ def test_structural_sql_in_comprehensions_and_conditionals_is_not_dynamic(tmp_pa
     record = FileRecord("store.py", path.stat().st_size, ".py", "Python")
     found = {item.title.split(":")[0]: item.evidence for item in SecureCodePatternAnalyzer().analyze(path, record)}
     assert found.get("Potential dynamically constructed SQL query") == ["store.py:7"]
+
+
+def test_yaml_loaders_are_judged_by_what_they_construct(tmp_path):
+    # Regressions: BaseLoader (strings only) was CRITICAL, and every non-Python yaml.load was
+    # CRITICAL although js-yaml 4 and Psych 4 load safely by default.
+    from pathlib import Path
+
+    from project_discovery.models import FileRecord
+
+    def titles(name, source):
+        path = Path(tmp_path) / name
+        path.write_text(source, encoding="utf-8")
+        record = FileRecord(name, path.stat().st_size, Path(name).suffix, "Source")
+        return {(item.title.split(":")[0], item.severity) for item in SecureCodePatternAnalyzer().analyze(path, record)}
+
+    assert titles("base.py", "import yaml\nyaml.load(stream, Loader=yaml.BaseLoader)\n") == set()
+    assert ("Potential unsafe deserialization API", "CRITICAL") in titles(
+        "full.py", "import yaml\nyaml.load(stream, Loader=yaml.UnsafeLoader)\n"
+    )
+    assert titles("config.js", "const config = yaml.load(text);\n") == {
+        ("YAML load whose safety depends on the library version", "MEDIUM"),
+    }

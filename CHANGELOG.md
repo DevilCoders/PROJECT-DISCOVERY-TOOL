@@ -28,7 +28,7 @@ methods and limits are in [docs/architecture/CODE_INTELLIGENCE.md](docs/architec
 
 ### Added: analyzers
 - `performance-hotspots`, `concurrency`, `resource-management` and `type-systems`.
-- `dataflow`: taint from web requests, sockets and stdin to SQL, command, code,
+- `dataflow`: taint from web requests and sockets (stdin, argv and environment in C/C++) to SQL, command, code,
   deserialization, template, path, SSRF, XSS, redirect, format-string and buffer sinks. Python
   is analysed inter-procedurally (helper summaries iterated to a fixed point) and across
   modules; JavaScript/TypeScript, PHP, Java/Kotlin/Scala/Groovy, Go, C#, Rust and C/C++ through
@@ -304,6 +304,24 @@ Findings and their status are in the second-round section of
   (PDT-389); JSX components and `htmlFor` (PDT-390); `uImage` files (PDT-391); IAR symbols and
   GNU ld units and comments in memory maps (PDT-392); short config names are not catalogs
   (PDT-393).
+- YAML loaders are judged by what they construct, and a positional unsafe loader is a taint sink
+  (PDT-394); identity markers need a JWT library or a whole-name import (PDT-395); credential and
+  PII field names match by their last word (PDT-396); one secret gives one finding (PDT-397);
+  `.env.example`-style files are lowered one level (PDT-398); taint findings carry their attacker
+  impact (PDT-399); the security docs describe taint sources and rounds as implemented (PDT-400);
+  PKCS#12 and Java keystores are reported by name (PDT-401).
+- Test declarations for unittest, Spock, Rust attributes, PHPUnit attributes and docblocks, and
+  Pest (PDT-402); CI jobs from the parsed pipeline, Maven plugins, `.cmake` modules and non-object
+  `package.json` files (PDT-403); function and method coverage counters and merged Go profiles
+  (PDT-404); malformed XML property lists (PDT-405); Jupyter notebooks (PDT-406).
+- `--resume` counts re-analyzed files' code-index rows and truncations once (PDT-407) and refuses
+  an inventory made with other options (PDT-409); calls on a call's result are not recursion
+  (PDT-408); every `--exclude-dir` spelling works, impossible values are errors and `--max-file-mb`
+  requires `--skip` (PDT-410); catalog reads never create a catalog (PDT-411); unprovisioned
+  Tree-sitter grammars are reported (PDT-412); development-tree markers are casefolded and generic
+  names need evidence (PDT-413); the HTML summary shows pruned directories (PDT-414); the Operations
+  guide matches `phase_seconds` and `pdt capabilities` (PDT-415); fatal errors name the scan root or
+  the advisory database (PDT-416).
 
 ## 0.2.0 — 2026-11-05
 
@@ -344,7 +362,7 @@ the scale and operability features needed for very large repositories.
 - Tree-sitter grammars are never downloaded: tree-sitter-language-pack 1.23+ fetches grammars
   inside `get_parser()`, so parsing is gated on grammars already provisioned locally (PDT-226).
 - Regex denial of service: the excerpt redactor was cubic on long identifier runs (9 s for
-  2,000 characters) and nine detector patterns were quadratic. All are now linear, and a
+  2,000 characters) and nine detector patterns were quadratic. Those nine are now linear, and a
   regression test times every package regex against adversarial input (PDT-227).
 - CI actions are pinned to commit SHAs instead of mutable tags (PDT-230).
 

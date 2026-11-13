@@ -247,6 +247,13 @@ class InventoryStore:
                 value INTEGER NOT NULL CHECK(value >= 0)
             ) WITHOUT ROWID"""
         )
+        # Files whose code facts were cut at a per-file limit: a file that --resume
+        # analyzes again is counted once.
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS code_index_truncated_files (
+                path TEXT PRIMARY KEY
+            ) WITHOUT ROWID"""
+        )
         for create_table, _insert, create_index, _ceiling in _CODE_TABLES.values():
             self.db.execute(create_table)
             if create_index:
@@ -391,15 +398,19 @@ class InventoryStore:
         code_pending = self._code_pending
         self._code_pending = {table: [] for table in _CODE_TABLES}
         file_truncations, self._code_file_truncations = self._code_file_truncations, []
+        inserted: dict[str, int] = {}
         try:
             with self.db:
                 for table, rows in code_pending.items():
                     if rows:
-                        self.db.executemany(_CODE_TABLES[table][1], rows)
+                        # INSERT OR IGNORE: rows that a file re-analyzed by --resume (or a call
+                        # repeated on one line) sends again are not new, so only the inserted
+                        # rows count toward the sequence and the table's ceiling.
+                        inserted[table] = max(0, self.db.executemany(_CODE_TABLES[table][1], rows).rowcount)
                         self.db.execute(
                             """INSERT INTO inventory_sequences(name, value) VALUES (?, ?)
                                ON CONFLICT(name) DO UPDATE SET value=value+excluded.value""",
-                            (table, len(rows)),
+                            (table, inserted[table]),
                         )
                 if self._code_truncated or file_truncations:
                     previous = self.db.execute(
@@ -407,11 +418,18 @@ class InventoryStore:
                     ).fetchone()
                     state = json.loads(previous[0]) if previous else {"tables": [], "files": 0}
                     state["tables"] = sorted(set(state["tables"]) | self._code_truncated)
-                    state["files"] += len(file_truncations)
+                    # A file counts once, also when --resume analyzes it again.
+                    new_truncations = [
+                        (key, truncated) for key, truncated in file_truncations
+                        if self.db.execute(
+                            "INSERT OR IGNORE INTO code_index_truncated_files(path) VALUES (?)", (key,),
+                        ).rowcount
+                    ]
+                    state["files"] += len(new_truncations)
                     # Files per truncated kind (references, facts, ...), so passes know what
                     # was cut: a reference cut makes dead-code candidates unreliable.
                     kinds = state.setdefault("kinds", {})
-                    for _, truncated in file_truncations:
+                    for _, truncated in new_truncations:
                         for kind in truncated:
                             kinds[kind] = kinds.get(kind, 0) + 1
                     self.db.execute(
@@ -477,8 +495,8 @@ class InventoryStore:
                     deltas[3] if deltas[3] is not None else current[3],
                 )
             raise
-        for table, rows in code_pending.items():
-            self._code_rows[table] += len(rows)
+        for table, count in inserted.items():
+            self._code_rows[table] += count
         return len(pending) + len(directory_pending) + code_rows
 
     def count(self, kind: str | None = None) -> int:
@@ -709,6 +727,7 @@ class InventoryStore:
             self.db.execute("DELETE FROM inventory_sequences")
             for table in _CODE_TABLES:
                 self.db.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed table names
+            self.db.execute("DELETE FROM code_index_truncated_files")
 
     def checkpoint(self, metadata: Mapping[str, Any]) -> None:
         """Flush inventory rows, then atomically persist a resumable scan checkpoint.

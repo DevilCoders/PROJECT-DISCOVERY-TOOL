@@ -89,3 +89,49 @@ def test_remote_and_foreign_roots_are_kept_verbatim(tmp_path: Path, monkeypatch)
         assert catalog.remove_project(f"{url}#v1.0.0") is True
         assert catalog.remove_project(url) is True      # every remaining ref of the URL
         assert [project["root"] for project in catalog.list_projects()] == [foreign_root]
+
+
+def test_reading_or_removing_never_creates_a_catalog(tmp_path: Path, capsys, monkeypatch):
+    # Regression: catalog-list, catalog-remove and catalog-compare created an empty catalog
+    # at a mistyped --db and answered "0 projects registered" or "Project not found", exit 0.
+    import sys
+
+    from project_discovery.cli import main as run_main
+
+    def main(argv):
+        monkeypatch.setattr(sys, "argv", ["pdt", *argv])
+        run_main()
+
+    typo = tmp_path / "typo" / "catalgo.sqlite3"
+    for argv in (
+        ["catalog-list", "--db", str(typo)],
+        ["catalog-remove", str(tmp_path), "--db", str(typo)],
+        ["catalog-compare", "--db", str(typo), "--output", str(tmp_path / "cmp")],
+    ):
+        with pytest.raises(SystemExit) as raised:
+            main(argv)
+        assert raised.value.code == 2, argv
+        assert "Project catalog not found" in capsys.readouterr().err
+    assert not typo.exists() and not typo.parent.exists()
+
+    root = tmp_path / "project"
+    root.mkdir()
+    report = tmp_path / "report.json"
+    _write_report(report, root)
+    database = tmp_path / "catalog.sqlite3"
+    with pytest.raises(SystemExit):
+        main(["catalog-add", str(report), "--db", str(database)])
+    with pytest.raises(SystemExit) as raised:
+        main(["catalog-remove", str(tmp_path / "never-registered"), "--db", str(database)])
+    assert raised.value.code == 2
+    assert "No registered project matches" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as raised:
+        main(["catalog-remove", str(root), "--db", str(database)])
+    assert raised.value.code == 0
+
+    other = tmp_path / "other.sqlite3"
+    import sqlite3
+
+    sqlite3.connect(other).close()
+    with pytest.raises(ValueError, match="is not a PDT project catalog"):
+        ProjectCatalog(other, read_only=True)

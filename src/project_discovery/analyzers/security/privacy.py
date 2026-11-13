@@ -18,19 +18,24 @@ _EMAIL = re.compile(
 # RFC 2606 / RFC 6761 names can never identify a real mailbox.
 _RESERVED_EMAIL_DOMAINS = ("example.com", "example.net", "example.org")
 _RESERVED_EMAIL_TLDS = frozenset({"example", "test", "invalid", "localhost"})
+# A field name ends with the keyword: DB_PASSWORD, user_email and userEmail count;
+# email_verified, password_hash and tokenizer do not. The left edge is a non-alphanumeric
+# character or a camelCase boundary; the right edge ends the identifier.
+_L = r"(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?-i:(?=[A-Z])))"
+_R = r"(?![A-Za-z0-9_])"
 _PII_FIELDS = {
-    "first_name": re.compile(r"(?i)\b(?:first_?name|given_?name|forename)\b"),
-    "middle_name": re.compile(r"(?i)\bmiddle_?name\b"),
-    "last_name": re.compile(r"(?i)\b(?:last_?name|surname|family_?name)\b"),
-    "username": re.compile(r"(?i)\b(?:user_?name|login_?name|account_?name)\b"),
-    "email": re.compile(r"(?i)\b(?:e-?mail|email_?address|mail_?address)\b"),
+    "first_name": re.compile(rf"(?i){_L}(?:first_?name|given_?name|forename){_R}"),
+    "middle_name": re.compile(rf"(?i){_L}middle_?name{_R}"),
+    "last_name": re.compile(rf"(?i){_L}(?:last_?name|surname|family_?name){_R}"),
+    "username": re.compile(rf"(?i){_L}(?:user_?name|login_?name|account_?name){_R}"),
+    "email": re.compile(rf"(?i){_L}(?:e-?mail|email_?address|mail_?address){_R}"),
     # A bare "mobile" names a platform far more often than a phone number.
     "phone": re.compile(
-        r"(?i)\b(?:phone(?:_?(?:number|no))?|telephone|mobile_?(?:phone|number|no)|cell_?(?:phone|number))\b"
+        rf"(?i){_L}(?:phone(?:_?(?:number|no))?|telephone|mobile_?(?:phone|number|no)|cell_?(?:phone|number)){_R}"
     ),
-    "address": re.compile(r"(?i)\b(?:street_?address|postal_?address|home_?address)\b"),
-    "date_of_birth": re.compile(r"(?i)\b(?:date_?of_?birth|birth_?date|dob)\b"),
-    "government_id": re.compile(r"(?i)\b(?:ssn|social_?security|passport_?number|national_?id)\b"),
+    "address": re.compile(rf"(?i){_L}(?:street_?address|postal_?address|home_?address){_R}"),
+    "date_of_birth": re.compile(rf"(?i){_L}(?:date_?of_?birth|birth_?date|dob){_R}"),
+    "government_id": re.compile(rf"(?i){_L}(?:ssn|social_?security|passport_?number|national_?id){_R}"),
 }
 # One pass per line: a named-group alternation reports which PII categories appear.
 _PII_ANY = re.compile(
@@ -38,8 +43,9 @@ _PII_ANY = re.compile(
     re.IGNORECASE,
 )
 _SECRET_FIELDS = re.compile(
-    r"(?i)\b(?:password|passwd|passphrase|api[_-]?key|client[_-]?secret|"
-    r"access[_-]?token|refresh[_-]?token|private[_-]?key|secret)\b"
+    rf"(?i){_L}(?:password|passwd|passphrase|api[_-]?key|client[_-]?secret|access[_-]?token|"
+    rf"refresh[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|signing[_-]?key|"
+    rf"encryption[_-]?key|secret|token){_R}"
 )
 _MAX_LINE_BYTES = 256 * 1024
 _MAX_DATA_EXPOSURE_FILE_BYTES = 64 * 1024 * 1024

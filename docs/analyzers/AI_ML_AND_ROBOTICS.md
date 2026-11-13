@@ -3,7 +3,7 @@
 ## AI/ML intelligence (initial implementation)
 The built-in AI/ML analyzer statically identifies common framework imports in Python
 source, training/inference/data-pipeline call markers, accelerator/device references,
-selected model metadata JSON, and model/dataset artifact file types.
+selected model metadata JSON, and model/dataset artifact file types. Jupyter notebooks are read statically: their code cells form one module (IPython `%` magics, `!` shell lines and `?` help lines are skipped), and evidence names the cell and line (`train.ipynb:cell 3 line 1`).
 
 It does not import ML frameworks, deserialize checkpoints, execute notebooks, read
 binary tensor payloads, inspect model weights, infer a complete neural architecture,

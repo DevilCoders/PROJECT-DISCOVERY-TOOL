@@ -106,7 +106,7 @@ See [Analyzer Coverage](docs/architecture/ANALYZER_COVERAGE.md), [Architecture](
 | Domain | Required intelligence |
 |---|---|
 | Filesystem | Files, directories, subdirectories, depth, fan-out, empty directories, hidden entries, symlinks, broken/external/internal links, special files, permission/mode, timestamps, file type/signature, extension, size buckets and directory aggregates |
-| Development artifacts | `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, build outputs, IDE indexes, compiler caches, fuzz corpora, package stores and ecosystem-specific generated trees |
+| Development artifacts | `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, `Pods`, `DerivedData`, build outputs, IDE indexes, compiler caches, fuzz corpora, package stores and ecosystem-specific generated trees. Names that are just as often project source (`packages`, `go`, `pkg`, `bin`, `env`, `gradle`) count only when their layout confirms them: a NuGet `repositories.config`, GOPATH's `pkg/mod`, MSBuild's `Debug`/`Release`, a `pyvenv.cfg` or `conda-meta`, a Gradle `caches` directory |
 | OS/platform | Host OS versus inferred target OS; architecture, shells, package managers, service managers, containers, sysroots, cross-compilers, platform manifests and CI OS matrices |
 | Network | IPv4, IPv6, IPv4-mapped IPv6, CIDR, ports, host:port, URLs, URIs, domains, subdomains, protocols, sockets, bind/listen/connect, proxy and service-discovery indicators |
 | API | REST, GraphQL, RPC/gRPC, JSON-RPC, SOAP/WSDL, WebSocket, event-driven APIs, webhooks, OpenAPI, AsyncAPI, OpenRPC, API collections, framework routes, middleware and generated clients |
@@ -230,7 +230,7 @@ Exit codes: `0` scan completed, `1` a finding at or above `--fail-on`, `2` usage
 
 ### Exclusions and skip accounting
 
-`--skip` controls only global oversized-file content skipping. `--exclude-dir NAME` is an explicit directory-pruning request. The current scanner traverses development dependency, cache and build directories by default; the marker catalog classifies these trees without excluding them. Explicitly excluded directories remain in the inventory with a prune reason. This behavior is covered by scanner tests, including `node_modules`, `.cache`, `.yarn` and `.fuff`.
+`--skip` controls only global oversized-file content skipping (`--max-file-mb` sets its threshold and requires it). `--exclude-dir` is an explicit directory-pruning request: a name prunes that name at any depth, and a path (relative to the scan root, `./web`, or absolute inside it) prunes one directory; a value outside the root is a usage error, and one that matches nothing is reported as a warning. The current scanner traverses development dependency, cache and build directories by default; the marker catalog classifies these trees without excluding them. Explicitly excluded directories remain in the inventory with a prune reason. This behavior is covered by scanner tests, including `node_modules`, `.cache`, `.yarn` and `.fuff`.
 
 ### Clean terminal behavior
 

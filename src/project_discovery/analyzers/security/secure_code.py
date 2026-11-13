@@ -127,11 +127,20 @@ _PATTERNS = (
         "unsafe_deserialization",
         re.compile(
             r"\b(?:pickle\.(?:load|loads)|marshal\.loads|dill\.(?:load|loads)|"
-            r"yaml\.load|ObjectInputStream|BinaryFormatter|unserialize)\s*\(",
+            r"ObjectInputStream|BinaryFormatter|unserialize)\s*\(",
             re.I,
         ),
         "Potential unsafe deserialization API",
         "Deserializing untrusted data may execute code or instantiate unsafe object graphs.",
+    ),
+    (
+        # js-yaml 4 and Psych 4 (Ruby 3.1) load safely by default; older versions construct
+        # arbitrary objects. Python's yaml.load is judged from the syntax tree instead.
+        "yaml_load_version_dependent",
+        re.compile(r"\byaml\.load\s*\(", re.I),
+        "YAML load whose safety depends on the library version",
+        "js-yaml 4 and Psych 4 load safely by default; earlier versions construct arbitrary "
+        "objects from tagged YAML. Confirm the version, or use safeLoad / YAML.safe_load.",
     ),
     (
         "tls_verification_disabled",
@@ -553,7 +562,8 @@ def _is_constant(node: ast.AST | None, value: object) -> bool:
     return isinstance(node, ast.Constant) and node.value is value
 
 
-_SAFE_YAML_LOADERS = {"SafeLoader", "CSafeLoader"}
+# BaseLoader builds only strings, lists and dicts.
+_SAFE_YAML_LOADERS = {"SafeLoader", "CSafeLoader", "BaseLoader", "CBaseLoader"}
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "head", "options", "request", "stream"}
 _PICKLE_LOADERS = {
     "pickle.load", "pickle.loads", "_pickle.load", "_pickle.loads", "cPickle.load",

@@ -309,10 +309,13 @@ def _shell_true(call: ast.Call) -> bool:
 
 
 def _yaml_unsafe(call: ast.Call) -> bool:
-    for keyword in call.keywords:
-        if keyword.arg == "Loader":
-            return "Safe" not in _dotted(keyword.value) and "Base" not in _dotted(keyword.value)
-    return len(call.args) < 2
+    """yaml.load with a loader that constructs objects (a positional loader counts too)."""
+    loader = next((keyword.value for keyword in call.keywords if keyword.arg == "Loader"),
+                  call.args[1] if len(call.args) > 1 else None)
+    if loader is None:
+        return True  # PyYAML before 6 used its full loader by default
+    name = _dotted(loader)
+    return "Safe" not in name and "Base" not in name
 
 
 @dataclass(slots=True)

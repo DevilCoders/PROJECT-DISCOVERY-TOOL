@@ -212,3 +212,50 @@ def test_class_constructors_rust_use_paths_and_php_imports(tmp_path: Path):
     packages = {item["package"] for item in graph["external_packages"]}
     assert not packages & {"function", "HasFactory", "Notifiable"}
     assert "src/util.rs" in {item["module"] for item in graph["most_imported"]}
+
+
+def test_calls_on_a_call_result_are_not_recursion(tmp_path: Path):
+    # Regression: getItems().size(), Runtime.getRuntime().exec() and this.getEngine().stop()
+    # had the receiver "<expression>", which resolved like a receiverless call to the
+    # caller itself: "Wrapper.size -> itself".
+    report, _ = _scan(tmp_path, {
+        "src/Wrapper.java": (
+            "class Wrapper {\n"
+            "    java.util.List<String> getItems() { return null; }\n"
+            "    int size() { return getItems().size(); }\n"
+            "    Process exec(String c) throws Exception { return Runtime.getRuntime().exec(c); }\n"
+            "    String build() { return new StringBuilder().build(); }\n"
+            "    int depth(int n) { return n <= 0 ? 0 : depth(n - 1); }\n"
+            "}\n"
+        ),
+        "src/engine.ts": (
+            "class Facade {\n"
+            "    getEngine(): any { return null; }\n"
+            "    stop(): void { this.getEngine().stop(); }\n"
+            "}\n"
+        ),
+        "src/Service.cs": (
+            "class Service {\n"
+            "    Client GetClient() { return null; }\n"
+            "    void Send() { GetClient().Send(); }\n"
+            "}\n"
+        ),
+        "src/Box.kt": (
+            "class Box {\n"
+            "    fun items(): List<Int> = listOf()\n"
+            "    fun count(): Int { return items().count() }\n"
+            "}\n"
+        ),
+        "src/lib.rs": (
+            "struct Pool;\n"
+            "impl Pool {\n"
+            "    fn items(&self) -> Vec<u8> { Vec::new() }\n"
+            "    fn len(&self) -> usize { self.items().len() }\n"
+            "}\n"
+        ),
+    })
+    cycles = next((item for item in report["findings"] if item["title"] == "Recursive call cycles"), None)
+    evidence = " ".join(cycles["evidence"]) if cycles else ""
+    assert "Wrapper.depth" in evidence
+    for name in ("Wrapper.size", "Wrapper.exec", "Wrapper.build", "Facade.stop", "Service.Send", "Box.count", "Pool.len"):
+        assert name not in evidence, name

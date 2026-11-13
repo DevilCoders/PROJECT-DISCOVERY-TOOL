@@ -525,3 +525,19 @@ def test_exported_fact_caps_report_truncation(tmp_path: Path, monkeypatch):
         DataFlowAnalyzer().analyze(path, record)
     kinds = [kind for kind, _, _ in facts.facts]
     assert kinds.count("taint_sink_param") == 1 and "dataflow_truncated" in kinds
+
+
+def test_positional_unsafe_yaml_loaders_are_sinks_and_flows_carry_impact(tmp_path: Path):
+    source = """
+        import yaml
+        from flask import request
+        def handler():
+            return yaml.load(request.data, yaml.UnsafeLoader)
+        """
+    assert ("deserialization", 5) in python_flows(source)
+    safe = source.replace("yaml.UnsafeLoader", "yaml.SafeLoader")
+    assert python_flows(safe) == set()
+    path = tmp_path / "views.py"
+    path.write_text(textwrap.dedent(source), encoding="utf-8")
+    finding = DataFlowAnalyzer().analyze(path, FileRecord("views.py", path.stat().st_size, ".py", "Python"))[0]
+    assert finding.impact  # Markdown and HTML show the attacker-impact section

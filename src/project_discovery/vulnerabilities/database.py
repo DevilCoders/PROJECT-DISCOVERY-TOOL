@@ -190,6 +190,11 @@ def _malformed_affected(entry: Any) -> bool:
     return any(not isinstance(item, dict) or not isinstance(item.get("events", []), list) for item in ranges)
 
 
+def sqlite_uri(path: PurePath, mode: str) -> str:
+    """A SQLite URI for an absolute path opened with ``mode`` (ro, rw); see read_only_uri."""
+    return read_only_uri(path).removesuffix("?mode=ro") + f"?mode={mode}"
+
+
 def read_only_uri(path: PurePath) -> str:
     """A read-only SQLite URI for an absolute path, including Windows UNC shares.
 
@@ -224,13 +229,30 @@ class VulnerabilityDatabase:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
-        if not read_only:
-            self.connection.executescript(_SCHEMA)
-            self._migrate()
-            self.connection.commit()
-        columns = {
-            row["name"] for row in self.connection.execute("PRAGMA table_info(affected_packages)")
-        }
+        try:
+            if not read_only:
+                self.connection.executescript(_SCHEMA)
+                self._migrate()
+                self.connection.commit()
+            columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(affected_packages)")
+            }
+            tables = {
+                row[0] for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        except sqlite3.DatabaseError as exc:
+            # sqlite3 says only "file is not a database"; name the file and the remedy.
+            self.connection.close()
+            raise ValueError(
+                f"The local vulnerability database {self.path} is not a readable PDT advisory "
+                f"database ({exc}); import an OSV snapshot into a new file with `pdt vuln-db import`."
+            ) from exc
+        if not {"metadata", "advisories", "affected_packages"} <= tables:
+            self.connection.close()
+            raise ValueError(
+                f"The local vulnerability database {self.path} is not a PDT advisory database "
+                "(its advisory tables are missing); import an OSV snapshot with `pdt vuln-db import`."
+            )
         self._has_keys = {"ecosystem_key", "name_key"} <= columns
 
     def _migrate(self) -> None:

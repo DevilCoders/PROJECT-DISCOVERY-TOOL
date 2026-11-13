@@ -415,3 +415,23 @@ def test_credential_urls_skip_placeholder_passwords(tmp_path: Path):
     ))
     lines = [item.evidence[0] for item in findings if item.title.endswith("credential_url")]
     assert lines == ["notes.txt:4"]
+
+
+def test_one_secret_gives_one_finding_and_examples_are_downgraded(tmp_path: Path):
+    # Regressions: an Anthropic key was also an OpenAI key, a database URL was both a
+    # credential URL and an assignment, and .env.example stayed HIGH.
+    anthropic = "sk-ant-" + "api03-" + "A1b2" * 6
+    titles = [item.title for item in _scan(tmp_path, "keys.py", f'KEY = "{anthropic}"\n')]
+    assert titles == ["Potential hardcoded credential: anthropic_api_key"]
+    url = _scan(tmp_path, "settings.py", 'DATABASE_URL = "postgres://svc:Fake-Db-Pass9@db.internal/app"\n')
+    assert [item.title for item in url] == ["Potential hardcoded credential: credential_url"]
+    example = _scan(tmp_path, ".env.example", "DB_PASSWORD=Fake-Example-Pass1\n")
+    assert [item.severity for item in example] == ["MEDIUM"]
+
+
+def test_key_containers_are_reported_by_name(tmp_path: Path):
+    path = tmp_path / "client.p12"
+    path.write_bytes(b"\x30\x82\x05\x00" + b"\x00" * 64)
+    record = FileRecord("certs/client.p12", path.stat().st_size, ".p12", "Binary")
+    findings = SecretPatternAnalyzer().analyze(path, record)
+    assert [(item.title, item.severity) for item in findings] == [("Private-key container: certs/client.p12", "HIGH")]

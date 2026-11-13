@@ -24,7 +24,7 @@ The built-in observability analyzer inventories static logging, metrics, tracing
 
 ## Implemented coverage artifact slice
 
-The coverage analyzer reads LCOV, Cobertura, JaCoCo, Clover (the project's own `<metrics>`, which php-code-coverage writes after every class and file), OpenCover, Go cover profiles and Istanbul/coverage JSON. It extracts recorded line, statement, function and branch counters where the format provides them. The report does not prove which source revision was tested, that all tests ran, or that coverage instrumentation was complete.
+The coverage analyzer reads LCOV, Cobertura, JaCoCo, Clover (the project's own `<metrics>`, which php-code-coverage writes after every class and file), OpenCover, Go cover profiles and Istanbul/coverage JSON. It extracts recorded line, statement, function and branch counters where the format provides them (LCOV `FNF`/`FNH` functions, JaCoCo `METHOD` and OpenCover method counters). A Go block that a `-coverpkg` run lists once per test binary counts once, as covered when any binary ran it. The report does not prove which source revision was tested, that all tests ran, or that coverage instrumentation was complete.
 
 
 ## Implemented accessibility markup slice
@@ -69,7 +69,7 @@ Initial archive intelligence reads ZIP/TAR metadata without extracting members. 
 
 Network intelligence statically inventories IPv4/IPv6/CIDR, common port declarations, URL/URI, host/domain/subdomain candidates and protocol markers. URL evidence keeps only the scheme, host and port: userinfo, path, query, fragment and authority properties (JDBC `;user=...;password=...`, `\instance` names, replica lists) are removed. It does not probe or resolve hosts. API type classification adds initial REST, GraphQL, gRPC/protobuf, JSON-RPC, SOAP/WSDL, WebSocket and event markers.
 
-Privacy intelligence inventories PII field-name categories and email-shaped values without retaining the matched values. Email values count only when the domain ends in a real IANA top-level domain and is not a reserved example name. Package specifiers such as `pkg@1.0.0`, asset names such as `logo@2x.png`, SCP remotes and URL user info are skipped. Prose documentation contributes email values but not field names. Field-name inventories are LOW severity because a name alone does not prove that data is present. Existing secret-pattern analysis remains responsible for high-signal credential formats. These are partial static indicators, not a full DLP engine.
+Privacy intelligence inventories PII field-name categories and email-shaped values without retaining the matched values. A field name matches when it ends with the keyword (`user_email`, `DB_PASSWORD`, `GITHUB_TOKEN`, `token`), not when the keyword only begins a longer name (`email_verified`, `tokenizer`). Email values count only when the domain ends in a real IANA top-level domain and is not a reserved example name. Package specifiers such as `pkg@1.0.0`, asset names such as `logo@2x.png`, SCP remotes and URL user info are skipped. Prose documentation contributes email values but not field names. Field-name inventories are LOW severity because a name alone does not prove that data is present. Existing secret-pattern analysis remains responsible for high-signal credential formats. These are partial static indicators, not a full DLP engine.
 
 
 Additional dependency manifests include Erlang rebar configuration, PlatformIO embedded firmware library declarations, Lua rockspec dependencies and Ruby gemspec runtime/development dependencies.

@@ -89,7 +89,10 @@ def test_catalog_list_cli_without_format_argument(tmp_path: Path, monkeypatch):
     import sys
 
     from project_discovery.cli import main
+    from project_discovery.projects.catalog import ProjectCatalog
 
+    # catalog-list never creates a catalog (a missing one is an error), so make one.
+    ProjectCatalog(tmp_path / "catalog.sqlite3").close()
     monkeypatch.setattr(
         sys, "argv", ["pdt", "catalog-list", "--db", str(tmp_path / "catalog.sqlite3")]
     )
@@ -885,3 +888,126 @@ def test_text_files_with_uncatalogued_names_are_secret_scanned(tmp_path: Path):
     found = {item["evidence"][0].rsplit(":", 1)[0] for item in report["findings"]
              if item["title"] == "Potential hardcoded credential: github_token"}
     assert found == {".git-credentials", ".pgpass", ".kube/config", "terraform.tfstate", "notes.unknownext"}
+
+
+def _run_main(capsys, monkeypatch, argv):
+    """Run ``pdt ARGV``; return the exit code and stderr."""
+    import sys as _sys
+
+    from project_discovery.cli import main as _main
+
+    monkeypatch.setattr(_sys, "argv", ["pdt", *argv])
+    with pytest.raises(SystemExit) as raised:
+        _main()
+    return raised.value.code, capsys.readouterr().err
+
+
+def test_resume_refuses_an_inventory_made_with_other_options(tmp_path, capsys, monkeypatch):
+    # Regression: --resume reused an --inventory-only store (name-only file types), and
+    # carried over --skip and --exclude-dir from the original command, without a warning.
+    project = tmp_path / "project"
+    (project / "web").mkdir(parents=True)
+    (project / "web" / "app.js").write_text("export const a = 1;\n", encoding="utf-8")
+    (project / "main.py").write_text("print(1)\n", encoding="utf-8")
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 128, inventory_only=True, quiet=True) == 0
+    code, err = _run_main(capsys, monkeypatch, ["scan", str(project), "--output", str(output), "--resume", "--quiet"])
+    assert code == 2
+    assert "stored --inventory-only, now full analysis" in err
+    assert run_scan(project, output, {"json"}, 128, ignores={"web"}, quiet=True) == 0
+    code, err = _run_main(capsys, monkeypatch, ["scan", str(project), "--output", str(output), "--resume", "--quiet"])
+    assert code == 2 and "--exclude-dir: stored web, now none" in err
+    # The same options resume, however they are spelled ("Web/" is the name web); ./web would
+    # be a different exclusion (only the top-level directory).
+    assert run_scan(project, output, {"json"}, 128, ignores={"Web/"}, resume=True, quiet=True) == 0
+
+
+def test_exclude_dir_spellings_and_size_option_prerequisite(tmp_path, capsys, monkeypatch):
+    # Regression: ./web and an absolute path inside the root pruned nothing, silently, and
+    # --max-file-mb without --skip was accepted although it does nothing.
+    import json
+
+    from project_discovery.inventory.scanner import normalize_exclusions
+
+    project = tmp_path / "project"
+    (project / "web" / "src").mkdir(parents=True)
+    assert normalize_exclusions({"./web", "web\\src\\", str(project / "lib"), "Node_Modules/"}, project) == (
+        {"node_modules"}, {"web", "web/src", "lib"},
+    )
+    for value, message in (
+        (str(tmp_path / "elsewhere"), "outside the scan root"), ("../x", "outside the scan root"),
+        (".", "names the scan root itself"), (str(project), "names the scan root itself"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            normalize_exclusions({value}, project)
+    with pytest.raises(ValueError, match="absolute path needs a local scan root"):
+        normalize_exclusions({str(project / "web")}, None)
+
+    (project / "web" / "src" / "app.js").write_text("export const a = 1;\n", encoding="utf-8")
+    (project / "main.py").write_text("print(1)\n", encoding="utf-8")
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 128, ignores={str(project / "web"), "missing"}, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    assert report["metrics"]["pruned_directory_count"] == 1
+    assert [item["path"] for item in report["files"]] == ["main.py"]
+    assert "--exclude-dir missing matched no directory" in json.dumps(report)
+    code, err = _run_main(capsys, monkeypatch, ["scan", str(project), "--output", str(tmp_path / "o2"), "--max-file-mb", "5"])
+    assert code == 2 and "--max-file-mb requires --skip" in err
+
+
+def test_fatal_errors_name_the_problem(tmp_path, capsys, monkeypatch):
+    # Regression: a file given as the root printed only its path, and a --vuln-db that is
+    # not SQLite printed sqlite3's bare "file is not a database".
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "a.py").write_text("x = 1\n", encoding="utf-8")
+    code, err = _run_main(capsys, monkeypatch, ["scan", str(project / "a.py"), "--output", str(tmp_path / "o1")])
+    assert code == 2 and "The scan root is not a directory: " in err
+    bogus = tmp_path / "bogus.sqlite3"
+    bogus.write_bytes(b"not sqlite at all, just text" * 8)
+    code, err = _run_main(
+        capsys, monkeypatch, ["scan", str(project), "--output", str(tmp_path / "o2"), "--vuln-db", str(bogus)],
+    )
+    assert code == 2
+    assert f"The local vulnerability database {bogus.resolve()} is not a readable PDT advisory database" in err
+
+
+def test_unprovisioned_grammars_of_scanned_languages_are_reported(tmp_path, monkeypatch):
+    # Regression: TreeSitterAnalyzer.supports() skips languages without a grammar, so the
+    # documented UNKNOWN for unprovisioned grammars never appeared in a scan.
+    import json
+
+    from project_discovery import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "lib.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (project / "app.py").write_text("x = 1\n", encoding="utf-8")
+    states = {"Rust": "grammar_not_provisioned"}
+    monkeypatch.setattr(cli, "parser_capabilities", lambda languages=None: {
+        name: states[name] for name in (languages or ()) if name in states
+    })
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 128, quiet=True) == 0
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    gap = next(item for item in report["findings"] if item["title"].startswith("Tree-sitter grammars not provisioned"))
+    assert (gap["confidence"], gap["severity"]) == ("UNKNOWN", "INFO")
+    assert gap["evidence"] == ["Rust: 1 file(s), grammar 'rust' not provisioned"]
+    states.clear()  # pack not installed or every grammar provisioned: nothing to report
+    assert run_scan(project, tmp_path / "out2", {"json"}, 128, quiet=True) == 0
+    report = json.loads((tmp_path / "out2" / "discovery-report.json").read_text(encoding="utf-8"))
+    assert not any(item["title"].startswith("Tree-sitter grammars") for item in report["findings"])
+
+
+def test_text_capabilities_list_the_analyzers(capsys, monkeypatch):
+    # Regression: the text table said only "47 loaded"; the guide says it lists them.
+    import sys as _sys
+
+    from project_discovery.cli import main as _main
+
+    monkeypatch.setattr(_sys, "argv", ["pdt", "capabilities"])
+    with pytest.raises(SystemExit) as raised:
+        _main()
+    assert raised.value.code == 0
+    out = capsys.readouterr().out
+    assert "loaded:" in out and "secret-patterns" in out

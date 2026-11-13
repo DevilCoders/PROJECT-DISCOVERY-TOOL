@@ -20,7 +20,10 @@ def _lexical_target(caller: str, callee: str, receiver: str) -> str:
     # this./self. calls, and Rust's Self::new(), name the caller's own type.
     if receiver in {"this", "self", "Self"} and "." in caller:
         return f"@{caller.rsplit('.', 1)[0]}.{callee}"
-    if receiver and receiver not in {"new", "<expression>"}:
+    # A call on another receiver (items.size()) or on a call's result (getItems().size(),
+    # Runtime.getRuntime().exec(), "<expression>") is not a call of the same-named function
+    # in this file, and never of the caller itself.
+    if receiver and receiver != "new":
         return f"~{receiver}.{callee}"
     return ""
 

@@ -173,3 +173,18 @@ def test_credential_field_lines_hide_positional_literals(tmp_path: Path):
     serialized = repr([item.to_dict() for item in findings])
     for raw in ("plaintextpw", "alice@fixture-mailbox.net", "'alice'"):
         assert raw not in serialized
+
+
+def test_field_names_end_with_the_keyword(tmp_path: Path):
+    # Regression: \\b boundaries missed DB_PASSWORD, SECRET_KEY, GITHUB_TOKEN and user_email.
+    path = tmp_path / "settings.env"
+    path.write_text(
+        "DB_PASSWORD=x\nSECRET_KEY=x\nGITHUB_TOKEN=x\ntoken=x\nuser_email=x\n"
+        "email_verified=x\ntokenizer=x\npassword_hash_algorithm=x\n",
+        encoding="utf-8",
+    )
+    record = FileRecord("settings.env", path.stat().st_size, ".env", "Text", file_type="text")
+    findings = DataExposureAnalyzer().analyze(path, record)
+    secrets = next(item for item in findings if "Credential field-name" in item.title)
+    assert [entry.split(":")[1].split(" ")[0] for entry in secrets.evidence] == ["1", "2", "3", "4"]
+    assert any("email" in item.title.lower() or "email" in item.detail.lower() for item in findings)

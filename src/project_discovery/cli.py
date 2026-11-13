@@ -29,7 +29,7 @@ from rich.text import Text
 
 from . import __version__
 from .analyzers import load_analyzers
-from .analyzers.code.tree_sitter_syntax import parser_capabilities
+from .analyzers.code.tree_sitter_syntax import GRAMMARS, parser_capabilities
 from .analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
 from .analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
 from .catalog.domains import analyzer_domain_catalog, analyzer_domain_count
@@ -53,7 +53,7 @@ from .intelligence.architecture import analyze_project_architecture
 from .intelligence.index import QUERY_KINDS, analyze_code_index, code_index_state, query_code_index
 from .intelligence.python_graph import analyze_python_dependencies
 from .inventory.cache import ScanCache
-from .inventory.scanner import discover_inventory
+from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
 from .inventory.store import (
     InventoryStore,
     StoredDiagnosticRecords,
@@ -172,6 +172,7 @@ EXIT_FINDINGS = 1
 EXIT_USAGE = 2
 EXIT_INCOMPLETE = 3
 EXIT_INTERRUPTED = 130
+DEFAULT_MAX_FILE_MB = 128  # the --skip threshold when --max-file-mb is not given
 # Entries that failed at inventory time each get a diagnostic, up to this many.
 MAX_INVENTORY_ERROR_DIAGNOSTICS = 10_000
 
@@ -234,8 +235,23 @@ def _print_security_findings(console: Console, findings, *, limit: int = 25) -> 
         )
 
 
-def _resumable_walk_stats(inventory_path: Path, root: Path) -> dict | None:
-    """Return the stored walk statistics when an inventory for ``root`` can be resumed."""
+def _describe_inventory_options(options: dict) -> dict[str, str]:
+    """The inventory-shaping options as the command-line spellings that produce them."""
+    megabytes = (options.get("max_file_bytes") or 0) // (1024 * 1024)
+    exclusions = [*(options.get("exclude_names") or []), *(f"./{path}" for path in options.get("exclude_paths") or [])]
+    return {
+        "analysis": "full analysis" if options.get("read_signatures") else "--inventory-only",
+        "size skip": f"--skip --max-file-mb {megabytes}" if options.get("skip_oversized") else "no --skip",
+        "--exclude-dir": ", ".join(exclusions) or "none",
+    }
+
+
+def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict) -> dict | None:
+    """Return the stored walk statistics when an inventory for ``root`` can be resumed.
+
+    Raises ValueError when the stored inventory was made with other inventory options:
+    continuing it would keep its name-only file types, size skips and pruned trees.
+    """
     if not inventory_path.is_file():
         return None
     try:
@@ -246,9 +262,19 @@ def _resumable_walk_stats(inventory_path: Path, root: Path) -> dict | None:
                 or store.get_metadata("inventory_status") not in {"complete", "partial"}
             ):
                 return None
+            stored = store.get_metadata("inventory_options")
             stats = store.get_metadata("walk_stats")
     except sqlite3.DatabaseError:
         return None  # an unreadable inventory has nothing to resume; a fresh scan replaces it
+    if not isinstance(stored, dict):
+        return None  # an earlier PDT version did not record its options: start fresh
+    before, now = _describe_inventory_options(stored), _describe_inventory_options(options)
+    differences = [f"{name}: stored {before[name]}, now {now[name]}" for name in now if before[name] != now[name]]
+    if differences:
+        raise ValueError(
+            "--resume: the stored inventory was made with other options (" + "; ".join(differences)
+            + "). Rerun with the original options, or without --resume to start a fresh scan."
+        )
     return stats if isinstance(stats, dict) else None
 
 
@@ -299,6 +325,36 @@ class _EphemeralScanCache:
 
     def prune_missing(self, root: str, current_paths) -> int:
         return 0
+
+
+def _grammar_gap_finding(language_counts) -> Finding | None:
+    """One UNKNOWN finding for scanned languages whose Tree-sitter grammar is not provisioned.
+
+    Only when tree-sitter-language-pack is installed (the operator opted in to Tree-sitter);
+    without the pack, metrics.local_parser_capabilities records the capability alone.
+    """
+    capabilities = parser_capabilities({name for name, count in language_counts.items() if count})
+    missing = sorted(
+        name for name, state in capabilities.items()
+        if state in {"grammar_not_provisioned", "parser_check_error"}
+    )
+    if not missing:
+        return None
+    return Finding(
+        "analysis_coverage",
+        f"Tree-sitter grammars not provisioned: {len(missing)} scanned language(s)",
+        "tree-sitter-language-pack is installed, but the grammars of these languages are not in "
+        "its local cache, so their files had no Tree-sitter analysis; PDT never downloads "
+        "grammars. PDT's built-in code model still covered the languages it supports. "
+        "Provision the grammars before scanning (see the Operations guide).",
+        confidence="UNKNOWN", severity="INFO",
+        evidence=[
+            f"{name}: {language_counts[name]:,} file(s), grammar '{GRAMMARS[name]}' "
+            + ("not provisioned" if capabilities[name] == "grammar_not_provisioned" else "could not be checked")
+            for name in missing
+        ],
+        analyzer="tree-sitter-polyglot",
+    )
 
 
 def _remote_coverage_findings(source_metadata: dict) -> list[Finding]:
@@ -452,9 +508,18 @@ def run_scan(
             output = root.parent / f"{project_name}-pdt-report"
         output = output.expanduser().resolve()
         if not root.is_dir():
-            raise NotADirectoryError(root)
+            raise NotADirectoryError(f"The scan root is not a directory: {root}")
         if output == root or root in output.parents:
             raise ValueError("Report output must be outside the analyzed project directory.")
+    # Every --exclude-dir spelling (./web, web\src, an absolute path inside the root) becomes
+    # the name or root-relative path the walk compares; a value that can never match is a
+    # usage error instead of a scan that silently prunes nothing.
+    excluded_names, excluded_paths = normalize_exclusions(ignores, None if memory_source is not None else root)
+    requested_inventory = inventory_options(
+        read_signatures=not inventory_only, skip_oversized=skip_oversized,
+        max_file_bytes=max_file_mb * 1024 * 1024,
+        excluded_names=excluded_names, excluded_paths=excluded_paths,
+    )
 
     # One scan per output directory: a second scan cleared the shared inventory under the
     # first, and both reports mixed two roots.
@@ -515,8 +580,8 @@ def run_scan(
         started = now()
         timer = PhaseTimer()
         inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
-        storage_notes: list[str] = []  # moved-aside databases, recorded as diagnostics
-        walk_stats = _resumable_walk_stats(inventory_path, root) if resume else None
+        storage_notes: list[str] = []  # moved-aside databases and unused exclusions: run diagnostics
+        walk_stats = _resumable_walk_stats(inventory_path, root, requested_inventory) if resume else None
         resumed = walk_stats is not None
         if resume and not resumed:
             _status(
@@ -555,6 +620,10 @@ def run_scan(
                         store=inventory_store,
                         read_signatures=not inventory_only,
                     )
+            for value in unused_exclusions(walk_stats, excluded_names, excluded_paths):
+                note = f"--exclude-dir {value} matched no directory, so nothing was pruned for it."
+                storage_notes.append(note)
+                _status(console, "WARNING", note, "yellow")
         timer.lap("inventory")
         resumed_skipped = 0
         inventory_error_count = 0
@@ -842,6 +911,9 @@ def run_scan(
                     memory_metadata = memory_source.finalize()
                     finding_store.extend_diagnostics(memory_metadata.get("coverage_gaps", []))
                     finding_store.extend_findings(_remote_coverage_findings(memory_metadata))
+                grammar_gap = None if inventory_only else _grammar_gap_finding(counts)
+                if grammar_gap is not None:
+                    finding_store.append_finding(grammar_gap)
                 if vulnerability_db is not None and not inventory_only:
                     skipped_lockfiles = [
                         record.path for record in records
@@ -1555,13 +1627,14 @@ def main() -> None:
         help="Opt in to skipping content analysis for files above --max-file-mb",
     )
     scan.add_argument(
-        "--max-file-mb", type=int, default=128,
-        help="Size threshold used only with --skip (default: 128 MiB)",
+        "--max-file-mb", type=int, default=None,
+        help=f"Size threshold for --skip, which it requires (default: {DEFAULT_MAX_FILE_MB} MiB)",
     )
     scan.add_argument(
         "--exclude-dir", action="append", default=[],
         metavar="NAME",
-        help="Explicitly prune a directory name or relative path; the directory remains inventoried",
+        help="Explicitly prune a directory name (at any depth), or one directory by its path relative "
+             "to the scan root (web/src, ./web) or absolute path inside it; the directory remains inventoried",
     )
     scan.add_argument(
         "--vuln-db", type=Path, default=None,
@@ -1823,7 +1896,8 @@ def main() -> None:
                     )
                     name = "Code model"
                 table.add_row(name, str(value) if value else "not installed")
-            table.add_row("Analyzers", f"{len(report['analyzers'])} loaded")
+            names = ", ".join(sorted(item["name"] for item in report["analyzers"]))
+            table.add_row("Analyzers", escape(f"{len(report['analyzers'])} loaded: {names}"))
             table.add_row("Plugin sandbox", escape(_sandbox_summary(report["plugin_sandbox"])))
             for plugin in report["plugins"]:
                 table.add_row(
@@ -1842,7 +1916,7 @@ def main() -> None:
             print("[ SUCCESS ] Registered project: " + item["root"])
             raise SystemExit(0)
         if args.command == "catalog-list":
-            with ProjectCatalog(args.db) as catalog:
+            with ProjectCatalog(args.db, read_only=True) as catalog:
                 projects = catalog.list_projects()
             for item in projects:
                 print(
@@ -1852,14 +1926,18 @@ def main() -> None:
             print(f"[ INFO ] {len(projects)} projects registered")
             raise SystemExit(0)
         if args.command == "catalog-remove":
-            with ProjectCatalog(args.db) as catalog:
+            with ProjectCatalog(args.db, create=False) as catalog:
                 removed = catalog.remove_project(args.root)
-            print("[ SUCCESS ] Project removed" if removed else "[ INFO ] Project not found")
+            if not removed:
+                # A script must tell a typo, or a project never registered, from a removal.
+                print(f"[ ERROR ] No registered project matches {args.root} in {catalog.database}", file=sys.stderr)
+                raise SystemExit(EXIT_USAGE)
+            print("[ SUCCESS ] Project removed")
             raise SystemExit(0)
         if args.command == "catalog-compare":
             if not formats or formats - {"json", "markdown"}:
                 parser.error("catalog-compare --format accepts json, markdown")
-            with ProjectCatalog(args.db) as catalog:
+            with ProjectCatalog(args.db, read_only=True) as catalog:
                 reports = catalog.load_reports()
             _refuse_output_inside_projects(args.output, reports)
             comparison = compare_many_reports(reports)
@@ -1869,6 +1947,10 @@ def main() -> None:
         if args.command == "scan":
             if not formats or formats - {"json", "markdown", "html"}:
                 parser.error("scan --format accepts json, markdown, html")
+            if args.max_file_mb is not None and not args.skip:
+                parser.error("--max-file-mb requires --skip; without --skip no file is skipped by size")
+            if args.max_file_mb is None:
+                args.max_file_mb = DEFAULT_MAX_FILE_MB
             if args.max_file_mb < 1:
                 parser.error("--max-file-mb must be >= 1")
             if args.url is not None and args.path is not None:

@@ -88,7 +88,7 @@ def test_identity_analyzer_honors_python_encoding_cookie(tmp_path: Path):
 
 def test_identity_analyzer_caps_retained_marker_locations(tmp_path: Path):
     source = "".join(
-        "passport.authenticate('jwt');\n"
+        "const passport = require('passport'); passport.authenticate('jwt');\n"
         for _ in range(250)
     )
     findings = _scan(tmp_path, "auth.js", source)
@@ -100,3 +100,17 @@ def test_identity_analyzer_caps_retained_marker_locations(tmp_path: Path):
     )
     assert len(framework.evidence) <= 100
     assert len(authentication.evidence) <= 100
+
+
+def test_identity_markers_need_token_libraries_and_imports(tmp_path: Path):
+    # Regressions: every .encode()/.decode() was an authentication marker, and substrings
+    # ("Jose" in a name) were CONFIRMED identity frameworks.
+    plain = _scan(tmp_path, "util.py", "data = text.encode('utf-8')\nvalue = raw.decode()\n")
+    assert not any(item.category == "authentication" for item in plain)
+    token = _scan(tmp_path, "auth.py", "import jwt\nclaims = jwt.decode(token, key, algorithms=['HS256'])\n")
+    assert any("authentication" in item.title.lower() or item.category == "authentication" for item in token)
+    prose = _scan(tmp_path, "people.js", "const author = 'Jose Fakename';\nconst passportNumber = 'X';\n")
+    assert not any("Identity framework references" in item.title for item in prose)
+    imported = _scan(tmp_path, "server.js", "const passport = require('passport');\n")
+    framework = next(item for item in imported if "Identity framework references" in item.title)
+    assert framework.confidence == "INFERRED"

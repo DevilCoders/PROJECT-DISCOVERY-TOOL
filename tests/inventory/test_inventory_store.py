@@ -516,3 +516,33 @@ def test_run_scoped_diagnostics_are_stored_once(tmp_path):
         assert list(store.iter_diagnostics()) == [
             "plugin x failed to load", "online lookup partial", "a.py: per-file error", "a.py: per-file error",
         ]
+
+
+def test_code_fact_counters_count_inserted_rows_once(tmp_path):
+    # Regression: inventory_sequences added len(rows) although INSERT OR IGNORE dropped
+    # duplicates, and a file re-analyzed by --resume was counted again as truncated, so a
+    # resumed scan reported 25 truncated files instead of 24 and inflated row counters.
+    from project_discovery.intelligence.facts import FileFacts
+    from project_discovery.inventory.store import InventoryStore
+
+    facts = FileFacts(
+        symbols=[("Java", "method", "size", "Box.size", 3, 5, True)],
+        calls=[("Box.size", "size", "~items.size", 4), ("Box.size", "size", "~items.size", 4)],
+        references={"items"},
+        truncated={"references"},
+    )
+    database = tmp_path / "inventory.sqlite3"
+    with InventoryStore(database) as store:
+        store.extend_code_facts("src/Box.java", facts)
+        store.flush()
+        store.extend_code_facts("src/Box.java", facts)  # what --resume does after a hard kill
+        store.flush()
+        rows = {
+            table: store.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("code_symbols", "code_calls", "code_references")
+        }
+        sequences = dict(store.db.execute("SELECT name, value FROM inventory_sequences WHERE name LIKE 'code_%'"))
+        state = store.get_metadata("code_index_truncated")
+    assert rows == {"code_symbols": 1, "code_calls": 1, "code_references": 1}
+    assert {table: sequences[table] for table in rows} == rows
+    assert state["files"] == 1 and state["kinds"] == {"references": 1}

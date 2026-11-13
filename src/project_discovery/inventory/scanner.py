@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import stat
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 
 from ..catalog.languages import detect_language, is_source_path, is_textual_path
@@ -22,21 +23,55 @@ _REPARSE_TAG_NAME_SURROGATE = 0x20000000
 # Kept as a compatibility constant. No directory is excluded by default.
 DEFAULT_IGNORES: set[str] = set()
 
-_DEVELOPMENT_MARKERS = {
+# Directory names that mark a development, dependency, build or cache tree on their own.
+# Stored casefolded: both walkers compare name.casefold(), so a capitalized entry
+# ("Pods") could never match.
+_DEVELOPMENT_MARKERS = frozenset(name.casefold() for name in (
     ".cache", ".cargo", ".gradle", ".m2", ".ivy2", ".coursier", ".npm",
     ".pnpm-store", ".yarn", ".venv", ".tox", ".nox", ".pytest_cache",
     ".mypy_cache", ".ruff_cache", ".next", ".nuxt", ".svelte-kit",
     ".angular", ".parcel-cache", ".turbo", ".vite", ".webpack",
     ".nyc_output", ".fuff", ".fuzz", ".fuzzing", ".idea", ".vscode",
     ".git", ".hg", ".svn", "node_modules", "bower_components", "vendor",
-    "packages", "target", "build", "dist", "out", "coverage", "htmlcov",
-    "venv", "env", "site-packages", "third_party", "third-party",
+    "target", "build", "dist", "out", "coverage", "htmlcov",
+    "venv", "site-packages", "third_party", "third-party",
     "bazel-out", "bazel-bin", "bazel-testlogs", "Pods", "Carthage",
-    "DerivedData", "gradle", "maven", "go", "pkg", "obj", "bin",
+    "DerivedData", "maven", "obj",
     "__pycache__", "_build", "_opam", "_site", "artifacts", "generated",
-    "generated_code", "gen", "tmp", "temp", "cache", "caches",
+    "generated_code", "tmp", "temp", "cache", "caches",
     "fuzz", "corpus", "corpora", "crashers", "seeds",
+))
+# Generic names that are as often project source: a JavaScript monorepo's packages/, a Go
+# repository's pkg/ and go/, scripts in bin/, configuration in env/, the Gradle wrapper in
+# gradle/. They are marked only when an entry that identifies the tree is present.
+_CORROBORATED_MARKERS: dict[str, tuple[str, ...]] = {
+    "packages": ("repositories.config",),   # NuGet packages folder
+    "go": ("pkg/mod",),                       # GOPATH
+    "pkg": ("mod/cache",),                    # GOPATH/pkg (the module cache)
+    "bin": ("Debug", "Release"),              # MSBuild output
+    "env": ("pyvenv.cfg", "conda-meta"),      # Python virtual or conda environment
+    "gradle": ("caches",),                    # a relocated Gradle user home
 }
+
+
+def development_marker(name: str, has_entry: Callable[[str], bool] | None = None) -> str | None:
+    """The development-tree marker of a directory name, or None.
+
+    ``has_entry(relative)`` says whether the directory contains that entry; without it a
+    generic name is never marked, because nothing can corroborate it.
+    """
+    key = name.casefold()
+    if key in _DEVELOPMENT_MARKERS:
+        return key
+    evidence = _CORROBORATED_MARKERS.get(key)
+    if evidence and has_entry is not None and any(has_entry(item) for item in evidence):
+        return key
+    return None
+
+
+def _on_disk(directory: str) -> Callable[[str], bool]:
+    """``has_entry`` for a directory on disk (lexists: a link is evidence, never followed)."""
+    return lambda relative: os.path.lexists(os.path.join(directory, relative))
 _SIZE_BUCKETS = (
     (1024, "under_1_kib"),
     (1024 * 1024, "1_kib_to_1_mib"),
@@ -353,27 +388,99 @@ def _symlink_scope(root: Path, link_path: Path, target: str) -> str:
         return "unknown"
 
 
-def _normalise_exclusions(ignores: set[str] | None) -> tuple[set[str], set[str]]:
+def _relative_to_root(value: str, root: Path) -> str | None:
+    """An absolute ``value`` as a POSIX path relative to ``root``, or None outside it.
+
+    The lexical path is tried first, then the resolved one (a path through a symlinked
+    parent, or a Windows short name, still names a directory inside the root).
+    """
+    for candidate in (os.path.abspath(value), os.path.realpath(value)):
+        try:
+            relative = os.path.relpath(candidate, root).replace("\\", "/")
+        except ValueError:  # another Windows drive
+            continue
+        if relative != ".." and not relative.startswith("../"):
+            return relative
+    return None
+
+
+def normalize_exclusions(
+    ignores: set[str] | None, root: Path | None = None,
+) -> tuple[set[str], set[str]]:
+    """--exclude-dir values as casefolded (names, root-relative paths).
+
+    A bare name (``node_modules``) prunes every directory of that name. A value with a
+    separator (``web/src``), a ``./`` prefix (``./web``) or an absolute path inside ``root``
+    names one directory relative to the root; ``.`` and ``..`` segments are collapsed
+    lexically. A value that can never match raises ValueError: one outside the root, the
+    root itself, or an absolute path when there is no local root (a remote scan).
+    """
     names: set[str] = set()
     paths: set[str] = set()
     for raw in ignores or ():
-        value = raw.replace("\\", "/").strip("/")
+        value = raw.strip()
         if not value:
             continue
-        if "/" in value:
-            paths.add(value.casefold())
+        text = value.replace("\\", "/")
+        anchored = text.startswith("./")
+        if text.startswith("/") or os.path.isabs(value):
+            if root is None:
+                raise ValueError(
+                    f"--exclude-dir {raw}: an absolute path needs a local scan root; "
+                    "give the directory relative to the repository root"
+                )
+            relative = _relative_to_root(value, root)
+            if relative is None:
+                raise ValueError(f"--exclude-dir {raw} is outside the scan root {root}")
+            text, anchored = relative, True
+        normalized = posixpath.normpath(text)
+        if normalized in {"", "."}:
+            raise ValueError(f"--exclude-dir {raw} names the scan root itself, which cannot be pruned")
+        if normalized == ".." or normalized.startswith("../"):
+            raise ValueError(f"--exclude-dir {raw} is outside the scan root")
+        if anchored or "/" in normalized:
+            paths.add(normalized.casefold())
         else:
-            names.add(value.casefold())
+            names.add(normalized.casefold())
     return names, paths
+
+
+_normalise_exclusions = normalize_exclusions  # the name earlier releases used
+
+
+def unused_exclusions(stats, excluded_names: set[str], excluded_paths: set[str]) -> list[str]:
+    """The --exclude-dir values that pruned no directory, spelled as names or ./paths."""
+    return [
+        name for name in sorted(excluded_names) if not stats.get(f"exclusion_used:name:{name}")
+    ] + [
+        f"./{path}" for path in sorted(excluded_paths) if not stats.get(f"exclusion_used:path:{path}")
+    ]
+
+
+def inventory_options(
+    *, read_signatures: bool, skip_oversized: bool, max_file_bytes: int,
+    excluded_names: set[str], excluded_paths: set[str],
+) -> dict:
+    """The options that shape a stored inventory; --resume continues only an identical one."""
+    return {
+        "read_signatures": bool(read_signatures),
+        "skip_oversized": bool(skip_oversized),
+        "max_file_bytes": int(max_file_bytes) if skip_oversized else None,
+        "exclude_names": sorted(excluded_names),
+        "exclude_paths": sorted(excluded_paths),
+    }
 
 
 def _exclusion_match(
     relative_path: str, name: str, excluded_names: set[str], excluded_paths: set[str],
-) -> str | None:
-    if name.casefold() in excluded_names:
-        return f"explicit --exclude-dir name: {name}"
-    if relative_path.casefold() in excluded_paths:
-        return f"explicit --exclude-dir path: {relative_path}"
+) -> tuple[str, str] | None:
+    """The --exclude-dir value a directory matches, as (stats key, prune reason)."""
+    folded = name.casefold()
+    if folded in excluded_names:
+        return f"exclusion_used:name:{folded}", f"explicit --exclude-dir name: {name}"
+    folded_path = relative_path.casefold()
+    if folded_path in excluded_paths:
+        return f"exclusion_used:path:{folded_path}", f"explicit --exclude-dir path: {relative_path}"
     return None
 
 
@@ -482,8 +589,9 @@ def _discover_with_rust(
             continue
         if kind == "directory":
             name = PurePosixPath(relative).name
-            marker = name.casefold() if name.casefold() in _DEVELOPMENT_MARKERS else None
-            exclusion = _exclusion_match(relative, name, excluded_names, excluded_paths)
+            marker = development_marker(name, _on_disk(os.path.join(root, relative)))
+            match = _exclusion_match(relative, name, excluded_names, excluded_paths)
+            exclusion = match[1] if match else None
             record = DirectoryRecord(
                 relative, depth, is_hidden=hidden, permissions=mode,
                 development_marker=marker, pruned=exclusion is not None,
@@ -496,9 +604,10 @@ def _discover_with_rust(
             if marker:
                 stats["development_directory_count"] += 1
                 stats[f"development_dir:{marker}"] += 1
-            if exclusion:
+            if match:
                 stats["pruned_directory_count"] += 1
                 stats[f"pruned_dir:{name.casefold()}"] += 1
+                stats[match[0]] += 1
                 # Recorded as pruned here, so the walker must not descend into it either.
                 skip = getattr(walker, "skip_directory", None)
                 if skip is not None:
@@ -593,11 +702,11 @@ def discover_inventory(
         raise ValueError("The scan root itself is a symlink; pass its real directory path explicitly.")
     root = root.resolve(strict=True)
     if not root.is_dir():
-        raise NotADirectoryError(root)
+        raise NotADirectoryError(f"The scan root is not a directory: {root}")
     if max_file_bytes < 1:
         raise ValueError("max_file_bytes must be >= 1")
 
-    excluded_names, excluded_paths = _normalise_exclusions(ignores)
+    excluded_names, excluded_paths = normalize_exclusions(ignores, root)
     stats: Counter[str] = Counter()
     try:
         root_info = root.stat()
@@ -608,7 +717,15 @@ def discover_inventory(
     if store is not None:
         store.clear()
         stats["inventory_store_enabled"] = 1
-        store.checkpoint({"inventory_status": "running", "root": str(root)})
+        store.checkpoint({
+            "inventory_status": "running", "root": str(root),
+            # What --resume compares: an inventory made with other options cannot be continued.
+            "inventory_options": inventory_options(
+                read_signatures=read_signatures, skip_oversized=skip_oversized,
+                max_file_bytes=max_file_bytes,
+                excluded_names=excluded_names, excluded_paths=excluded_paths,
+            ),
+        })
     root_directory = DirectoryRecord(".", 0, permissions=root_mode, is_hidden=root_hidden)
     directories_by_path: dict[str, DirectoryRecord] = {}
     if store is None:
@@ -695,10 +812,11 @@ def discover_inventory(
                 continue
 
             if stat.S_ISDIR(info.st_mode):
-                marker = entry.name.casefold() if entry.name.casefold() in _DEVELOPMENT_MARKERS else None
-                exclusion = _exclusion_match(
+                marker = development_marker(entry.name, _on_disk(entry.path))
+                match = _exclusion_match(
                     relative, entry.name, excluded_names, excluded_paths,
                 )
+                exclusion = match[1] if match else None
                 record = DirectoryRecord(
                     relative,
                     depth + 1,
@@ -715,9 +833,10 @@ def discover_inventory(
                 if marker:
                     stats["development_directory_count"] += 1
                     stats[f"development_dir:{marker}"] += 1
-                if exclusion:
+                if match:
                     stats["pruned_directory_count"] += 1
                     stats[f"pruned_dir:{entry.name.casefold()}"] += 1
+                    stats[match[0]] += 1
                 else:
                     try:
                         child_iterator = os.scandir(entry.path)

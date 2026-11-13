@@ -130,3 +130,28 @@ def test_phpunit_clover_reports_project_metrics(tmp_path: Path):
         "</project></coverage>"
     ))
     assert "statements: 15/100 (15.0%)" in findings[0].detail
+
+
+def test_function_and_method_counters_and_merged_go_profiles(tmp_path: Path):
+    # Regressions: LCOV FNF/FNH, JaCoCo METHOD and OpenCover method counters were dropped,
+    # and a -coverpkg profile counted each block once per test binary.
+    lcov = _scan(tmp_path, "lcov.info", "SF:a.ts\nFNF:4\nFNH:3\nLF:10\nLH:5\nend_of_record\n")
+    assert "functions: 3/4 (75.0%)" in lcov[0].detail
+    jacoco = _scan(
+        tmp_path, "jacoco.xml",
+        "<report name='x'><counter type='METHOD' missed='1' covered='3'/>"
+        "<counter type='LINE' missed='5' covered='5'/></report>",
+    )
+    assert "methods: 3/4 (75.0%)" in jacoco[0].detail
+    opencover = _scan(
+        tmp_path, "opencover.xml",
+        "<CoverageSession><Summary numSequencePoints='10' visitedSequencePoints='5' "
+        "numMethods='8' visitedMethods='2'/></CoverageSession>",
+    )
+    assert "methods: 2/8 (25.0%)" in opencover[0].detail
+    go = _scan(
+        tmp_path, "coverage.out",
+        "mode: set\napp/a.go:1.1,3.2 2 0\napp/b.go:1.1,2.2 2 1\n"
+        "app/a.go:1.1,3.2 2 1\napp/b.go:1.1,2.2 2 0\n",
+    )
+    assert "statements: 4/4 (100.0%)" in go[0].detail

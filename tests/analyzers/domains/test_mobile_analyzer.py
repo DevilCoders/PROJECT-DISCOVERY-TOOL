@@ -81,3 +81,13 @@ def test_non_mobile_package_json_is_ignored(tmp_path: Path):
     assert MobileIntelligenceAnalyzer().analyze(
         path, _record(path, "package.json")
     ) == []
+
+
+def test_malformed_xml_property_list_is_a_parse_error(tmp_path: Path):
+    # Regression: plistlib raises ExpatError for malformed XML, which escaped the analyzer.
+    path = tmp_path / "Info.plist"
+    path.write_text('<?xml version="1.0"?><plist version="1.0"><dict><key>A</key>', encoding="utf-8")
+    findings = MobileIntelligenceAnalyzer().analyze(path, _record(path, "ios/App/Info.plist"))
+    assert [(item.confidence, item.title) for item in findings] == [
+        ("UNKNOWN", "Apple property list parse error: ios/App/Info.plist"),
+    ]

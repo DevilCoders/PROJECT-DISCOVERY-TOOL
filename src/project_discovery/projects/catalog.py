@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from ..vulnerabilities.database import sqlite_uri
 from .comparison import load_report
 
 # ``user@host:path`` (scp-style Git remotes); a Windows drive ``C:\`` has no "@".
@@ -46,23 +47,47 @@ def catalog_root(report: dict[str, Any]) -> str:
 class ProjectCatalog:
     """Store report metadata and local report paths; never copies project source."""
 
-    def __init__(self, database: Path) -> None:
+    def __init__(self, database: Path, *, create: bool = True, read_only: bool = False) -> None:
+        """Open the catalog at ``database``.
+
+        create=False opens an existing catalog only, so listing, comparing or removing
+        never leaves an empty catalog at a mistyped --db path; read_only=True also opens
+        it read-only. A file that is not a PDT catalog raises ValueError naming it.
+        """
         self.database = database.expanduser().resolve()
-        self.database.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.database)
-        self.db.execute(
-            """CREATE TABLE IF NOT EXISTS projects (
-                project_id TEXT PRIMARY KEY,
-                root TEXT NOT NULL UNIQUE,
-                project_name TEXT NOT NULL,
-                report_path TEXT NOT NULL,
-                scan_finished_at TEXT NOT NULL,
-                file_count INTEGER NOT NULL,
-                finding_count INTEGER NOT NULL,
-                languages_json TEXT NOT NULL
-            )"""
-        )
-        self.db.commit()
+        if create and not read_only:
+            self.database.parent.mkdir(parents=True, exist_ok=True)
+            self.db = sqlite3.connect(self.database)
+        else:
+            if not self.database.is_file():
+                raise FileNotFoundError(
+                    f"Project catalog not found: {self.database} (register a report with `pdt catalog-add`)"
+                )
+            self.db = sqlite3.connect(sqlite_uri(self.database, "ro" if read_only else "rw"), uri=True)
+        try:
+            if create and not read_only:
+                self.db.execute(
+                    """CREATE TABLE IF NOT EXISTS projects (
+                        project_id TEXT PRIMARY KEY,
+                        root TEXT NOT NULL UNIQUE,
+                        project_name TEXT NOT NULL,
+                        report_path TEXT NOT NULL,
+                        scan_finished_at TEXT NOT NULL,
+                        file_count INTEGER NOT NULL,
+                        finding_count INTEGER NOT NULL,
+                        languages_json TEXT NOT NULL
+                    )"""
+                )
+                self.db.commit()
+            present = self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'"
+            ).fetchone()
+        except sqlite3.DatabaseError as exc:
+            self.db.close()
+            raise ValueError(f"{self.database} is not a readable PDT project catalog ({exc})") from exc
+        if present is None:
+            self.db.close()
+            raise ValueError(f"{self.database} is not a PDT project catalog (it has no projects table)")
 
     def add_report(self, report_path: Path) -> dict[str, Any]:
         report_path = report_path.expanduser().resolve(strict=True)

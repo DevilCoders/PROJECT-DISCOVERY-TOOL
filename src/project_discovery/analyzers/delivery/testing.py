@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from ...catalog.languages import is_source_path, source_extensions, source_language_names
-from ...core.source_utils import describe_error, read_text_bounded
+from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -13,15 +13,25 @@ _QUOTE = r"""['"\x60]"""
 _STRING_CASE = lambda names: re.compile(
     r"(?m)\b(?:" + names + r")\s*\(\s*" + _QUOTE + r"([^'\"\x60]+)" + _QUOTE
 )
+# What may sit between a PHP test attribute or docblock and the method: more attributes and
+# modifiers.
+_PHP_METHOD = (
+    r"\s*+(?:#\[[^\]\n]*+\]\s*+)*+(?:(?:public|protected|private|static|final|abstract)\s++)*+"
+    r"function\s++(\w+)"
+)
 _PATTERNS = {
-    ".py": re.compile(r"(?m)^[ \t]*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)\s*\("),
+    # unittest also names methods testSomething.
+    ".py": re.compile(r"(?m)^[ \t]*(?:async\s+)?def\s+(test\w*)\s*\("),
     ".js": _STRING_CASE("it|test"),
     ".jsx": _STRING_CASE("it|test"),
     ".mjs": _STRING_CASE("it|test"),
     ".cjs": _STRING_CASE("it|test"),
     ".ts": _STRING_CASE("it|test"),
     ".tsx": _STRING_CASE("it|test"),
-    ".rs": re.compile(r"(?m)#\s*\[\s*(?:tokio::)?test\s*\]"),
+    # #[test], #[tokio::test(flavor = "multi_thread")], #[sqlx::test], #[test_case(...)], #[rstest]
+    ".rs": re.compile(
+        r"(?m)#\s*\[\s*(?:\w++::)*+(?:test|test_case|rstest|wasm_bindgen_test)(?:\s*\([^)\n]{0,200}+\))?\s*\]"
+    ),
     ".go": re.compile(r"(?m)^[ \t]*func\s+(Test[A-Za-z0-9_]+)\s*\("),
     ".java": re.compile(r"(?m)^[ \t]*@(?:Test|ParameterizedTest|RepeatedTest|TestFactory)\b"),
     ".kt": re.compile(r"(?m)^[ \t]*@(?:Test|ParameterizedTest)\b"),
@@ -32,7 +42,15 @@ _PATTERNS = {
     ".cc": re.compile(r"(?m)\b(?:TEST(?:_F|_P)?|TEST_CASE)\s*\(\s*([A-Za-z0-9_]+)"),
     ".cxx": re.compile(r"(?m)\b(?:TEST(?:_F|_P)?|TEST_CASE)\s*\(\s*([A-Za-z0-9_]+)"),
     ".c": re.compile(r"(?m)\b(?:START_TEST|TEST_CASE)\s*\(\s*([A-Za-z0-9_]+)"),
-    ".php": re.compile(r"(?m)^[ \t]*public\s+function\s+(test[A-Za-z0-9_]+)\s*\("),
+    # PHPUnit test methods, #[Test] attributes and @test docblocks, and Pest it()/test() calls.
+    # An attribute or docblock match runs through the method it annotates, so a method that
+    # is both annotated and named test* counts once.
+    ".php": re.compile(
+        r"(?m)#\[\s*+(?:\\?PHPUnit\\Framework\\Attributes\\)?Test\b(?![\w\\])[^\]\n]*+\]" + _PHP_METHOD
+        + r"|^[ \t]*+(?:/\*\*|\*)[ \t]*+@test\b(?:[^*]|\*(?!/)){0,4000}+\*/" + _PHP_METHOD
+        + r"|^[ \t]*+public\s++function\s++(test\w+)\s*+\("
+        r"|^[ \t]*+(?:it|test)\s*+\(\s*+['\"]([^'\"\n]+)['\"]"
+    ),
     ".rb": _STRING_CASE("it|specify"),
     ".swift": re.compile(r"(?m)^[ \t]*func\s+(test[A-Za-z0-9_]+)\s*\("),
     ".dart": _STRING_CASE("test|group"),
@@ -49,7 +67,14 @@ _PATTERNS = {
     ".sol": re.compile(r"(?m)^[ \t]*function\s+(test[A-Za-z0-9_]*)\s*\("),
     ".nim": re.compile(r'(?mi)^[ \t]*(?:test|suite)\s+["\']([^"\']+)["\']'),
     ".hs": re.compile(r'(?m)\b(?:describe|it)\s+["\']([^"\']+)["\']'),
-    ".groovy": re.compile(r"(?m)^[ \t]*def\s+(?:'([^']+)'|([A-Za-z0-9_]+))\s*\("),
+    # Spock feature methods are named by strings (any other def is a helper); JUnit methods
+    # are @Test-annotated or named test*, and an annotated test* method counts once.
+    ".groovy": re.compile(
+        r"""(?m)^[ \t]*+def\s++(?:"([^"\n]+)"|'([^'\n]+)')\s*+\("""
+        r"|^[ \t]*+@Test\b(?:\([^)\n]*+\))?\s*+(?:@\w++(?:\([^)\n]*+\))?\s*+)*+"
+        r"(?:(?:public|protected|private|static|final)\s++)*+(?:void|def)\s++(\w+)"
+        r"|^[ \t]*+(?:public\s++)?void\s++(test\w*)\s*+\("
+    ),
     ".m": re.compile(r"(?m)^[ \t]*-\s*\(void\)\s*(test[A-Za-z0-9_]+)"),
     ".f90": re.compile(r"(?im)^[ \t]*subroutine\s+(test_[A-Za-z0-9_]+)"),
     ".v": re.compile(r"(?m)^[ \t]*module\s+(tb_[A-Za-z0-9_]+)"),
@@ -144,13 +169,12 @@ class TestDiscoveryAnalyzer(Analyzer):
                 evidence=[record.path],
                 analyzer=self.name,
             )]
-        evidence = [
-            f"{record.path}:{content.count(chr(10), 0, match.start()) + 1}"
-            for match in matches[:100]
-        ]
+        lines = LineIndex(content)
+        evidence = [f"{record.path}:{lines.line(match.start())}" for match in matches[:100]]
+        # Annotation and attribute patterns capture no name; those are not empty samples.
         names = [
-            " ".join(group for group in match.groups() if group)
-            for match in matches[:30]
+            name for name in (" ".join(group for group in match.groups() if group) for match in matches[:30])
+            if name
         ]
         return [Finding(
             "testing",

@@ -6,6 +6,7 @@ import plistlib
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from xml.parsers.expat import ExpatError  # plistlib raises it for malformed XML property lists
 
 from ...core.safe_parsers import safe_xml_fromstring
 from ...core.source_utils import describe_error, open_verified_binary, read_bytes_bounded, read_text_bounded
@@ -149,7 +150,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
         try:
             with open_verified_binary(path, record.analysis_identity) as stream:
                 data = plistlib.load(stream)
-        except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+        except (OSError, plistlib.InvalidFileException, ValueError, ExpatError) as exc:
             return [Finding(
                 "mobile", f"Apple property list parse error: {record.path}",
                 describe_error(exc), confidence="UNKNOWN", severity="LOW",

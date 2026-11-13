@@ -131,7 +131,7 @@ def flow_findings(model: FileModel, flows: list[Flow], analyzer: str) -> list[Fi
         findings.append(code_finding(
             model, "security", title, f"{impact} {len(items)} flow(s): {described}.",
             sorted({flow.call_line for flow in items}), analyzer=analyzer, severity=severity,
-            recommendation=recommendation,
+            impact=impact, recommendation=recommendation,
         ))
     return findings
 

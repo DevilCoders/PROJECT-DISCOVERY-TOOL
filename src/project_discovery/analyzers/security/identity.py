@@ -103,6 +103,20 @@ _PATTERNS = (
 )
 
 
+_IMPORT_LINE = re.compile(
+    r"(?i)^[ \t]*+(?:import|from|using|use|require|include|#include|@import|implementation|compile|api)\b"
+    r"|\brequire\s*+\(|\bimport\s*+\(|<(?:dependency|PackageReference)\b|<artifactId>"
+)
+_FRAMEWORK_WORDS = {
+    framework: re.compile(r"(?i)(?<![\w.-])" + re.escape(framework) + r"(?![\w-])") for framework in _FRAMEWORKS
+}
+
+
+def _root_name(node) -> str:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id.lower() if isinstance(node, ast.Name) else ""
+
 def _python_markers(source: str, relative: str) -> tuple[dict[str, set[int]], dict[str, set[int]]]:
     try:
         tree = parse_python(source, filename=relative)
@@ -132,10 +146,15 @@ def _python_markers(source: str, relative: str) -> tuple[dict[str, set[int]], di
                 func.id if isinstance(func, ast.Name) else ""
             )
             lowered = name.lower()
-            if lowered in {
+            # encode/decode are authentication markers only on a JWT library
+            # (jwt.decode), not on every bytes or string.
+            token_call = lowered in {"decode", "encode"} and isinstance(func, ast.Attribute) and (
+                _root_name(func.value) in {"jwt", "jose", "jws", "jwe", "pyjwt"}
+            )
+            if token_call or lowered in {
                 "login_required", "requires_auth", "create_access_token",
-                "verify_password", "check_password", "hashpw", "decode",
-                "encode", "oauth2passwordbearer", "httpbearer",
+                "verify_password", "check_password", "hashpw",
+                "oauth2passwordbearer", "httpbearer",
             }:
                 category = (
                     "authorization" if lowered in {"login_required", "requires_auth"}
@@ -208,10 +227,11 @@ class IdentityIntelligenceAnalyzer(Analyzer):
         # Iterate without materializing source.splitlines(); retain only bounded
         # representative locations for each marker/framework family.
         for line_number, line in enumerate(io.StringIO(source, newline=None), 1):
-            lowered = line.lower()
-            if not is_python:
+            if not is_python and _IMPORT_LINE.search(line):
+                # Whole names on import, require, use and include lines: a substring such as
+                # "Jose" in a person's name or "passport" in a field is not a library.
                 for framework, package in _FRAMEWORKS.items():
-                    if package.lower() in lowered or framework.lower() in lowered:
+                    if _FRAMEWORK_WORDS[framework].search(line):
                         _add_location(frameworks, package, line_number)
             for category, pattern, _, _ in _PATTERNS:
                 if pattern.search(line):
@@ -229,7 +249,7 @@ class IdentityIntelligenceAnalyzer(Analyzer):
                 f"Identity framework references: {record.path}",
                 "Observed identity/authentication libraries: " + ", ".join(names)
                 + ". Import presence does not prove that authentication is enabled or correct.",
-                confidence="CONFIRMED", evidence=evidence[:100], analyzer=self.name,
+                confidence="CONFIRMED" if is_python else "INFERRED", evidence=evidence[:100], analyzer=self.name,
             ))
         metadata = {category: (title, detail) for category, _, title, detail in _PATTERNS}
         for category, locations in sorted(markers.items()):

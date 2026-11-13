@@ -93,3 +93,44 @@ def test_root_test_filename_convention_is_language_agnostic(tmp_path: Path):
     path.write_text('proc testRuntime() = discard\n', encoding="utf-8")
     record = FileRecord(path.name, path.stat().st_size, path.suffix.lower(), "Odin")
     assert analyzer.supports(record)
+
+
+def test_test_declarations_across_framework_conventions(tmp_path: Path):
+    # Regressions: unittest testCamelCase methods, Rust tokio/test_case/rstest attributes,
+    # PHPUnit attributes, @test docblocks and Pest calls were not counted; Groovy counted
+    # every def; annotation patterns produced empty sample names.
+    analyzer = TestDiscoveryAnalyzer()
+
+    def scan(relative, source):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        return analyzer.analyze(path, _record(path, relative))[0]
+
+    python = scan("tests/test_login.py", "class LoginTest(TestCase):\n    def testLogin(self):\n        pass\n")
+    assert "Detected 1 test declarations" in python.detail
+    rust = scan(
+        "tests/api.rs",
+        "#[tokio::test(flavor = \"multi_thread\")]\nasync fn a() {}\n#[cfg(test)]\nmod m {}\n"
+        "#[test_case(1, 2 ; \"small\")]\nfn b() {}\n#[rstest]\nfn c() {}\n#[sqlx::test]\nasync fn d() {}\n",
+    )
+    assert "Detected 4 test declarations" in rust.detail
+    assert "Sample names: ," not in rust.detail
+    php = scan(
+        "tests/MathTest.php",
+        "<?php\nclass MathTest extends TestCase {\n"
+        "    #[Test]\n    public function testAdds(): void {}\n"
+        "    /**\n     * @test\n     */\n    public function subtracts(): void {}\n"
+        "    public function testPlain(): void {}\n"
+        "    public function helper(): void { $mail = 'someone@test.example'; }\n}\n"
+        "it('multiplies numbers', function () {});\n",
+    )
+    assert "Detected 4 test declarations" in php.detail
+    assert "testAdds, subtracts, testPlain, multiplies numbers" in php.detail
+    groovy = scan(
+        "src/test/groovy/MathSpec.groovy",
+        "class MathSpec extends Specification {\n    def \"adds numbers\"() { expect: true }\n"
+        "    def helper() { 1 }\n    @Test\n    void checksTotals() {}\n}\n",
+    )
+    assert "Detected 2 test declarations" in groovy.detail
+    assert "adds numbers, checksTotals" in groovy.detail

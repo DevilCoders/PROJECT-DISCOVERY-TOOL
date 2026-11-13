@@ -99,3 +99,27 @@ def test_accelerator_references_match_whole_name_components(tmp_path: Path):
     findings = AIMLIntelligenceAnalyzer().analyze(path, _record(path, "gpu.py"))
     accelerator = next(item for item in findings if item.title.startswith("Accelerator/device"))
     assert accelerator.evidence == ["gpu.py:3 (torch.cuda.is_available)"]
+
+
+def test_notebook_code_cells_are_analyzed_with_cell_locations(tmp_path: Path):
+    # Regression: .ipynb notebooks, where most ML code lives, were not analyzed.
+    path = tmp_path / "train.ipynb"
+    path.write_text(json.dumps({
+        "cells": [
+            {"cell_type": "markdown", "source": ["import tensorflow  # prose, not code\n"]},
+            {"cell_type": "code", "source": ["%matplotlib inline\n", "!pip install torch\n", "import torch\n"]},
+            {"cell_type": "code", "source": "model.fit(data)\n"},
+        ],
+        "metadata": {}, "nbformat": 4, "nbformat_minor": 5,
+    }), encoding="utf-8")
+    analyzer = AIMLIntelligenceAnalyzer()
+    record = _record(path, "notebooks/train.ipynb")
+    assert analyzer.supports(record)
+    findings = analyzer.analyze(path, record)
+    frameworks = next(item for item in findings if "AI/ML frameworks imported" in item.title)
+    assert frameworks.evidence == ["notebooks/train.ipynb:cell 2 line 3 (PyTorch)"]
+    training = next(item for item in findings if "training pipeline" in item.title)
+    assert training.evidence == ["notebooks/train.ipynb:cell 3 line 1 (model.fit)"]
+    broken = tmp_path / "broken.ipynb"
+    broken.write_text("{not json", encoding="utf-8")
+    assert analyzer.analyze(broken, _record(broken, "broken.ipynb"))[0].confidence == "UNKNOWN"

@@ -25,9 +25,12 @@ read its exit codes and performance data.
    The pack keeps grammars in a per-user cache. To provision them once for a shared or
    offline host, set `TREE_SITTER_LANGUAGE_PACK_CACHE_DIR` to the same directory for the
    download and for scans. Grammar names are the pack's (C# is `csharp`).
-   Unprovisioned grammars are reported as `UNKNOWN`. With grammars provisioned, the shared
-   code model of 16 brace languages comes from the syntax tree instead of the structural
-   lexer; set `PDT_CODE_MODEL=lexical` to keep the lexer (for example to compare results).
+   With the pack installed, a scan lists the languages it found whose grammar is not
+   provisioned in one INFO `UNKNOWN` finding ("Tree-sitter grammars not provisioned");
+   without the pack, `metrics.local_parser_capabilities` records each language's state.
+   With grammars provisioned, the shared code model of 16 brace languages comes from the
+   syntax tree instead of the structural lexer; set `PDT_CODE_MODEL=lexical` to keep the
+   lexer (for example to compare results).
 
 ## Scan modes
 
@@ -36,7 +39,7 @@ read its exit codes and performance data.
 | Full analysis | `pdt scan /src --output /reports/src` |
 | Fast metadata inventory (no content reads) | `pdt scan /src --output /reports/src --inventory-only` |
 | Continue an interrupted scan | rerun the same command with `--resume` |
-| Skip content of huge files | `--skip --max-file-mb 512` (skipped files stay inventoried) |
+| Skip content of huge files | `--skip --max-file-mb 512` (skipped files stay inventoried; `--max-file-mb` requires `--skip`) |
 | Prune directories explicitly | `--exclude-dir node_modules --exclude-dir build/cache` |
 | CI gate | `pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color` |
 | Remote repository, downloaded | `pdt scan https://github.com/org/repo --output /reports/repo` |
@@ -44,6 +47,12 @@ read its exit codes and performance data.
 | Online advisory lookups | add `--vuln-online` (optionally `--vuln-enrich nvd,ghsa`) |
 
 Online scans, their budgets and credentials are described in [ONLINE_MODE.md](ONLINE_MODE.md).
+
+`--exclude-dir` takes a directory name, which prunes every directory of that name at any depth
+(`node_modules`), or one directory by its path: relative to the scan root (`build/cache`,
+`./web`, `web\src`) or absolute inside it. Matching ignores case, and `.`/`..` segments are
+collapsed. A value outside the root, or the root itself, is a usage error (exit 2). A value that
+matches no directory prints a warning and is recorded as a scan diagnostic.
 
 ### Parallelism
 
@@ -68,6 +77,11 @@ skipped; the rest are analyzed, then the import graph, architecture layout and r
 rebuilt. Files whose analysis failed in the interrupted run (for example a sharing violation or a
 terminated worker) keep their error and are not retried; run a fresh scan to retry them. Files added or removed after the original traversal are not picked up: run a fresh
 scan for a current view. When no resumable inventory exists, PDT warns and starts a fresh scan.
+The inventory-shaping options must match the original command: `--inventory-only`, `--skip` with
+its `--max-file-mb`, and the `--exclude-dir` values (however they are spelled). When one differs,
+`--resume` stops with exit 2 and names it; rerun with the original options, or without `--resume`.
+A file that was being analyzed when the process died is analyzed again, and its code-index rows
+and truncation are stored and counted once.
 An inventory or fingerprint database that SQLite cannot read (a damaged file) is moved aside as
 `NAME.corrupt-<timestamp>` with a warning and a scan diagnostic, and the scan rebuilds it; a
 locked database is never treated as damaged.
@@ -155,9 +169,10 @@ could not be read during the walk are listed as diagnostics in every report.
 Every JSON report contains `metrics.performance`:
 
 - `phase_seconds`: inventory, analysis, cache_maintenance, online_vulnerabilities (with
-  `--vuln-online`), python_graph, architecture, code_index, shutdown (the worker pool and plugin
-  hosts) and reporting. Before 2026-11-12 the architecture pass was billed to code_index and
-  "architecture" measured the shutdown.
+  `--vuln-online`), python_graph, architecture, code_index and shutdown (the worker pool and
+  plugin hosts). Report writing comes after the JSON report is assembled, so its time is not in
+  the report: the terminal summary prints it as "reporting". Before 2026-11-12 the
+  architecture pass was billed to code_index and "architecture" measured the shutdown.
 - `files_per_second` and `bytes_per_second` up to report writing.
 - `peak_rss_bytes`: the coordinator process's peak resident memory. Worker processes are
   separate; see `tools/benchmark.py` for the largest-process figure on POSIX.

@@ -93,7 +93,7 @@ The baseline is not production-ready:
 - [x] Initial marker catalog for `node_modules`, `.cache`, `.yarn`, `.pnpm-store`, `.npm`, `.gradle`, `.m2`, `.venv`, `vendor`, build outputs and other common workspaces.
 - [x] Remove implicit default pruning of dependency/build/cache trees.
 - [x] Traverse all recognized trees by default unless the operator explicitly opts out or a documented safety policy marks an entry unknown.
-- [x] Add `--exclude-dir NAME` (a directory name or a relative path); every pruned subtree keeps its directory record with `pruned` set and the exact `prune_reason`, and pruned counts appear in every report.
+- [x] Add `--exclude-dir NAME` (a directory name, or a path relative to the root or absolute inside it); every pruned subtree keeps its directory record with `pruned` set and the exact `prune_reason`, and pruned counts appear in every report (terminal, Markdown, JSON and the HTML inventory summary).
 - [ ] Add optional exclusion profile presets.
 - [x] Add `--inventory-only`: inventory files, directories and links without reading file contents (no hashing or content analyzers), recorded as `metrics.execution.analysis_mode`.
 - [ ] Add directory-only and deep-analysis controls with explicit semantics.

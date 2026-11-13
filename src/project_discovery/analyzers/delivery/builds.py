@@ -36,7 +36,7 @@ _BUILD_NAMES = {
     "pants", "pants.toml", "gradlew", "mvnw", "modulefile",
 }
 _BUILD_EXTENSIONS = {
-    ".gradle", ".mk", ".sbt", ".bzl", ".ninja", ".pro", ".pri",
+    ".cmake", ".gradle", ".mk", ".sbt", ".bzl", ".ninja", ".pro", ".pri",
     ".csproj", ".fsproj", ".vbproj", ".sln", ".slnx", ".pbxproj",
     ".am", ".ac",
 }
@@ -47,6 +47,25 @@ _DOCKER_INSTRUCTION = re.compile(r"(?mi)^[ \t]*(FROM|RUN|COPY|ADD|WORKDIR|USER|E
 
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
+
+
+def _workflow_jobs(content: str, provider: str) -> list[str]:
+    """Job names of a GitHub, GitLab or Azure pipeline (empty when the YAML does not parse)."""
+    from ...core.safe_parsers import safe_yaml_load
+    from .deployment import _azure_jobs, _gitlab_jobs
+
+    try:
+        data = safe_yaml_load(content, allow_unknown_tags=True)  # GitLab's !reference
+    except Exception:  # noqa: BLE001 - deployment-intelligence reports YAML parse failures
+        return []
+    if not isinstance(data, dict):
+        return []
+    if provider == "gitlab":
+        return _gitlab_jobs(data)
+    if provider == "azure":
+        return _azure_jobs(data)
+    jobs = data.get("jobs")
+    return [str(name) for name in jobs] if isinstance(jobs, dict) else []
 
 
 class BuildManifestAnalyzer(Analyzer):
@@ -91,10 +110,11 @@ class BuildManifestAnalyzer(Analyzer):
                 targets = [f"{kind}: {target}" for kind, target in _CMAKE_TARGET.findall(content)]
             elif name == "package.json":
                 data = json.loads(content)
-                scripts = data.get("scripts", {})
-                targets = [f"script: {key}" for key in scripts]
+                data = data if isinstance(data, dict) else {}  # valid JSON need not be an object
+                scripts = data.get("scripts")
+                targets = [f"script: {key}" for key in scripts] if isinstance(scripts, dict) else []
                 metadata.extend(
-                    f"package: {data[key]}" for key in ("name", "version") if data.get(key)
+                    f"package: {data[key]}" for key in ("name", "version") if isinstance(data.get(key), str)
                 )
             elif name == "pyproject.toml":
                 data = tomllib.loads(content)
@@ -190,22 +210,22 @@ class BuildManifestAnalyzer(Analyzer):
                 ]
                 metadata.append("Jenkins pipeline script")
             elif record.path.startswith(".github/workflows/"):
-                targets = [
-                    f"job: {job}" for job in re.findall(
-                        r"(?m)^[ \t]{2}([A-Za-z0-9_.-]+):\s*(?:#.*)?$", content
-                    )
-                ]
+                # Jobs are the keys of the jobs mapping, not every indented key (triggers).
+                targets = [f"job: {job}" for job in _workflow_jobs(content, "github")]
                 metadata.append("GitHub Actions workflow")
             elif name in {
                 ".gitlab-ci.yml", "azure-pipelines.yml", "azure-pipelines.yaml",
                 "bitbucket-pipelines.yml", ".travis.yml", "appveyor.yml",
             }:
-                ci_jobs = re.findall(
-                    r"(?m)^[ \t]*-\s*job:\s*([A-Za-z0-9_.-]+)\s*$", content
-                )
-                ci_jobs.extend(re.findall(
-                    r"(?m)^([A-Za-z0-9_.-]+):\s*$", content
-                ))
+                if name in {".gitlab-ci.yml", "azure-pipelines.yml", "azure-pipelines.yaml"}:
+                    ci_jobs = _workflow_jobs(content, "gitlab" if name == ".gitlab-ci.yml" else "azure")
+                else:
+                    ci_jobs = re.findall(
+                        r"(?m)^[ \t]*-\s*job:\s*([A-Za-z0-9_.-]+)\s*$", content
+                    )
+                    ci_jobs.extend(re.findall(
+                        r"(?m)^([A-Za-z0-9_.-]+):\s*$", content
+                    ))
                 targets = [
                     f"job: {job}" for job in dict.fromkeys(ci_jobs)
                     if job not in {
@@ -239,19 +259,13 @@ class BuildManifestAnalyzer(Analyzer):
                     and element.text and element.text.strip()
                 )
                 targets = [
-                    _local_name(element.tag) for element in root.iter()
-                    if _local_name(element.tag) in {"plugin", "execution"}
+                    f"plugin: {artifact.text.strip()}"
+                    for element in root.iter() if _local_name(element.tag) == "plugin"
+                    for artifact in element if _local_name(artifact.tag) == "artifactId"
+                    and artifact.text and artifact.text.strip()
                 ]
             elif name in {"dockerfile", "containerfile"}:
                 targets = [f"instruction: {kind.upper()}" for kind in _DOCKER_INSTRUCTION.findall(content)]
-            elif record.path.startswith(".github/workflows/") or name == ".gitlab-ci.yml":
-                targets = [
-                    f"job: {job}" for job in re.findall(
-                        r"(?m)^([A-Za-z0-9_.-]+):\s*$", content
-                    )
-                    if job not in {"name", "on", "permissions", "env", "defaults"}
-                ]
-                metadata.append("CI workflow manifest")
             elif record.extension in {".gradle", ".sbt"} or name.startswith("build.gradle"):
                 task_patterns = (
                     r"""(?m)\btasks?\s*\.\s*(?:register|create|named)\s*(?:<[^>]+>\s*)?\(\s*['"]([^'"]+)['"]""",
