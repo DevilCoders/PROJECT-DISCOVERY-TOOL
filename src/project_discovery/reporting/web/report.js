@@ -75,7 +75,18 @@ const budgets=metrics.analysis_budgets||{};
   (metrics.execution||{}).analysis_mode==="inventory-only"?"No analyzer ran (inventory only)":
   (budgets.timeout_seconds?budgets.timeout_seconds+" s":"no time limit")+" and "+
   (budgets.memory_mb?number(budgets.memory_mb)+" MiB":"no memory limit")+" per analyzer and file • "+
-  (stopped?number(stopped)+" call(s) stopped by a budget":"no call stopped");}
+  (stopped?number(stopped)+" call(s) stopped by a budget":"no call stopped");
+ const mib={};for(const [name,entry] of Object.entries(budgets.analyzers||{}))if(entry.bytes_read)mib[name]=Math.round(entry.bytes_read/10485.76)/100;
+ fillBars("analyzer-bytes",mib);
+ const reached=Object.entries(budgets.limits_reached||{});
+ $("analyzer-limits").textContent=reached.length?number(reached.reduce(function(sum,item){return sum+item[1];},0))+
+  " content limit(s) reached: "+reached.map(function(item){return item[0]+" "+number(item[1]);}).join(", "):"No content limit reached";
+ const declared=$("analyzer-declared");declared.replaceChildren();
+ for(const [name,limits] of Object.entries(budgets.analyzer_limits||{})){
+  const row=document.createElement("div");
+  row.textContent=name+": "+(limits?limits.reads+(limits.file_bytes?", "+number(Math.round(limits.file_bytes/1048.576)/1000)+" MiB per file":"")+
+   Object.entries(limits.caps||{}).map(function(item){return ", "+item[0]+" "+number(item[1]);}).join(""):"not declared");
+  declared.append(row);}}
 $("host-os").textContent=JSON.stringify({
  host:metrics.host_os||{},
  native_backend:metrics.native_backend||{backend:"not reported"}

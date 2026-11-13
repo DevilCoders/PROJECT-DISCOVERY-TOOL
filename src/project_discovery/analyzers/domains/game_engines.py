@@ -6,6 +6,7 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...core.safe_parsers import safe_xml_fromstring
 from ...core.source_utils import describe_error, read_bytes_bounded, read_text_bounded
 from ...models import FileRecord, Finding
@@ -46,10 +47,20 @@ _RENPY_MARKERS = (
 )
 
 
+_MAX_GAME_FILE_BYTES = 16 * 1024 * 1024
+_MAX_ROBLOX_XML_BYTES = 64 * 1024 * 1024
+
+
 class GameEngineIntelligenceAnalyzer(Analyzer):
     """Recognize major game engines and extract safe, static project evidence."""
 
     name = "game-engine-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_ROBLOX_XML_BYTES,
+        "whole",
+        {"project_file_bytes": _MAX_GAME_FILE_BYTES},
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("game_engines", "graphics_shaders", "assets")
     languages = (
         "Unity", "Unreal Engine", "Godot", "GameMaker", "Defold",
@@ -155,7 +166,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
     def _read_text(self, path: Path, record: FileRecord):
         try:
             return read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_GAME_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             ), None
         except (OSError, UnicodeDecodeError) as exc:
@@ -211,7 +222,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
     def _json_project(self, path: Path, record: FileRecord, forced_engine: str | None = None) -> list[Finding]:
         try:
             data = json.loads(read_text_bounded(
-                    path, 16 * 1024 * 1024,
+                    path, _MAX_GAME_FILE_BYTES,
                     expected_identity=record.analysis_identity,
                 ))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -315,7 +326,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
     def _roblox_xml(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             root = safe_xml_fromstring(read_bytes_bounded(
-                path, 64 * 1024 * 1024, expected_identity=record.analysis_identity,
+                path, _MAX_ROBLOX_XML_BYTES, expected_identity=record.analysis_identity,
             ))
         except (OSError, ValueError, ET.ParseError) as exc:
             return [Finding(
@@ -337,7 +348,7 @@ class GameEngineIntelligenceAnalyzer(Analyzer):
     def _web_game_manifest(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             data = json.loads(read_text_bounded(
-                    path, 16 * 1024 * 1024,
+                    path, _MAX_GAME_FILE_BYTES,
                     expected_identity=record.analysis_identity,
                 ))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):

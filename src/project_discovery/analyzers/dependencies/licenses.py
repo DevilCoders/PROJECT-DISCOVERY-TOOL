@@ -7,6 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from ...core.limits import AnalyzerLimits
 from ...core.source_utils import describe_error, open_verified_binary, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -54,7 +55,7 @@ def _table(data: Any, *keys: str) -> dict:
 def _manifest_license(path: Path, record: FileRecord) -> list[str]:
     name = Path(record.path).name.lower()
     content = read_text_bounded(
-        path, 8 * 1024 * 1024, expected_identity=record.analysis_identity,
+        path, _MAX_LICENSE_MANIFEST_BYTES, expected_identity=record.analysis_identity,
     )
     if name in {"package.json", "composer.json"}:
         data: Any = json.loads(content)
@@ -79,10 +80,19 @@ def _manifest_license(path: Path, record: FileRecord) -> list[str]:
     return []
 
 
+_MAX_LICENSE_MANIFEST_BYTES = 8 * 1024 * 1024
+
+
 class LicenseAnalyzer(Analyzer):
     """Inventory SPDX headers and package-level license declarations."""
 
     name = "license-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_LICENSE_MANIFEST_BYTES,
+        "prefix",
+        {"header_window_bytes": _HEADER_WINDOW_BYTES},
+        outcome="Source and license files are checked within the header window; an unparsable manifest is an UNKNOWN finding",
+    )
     domains = ("licenses",)
 
     def supports(self, record: FileRecord) -> bool:

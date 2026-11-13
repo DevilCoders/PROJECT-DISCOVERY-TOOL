@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
@@ -101,6 +102,11 @@ class DependencyManifestAnalyzer(Analyzer):
     """Extract explicitly declared dependencies from common project manifests."""
 
     name = "dependency-manifests"
+    limits = AnalyzerLimits(
+        _MAX_DEPENDENCY_MANIFEST_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth, read or parse failure",
+    )
     domains = ("dependency_manifests",)
     _supported_names = {
         "pyproject.toml", "cargo.toml", "go.mod", "package.json", "composer.json",
@@ -122,7 +128,7 @@ class DependencyManifestAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_DEPENDENCY_MANIFEST_BYTES:
+        if over_limit(record.size_bytes, _MAX_DEPENDENCY_MANIFEST_BYTES):
             return [Finding(
                 "configuration",
                 f"Dependency manifest resource limit: {record.path}",

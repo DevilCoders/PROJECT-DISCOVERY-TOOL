@@ -26,6 +26,7 @@ import struct
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, open_verified_binary, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...inventory.signatures import family_of
@@ -147,6 +148,12 @@ def _kind(record: FileRecord) -> str | None:
 
 class FirmwareAnalyzer(Analyzer):
     name = "firmware"
+    limits = AnalyzerLimits(
+        MAX_TEXT_IMAGE_BYTES,
+        "sampled",
+        {"header_sample_bytes": MAX_HEADER_BYTES, "table_bytes": MAX_TABLE_BYTES, "string_scan_bytes": MAX_STRING_SCAN_BYTES, "uf2_blocks": MAX_UF2_BLOCKS},
+        outcome="Partial header results; an over-budget build file is skipped and the limit recorded",
+    )
     version = "1.0.0"
     description = ("Firmware images and binaries (ELF, HEX, S-record, UF2, DTB/FIT, uImage, Android boot, ESP32, "
                    "filesystems) and firmware build systems (Yocto, Buildroot, OpenWrt, ESP-IDF partitions).")
@@ -160,7 +167,7 @@ class FirmwareAnalyzer(Analyzer):
         try:
             if kind == "binary":
                 return self._binary(path, record)
-            if record.size_bytes > MAX_TABLE_BYTES:
+            if over_limit(record.size_bytes, MAX_TABLE_BYTES):
                 return []
             text = read_text_bounded(path, MAX_TABLE_BYTES, errors="replace",
                                      expected_identity=record.analysis_identity)

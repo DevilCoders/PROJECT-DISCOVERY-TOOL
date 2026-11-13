@@ -8,6 +8,7 @@ from importlib.resources import files as resource_files
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...catalog.languages import is_source_path, is_textual_path, known_extensions
 from ...core.source_utils import describe_error, open_verified_binary
 from ...models import FileRecord, Finding
@@ -240,6 +241,12 @@ class NetworkIndicatorAnalyzer(Analyzer):
     """Extract static network indicators; never probes or connects to discovered hosts."""
 
     name = "network-indicators"
+    limits = AnalyzerLimits(
+        _MAX_NETWORK_FILE_BYTES,
+        "stream",
+        {"line_bytes": _MAX_NETWORK_LINE_BYTES, "indicators": _MAX_NETWORK_INDICATORS, "evidence_lines": _MAX_NETWORK_EVIDENCE},
+        outcome="UNKNOWN or partial finding at the byte, line or indicator limit",
+    )
     domains = ("networking",)
     languages = ("Polyglot text/source/configuration",)
 
@@ -251,7 +258,7 @@ class NetworkIndicatorAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_NETWORK_FILE_BYTES:
+        if over_limit(record.size_bytes, _MAX_NETWORK_FILE_BYTES):
             return [Finding(
                 "network",
                 f"Network indicator resource limit: {record.path}",
@@ -586,6 +593,10 @@ class NetworkIndicatorAnalyzer(Analyzer):
                 severity="LOW",
             ))
         if budget_reason:
+            if "indicator" in budget_reason:
+                limit_reached("indicators", _MAX_NETWORK_INDICATORS, unique_indicator_count)
+            else:
+                limit_reached("bytes", _MAX_NETWORK_FILE_BYTES, record.size_bytes)
             findings.append(Finding(
                 "network",
                 f"Network indicator scan budget reached: {record.path}",

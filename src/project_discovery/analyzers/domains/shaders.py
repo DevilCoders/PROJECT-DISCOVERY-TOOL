@@ -21,6 +21,7 @@ import struct
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, open_verified_binary, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
@@ -123,6 +124,12 @@ def _shader_kind(record: FileRecord) -> str | None:
 
 class ShaderAnalyzer(Analyzer):
     name = "shaders"
+    limits = AnalyzerLimits(
+        MAX_SHADER_BYTES,
+        "whole",
+        {"spirv_words": MAX_SPIRV_WORDS},
+        outcome="Skipped; the limit reached is recorded in the budget metrics",
+    )
     version = "1.0.0"
     description = ("Shader stages, entry points and resource bindings (GLSL, HLSL, WGSL, Metal, Godot, ShaderLab) and "
                    "compiled shaders (SPIR-V, DXBC/DXIL, metallib).")
@@ -137,7 +144,7 @@ class ShaderAnalyzer(Analyzer):
         try:
             if kind == "binary":
                 return self._binary(path, record)
-            if record.size_bytes > MAX_SHADER_BYTES:
+            if over_limit(record.size_bytes, MAX_SHADER_BYTES):
                 return []
             text = read_text_bounded(path, MAX_SHADER_BYTES, errors="replace", expected_identity=record.analysis_identity)
         except (OSError, SourceBudgetExceeded, struct.error):

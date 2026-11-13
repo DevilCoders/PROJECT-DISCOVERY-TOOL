@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
 from ...models import FileRecord, Finding
 from ...vulnerabilities.database import VulnerabilityDatabase
@@ -321,6 +322,12 @@ class LocalVulnerabilityAnalyzer(Analyzer):
     """Match locked package coordinates against an operator-imported local OSV database."""
 
     name = LOCAL_ANALYZER_NAME
+    limits = AnalyzerLimits(
+        _MAX_LOCKFILE_BYTES,
+        "whole",
+        {"package_entries": _MAX_LOCKFILE_PACKAGE_ENTRIES},
+        outcome="UNKNOWN finding at the byte or entry limit",
+    )
     domains = ("vulnerabilities", "dependency_resolution", "supply_chain")
     languages = tuple(sorted(set(LOCKFILE_ECOSYSTEMS.values())))
 
@@ -335,7 +342,7 @@ class LocalVulnerabilityAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_LOCKFILE_BYTES:
+        if over_limit(record.size_bytes, _MAX_LOCKFILE_BYTES):
             return [Finding(
                 "vulnerabilities",
                 f"Dependency lockfile exceeds vulnerability parser budget: {record.path}",

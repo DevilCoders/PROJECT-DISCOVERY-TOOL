@@ -9,6 +9,7 @@ import importlib
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -290,6 +291,12 @@ class TreeSitterAnalyzer(Analyzer):
     """Provide generic syntax-tree metrics for any locally provisioned grammar."""
 
     name = "tree-sitter-polyglot"
+    limits = AnalyzerLimits(
+        _MAX_TREE_SITTER_FILE_BYTES,
+        "whole",
+        {"error_locations": _MAX_ERROR_LOCATIONS},
+        outcome="UNKNOWN finding on oversize, growth, read or parser failure",
+    )
     domains = ("source_structure", "symbol_index", "imports")
     languages = tuple(GRAMMARS)
 
@@ -301,7 +308,7 @@ class TreeSitterAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_TREE_SITTER_FILE_BYTES:
+        if over_limit(record.size_bytes, _MAX_TREE_SITTER_FILE_BYTES):
             return [Finding(
                 "code",
                 f"Tree-sitter resource limit: {record.path}",

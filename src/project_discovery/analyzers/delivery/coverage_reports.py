@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.safe_parsers import safe_xml_fromstring
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
@@ -215,6 +216,11 @@ class CoverageArtifactAnalyzer(Analyzer):
     """Read LCOV, Cobertura, JaCoCo, Clover, OpenCover, Go and Istanbul artifacts."""
 
     name = "coverage-artifacts"
+    limits = AnalyzerLimits(
+        _MAX_COVERAGE_ARTIFACT_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth, read or parse failure",
+    )
     domains = ("coverage",)
     languages = ("Python", "JavaScript", "TypeScript", "Go", "Java", "C#", "C/C++")
 
@@ -225,7 +231,7 @@ class CoverageArtifactAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_COVERAGE_ARTIFACT_BYTES:
+        if over_limit(record.size_bytes, _MAX_COVERAGE_ARTIFACT_BYTES):
             return [Finding(
                 "coverage", f"Coverage artifact resource limit: {record.path}",
                 f"File size {record.size_bytes:,} bytes exceeds the coverage parser's "

@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from ..core.limits import AnalyzerLimits
 from ..models import FileRecord, Finding
 
 
@@ -23,6 +24,10 @@ class Analyzer(ABC):
     domains: tuple[str, ...] = ()
     languages: tuple[str, ...] = ()
     concurrent_safe = True
+    # The per-file content limits the analyzer applies: the most of a file it reads, how it
+    # reads, and its other caps (core.limits.AnalyzerLimits). Reports list them with what
+    # each call read and the limits it reached; every built-in analyzer declares them.
+    limits: AnalyzerLimits | None = None
 
     @abstractmethod
     def supports(self, record: FileRecord) -> bool:

@@ -22,10 +22,13 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from ..core.limits import accounting
 from ..core.source_utils import (
     identity_matches,
     open_verified_binary,
     prefetched_content,
+    PythonSourceTooLarge,
+    SourceBudgetExceeded,
     redact_source_excerpt,
     stat_identity,
 )
@@ -65,10 +68,12 @@ class FileOutcome:
     # Process workers: (GPU dispatches, CPU fallbacks) during this batch, carried by its
     # last outcome. The native counters are per process, so the coordinator sums them.
     gpu_counts: tuple[int, int] | None = None
-    # (analyzer, seconds, sampled peak memory growth in MiB or None) per analyzer call, and
-    # (analyzer, kind, limit, used) per call an analysis budget stopped.
-    budget_usage: list[tuple[str, float, float | None]] = field(default_factory=list)
+    # (analyzer, seconds, sampled peak memory growth in MiB or None, bytes read) per analyzer
+    # call; (analyzer, kind, limit, used) per call a time or memory budget stopped; and
+    # (analyzer, kind, limit, used) per content limit a completed call reached.
+    budget_usage: list[tuple[str, float, float | None, int]] = field(default_factory=list)
     budget_stops: list[tuple[str, str, float, float]] = field(default_factory=list)
+    limit_hits: list[tuple[str, str, float, float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -114,6 +119,7 @@ def _rollback_facts(sizes: tuple[int, int, int] | None) -> None:
 def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: FileOutcome) -> None:
     policy = budgets.current_policy()
     for analyzer in analyzers:
+        account = None
         try:
             lock = locks.get(id(analyzer))
             with lock if lock is not None else nullcontext():
@@ -122,14 +128,16 @@ def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: Fi
                     budget = None if isinstance(analyzer, _isolated_analyzer_type()) else policy.for_analyzer(analyzer)
                     facts = current_facts()
                     sizes = (len(facts.symbols), len(facts.calls), len(facts.facts)) if facts is not None else None
-                    run = budgets.run_with_budget(budget, partial(analyzer.analyze, path, record))
-                    outcome.budget_usage.append((analyzer.name, run.seconds, run.peak_mb))
+                    with accounting() as account:
+                        run = budgets.run_with_budget(budget, partial(analyzer.analyze, path, record))
+                    outcome.budget_usage.append((analyzer.name, run.seconds, run.peak_mb, account.bytes_read))
                     if run.stop is not None:
                         _rollback_facts(sizes)
                         outcome.budget_stops.append((analyzer.name, run.stop.kind, run.stop.limit, run.stop.used))
                         outcome.findings.append(_budget_stop_finding(analyzer, record, run.stop))
                         continue
                     produced = run.result
+                    outcome.limit_hits.extend((analyzer.name, *limit) for limit in account.limits)
                     if getattr(analyzer, "_pdt_in_process_plugin", False):
                         # The isolated modes' validation, redaction and bounds; the plugin
                         # cannot choose the analyzer name either (PDT-317).
@@ -146,12 +154,18 @@ def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: Fi
             # counted when it carried a stop; never let it escape and fail the whole batch.
             continue
         except Exception as exc:
+            if account is not None:
+                # A bounded read past its budget raises inside the analyzer: keep its record.
+                outcome.limit_hits.extend((analyzer.name, *limit) for limit in account.limits)
             message = redact_source_excerpt(f"{type(exc).__name__}: {exc}")
             outcome.errors.append(f"{record.path} [{analyzer.name}]: {message}")
+            # A content budget the analyzer did not handle is a limit, not a failure.
+            limited = isinstance(exc, (SourceBudgetExceeded, PythonSourceTooLarge))
+            what = "content limit reached" if limited else "failed"
             # Keep coverage gaps visible in the findings, not only in diagnostics.
             outcome.findings.append(Finding(
                 "analysis_coverage",
-                f"Analyzer failed: {analyzer.name}: {record.path}",
+                f"Analyzer {what}: {analyzer.name}: {record.path}",
                 f"{message}. This analyzer did not complete for the file; absence of "
                 "its findings is not evidence of absence.",
                 confidence="UNKNOWN",

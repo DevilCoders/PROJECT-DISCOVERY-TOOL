@@ -24,6 +24,7 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.secret_patterns import ANY_TOKEN
 from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
@@ -246,6 +247,12 @@ def _js_string(raw: str) -> str:
 
 class IntegrationAnalyzer(Analyzer):
     name = "integration-points"
+    limits = AnalyzerLimits(
+        MAX_MANIFEST_BYTES,
+        "whole",
+        {"facts": MAX_FACTS},
+        outcome="Over-budget manifests are skipped and the limit recorded; facts past the cap are not recorded",
+    )
     version = "1.0.0"
     description = ("Outbound HTTP calls, message topics, gRPC services and package identity for integration maps "
                    "across projects.")
@@ -261,7 +268,7 @@ class IntegrationAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         name = PurePosixPath(record.path.replace("\\", "/")).name.lower()
         if name in _MANIFESTS or name.endswith((".csproj", ".gemspec")) or record.language == "Protocol Buffers":
-            if record.size_bytes > MAX_MANIFEST_BYTES:
+            if over_limit(record.size_bytes, MAX_MANIFEST_BYTES):
                 return []
             try:
                 text = read_text_bounded(path, MAX_MANIFEST_BYTES, errors="replace",

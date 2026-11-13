@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from ...core.limits import AnalyzerLimits
 from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -157,17 +158,25 @@ def _read_text(
 ) -> tuple[str | None, str | None]:
     try:
         return read_text_bounded(
-            path, 2 * 1024 * 1024, encoding="utf-8", errors="replace",
+            path, _MAX_VCS_FILE_BYTES, encoding="utf-8", errors="replace",
             expected_identity=expected_identity,
         ), None
     except OSError as exc:
         return None, describe_error(exc)
 
 
+_MAX_VCS_FILE_BYTES = 2 * 1024 * 1024
+
+
 class VCSHostingAnalyzer(Analyzer):
     """Discover local VCS metadata and hosting/CI providers without invoking clients."""
 
     name = "vcs-hosting-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_VCS_FILE_BYTES,
+        "whole",
+        outcome="An unreadable or over-budget file contributes no signals; the limit reached is recorded",
+    )
     domains = ("vcs", "hosting_providers", "ci_cd", "cloud_services")
     languages = tuple(dict.fromkeys([*_VCS_ROOTS.values(), *_MARKER_FILES.values()])) + (
         "Perforce", "Git LFS", "Git Submodules",

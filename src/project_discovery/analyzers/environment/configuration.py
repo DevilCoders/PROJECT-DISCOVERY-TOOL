@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
 from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt, text_encoding
 from ...models import CodeEvidence, FileRecord, Finding
@@ -313,6 +314,12 @@ class ConfigurationAnalyzer(Analyzer):
     """Inventory configuration keys without exposing their values."""
 
     name = "configuration-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_CONFIG_FILE_BYTES,
+        "whole",
+        {"keys": _MAX_CONFIG_KEYS, "risk_lines": _MAX_CONFIG_RISK_LINES},
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("configuration",)
 
     def supports(self, record: FileRecord) -> bool:
@@ -324,7 +331,7 @@ class ConfigurationAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_CONFIG_FILE_BYTES:
+        if over_limit(record.size_bytes, _MAX_CONFIG_FILE_BYTES):
             return [Finding(
                 "configuration",
                 f"Configuration analysis resource limit: {record.path}",

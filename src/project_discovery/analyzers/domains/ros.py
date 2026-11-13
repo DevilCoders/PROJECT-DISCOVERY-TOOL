@@ -6,6 +6,7 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...core.safe_parsers import safe_xml_fromstring
 from ...core.source_utils import describe_error, parse_python, read_bytes_bounded, read_text_bounded
 from ...models import FileRecord, Finding
@@ -42,10 +43,20 @@ def _literal_string(node: ast.AST) -> str | None:
     return value if isinstance(value, str) else None
 
 
+_MAX_ROS_FILE_BYTES = 16 * 1024 * 1024
+_MAX_ROS_INTERFACE_BYTES = 4 * 1024 * 1024
+
+
 class ROSIntelligenceAnalyzer(Analyzer):
     """Inspect ROS manifests, Python/C++ APIs, launch files and interfaces offline."""
 
     name = "ros-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_ROS_FILE_BYTES,
+        "whole",
+        {"interface_bytes": _MAX_ROS_INTERFACE_BYTES},
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("robotics_ros",)
     languages = ("Python", "C++", "XML", "ROS interfaces")
 
@@ -80,7 +91,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
             )]
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_ROS_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:
@@ -218,7 +229,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
     def _package(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             root = safe_xml_fromstring(read_bytes_bounded(
-                path, 16 * 1024 * 1024, expected_identity=record.analysis_identity,
+                path, _MAX_ROS_FILE_BYTES, expected_identity=record.analysis_identity,
             ))
         except (OSError, ValueError, ET.ParseError) as exc:
             return [Finding(
@@ -257,7 +268,7 @@ class ROSIntelligenceAnalyzer(Analyzer):
     def _interface(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             lines = read_text_bounded(
-                path, 4 * 1024 * 1024,
+                path, _MAX_ROS_INTERFACE_BYTES,
                 expected_identity=record.analysis_identity,
             ).splitlines()
         except (OSError, UnicodeDecodeError) as exc:

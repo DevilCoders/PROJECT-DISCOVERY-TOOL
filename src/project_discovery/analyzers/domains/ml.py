@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...core.source_utils import describe_error, parse_python, read_python_source_bounded, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -99,7 +100,7 @@ def _notebook_source(path: Path, expected_identity=None) -> tuple[str, list[tupl
     IPython magics (%, %%), shell escapes (!) and help requests (?) are blanked: they are
     not Python, and a blank line keeps the remaining line numbers aligned.
     """
-    notebook = json.loads(read_text_bounded(path, 16 * 1024 * 1024, expected_identity=expected_identity))
+    notebook = json.loads(read_text_bounded(path, _MAX_ML_FILE_BYTES, expected_identity=expected_identity))
     cells = notebook.get("cells") if isinstance(notebook, dict) else None
     lines: list[str] = []
     positions: list[tuple[int, int]] = []
@@ -125,7 +126,7 @@ def _python_evidence(
         if notebook:
             source, positions = _notebook_source(path, expected_identity)
         else:
-            source = read_python_source_bounded(path, 16 * 1024 * 1024, expected_identity=expected_identity)
+            source = read_python_source_bounded(path, _MAX_ML_FILE_BYTES, expected_identity=expected_identity)
         tree = parse_python(source, filename=relative)
     except (OSError, ValueError, SyntaxError, LookupError, RecursionError, MemoryError) as exc:
         return [Finding(
@@ -252,10 +253,18 @@ def _python_evidence(
     return findings
 
 
+_MAX_ML_FILE_BYTES = 16 * 1024 * 1024
+
+
 class AIMLIntelligenceAnalyzer(Analyzer):
     """Discover ML frameworks and artifact inventories without loading model data."""
 
     name = "ai-ml-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_ML_FILE_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("machine_learning", "datasets", "model_artifacts", "gpu_compute")
     languages = ("Python", "JSON", "Jupyter Notebook")
 
@@ -304,7 +313,7 @@ class AIMLIntelligenceAnalyzer(Analyzer):
         if name in _MODEL_METADATA_NAMES or record.extension == ".json":
             try:
                 data = json.loads(read_text_bounded(
-                    path, 16 * 1024 * 1024,
+                    path, _MAX_ML_FILE_BYTES,
                     expected_identity=record.analysis_identity,
                 ))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:

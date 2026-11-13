@@ -12,6 +12,8 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
+from ...intelligence.model import MAX_MODEL_BYTES
 from ...intelligence import facts as code_facts
 from ...intelligence.model import FUNCTION_KINDS, FileModel, model_for, supports_language
 from ...intelligence.model.lexical import LEXICAL_LANGUAGES
@@ -351,6 +353,11 @@ _MESSAGES = {
 
 class PerformanceHotspotAnalyzer(Analyzer):
     name = "performance-hotspots"
+    limits = AnalyzerLimits(
+        MAX_MODEL_BYTES,
+        "model",
+        outcome="Files past the code model budget are not modelled; code-index reports them",
+    )
     version = "1.0.0"
     description = "N+1 queries and requests in loops, nested loops, complexity hotspots and profiling artifacts."
     domains = ("performance",)

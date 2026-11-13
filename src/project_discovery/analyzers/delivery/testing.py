@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...catalog.languages import is_source_path, source_extensions, source_language_names
 from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
@@ -121,10 +122,18 @@ def is_test_path(path: str) -> bool:
     )
 
 
+_MAX_TEST_FILE_BYTES = 16 * 1024 * 1024
+
+
 class TestDiscoveryAnalyzer(Analyzer):
     """Find test files and recognizable test declarations across language ecosystems."""
 
     name = "test-discovery"
+    limits = AnalyzerLimits(
+        _MAX_TEST_FILE_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("tests",)
     languages = source_language_names() + ("Bats",)
 
@@ -147,7 +156,7 @@ class TestDiscoveryAnalyzer(Analyzer):
             )]
         try:
             content = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_TEST_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

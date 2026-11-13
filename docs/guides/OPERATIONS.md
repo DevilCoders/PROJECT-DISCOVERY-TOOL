@@ -320,6 +320,15 @@ the files they came from. The terminal summary has an `Analyzer budgets` row, th
 report an `Analyzer Budgets` section with the ten slowest analyzers, and the HTML report an
 `Analyzer time` card.
 
+Each analyzer also applies fixed per-file content limits (the most of a file it reads, and caps on
+lines, entries or findings), declared in its `limits` attribute and listed in
+[ANALYZER_RESOURCE_BUDGETS.md](../architecture/ANALYZER_RESOURCE_BUDGETS.md).
+`metrics.analysis_budgets` also reports them (`analyzer_limits`), the bytes each analyzer read
+(`bytes_read`, and the largest read with its file), and every content limit a call reached
+(`limits_reached` by kind and up to 100 `limited` entries with the analyzer, file, limit and
+value). A file past an analyzer's byte budget gets that analyzer's `UNKNOWN` finding or, for the
+few analyzers that skip such files, only the limit record.
+
 Limits of the mechanism:
 
 - A single long call into C code (one regular-expression search over an already bounded

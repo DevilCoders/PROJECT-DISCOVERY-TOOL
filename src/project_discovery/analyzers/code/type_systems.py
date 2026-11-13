@@ -15,6 +15,7 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...intelligence.model import FUNCTION_KINDS, model_for, supports_language
@@ -238,6 +239,11 @@ def _config_name(record: FileRecord) -> str | None:
 
 class TypeSystemAnalyzer(Analyzer):
     name = "type-systems"
+    limits = AnalyzerLimits(
+        _MAX_CONFIG_BYTES,
+        "whole",
+        outcome="Skipped; the limit reached is recorded in the budget metrics",
+    )
     version = "1.0.0"
     description = "Type annotation coverage, type escape hatches and type-checker strictness."
     domains = ("type_systems",)
@@ -285,7 +291,7 @@ class TypeSystemAnalyzer(Analyzer):
         return findings
 
     def _config(self, path: Path, record: FileRecord, name: str) -> list[Finding]:
-        if record.size_bytes > _MAX_CONFIG_BYTES:
+        if over_limit(record.size_bytes, _MAX_CONFIG_BYTES):
             return []
         try:
             text = read_text_bounded(path, _MAX_CONFIG_BYTES, errors="replace",

@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from ...core.limits import AnalyzerLimits
 from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
 from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
@@ -137,10 +138,18 @@ def _locale_stem(stem: str) -> bool:
     return stem.replace("_", "-").split("-", 1)[0].lower() in _LANGUAGE_CODES
 
 
+_MAX_LOCALIZATION_BYTES = 16 * 1024 * 1024
+
+
 class LocalizationAnalyzer(Analyzer):
     """Inventory translation catalogs without disclosing translated values."""
 
     name = "localization-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_LOCALIZATION_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("localization",)
     languages = (
         "Gettext PO", "ARB", "XLIFF", "Apple Strings", "Fluent", "RESX",
@@ -170,7 +179,7 @@ class LocalizationAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_LOCALIZATION_BYTES,
                 expected_identity=record.analysis_identity,
             )
             extension = path.suffix.lower()

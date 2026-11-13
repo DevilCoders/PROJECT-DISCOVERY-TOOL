@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...catalog.languages import is_source_path, source_language_names
 from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
@@ -55,10 +56,18 @@ _CONFIG_MARKERS = re.compile(
 )
 
 
+_MAX_OBSERVABILITY_BYTES = 16 * 1024 * 1024
+
+
 class ObservabilityAnalyzer(Analyzer):
     """Discover logging, metrics, tracing and health-check instrumentation."""
 
     name = "observability-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_OBSERVABILITY_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("logging", "observability")
     languages = source_language_names()
 
@@ -72,7 +81,7 @@ class ObservabilityAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_OBSERVABILITY_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

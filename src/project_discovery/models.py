@@ -25,7 +25,10 @@ from typing import Any, Literal, Sequence
 # to directory records (false inside a --development-trees directory-only tree) and
 # metrics.development_trees. 1.15 added metrics.analysis_budgets: the per-analyzer time and
 # memory budgets, the per-domain overrides, what each analyzer used and the calls a budget stopped.
-REPORT_SCHEMA_VERSION = "1.15"
+# 1.16 added to metrics.analysis_budgets the content limits each analyzer declares
+# (analyzer_limits), the bytes each analyzer read and the content limits its calls reached
+# (limits_reached, limited).
+REPORT_SCHEMA_VERSION = "1.16"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

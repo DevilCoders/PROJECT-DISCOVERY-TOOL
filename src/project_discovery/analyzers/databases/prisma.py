@@ -5,6 +5,7 @@ import bisect
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -34,10 +35,18 @@ _FIELD = re.compile(r"(?m)^[ \t]++([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-
 _PROVIDER = re.compile(r'(?m)^[ \t]*provider\s*=\s*"([^"]+)"')
 
 
+_MAX_PRISMA_BYTES = 16 * 1024 * 1024
+
+
 class PrismaSchemaAnalyzer(Analyzer):
     """Extract Prisma models, enums, datasource providers and model relations."""
 
     name = "prisma-schema"
+    limits = AnalyzerLimits(
+        _MAX_PRISMA_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("orm", "databases_sql",)
     languages = ("Prisma",)
 
@@ -47,7 +56,7 @@ class PrismaSchemaAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             content = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_PRISMA_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

@@ -247,6 +247,26 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   change after inventory or while they are analyzed, and FIFOs in the tree or swapped in for a
   file.
 - Report schema 1.15: `metrics.analysis_budgets`.
+- Every built-in analyzer declares its per-file content limits in a `limits` attribute
+  (`core/limits.py`): the most of a file it reads, how it reads (whole, stream, prefix, sampled,
+  code model), its other caps and what a file past a limit gets. The declarations reference the
+  constants the analyzers apply, and the limit table in `ANALYZER_RESOURCE_BUDGETS.md` is
+  generated from them (`python tools/analyzer_limits.py --write`).
+- The engine records the bytes each analyzer call reads through the verified readers and every
+  content limit it reaches (bytes, characters, lines, entries, findings, indicators, pages, wall
+  time): bounded reads past their budget and size checks record themselves, and the secret,
+  network, platform, data-exposure, API, archive, document and lockfile analyzers record their
+  caps. `metrics.analysis_budgets` adds `analyzer_limits`, `limits_reached`, `limited` and, per
+  analyzer, `bytes_read`, `max_bytes_read`, `max_bytes_path` and `limits_reached`; the Markdown
+  "Analyzer Budgets" section (with a table of the declared limits) and an HTML "Analyzer reads"
+  card show them, and the terminal summary counts the limits reached. The type-system, embedded, frontend, HDL, shader,
+  firmware and integration-point analyzers skip a file past their byte budget without a
+  finding; those skips are now counted as limits reached.
+- A content budget an analyzer lets escape (a bounded read that raises, a Python module past the
+  syntax-tree budget) is reported as `Analyzer content limit reached: NAME: PATH`, no longer as
+  `Analyzer failed`.
+- Report schema 1.16: `analyzer_limits`, `limits_reached`, `limited` and the per-analyzer byte
+  counts in `metrics.analysis_budgets`.
 
 ### Fixed: found during the filesystem inventory work
 - A budget stop that reached an analyzer call just as it returned was cleared with

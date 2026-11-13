@@ -5,6 +5,7 @@ import ast
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...catalog.languages import source_extensions, source_language_names
 from ...core.source_utils import describe_error, parse_python, read_text_bounded
 from ...models import FileRecord, Finding
@@ -167,10 +168,18 @@ def _python_imports(source: str, relative: str) -> tuple[dict[str, set[int]], di
     return imports, operations
 
 
+_MAX_NOSQL_BYTES = 16 * 1024 * 1024
+
+
 class NoSQLIntelligenceAnalyzer(Analyzer):
     """Identify non-relational database clients and statically visible operations."""
 
     name = "nosql-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_NOSQL_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("databases_nosql", "messaging")
     languages = source_language_names()
 
@@ -180,7 +189,7 @@ class NoSQLIntelligenceAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_NOSQL_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

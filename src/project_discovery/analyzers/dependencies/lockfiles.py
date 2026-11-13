@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
@@ -29,6 +30,12 @@ class LockfileAnalyzer(Analyzer):
     """Extract pinned/resolved package versions from common lockfile formats."""
 
     name = "dependency-lockfiles"
+    limits = AnalyzerLimits(
+        _MAX_LOCKFILE_INVENTORY_BYTES,
+        "whole",
+        {"package_entries": _MAX_LOCKFILE_PACKAGE_ENTRIES},
+        outcome="UNKNOWN finding at the byte or entry limit",
+    )
     domains = ("dependency_resolution", "supply_chain")
     languages = tuple(sorted(set(LOCKFILE_ECOSYSTEMS.values())))
 
@@ -40,7 +47,7 @@ class LockfileAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_LOCKFILE_INVENTORY_BYTES:
+        if over_limit(record.size_bytes, _MAX_LOCKFILE_INVENTORY_BYTES):
             return [Finding(
                 "dependency",
                 f"Lockfile inventory resource limit: {record.path}",

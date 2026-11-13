@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...intelligence import facts as code_facts
 from ...intelligence.model import MAX_MODEL_BYTES, model_for, supports_language
 from ...intelligence.model.lexical import LEXICAL_LANGUAGES
@@ -30,6 +31,11 @@ def _lexical_target(caller: str, callee: str, receiver: str) -> str:
 
 class CodeIndexAnalyzer(Analyzer):
     name = "code-index"
+    limits = AnalyzerLimits(
+        MAX_MODEL_BYTES,
+        "model",
+        outcome="UNKNOWN finding for a file past the code model budget",
+    )
     version = "1.0.0"
     description = "Symbols, call sites, references and imports for the cross-file code index."
     domains = ("symbol_index", "call_graph", "imports")
@@ -42,7 +48,7 @@ class CodeIndexAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > MAX_MODEL_BYTES:
+        if over_limit(record.size_bytes, MAX_MODEL_BYTES):
             return [Finding(
                 "symbol_index",
                 f"Code index budget exceeded: {record.path}",

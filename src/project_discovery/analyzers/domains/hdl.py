@@ -19,6 +19,7 @@ import re
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
@@ -411,6 +412,12 @@ def _hdl_kind(record: FileRecord) -> str | None:
 
 class HardwareDescriptionAnalyzer(Analyzer):
     name = "hdl"
+    limits = AnalyzerLimits(
+        MAX_HDL_BYTES,
+        "whole",
+        {"design_units": MAX_UNITS},
+        outcome="Skipped; the limit reached is recorded in the budget metrics",
+    )
     version = "1.0.0"
     description = ("Verilog/SystemVerilog/VHDL design units, ports, instances, clocks and RTL lint; FPGA constraints "
                    "and project targets.")
@@ -421,7 +428,7 @@ class HardwareDescriptionAnalyzer(Analyzer):
         return record.error is None and record.content_skipped_reason is None and _hdl_kind(record) is not None
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > MAX_HDL_BYTES:
+        if over_limit(record.size_bytes, MAX_HDL_BYTES):
             return []
         try:
             text = read_text_bounded(path, MAX_HDL_BYTES, errors="replace", expected_identity=record.analysis_identity)

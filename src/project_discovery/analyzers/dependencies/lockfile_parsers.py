@@ -11,6 +11,7 @@ import re
 import tomllib
 from dataclasses import dataclass
 from typing import Any
+from ...core.limits import limit_reached
 
 MAX_LOCKFILE_BYTES = 128 * 1024 * 1024
 MAX_LOCKFILE_PACKAGE_ENTRIES = 250_000
@@ -117,6 +118,7 @@ class _Collector:
         if not package.name or not package.version or package in self.packages:
             return
         if len(self.packages) >= self.max_entries:
+            limit_reached("entries", self.max_entries, len(self.packages) + 1)
             raise LockfileEntryBudgetExceeded(
                 f"lockfile exceeded the {self.max_entries:,}-package entry budget"
             )

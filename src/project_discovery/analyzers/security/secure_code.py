@@ -11,6 +11,7 @@ import re
 import tokenize
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...catalog.languages import is_source_path, source_language_names
 from ...core.source_utils import describe_error, open_verified_binary, parse_python, redact_source_excerpt
 from ...models import CodeEvidence, FileRecord, Finding
@@ -743,6 +744,12 @@ class SecureCodePatternAnalyzer(Analyzer):
     """Find high-signal unsafe API patterns across common source languages."""
 
     name = "secure-code-patterns"
+    limits = AnalyzerLimits(
+        _MAX_SECURE_CODE_FILE_BYTES,
+        "whole",
+        {"rule_locations": _MAX_RULE_LOCATIONS, "excerpts_per_finding": _MAX_CODE_EXCERPTS_PER_FINDING},
+        outcome="UNKNOWN finding on oversize, growth, read or AST resource failure",
+    )
     domains = ("secure_code", "cryptography", "serialization")
     languages = source_language_names()
 
@@ -750,7 +757,7 @@ class SecureCodePatternAnalyzer(Analyzer):
         return record.error is None and is_source_path(record.path)
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_SECURE_CODE_FILE_BYTES:
+        if over_limit(record.size_bytes, _MAX_SECURE_CODE_FILE_BYTES):
             return [Finding(
                 "security",
                 f"Secure-code analysis resource limit: {record.path}",

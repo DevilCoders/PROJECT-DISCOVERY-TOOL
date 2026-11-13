@@ -5,6 +5,8 @@ from pathlib import Path
 
 MAX_AST_FILE_BYTES = 4 * 1024 * 1024  # the syntax-tree budget
 MAX_SYMBOL_EVIDENCE = 200
+from ...core.limits import AnalyzerLimits, over_limit
+from ...core.source_utils import MAX_PYTHON_SYNTAX_TREE_LINES
 from ...core.source_utils import SourceBudgetExceeded, parse_python, read_python_source_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -12,6 +14,12 @@ from ..base import Analyzer
 
 class PythonAnalyzer(Analyzer):
     name = "python-ast"
+    limits = AnalyzerLimits(
+        MAX_AST_FILE_BYTES,
+        "whole",
+        {"syntax_tree_lines": MAX_PYTHON_SYNTAX_TREE_LINES, "symbol_evidence": MAX_SYMBOL_EVIDENCE},
+        outcome="UNKNOWN finding on oversize or parse failure",
+    )
     domains = ("source_structure", "symbol_index", "imports",)
     languages = ("Python",)
     def supports(self, record: FileRecord) -> bool:
@@ -21,7 +29,7 @@ class PythonAnalyzer(Analyzer):
             and record.content_skipped_reason is None
         )
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > MAX_AST_FILE_BYTES:
+        if over_limit(record.size_bytes, MAX_AST_FILE_BYTES):
             return [Finding(
                 "code",
                 f"Python AST resource limit: {record.path}",

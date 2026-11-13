@@ -16,6 +16,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
+from ...intelligence.model import MAX_MODEL_BYTES
 from ...intelligence import facts as code_facts
 from ...intelligence.model import AMBIGUOUS_M, FileModel, model_for
 from ...intelligence.model.lexical import LEXICAL_LANGUAGES
@@ -159,6 +161,12 @@ def _followed(target: str) -> bool:
 
 class DataFlowAnalyzer(Analyzer):
     name = "dataflow"
+    limits = AnalyzerLimits(
+        MAX_MODEL_BYTES,
+        "model",
+        {"exported_facts": MAX_EXPORTED_FACTS, "outgoing_facts": MAX_OUTGOING_FACTS},
+        outcome='A "Data-flow analysis truncated" UNKNOWN finding when a cap cuts the analysis',
+    )
     version = "1.0.0"
     description = ("Taint tracking from untrusted input (web requests and sockets; stdin, argv and the environment "
                    "in C/C++) to SQL, command, code, deserialization, template, path, SSRF, XSS and redirect sinks.")

@@ -5,6 +5,7 @@ import ast
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...catalog.languages import source_extensions, source_language_names
 from ...core.source_utils import (
     describe_error,
@@ -128,6 +129,12 @@ class APIEndpointAnalyzer(Analyzer):
     """Discover route declarations without starting web servers or resolving runtime routing."""
 
     name = "api-endpoints"
+    limits = AnalyzerLimits(
+        MAX_SOURCE_ENDPOINT_SCAN_BYTES,
+        "stream",
+        {"python_ast_bytes": MAX_PYTHON_ENDPOINT_AST_BYTES, "line_chars": MAX_ENDPOINT_LINE_CHARS, "facts": MAX_ENDPOINT_FACTS},
+        outcome="UNKNOWN or partial finding at the byte, Python AST or fact limit",
+    )
     domains = ("api_rest", "networking")
     languages = source_language_names()
 
@@ -140,7 +147,7 @@ class APIEndpointAnalyzer(Analyzer):
         jaxrs_paths: list[tuple[str, int]] = []
         truncated = False
         if record.extension in {".py", ".pyi"}:
-            if record.size_bytes > MAX_PYTHON_ENDPOINT_AST_BYTES:
+            if over_limit(record.size_bytes, MAX_PYTHON_ENDPOINT_AST_BYTES):
                 return [Finding(
                     "api",
                     f"Python endpoint AST resource limit: {record.path}",
@@ -243,7 +250,7 @@ class APIEndpointAnalyzer(Analyzer):
                 ],
                 analyzer=self.name,
             ))
-        if len(unique) > MAX_ENDPOINT_FACTS:
+        if over_limit(len(unique), MAX_ENDPOINT_FACTS, "entries"):
             findings.append(Finding(
                 "api",
                 f"API endpoint facts truncated: {record.path}",
@@ -255,6 +262,7 @@ class APIEndpointAnalyzer(Analyzer):
                 severity="LOW",
             ))
         if truncated:
+            limit_reached("bytes", MAX_SOURCE_ENDPOINT_SCAN_BYTES, record.size_bytes)
             findings.append(Finding(
                 "api",
                 f"API endpoint scan budget reached: {record.path}",

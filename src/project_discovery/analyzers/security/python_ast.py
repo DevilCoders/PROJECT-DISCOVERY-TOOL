@@ -49,6 +49,8 @@ _IMPACTS = {
 }
 
 
+from ...core.limits import AnalyzerLimits, over_limit
+from ...core.source_utils import MAX_PYTHON_SYNTAX_TREE_LINES
 from ...core.source_utils import (
     describe_error,
     SourceBudgetExceeded,
@@ -88,6 +90,12 @@ class PythonSecurityAnalyzer(Analyzer):
     """
 
     name = "python-security"
+    limits = AnalyzerLimits(
+        MAX_AST_FILE_BYTES,
+        "whole",
+        {"syntax_tree_lines": MAX_PYTHON_SYNTAX_TREE_LINES},
+        outcome="UNKNOWN finding on oversize or parse failure",
+    )
     domains = ("secure_code", "application_security")
     languages = ("Python",)
 
@@ -99,7 +107,7 @@ class PythonSecurityAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > MAX_AST_FILE_BYTES:
+        if over_limit(record.size_bytes, MAX_AST_FILE_BYTES):
             return [Finding(
                 "security",
                 f"Python security AST resource limit: {record.path}",

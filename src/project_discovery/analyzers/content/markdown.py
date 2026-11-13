@@ -2,6 +2,7 @@
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -24,12 +25,17 @@ def _heading_title(raw: str) -> str:
 
 class MarkdownAnalyzer(Analyzer):
     name = "markdown"
+    limits = AnalyzerLimits(
+        _MAX_MARKDOWN_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("documentation",)
     languages = ("Markdown",)
     def supports(self, record: FileRecord) -> bool:
         return record.extension == ".md" and record.error is None
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_MARKDOWN_BYTES:
+        if over_limit(record.size_bytes, _MAX_MARKDOWN_BYTES):
             return [Finding(
                 "documentation", f"Markdown resource limit: {record.path}",
                 f"File size {record.size_bytes:,} bytes exceeds the Markdown analyzer's "

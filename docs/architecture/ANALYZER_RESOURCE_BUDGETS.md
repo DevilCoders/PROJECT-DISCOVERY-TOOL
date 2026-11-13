@@ -1,6 +1,6 @@
 # Analyzer resource budgets
 
-These are per-analyzer safety limits, not a global scan-size policy. Every analyzer call on a file has a time and a memory budget, configurable per scan and per analyzer domain; the byte, line and entry limits in the table below are fixed implementation defaults.
+These are per-analyzer safety limits, not a global scan-size policy. Every analyzer call on a file has a time and a memory budget, configurable per scan and per analyzer domain; the byte, line and entry limits each analyzer declares are fixed in code.
 
 ## Time and memory budgets
 
@@ -15,48 +15,94 @@ A watchdog thread samples the running calls every 50 ms (`engine/budgets.py`). A
 
 A single long C call (one regular-expression search, a blocking read) finishes before the stop takes effect, and a memory spike between two samples is not seen. With the thread executor the analyzers share one process, so memory growth includes concurrent calls.
 
-## Current bounded work
+## Per-analyzer content limits
 
-| Analyzer / subsystem | Current limit | Input strategy | Limit outcome |
+Each built-in analyzer declares the limits it applies to one file in its `limits` attribute (`core/limits.py`): the most of a file it reads, how it reads, its other caps and what a file past a limit gets. The declaration references the constants the analyzer applies, and the table below is generated from it. During a scan the engine records, for every analyzer call, the bytes it read through the verified readers and each limit it reached: a bounded read past its budget, a size check, or a cap the analyzer reports. `metrics.analysis_budgets` lists them per analyzer with the declarations (`analyzer_limits`), and the terminal, Markdown and HTML reports show them.
+
+<!-- BEGIN GENERATED LIMITS: python tools/analyzer_limits.py --write -->
+
+| Analyzer | Reads | Per-file budget | Other limits | At the limit |
+|---|---|---:|---|---|
+| `accessibility-markup` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `ai-ml-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `api-contracts` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth, read or parse failure |
+| `api-endpoints` | stream | 32 MiB | python_ast_bytes 4 MiB; line_chars 262,144; facts 500 | UNKNOWN or partial finding at the byte, Python AST or fact limit |
+| `api-type-classifier` | stream | 32 MiB | line_bytes 256 KiB; evidence_per_style 20 | UNKNOWN or partial finding at the byte limit |
+| `archive-intelligence` | sampled | — | entries 200,000; index_bytes 64 MiB; member_sample_bytes 1 MiB; archive_sample_bytes 32 MiB; wall_seconds 8; tar_decompressed_bytes 4 GiB | UNKNOWN or partial finding at an index, entry, sample, decompression or wall-time limit |
+| `build-manifests` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth, read or parse failure |
+| `code-index` | model | 4 MiB | — | UNKNOWN finding for a file past the code model budget |
+| `concurrency` | model | 4 MiB | — | Files past the code model budget are not modelled; code-index reports them |
+| `configuration-intelligence` | whole | 16 MiB | keys 100,000; risk_lines 100 | UNKNOWN finding on oversize, growth or read failure |
+| `coverage-artifacts` | whole | 64 MiB | — | UNKNOWN finding on oversize, growth, read or parse failure |
+| `data-exposure-indicators` | stream | 64 MiB | line_bytes 256 KiB; evidence_lines 100; code_excerpts 20 | UNKNOWN or partial finding at the byte limit |
+| `dataflow` | model | 4 MiB | exported_facts 500; outgoing_facts 500 | A "Data-flow analysis truncated" UNKNOWN finding when a cap cuts the analysis |
+| `dependency-lockfiles` | whole | 128 MiB | package_entries 250,000 | UNKNOWN finding at the byte or entry limit |
+| `dependency-manifests` | whole | 32 MiB | — | UNKNOWN finding on oversize, growth, read or parse failure |
+| `deployment-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `document-formats` | whole | 32 MiB | binary_document_bytes 16 MiB; pdf_pages 5,000; extracted_chars 16,777,216; docx_entries 10,000; docx_uncompressed_bytes 32 MiB | UNKNOWN finding at an input, page, text, entry or uncompressed-byte limit |
+| `embedded` | whole | 4 MiB | — | Skipped; the limit reached is recorded in the budget metrics |
+| `firmware` | sampled | 64 MiB | header_sample_bytes 1 MiB; table_bytes 4 MiB; string_scan_bytes 8 MiB; uf2_blocks 65,536 | Partial header results; an over-budget build file is skipped and the limit recorded |
+| `frontend` | whole | 2 MiB | — | Skipped; the limit reached is recorded in the budget metrics |
+| `game-engine-intelligence` | whole | 64 MiB | project_file_bytes 16 MiB | UNKNOWN finding on oversize, growth or read failure |
+| `hdl` | whole | 8 MiB | design_units 2,000 | Skipped; the limit reached is recorded in the budget metrics |
+| `identity-intelligence` | whole | 16 MiB | evidence_lines 100 | UNKNOWN finding on oversize, growth, read or AST resource failure |
+| `integration-points` | whole | 2 MiB | facts 400 | Over-budget manifests are skipped and the limit recorded; facts past the cap are not recorded |
+| `license-intelligence` | prefix | 8 MiB | header_window_bytes 64 KiB | Source and license files are checked within the header window; an unparsable manifest is an UNKNOWN finding |
+| `local-vulnerability-intelligence` | whole | 128 MiB | package_entries 250,000 | UNKNOWN finding at the byte or entry limit |
+| `localization-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `markdown` | whole | 32 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `messaging-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `migration-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `mobile-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `network-indicators` | stream | 64 MiB | line_bytes 256 KiB; indicators 25,000; evidence_lines 100 | UNKNOWN or partial finding at the byte, line or indicator limit |
+| `nosql-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `observability-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `operating-system-intelligence` | stream | — | chars 67,108,864; line_chars 262,144; evidence_lines 20 | UNKNOWN finding when the character budget is reached |
+| `performance-hotspots` | model | 4 MiB | — | Files past the code model budget are not modelled; code-index reports them |
+| `prisma-schema` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `python-ast` | whole | 4 MiB | syntax_tree_lines 100,000; symbol_evidence 200 | UNKNOWN finding on oversize or parse failure |
+| `resource-management` | model | 4 MiB | — | Files past the code model budget are not modelled; code-index reports them |
+| `ros-intelligence` | whole | 16 MiB | interface_bytes 4 MiB | UNKNOWN finding on oversize, growth or read failure |
+| `secret-patterns` | stream | 64 MiB | chunk_bytes 8 MiB; overlap_chars 4,096; findings 10,000 | UNKNOWN or partial finding at the byte or finding limit |
+| `secure-code-patterns` | whole | 16 MiB | rule_locations 100; excerpts_per_finding 20 | UNKNOWN finding on oversize, growth, read or AST resource failure |
+| `shaders` | whole | 4 MiB | spirv_words 2,000,000 | Skipped; the limit reached is recorded in the budget metrics |
+| `sql-schema` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `test-discovery` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
+| `tree-sitter-polyglot` | whole | 16 MiB | error_locations 10,000 | UNKNOWN finding on oversize, growth, read or parser failure |
+| `type-systems` | whole | 2 MiB | — | Skipped; the limit reached is recorded in the budget metrics |
+| `vcs-hosting-intelligence` | whole | 2 MiB | — | An unreadable or over-budget file contributes no signals; the limit reached is recorded |
+
+Read modes:
+
+- `whole`: Reads the whole file within its budget; a larger file is not analyzed.
+- `stream`: Streams the file up to its budget; the rest is not analyzed.
+- `prefix`: Reads a fixed prefix by design.
+- `sampled`: Reads bounded samples, tables and members, never the whole file.
+- `model`: Uses the shared code model (one bounded read per file and worker).
+- `none`: Reads no file content.
+
+<!-- END GENERATED LIMITS -->
+
+How the analyzers read:
+
+- Reads go through a verified descriptor (no symlinks, identity checked against the inventory) and take at most the budget plus one byte, so a file that grew during the read is detected.
+- Python sources are decoded by their PEP 263 declaration. Every Python syntax tree shares one budget, because a tree costs 100-200 times its source in memory.
+- `secret-patterns` scans binary chunks with an overlap, so a secret split across two chunks is found.
+- `archive-intelligence` checks the ZIP end-of-central-directory records before `ZipFile.infolist()` materializes the index, samples members in memory without extracting them, and checks its wall-time and TAR decompression limits cooperatively, between operations and inside its reads.
+- `document-formats` checks DOCX package metadata and compression before python-docx opens it.
+- `firmware` reads headers and tables through a verified binary stream with seeks, never the whole file.
+- Lockfiles are parsed from one bounded buffer; the entry cap limits the retained packages, not the parser's object graph.
+
+## Shared subsystems
+
+| Subsystem | Limit | Input strategy | Limit outcome |
 |---|---:|---|---|
-| Configuration intelligence | 16 MiB per file | Reads at most limit + 1 bytes; parses one decoded buffer and reuses its source lines | UNKNOWN on indexed oversize or file growth |
-| Cross-language secure-code patterns | 16 MiB per file | Reads at most limit + 1 bytes; PEP 263 decoding for Python | UNKNOWN on oversize/growth/decode/AST resource failure |
-| Identity intelligence | 16 MiB per file; 100 retained source locations per category | Reads at most limit + 1 bytes; PEP 263 decoding for Python; bounded location aggregation and line iteration | UNKNOWN on oversize/growth/decode/AST resource failure |
-| Data-exposure / PII indicators | 64 MiB per file; 256 KiB per line; 100 evidence line references; 20 code excerpts | Binary line streaming; redacted excerpts; bounded evidence retention | UNKNOWN/partial when byte budget is reached |
-| Secret-pattern analysis | 64 MiB per file; 8 MiB chunks; 4 KiB overlap; at most 10,000 findings | Binary chunk streaming with cross-chunk overlap | UNKNOWN/partial on byte or finding limits |
-| Python AST inventory/security | 4 MiB and 100,000 lines per file (a syntax tree costs 100-200 times its source; every Python parse shares this budget) | PEP 263-aware source reads with AST parsing | UNKNOWN on indexed oversize or parse failure |
 | Python import graph | 4 MiB and 100,000 lines per module | AST extraction over inventoried source | UNKNOWN for skipped or over-budget modules |
-| Python API endpoint extraction | 4 MiB and 100,000 lines per Python file | PEP 263-aware limit + 1 byte read and AST parsing | UNKNOWN on oversize/growth/parser resource failure |
-| Non-Python API endpoint scanning | 32 MiB per file; 256 KiB per line | Bounded line streaming | UNKNOWN/partial when scan byte limit is reached |
-| API-style classification | 32 MiB per file; 256 KiB per line; 20 evidence lines per style | Bounded byte/line streaming with bounded per-category samples | UNKNOWN/partial on byte or indicator cap |
-| Network indicators | 64 MiB per file; 256 KiB per line; 25,000 retained unique indicators; 100 evidence lines | Bounded line streaming; values reduced to hosts, addresses and ports | UNKNOWN/partial when a byte, line or indicator limit is reached |
-| Operating-system indicators | 64 Mi characters per file; 256 Ki characters per line; 20 evidence lines per platform | Bounded line streaming; per-platform counts | UNKNOWN when the file budget is reached |
-| SQL, migration, Prisma, NoSQL, messaging, observability, test and deployment analyzers | 16 MiB per file | Bounded read; line numbers from one newline index | UNKNOWN on oversize or read failure |
-| API contract parsing | 16 MiB per file | Bounded one-buffer read for OpenAPI, AsyncAPI, OpenRPC, WSDL, RAML, GraphQL, Protobuf and Thrift | UNKNOWN on oversize/growth/parse failure |
-| Tree-sitter syntax parsing | 16 MiB per file | Bounded source read before parser invocation | UNKNOWN on oversize/growth/parser failure |
-| Build manifest analysis | 16 MiB per file | Bounded one-buffer read for build/CI manifests | UNKNOWN on oversize/growth/parse failure |
-| Markdown structure analysis | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
-| Coverage artifact parsing | 64 MiB per file | Bounded UTF-8 read before JSON/XML/LCOV parsing | UNKNOWN on oversize/growth/parse failure |
-| Generic lockfile inventory | 128 MiB per lockfile; 250,000 retained package/version entries | Bounded one-buffer read; JSON/TOML objects parsed in memory; text formats iterated from bounded in-memory content | UNKNOWN on byte or entry-count limit |
-| Local vulnerability lockfiles | 128 MiB per lockfile; 250,000 retained package/version entries | Bounded one-buffer read; JSON/TOML objects parsed in memory; text formats iterated from bounded in-memory content | UNKNOWN on byte or entry-count limit |
-| License headers and declarations | First 64 KiB of each source or license file (lenient decoding); 8 MiB per package manifest | Bounded prefix read through a verified descriptor | Files are checked within the header window; an unparsable manifest is an UNKNOWN finding |
-| Text/HTML/RST documents | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
-| Markdown | 32 MiB per file | Bounded UTF-8 read | UNKNOWN on oversize/growth |
-| PDF/DOCX documents | 16 MiB compressed input; PDF 5,000 pages; extracted text 16 MiB; DOCX 10,000 entries and 32 MiB total declared uncompressed data | Bounded bytes; DOCX ZIP metadata/ratio checks before python-docx | UNKNOWN on input, page, text, package entry or uncompressed-byte budget stop |
-| ZIP archive index | 200,000 entries; 64 MiB declared central-directory bytes | EOCD/ZIP64 preflight before ZipFile.infolist() | UNKNOWN without index materialization when bounds are exceeded or unavailable |
-| ZIP/TAR member content | 1 MiB per member; 32 MiB per archive | In-memory member streams only; no extraction | UNKNOWN/partial when member/sample limit is reached |
-| ZIP/TAR archive inspection | 8 seconds per archive; compressed TAR output capped at 4 GiB | Cooperative checks during metadata iteration, member sampling and content-pattern matching; the TAR decompression reader enforces both limits inside reads | UNKNOWN/partial when the deadline or decompression budget is reached |
-| Shared code model | 4 MiB per file | Bounded read; Python syntax tree or linear-time structural lexer, built once per file and worker | UNKNOWN (code-index analyzer) when a file is too large to model |
+| Shared code model | 4 MiB per file | Bounded read; Python syntax tree or linear-time structural lexer, built once per file and worker | Each analyzer using the model records the limit; `code-index` reports the file as UNKNOWN |
 | Code facts | Per file: 5,000 symbols, 20,000 call sites, 10,000 references, 5,000 domain facts. Per table: 5M symbols, 10M calls, 20M references, 5M facts | Stored with the file's findings in bounded SQLite batches | "Code index truncated" UNKNOWN finding; index-based results incomplete |
 | Code index passes | 500,000 resolved call-graph edges for cycle detection; 5,000 items per integration list | Read-only connection and temporary tables | Edge limit recorded in `metrics.code_index`; per-pass errors become UNKNOWN findings |
 | Data flow (Python) | 50,000 statement visits per function and round; summaries iterate until unchanged (at most 64 rounds); 4 passes per loop; 6 source labels per value (parameter labels are always kept); 500 exported summaries and 500 tainted calls per file | Syntax-tree interpretation of relevant functions only | Interrupted functions, a cap that stops a changing iteration and facts beyond the caps: a "Data-flow analysis truncated" UNKNOWN finding |
 | Data flow (lexical languages) | 20,000 assignments and sinks per function region; 200,000 summary events per file; 3 helper rounds; 200 outgoing calls; 4,000 characters per right-hand side; 500 exported summaries and 500 tainted calls per file | Cleaned text of the code model | Any cut: a "Data-flow analysis truncated" UNKNOWN finding |
-| Type-checker and frontend configuration | 2 MiB per file | Bounded read | File skipped |
-| Embedded configuration | 4 MiB per file (platformio.ini, sdkconfig, .ioc, linker scripts, device trees, FreeRTOSConfig.h) | Bounded read | File skipped |
-| Firmware and binary headers | 1 MiB header sample; 4 MiB per ELF/PE table and per firmware build file; 64 MiB per Intel HEX or S-record image; 8 MiB scanned for component strings; 65,536 UF2 blocks | Verified binary stream with seeks, never a full read | Partial header results; unreadable formats report nothing |
-| HDL sources and constraints | 8 MiB per file; 2,000 design units per file | Bounded read with linear comment/string blanking | File skipped |
-| Shaders | 4 MiB per source file; SPIR-V up to 2,000,000 words | Bounded read or verified binary stream | File skipped |
-| Integration points | 2 MiB per manifest or `.proto`; 400 facts per source file | Bounded read; source through the code model | Later facts in the file are not recorded |
 
 ## Global oversized-file policy
 
@@ -66,7 +112,7 @@ An analyzer may apply its own specialized budget regardless of --skip. Such a re
 
 ## Important limitations
 
-- Most byte limits are fixed constants and are not yet configurable by CLI or a policy file; only the time and memory budgets are.
+- The declared byte, line and entry limits are fixed in code; only the time and memory budgets are configurable.
 - Lockfile text formats iterate lines from a bounded in-memory content buffer; JSON/TOML lockfiles are parsed as bounded in-memory objects. The 250,000 entry cap limits retained package results, not the initial JSON/TOML parser object graph.
 - Core Python AST inventory, Python security AST, import graph and Python endpoint readers now use race-safe limit + 1 byte reads. The other listed parser-based analyzers also use bounded reads; newly added analyzers must follow the same contract.
 - The archive wall-time limit is cooperative. It is checked between metadata/member operations and regex matches; it cannot preempt a blocked filesystem read or interrupt a single in-progress Python regular-expression call.
@@ -76,8 +122,8 @@ An analyzer may apply its own specialized budget regardless of --skip. Such a re
 
 ## Release requirements
 
-1. Move the byte budgets into the policy object that holds the time and memory budgets, with the same per-domain overrides.
-2. Record consumed bytes and partial-analysis state next to the configured budgets, time, memory and stops already in JSON, Markdown, HTML and terminal summaries.
+1. Make the declared byte budgets configurable per domain within safe ceilings: a parser that builds its whole input in memory (a syntax tree, a JSON document) cannot have its budget raised freely.
+2. Record a per-file analyzer status (completed, partial, budget-stopped, unsupported, error) in the inventory, next to the per-analyzer totals in the metrics.
 3. Add adversarial tests for file mutation inside a single analyzer read, long lines, deeply nested ASTs, malformed parser input, archive bombs and wall-time boundaries.
 4. Benchmark wall time, throughput and peak RSS over 2GB, 10GB, 50GB and 100GB+ corpora.
 5. Keep every budget-stopped outcome distinguishable from excluded, skipped, unsupported, parse-error and clean-complete states.

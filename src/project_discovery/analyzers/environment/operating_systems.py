@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, limit_reached
 from ...catalog.languages import is_textual_path
 from ...core.source_utils import describe_error, open_verified_text
 from ...models import FileRecord, Finding
@@ -29,6 +30,12 @@ class OperatingSystemAnalyzer(Analyzer):
     """Infer project target platforms from manifests and source markers."""
 
     name = "operating-system-intelligence"
+    limits = AnalyzerLimits(
+        None,
+        "stream",
+        {"chars": _MAX_OS_FILE_CHARS, "line_chars": _MAX_LINE_CHARS, "evidence_lines": _MAX_OS_EVIDENCE_LINES},
+        outcome="UNKNOWN finding when the character budget is reached",
+    )
     domains = ("operating_systems", "configuration", "embedded")
     languages = ("Polyglot source/configuration/build manifests",)
 
@@ -84,6 +91,7 @@ class OperatingSystemAnalyzer(Analyzer):
             )]
         findings = []
         if budget_reached:
+            limit_reached("chars", _MAX_OS_FILE_CHARS, characters)
             findings.append(Finding(
                 "platform", f"Platform analysis resource limit: {record.path}",
                 f"Analysis stopped after {_MAX_OS_FILE_CHARS:,} characters. This is not a clean result "

@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.parsers.expat import ExpatError  # plistlib raises it for malformed XML property lists
 
+from ...core.limits import AnalyzerLimits
 from ...core.safe_parsers import safe_xml_fromstring
 from ...core.source_utils import describe_error, open_verified_binary, read_bytes_bounded, read_text_bounded
 from ...models import FileRecord, Finding
@@ -24,10 +25,18 @@ _PRIVACY_KEYS = (
 _MOBILE_SOURCE_EXTENSIONS = {".swift", ".m", ".mm", ".kt", ".kts", ".dart"}
 
 
+_MAX_MOBILE_FILE_BYTES = 16 * 1024 * 1024
+
+
 class MobileIntelligenceAnalyzer(Analyzer):
     """Inspect Android/iOS/Flutter/React Native declarations without building apps."""
 
     name = "mobile-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_MOBILE_FILE_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("mobile", "privacy")
     languages = ("Android XML", "Gradle", "Swift", "Objective-C", "Kotlin", "Dart", "JSON", "Plist")
 
@@ -82,7 +91,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
     def _read_xml(self, path: Path, record: FileRecord):
         try:
             return safe_xml_fromstring(read_bytes_bounded(
-                path, 16 * 1024 * 1024, expected_identity=record.analysis_identity,
+                path, _MAX_MOBILE_FILE_BYTES, expected_identity=record.analysis_identity,
             )), None
         except (OSError, ValueError, ET.ParseError) as exc:
             return None, Finding(
@@ -237,7 +246,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
     def _json_manifest(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             data = json.loads(read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MOBILE_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             ))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -273,7 +282,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
     def _flutter_manifest(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MOBILE_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:
@@ -295,7 +304,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
     def _podfile(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MOBILE_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:
@@ -318,7 +327,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
     def _gradle(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MOBILE_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:
@@ -347,7 +356,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
     def _xcode_project(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MOBILE_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:
@@ -367,7 +376,7 @@ class MobileIntelligenceAnalyzer(Analyzer):
     def _mobile_source(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MOBILE_FILE_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

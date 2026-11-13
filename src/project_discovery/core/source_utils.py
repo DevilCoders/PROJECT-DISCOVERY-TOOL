@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
+from .limits import count_read, limit_reached
 from .secret_patterns import ANY_TOKEN, ASSIGNMENT_OPERATOR, CREDENTIAL_KEYWORDS
 
 FileIdentity =tuple[int | None, int | None, int | None, int | None, int | None]
@@ -334,6 +335,12 @@ def parse_python(source: str, filename: str = "<unknown>") -> ast.AST:
                 result = exc
         _parsed.entry = (source, result)
     if isinstance(result, BaseException):
+        if isinstance(result, PythonSourceTooLarge):
+            # Each analyzer that asked for the tree reached the limit, also from the memo.
+            if len(source) > MAX_PYTHON_SYNTAX_TREE_CHARS:
+                limit_reached("chars", MAX_PYTHON_SYNTAX_TREE_CHARS, len(source))
+            else:
+                limit_reached("lines", MAX_PYTHON_SYNTAX_TREE_LINES, source.count("\n") + 1)
         # Raise a fresh instance so repeated failures do not chain tracebacks.
         raise type(result)(*result.args)
     return result
@@ -341,6 +348,65 @@ def parse_python(source: str, filename: str = "<unknown>") -> ast.AST:
 
 def _prefetch_key(path: Path) -> str:
     return os.path.normcase(os.fspath(path))
+
+
+class _CountingRaw(io.RawIOBase):
+    """A raw stream that adds the bytes read through it to the running analyzer call."""
+
+    mode = "rb"
+
+    def __init__(self, raw) -> None:
+        super().__init__()
+        self._raw = raw
+
+    @property
+    def name(self):
+        return self._raw.name
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int | None:
+        count = self._raw.readinto(buffer)
+        if count:
+            count_read(count)
+        return count
+
+    def readall(self) -> bytes:
+        data = self._raw.read()  # FileIO reads the rest in one call, BytesIO returns it
+        count_read(len(data))
+        return data
+
+    def seekable(self) -> bool:
+        return self._raw.seekable()
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        return self._raw.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._raw.tell()
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def close(self) -> None:
+        if not self.closed:
+            try:
+                self._raw.close()
+            finally:
+                super().close()
+
+
+def _stream_size(stream) -> int | None:
+    """The size of a verified stream's file or buffer, for a limit record."""
+    try:
+        return os.fstat(stream.fileno()).st_size
+    except (OSError, ValueError):  # io.UnsupportedOperation is both
+        pass
+    try:
+        return stream.seek(0, io.SEEK_END)
+    except (OSError, ValueError):
+        return None
 
 
 @contextmanager
@@ -377,8 +443,9 @@ def open_verified_binary(
         and entry[0] == _prefetch_key(path)
         and identity_matches(expected_identity, entry[1])
     ):
-        # BufferedReader keeps peek()/readline()/seek() semantics of a real file.
-        with io.BufferedReader(io.BytesIO(entry[2])) as stream:
+        # BufferedReader keeps peek()/readline()/seek() semantics of a real file; the
+        # counting raw stream accounts what the analyzer reads.
+        with io.BufferedReader(_CountingRaw(io.BytesIO(entry[2]))) as stream:
             yield stream
         return
     observed = path.lstat()
@@ -394,8 +461,9 @@ def open_verified_binary(
             raise OSError(f"file identity changed while opening: {path}")
         if not identity_matches(expected_identity, opened_identity):
             raise OSError(f"file identity changed since inventory: {path}")
-        stream = os.fdopen(descriptor, "rb")
+        raw = io.FileIO(descriptor, "r", closefd=True)
         descriptor = -1
+        stream = io.BufferedReader(_CountingRaw(raw))
         try:
             yield stream
         finally:
@@ -450,10 +518,11 @@ def read_python_source_bounded(
         raise ValueError("max_bytes must be positive")
     with open_verified_binary(path, expected_identity) as stream:
         raw_source = stream.read(max_bytes + 1)
-    if len(raw_source) > max_bytes:
-        raise SourceBudgetExceeded(
-            f"source grew beyond the {max_bytes:,}-byte parser budget while being read"
-        )
+        if len(raw_source) > max_bytes:
+            limit_reached("bytes", max_bytes, _stream_size(stream) or len(raw_source))
+            raise SourceBudgetExceeded(
+                f"source grew beyond the {max_bytes:,}-byte parser budget while being read"
+            )
     encoding, _ = tokenize.detect_encoding(io.BytesIO(raw_source).readline)
     return raw_source.decode(encoding)
 
@@ -469,10 +538,11 @@ def read_bytes_bounded(
         raise ValueError("max_bytes must be positive")
     with open_verified_binary(path, expected_identity) as stream:
         raw_content = stream.read(max_bytes + 1)
-    if len(raw_content) > max_bytes:
-        raise SourceBudgetExceeded(
-            f"content grew beyond the {max_bytes:,}-byte analyzer budget while being read"
-        )
+        if len(raw_content) > max_bytes:
+            limit_reached("bytes", max_bytes, _stream_size(stream) or len(raw_content))
+            raise SourceBudgetExceeded(
+                f"content grew beyond the {max_bytes:,}-byte analyzer budget while being read"
+            )
     return raw_content
 
 

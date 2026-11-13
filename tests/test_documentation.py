@@ -208,6 +208,17 @@ def test_capability_matrix_is_current():
     )
 
 
+def test_analyzer_limit_table_is_current():
+    spec = importlib.util.spec_from_file_location("pdt_analyzer_limits", ROOT / "tools" / "analyzer_limits.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    document = _text(tool.DOCUMENT)
+    assert document == tool.render(document), (
+        "the limit table in docs/architecture/ANALYZER_RESOURCE_BUDGETS.md is stale: "
+        "run python tools/analyzer_limits.py --write"
+    )
+
+
 def test_every_analyzer_language_is_a_catalog_name_or_a_declared_format():
     # The matrix lists analyzers by the catalog names they declare; a misspelt name would
     # silently drop an analyzer from its language's row.

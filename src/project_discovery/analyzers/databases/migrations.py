@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits
 from ...catalog.languages import source_extensions
 from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
@@ -191,10 +192,18 @@ def _migration_identifier(filename: str, content: str) -> str:
     return numeric.group(1) if numeric else stem
 
 
+_MAX_MIGRATION_BYTES = 16 * 1024 * 1024
+
+
 class MigrationIntelligenceAnalyzer(Analyzer):
     """Identify migration frameworks, operations, rollback markers and destructive changes."""
 
     name = "migration-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_MIGRATION_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("migrations",)
     languages = (
         "SQL", "Python", "Ruby", "JavaScript", "TypeScript", "C#", "PHP",
@@ -216,7 +225,7 @@ class MigrationIntelligenceAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             content = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MIGRATION_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

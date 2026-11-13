@@ -22,6 +22,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ...core.limits import over_limit
 from ...core.source_utils import SourceBudgetExceeded, read_python_source_bounded, read_text_bounded
 from ...models import FileRecord
 
@@ -163,6 +164,11 @@ def supports_language(language: str) -> bool:
 
 def model_for(path: Path, record: FileRecord) -> FileModel | None:
     """The file's model, built once per file and thread; None when not modelled."""
+    if (
+        not record.error and not record.content_skipped_reason and supports_language(record.language)
+        and over_limit(record.size_bytes, MAX_MODEL_BYTES)
+    ):
+        return None  # each analyzer asking for the model reached its limit (recorded per call)
     key = (record.path, record.size_bytes, record.mtime_ns)
     cached = getattr(_memo, "entry", None)
     if cached is not None and cached[0] == key:

@@ -8,6 +8,7 @@ import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_bytes_bounded, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -99,6 +100,12 @@ class DocumentAnalyzer(Analyzer):
     """Extract document structure and text metrics without asserting implementation."""
 
     name = "document-formats"
+    limits = AnalyzerLimits(
+        _MAX_TEXT_DOCUMENT_BYTES,
+        "whole",
+        {"binary_document_bytes": _MAX_BINARY_DOCUMENT_BYTES, "pdf_pages": _MAX_PDF_PAGES, "extracted_chars": _MAX_DOCUMENT_TEXT_CHARS, "docx_entries": _MAX_DOCX_ENTRIES, "docx_uncompressed_bytes": _MAX_DOCX_UNCOMPRESSED_BYTES},
+        outcome="UNKNOWN finding at an input, page, text, entry or uncompressed-byte limit",
+    )
     domains = ("documentation",)
     _extensions = {".html", ".htm", ".rst", ".txt", ".adoc", ".asciidoc", ".tex", ".pdf", ".docx"}
 
@@ -121,7 +128,7 @@ class DocumentAnalyzer(Analyzer):
                 severity="LOW",
             )]
 
-        if record.size_bytes > max_bytes:
+        if over_limit(record.size_bytes, max_bytes):
             return budget_finding(
                 f"File size {record.size_bytes:,} bytes exceeds the document analyzer's "
                 f"{max_bytes:,}-byte input budget."
@@ -170,7 +177,7 @@ class DocumentAnalyzer(Analyzer):
                 pypdf = importlib.import_module("pypdf")
                 reader = pypdf.PdfReader(io.BytesIO(raw_document), strict=False)
                 page_count = len(reader.pages)
-                if page_count > _MAX_PDF_PAGES:
+                if over_limit(page_count, _MAX_PDF_PAGES, "pages"):
                     return budget_finding(
                         f"PDF contains {page_count:,} pages; the configured page budget is "
                         f"{_MAX_PDF_PAGES:,}. No page text was extracted."
@@ -180,7 +187,7 @@ class DocumentAnalyzer(Analyzer):
                 for page in reader.pages:
                     value = page.extract_text() or ""
                     text_chars += len(value)
-                    if text_chars > _MAX_DOCUMENT_TEXT_CHARS:
+                    if over_limit(text_chars, _MAX_DOCUMENT_TEXT_CHARS, "chars"):
                         return budget_finding(
                             f"PDF extracted text exceeded {_MAX_DOCUMENT_TEXT_CHARS:,} characters. "
                             "Text extraction stopped and the document result is UNKNOWN."
@@ -201,13 +208,13 @@ class DocumentAnalyzer(Analyzer):
                 )
                 with zipfile.ZipFile(io.BytesIO(raw_document)) as package:
                     members = package.infolist()
-                    if len(members) > _MAX_DOCX_ENTRIES:
+                    if over_limit(len(members), _MAX_DOCX_ENTRIES, "entries"):
                         return budget_finding(
                             f"DOCX package contains {len(members):,} entries; "
                             f"entry budget is {_MAX_DOCX_ENTRIES:,}."
                         )
                     uncompressed_bytes = sum(item.file_size for item in members)
-                    if uncompressed_bytes > _MAX_DOCX_UNCOMPRESSED_BYTES:
+                    if over_limit(uncompressed_bytes, _MAX_DOCX_UNCOMPRESSED_BYTES):
                         return budget_finding(
                             f"DOCX package declares {uncompressed_bytes:,} uncompressed bytes; "
                             f"package budget is {_MAX_DOCX_UNCOMPRESSED_BYTES:,} bytes."
@@ -230,7 +237,7 @@ class DocumentAnalyzer(Analyzer):
                 for paragraph in document.paragraphs:
                     if paragraph.text:
                         text_chars += len(paragraph.text)
-                        if text_chars > _MAX_DOCUMENT_TEXT_CHARS:
+                        if over_limit(text_chars, _MAX_DOCUMENT_TEXT_CHARS, "chars"):
                             return budget_finding(
                                 f"DOCX extracted text exceeded {_MAX_DOCUMENT_TEXT_CHARS:,} "
                                 "characters; extraction stopped."
@@ -247,7 +254,7 @@ class DocumentAnalyzer(Analyzer):
                         for cell in row.cells:
                             if cell.text:
                                 text_chars += len(cell.text)
-                                if text_chars > _MAX_DOCUMENT_TEXT_CHARS:
+                                if over_limit(text_chars, _MAX_DOCUMENT_TEXT_CHARS, "chars"):
                                     return budget_finding(
                                         f"DOCX extracted text exceeded {_MAX_DOCUMENT_TEXT_CHARS:,} "
                                         "characters; extraction stopped."

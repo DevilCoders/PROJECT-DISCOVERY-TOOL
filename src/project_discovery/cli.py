@@ -269,14 +269,16 @@ class _BudgetUsage:
         self.analyzers: dict[str, dict] = {}
         self.stops: Counter = Counter()
         self.stopped: list[dict] = []
+        self.limit_kinds: Counter = Counter()
+        self.limited: list[dict] = []
 
     def add(self, path: str, outcome) -> None:
-        for name, seconds, peak_mb in getattr(outcome, "budget_usage", None) or ():
-            entry = self.analyzers.setdefault(name, {
-                "calls": 0, "seconds": 0.0, "max_seconds": 0.0, "max_seconds_path": None,
-                "max_memory_mb": None, "max_memory_path": None,
-            })
+        for name, seconds, peak_mb, bytes_read in getattr(outcome, "budget_usage", None) or ():
+            entry = self._entry(name)
             entry["calls"] += 1
+            entry["bytes_read"] += bytes_read
+            if bytes_read > entry["max_bytes_read"]:
+                entry["max_bytes_read"], entry["max_bytes_path"] = bytes_read, path
             entry["seconds"] += seconds
             if seconds > entry["max_seconds"]:
                 entry["max_seconds"], entry["max_seconds_path"] = seconds, path
@@ -287,6 +289,19 @@ class _BudgetUsage:
             if len(self.stopped) < self.MAX_STOPPED:
                 self.stopped.append({"analyzer": name, "path": path, "budget": kind,
                                      "limit": limit, "used": round(used, 3)})
+        for name, kind, limit, used in getattr(outcome, "limit_hits", None) or ():
+            self.limit_kinds[kind] += 1
+            self._entry(name)["limits_reached"] += 1
+            if len(self.limited) < self.MAX_STOPPED:
+                self.limited.append({"analyzer": name, "path": path, "limit": kind,
+                                     "value": _whole(limit), "used": _whole(used)})
+
+    def _entry(self, name: str) -> dict:
+        return self.analyzers.setdefault(name, {
+            "calls": 0, "seconds": 0.0, "max_seconds": 0.0, "max_seconds_path": None,
+            "max_memory_mb": None, "max_memory_path": None,
+            "bytes_read": 0, "max_bytes_read": 0, "max_bytes_path": None, "limits_reached": 0,
+        })
 
     def metrics(self) -> dict:
         analyzers = {
@@ -299,8 +314,24 @@ class _BudgetUsage:
         return {
             "stops": {"time": self.stops.get("time", 0), "memory": self.stops.get("memory", 0)},
             "stopped": self.stopped,
+            "limits_reached": dict(sorted(self.limit_kinds.items())),
+            "limited": self.limited,
             "analyzers": analyzers,
         }
+
+
+def _whole(value: float | None) -> float | int | None:
+    if value is None:
+        return None
+    return int(value) if float(value).is_integer() else round(value, 3)
+
+
+def _declared_limits(analyzers) -> dict[str, dict | None]:
+    """The content limits each loaded analyzer declares (None: it declares none)."""
+    return {
+        analyzer.name: limits.describe() if (limits := getattr(analyzer, "limits", None)) is not None else None
+        for analyzer in sorted(analyzers, key=lambda item: item.name)
+    }
 
 
 def _describe_inventory_options(options: dict) -> dict[str, str]:
@@ -1088,7 +1119,10 @@ def run_scan(
             "native_backend": _with_worker_gpu(native_capabilities(), worker_gpu),
             "native_extension_available": native_available(),
             # Per-analyzer time and memory budgets, what each analyzer used, and the stops.
-            "analysis_budgets": {**budget_policy.describe(), **budget_usage.metrics()},
+            "analysis_budgets": {
+                **budget_policy.describe(), **budget_usage.metrics(),
+                "analyzer_limits": _declared_limits(analyzers),
+            },
             "execution": {
                 "mode": f"bounded-{engine.mode}-pool",
                 "executor": engine.mode,

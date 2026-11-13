@@ -5,6 +5,7 @@ import ast
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...core.source_utils import describe_error, parse_python, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -106,10 +107,18 @@ def _python_scan(source: str, relative: str):
     return imports, operations
 
 
+_MAX_MESSAGING_BYTES = 16 * 1024 * 1024
+
+
 class MessagingIntelligenceAnalyzer(Analyzer):
     """Inventory broker clients and producer/consumer API references statically."""
 
     name = "messaging-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_MESSAGING_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("messaging", "networking")
     languages = (
         "Python", "JavaScript", "TypeScript", "Java", "Kotlin", "C#",
@@ -122,7 +131,7 @@ class MessagingIntelligenceAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MESSAGING_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

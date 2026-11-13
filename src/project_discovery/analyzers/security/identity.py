@@ -7,6 +7,7 @@ import re
 import tokenize
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import describe_error, open_verified_binary, parse_python
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -168,6 +169,12 @@ class IdentityIntelligenceAnalyzer(Analyzer):
     """Inventory auth frameworks and access-control markers without validating credentials."""
 
     name = "identity-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_IDENTITY_SOURCE_BYTES,
+        "whole",
+        {"evidence_lines": _MAX_IDENTITY_EVIDENCE_LINES},
+        outcome="UNKNOWN finding on oversize, growth, read or AST resource failure",
+    )
     domains = ("authentication", "authorization")
     languages = (
         "Python", "JavaScript", "TypeScript", "Java", "Kotlin", "C#",
@@ -178,7 +185,7 @@ class IdentityIntelligenceAnalyzer(Analyzer):
         return record.error is None and record.extension in _SOURCE_EXTENSIONS
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_IDENTITY_SOURCE_BYTES:
+        if over_limit(record.size_bytes, _MAX_IDENTITY_SOURCE_BYTES):
             return [Finding(
                 "identity", f"Identity analysis resource limit: {record.path}",
                 f"File size {record.size_bytes:,} bytes exceeds the identity analyzer's "

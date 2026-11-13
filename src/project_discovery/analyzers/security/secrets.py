@@ -5,6 +5,7 @@ import codecs
 import re
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits, limit_reached
 from ...catalog.languages import (
     detect_language,
     is_source_path,
@@ -231,6 +232,12 @@ class SecretPatternAnalyzer(Analyzer):
     """Detect likely embedded credentials; never persist matched values."""
 
     name = "secret-patterns"
+    limits = AnalyzerLimits(
+        _MAX_SCAN_BYTES,
+        "stream",
+        {"chunk_bytes": _CHUNK_BYTES, "overlap_chars": _OVERLAP_CHARS, "findings": _MAX_FINDINGS},
+        outcome="UNKNOWN or partial finding at the byte or finding limit",
+    )
     domains = ("secrets",)
     languages = textual_language_names()
 
@@ -375,6 +382,10 @@ class SecretPatternAnalyzer(Analyzer):
             )]
 
         if stop_reason or (record.size_bytes > bytes_scanned and bytes_scanned >= _MAX_SCAN_BYTES):
+            if stop_reason:
+                limit_reached("findings", _MAX_FINDINGS, len(findings))
+            else:
+                limit_reached("bytes", _MAX_SCAN_BYTES, record.size_bytes)
             reason = stop_reason or f"byte budget {_MAX_SCAN_BYTES:,} reached"
             findings.append(Finding(
                 "secrets",

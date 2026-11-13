@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ...core.limits import AnalyzerLimits
 from ...core.safe_parsers import safe_yaml_load_all
 from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
@@ -159,10 +160,18 @@ def _public_ingress(source: str):
     return None
 
 
+_MAX_DEPLOYMENT_BYTES = 16 * 1024 * 1024
+
+
 class DeploymentIntelligenceAnalyzer(Analyzer):
     """Inspect deployment manifests without executing commands or contacting services."""
 
     name = "deployment-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_DEPLOYMENT_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = (
         "ci_cd", "containers", "orchestration", "infrastructure_as_code",
         "supply_chain", "networking",
@@ -208,7 +217,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
     def _read_yaml(self, path: Path, record: FileRecord) -> tuple[list[Any] | None, Finding | None]:
         try:
             text = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_DEPLOYMENT_BYTES,
                 expected_identity=record.analysis_identity,
             )
             return _SafeDeploymentLoader.load_all(text), None
@@ -225,7 +234,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
     def _dockerfile(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             lines = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_DEPLOYMENT_BYTES,
                 expected_identity=record.analysis_identity,
             ).splitlines()
         except (OSError, UnicodeDecodeError) as exc:
@@ -296,7 +305,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
     def _terraform(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_DEPLOYMENT_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:
@@ -560,7 +569,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
     def _json_deployment(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             root = _mapping(json.loads(read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_DEPLOYMENT_BYTES,
                 expected_identity=record.analysis_identity,
             )))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -576,7 +585,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
     def _jenkins(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_DEPLOYMENT_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

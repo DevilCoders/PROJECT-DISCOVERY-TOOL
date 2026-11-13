@@ -112,7 +112,7 @@ The baseline is not production-ready:
 
 ### Per-analyzer resource governance
 
-- [ ] Centralize per-analyzer limits into a policy object and add configured/consumed byte, time and stop-reason telemetry for all report formats.
+- [x] Centralize per-analyzer limits into a policy object and add configured/consumed byte, time and stop-reason telemetry for all report formats: every built-in analyzer declares its content limits in one `AnalyzerLimits` object (`core/limits.py`) that references the constants it applies, and the engine reports them with the time and memory budget policy (`engine/budgets.py`). Each call's bytes read, time, sampled memory, budget stops and content limits reached are in `metrics.analysis_budgets` and the Markdown and HTML reports, and the terminal summary counts the stops and limits reached; the budget document's table is generated from the declarations. Byte budgets are declared, not configurable.
 
 
 ### Bounded thread-pool concurrency and C/OpenCL GPU execution (new release gate)

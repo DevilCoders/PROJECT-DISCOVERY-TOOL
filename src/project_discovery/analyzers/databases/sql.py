@@ -5,6 +5,7 @@ import bisect
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...core.source_utils import LineIndex, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from .migrations import down_regions, in_regions
@@ -75,10 +76,18 @@ def _clean_identifier(value: str) -> str:
     return re.sub(r'[`"\[\]]', "", value.strip())
 
 
+_MAX_SQL_BYTES = 16 * 1024 * 1024
+
+
 class SQLSchemaAnalyzer(Analyzer):
     """Inventory common SQL DDL objects and flag potentially destructive migrations."""
 
     name = "sql-schema"
+    limits = AnalyzerLimits(
+        _MAX_SQL_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("databases_sql", "migrations",)
     languages = ("SQL",)
 
@@ -88,7 +97,7 @@ class SQLSchemaAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             content = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_SQL_BYTES,
                 expected_identity=record.analysis_identity,
             )
         except (OSError, UnicodeDecodeError) as exc:

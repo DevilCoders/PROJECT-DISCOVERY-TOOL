@@ -19,6 +19,7 @@ import re
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...intelligence.model import FUNCTION_KINDS, model_for
@@ -187,6 +188,11 @@ def _kind(record: FileRecord) -> str | None:
 
 class EmbeddedAnalyzer(Analyzer):
     name = "embedded"
+    limits = AnalyzerLimits(
+        _MAX_CONFIG_BYTES,
+        "whole",
+        outcome="Skipped; the limit reached is recorded in the budget metrics",
+    )
     version = "1.0.0"
     description = ("Embedded targets (PlatformIO, ESP-IDF, Zephyr, STM32CubeMX, Rust), memory maps, device trees, "
                    "RTOS usage and interrupt-handler safety.")
@@ -200,7 +206,7 @@ class EmbeddedAnalyzer(Analyzer):
         kind = _kind(record)
         if kind == "source":
             return self._source(path, record)
-        if record.size_bytes > _MAX_CONFIG_BYTES:
+        if over_limit(record.size_bytes, _MAX_CONFIG_BYTES):
             return []
         try:
             text = read_text_bounded(path, _MAX_CONFIG_BYTES, errors="replace",

@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...catalog.languages import is_textual_path, source_extensions
 from ...core.source_utils import describe_error, open_verified_binary
 from ...models import FileRecord, Finding
@@ -38,6 +39,12 @@ class APITypeAnalyzer(Analyzer):
     """Classify common API styles without contacting any endpoint."""
 
     name = "api-type-classifier"
+    limits = AnalyzerLimits(
+        _MAX_API_TYPE_FILE_BYTES,
+        "stream",
+        {"line_bytes": _MAX_LINE_BYTES, "evidence_per_style": _MAX_API_TYPE_EVIDENCE_PER_STYLE},
+        outcome="UNKNOWN or partial finding at the byte limit",
+    )
     domains = ("api_rest", "api_graphql", "api_rpc", "api_event", "networking")
     languages = ("Polyglot source and API contract formats",)
 
@@ -59,7 +66,7 @@ class APITypeAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_API_TYPE_FILE_BYTES:
+        if over_limit(record.size_bytes, _MAX_API_TYPE_FILE_BYTES):
             return [Finding(
                 "api",
                 f"API type analysis resource limit: {record.path}",
@@ -125,6 +132,7 @@ class APITypeAnalyzer(Analyzer):
                 confidence="INFERRED", evidence=evidence, analyzer=self.name,
             ))
         if budget_reached:
+            limit_reached("bytes", _MAX_API_TYPE_FILE_BYTES, record.size_bytes)
             findings.append(Finding(
                 "api",
                 f"API type scan budget reached: {record.path}",

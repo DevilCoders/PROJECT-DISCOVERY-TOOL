@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
 from ...models import FileRecord, Finding
@@ -93,6 +94,11 @@ class APIContractAnalyzer(Analyzer):
     """Inventory API schemas and operations without making network requests."""
 
     name = "api-contracts"
+    limits = AnalyzerLimits(
+        _MAX_API_CONTRACT_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth, read or parse failure",
+    )
     domains = ("api_rest", "api_graphql", "api_rpc", "api_event", "api_soap", "api_collections")
 
     def supports(self, record: FileRecord) -> bool:
@@ -106,7 +112,7 @@ class APIContractAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_API_CONTRACT_BYTES:
+        if over_limit(record.size_bytes, _MAX_API_CONTRACT_BYTES):
             return [Finding(
                 "api", f"API contract resource limit: {record.path}",
                 f"File size {record.size_bytes:,} bytes exceeds the API contract parser's "

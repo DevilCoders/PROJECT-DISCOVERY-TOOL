@@ -14,6 +14,8 @@ import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
+from ...intelligence.model import MAX_MODEL_BYTES
 from ...intelligence import facts as code_facts
 from ...intelligence.model import FUNCTION_KINDS, FileModel, model_for, supports_language
 from ...intelligence.model.lexical import LEXICAL_LANGUAGES
@@ -358,6 +360,11 @@ _MESSAGES = {
 
 class ResourceManagementAnalyzer(Analyzer):
     name = "resource-management"
+    limits = AnalyzerLimits(
+        MAX_MODEL_BYTES,
+        "model",
+        outcome="Files past the code model budget are not modelled; code-index reports them",
+    )
     version = "1.0.0"
     description = "Resources and memory that are acquired without a guaranteed release."
     domains = ("memory",)

@@ -5,6 +5,7 @@ from collections import defaultdict
 from html.parser import HTMLParser
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits
 from ...core.source_utils import describe_error, read_text_bounded
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -112,10 +113,18 @@ class _AccessibilityParser(HTMLParser):
         return dict(self.issues)
 
 
+_MAX_MARKUP_BYTES = 16 * 1024 * 1024
+
+
 class AccessibilityAnalyzer(Analyzer):
     """Find high-signal markup accessibility issues without running frontend code."""
 
     name = "accessibility-markup"
+    limits = AnalyzerLimits(
+        _MAX_MARKUP_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
     domains = ("accessibility",)
     languages = ("HTML", "JavaScript", "TypeScript", "Vue", "Svelte", "Astro")
 
@@ -125,7 +134,7 @@ class AccessibilityAnalyzer(Analyzer):
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         try:
             source = read_text_bounded(
-                path, 16 * 1024 * 1024,
+                path, _MAX_MARKUP_BYTES,
                 expected_identity=record.analysis_identity,
             )
             parser = _AccessibilityParser(components=record.extension.lower() not in {".html", ".htm"})

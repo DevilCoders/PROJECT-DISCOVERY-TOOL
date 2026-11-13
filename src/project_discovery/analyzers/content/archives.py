@@ -15,6 +15,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
+from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...core.source_utils import LineIndex, describe_error, open_verified_binary, redact_source_excerpt
 from ...inventory.signatures import family_of
 from ...models import CodeEvidence, FileRecord, Finding
@@ -291,6 +292,12 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
     """Inspect archive indexes and metadata under entry-count and evidence limits."""
 
     name = "archive-intelligence"
+    limits = AnalyzerLimits(
+        None,
+        "sampled",
+        {"entries": _MAX_ARCHIVE_ENTRIES, "index_bytes": _MAX_ARCHIVE_INDEX_BYTES, "member_sample_bytes": _MAX_MEMBER_SCAN_BYTES, "archive_sample_bytes": _MAX_ARCHIVE_SCAN_BYTES, "wall_seconds": _MAX_ARCHIVE_WALL_SECONDS, "tar_decompressed_bytes": _MAX_TAR_DECOMPRESSED_BYTES},
+        outcome="UNKNOWN or partial finding at an index, entry, sample, decompression or wall-time limit",
+    )
     domains = ("archives", "filesystem_inventory", "supply_chain")
     languages = ("ZIP", "TAR", "GZIP", "BZIP2", "XZ", "7z", "RAR", "CAB", "ISO")
 
@@ -341,7 +348,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             )]
         if index_hint is not None:
             entry_count, index_bytes = index_hint
-            if entry_count > _MAX_ARCHIVE_ENTRIES or index_bytes > _MAX_ARCHIVE_INDEX_BYTES:
+            if (over_limit(entry_count, _MAX_ARCHIVE_ENTRIES, "entries")
+                    or over_limit(index_bytes, _MAX_ARCHIVE_INDEX_BYTES)):
                 return [Finding(
                     "archive",
                     f"ZIP central-directory budget exceeded: {record.path}",
@@ -469,7 +477,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             evidence=evidence,
             analyzer=self.name,
         )]
-        if total > _MAX_ARCHIVE_ENTRIES:
+        if over_limit(total, _MAX_ARCHIVE_ENTRIES, "entries"):
             findings.append(Finding(
                 "archive",
                 f"ZIP entry limit reached: {record.path}",
@@ -487,6 +495,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             findings.append(self._collision_finding(record, collisions))
         findings.extend(content_findings)
         if content_truncated:
+            limit_reached("bytes", _MAX_ARCHIVE_SCAN_BYTES)
             findings.append(Finding(
                 "archive",
                 f"ZIP member content budget reached: {record.path}",
@@ -499,6 +508,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 severity="LOW",
             ))
         if time_budget_reached:
+            limit_reached("wall_time", _MAX_ARCHIVE_WALL_SECONDS)
             findings.append(Finding(
                 "archive",
                 f"ZIP wall-time budget reached: {record.path}",
@@ -553,7 +563,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                 time_budget_reached = True
                                 break
                             total += 1
-                            if total > _MAX_ARCHIVE_ENTRIES:
+                            if total > _MAX_ARCHIVE_ENTRIES:  # recorded with the finding below
                                 break
                             names.append(member.name)
                             if member.isdir():
@@ -631,6 +641,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             analyzer=self.name,
         )]
         if stop_reason and not time_budget_reached:
+            limit_reached("bytes", _MAX_TAR_DECOMPRESSED_BYTES)
             findings.append(Finding(
                 "archive",
                 f"TAR decompression budget reached: {record.path}",
@@ -644,7 +655,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         collisions = _colliding_names(names)
         if collisions:
             findings.append(self._collision_finding(record, collisions))
-        if total > _MAX_ARCHIVE_ENTRIES:
+        if over_limit(total, _MAX_ARCHIVE_ENTRIES, "entries"):
             findings.append(Finding(
                 "archive",
                 f"TAR entry limit reached: {record.path}",
@@ -679,6 +690,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             ))
         findings.extend(content_findings)
         if content_truncated:
+            limit_reached("bytes", _MAX_ARCHIVE_SCAN_BYTES)
             findings.append(Finding(
                 "archive",
                 f"TAR member content budget reached: {record.path}",
@@ -691,6 +703,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 severity="LOW",
             ))
         if time_budget_reached:
+            limit_reached("wall_time", _MAX_ARCHIVE_WALL_SECONDS)
             findings.append(Finding(
                 "archive",
                 f"TAR wall-time budget reached: {record.path}",

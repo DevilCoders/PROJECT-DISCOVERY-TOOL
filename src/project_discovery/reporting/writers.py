@@ -112,6 +112,33 @@ def _limit_text(timeout: Any, memory: Any) -> str:
     return f"{time_text} and {memory_text}"
 
 
+def size_text(value: Any) -> str:
+    """A byte count for people: "1.5 MiB", "640 bytes"."""
+    value = float(value or 0)
+    for unit, scale in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if value >= scale:
+            scaled = f"{value / scale:,.1f}"
+            return f"{scaled[:-2] if scaled.endswith('.0') else scaled} {unit}"
+    return f"{value:,.0f} bytes"
+
+
+def cap_text(name: str, value: Any) -> str:
+    """One declared cap for people: "line_bytes 256 KiB", "findings 10,000"."""
+    if name.endswith("_bytes"):
+        return f"{name} {size_text(value)}"
+    if name.endswith("_seconds"):
+        return f"{name} {value:g}"
+    return f"{name} {value:,}"
+
+
+def _limit_value_text(kind: str, value: Any) -> str:
+    if kind == "bytes":
+        return size_text(value)
+    if kind == "wall_time":
+        return f"{value:g} s"
+    return f"{value:,.0f} {kind}"
+
+
 def budget_summary(budgets: dict[str, Any] | None) -> str:
     """"120 s and 2,048 MiB per analyzer and file; 1 domain override; 2 stopped (time 2)"."""
     budgets = budgets or {}
@@ -127,6 +154,10 @@ def budget_summary(budgets: dict[str, Any] | None) -> str:
     stopped = stops.get("time", 0) + stops.get("memory", 0)
     text += (f"; {stopped:,} call(s) stopped (time {stops.get('time', 0):,}, memory {stops.get('memory', 0):,})"
              if stopped else "; no call stopped")
+    reached = budgets.get("limits_reached") or {}
+    if reached:
+        text += f"; {sum(reached.values()):,} content limit(s) reached (" + ", ".join(
+            f"{kind} {count:,}" for kind, count in reached.items()) + ")"
     return text
 
 
@@ -143,6 +174,11 @@ def _write_markdown_budgets(line, budgets: dict[str, Any]) -> None:
         unit = "s" if item["budget"] == "time" else "MiB"
         line(f"- Stopped: {_md(item['path'])}: {_md(item['analyzer'])}, {item['budget']} budget "
              f"{item['limit']:g} {unit}, at {item['used']:,.1f} {unit}")
+    for item in (budgets.get("limited") or [])[:20]:
+        used = "" if item.get("used") is None else f", at {_limit_value_text(item['limit'], item['used'])}"
+        line(f"- Limit reached: {_md(item['path'])}: {_md(item['analyzer'])}, "
+             f"{_limit_value_text(item['limit'], item['value'])} limit{used}")
+    declared = budgets.get("analyzer_limits") or {}
     analyzers = budgets.get("analyzers") or {}
     if analyzers:
         line()
@@ -151,8 +187,27 @@ def _write_markdown_budgets(line, budgets: dict[str, Any]) -> None:
         for name, entry in list(analyzers.items())[:10]:
             memory = (f", peak memory growth {entry['max_memory_mb']:,.1f} MiB"
                       if entry.get("max_memory_mb") is not None else "")
+            limits = declared.get(name) or {}
+            budget = (f" (budget {size_text(limits['file_bytes'])} per file, {limits['reads']})"
+                      if limits.get("file_bytes") else "")
+            reached = (f", {entry['limits_reached']:,} limit(s) reached"
+                       if entry.get("limits_reached") else "")
             line(f"- {_md(name)}: {entry['seconds']:,.2f} s over {entry['calls']:,} file(s), longest "
-                 f"{entry['max_seconds']:,.2f} s ({_md(entry['max_seconds_path'] or '-')}){memory}")
+                 f"{entry['max_seconds']:,.2f} s ({_md(entry['max_seconds_path'] or '-')}), read "
+                 f"{size_text(entry.get('bytes_read'))}{budget}{reached}{memory}")
+    if declared:
+        line()
+        line("Content limits the analyzers declare:")
+        line()
+        line("| Analyzer | Reads | Per-file budget | Other limits |")
+        line("|---|---|---:|---|")
+        for name, limits in declared.items():
+            if limits is None:
+                line(f"| {_md(name)} | not declared | - | - |")
+                continue
+            caps = ", ".join(cap_text(key, value) for key, value in (limits.get("caps") or {}).items())
+            budget = size_text(limits["file_bytes"]) if limits.get("file_bytes") else "-"
+            line(f"| {_md(name)} | {limits['reads']} | {budget} | {_md(caps) or '-'} |")
     line()
 
 
@@ -490,6 +545,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>MIME types</h3><div id="mime-types"></div></div>
      <div class="profile-card"><h3>Host & native engine</h3><div id="host-os" class="mono muted"></div></div>
      <div class="profile-card"><h3>Analyzer time (seconds)</h3><div id="analyzer-budgets" class="muted"></div><div id="analyzer-time"></div></div>
+     <div class="profile-card"><h3>Analyzer reads (MiB)</h3><div id="analyzer-limits" class="muted"></div><div id="analyzer-bytes"></div><details><summary>Declared content limits</summary><div id="analyzer-declared" class="mono muted"></div></details></div>
      <div class="profile-card"><h3>Vulnerability intelligence</h3><div id="vuln-summary" class="mono muted"></div></div>
      <div class="profile-card"><h3>Source control & delivery</h3><div id="vcs-summary" class="mono muted"></div></div>
     </div>

@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...catalog.languages import is_documentation_path, is_textual_path
 from ...core.source_utils import describe_error, open_verified_binary, redact_source_excerpt, utf8_stream
 from ...models import CodeEvidence, FileRecord, Finding
@@ -105,6 +106,12 @@ class DataExposureAnalyzer(Analyzer):
     """Find PII/credential field names and email-shaped values without storing values."""
 
     name = "data-exposure-indicators"
+    limits = AnalyzerLimits(
+        _MAX_DATA_EXPOSURE_FILE_BYTES,
+        "stream",
+        {"line_bytes": _MAX_LINE_BYTES, "evidence_lines": _MAX_EVIDENCE_LINES, "code_excerpts": _MAX_CODE_EXCERPTS},
+        outcome="UNKNOWN or partial finding at the byte limit",
+    )
     domains = ("privacy", "secrets")
     languages = ("Polyglot text/source/configuration",)
 
@@ -116,7 +123,7 @@ class DataExposureAnalyzer(Analyzer):
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        if record.size_bytes > _MAX_DATA_EXPOSURE_FILE_BYTES:
+        if over_limit(record.size_bytes, _MAX_DATA_EXPOSURE_FILE_BYTES):
             return [Finding(
                 "privacy",
                 f"Data exposure analysis resource limit: {record.path}",
@@ -330,6 +337,7 @@ class DataExposureAnalyzer(Analyzer):
                 severity="LOW",
             ))
         if budget_reached:
+            limit_reached("bytes", _MAX_DATA_EXPOSURE_FILE_BYTES, record.size_bytes)
             findings.append(Finding(
                 "privacy",
                 f"Data exposure scan budget reached: {record.path}",

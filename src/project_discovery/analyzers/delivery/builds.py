@@ -7,6 +7,7 @@ import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from ...core.limits import AnalyzerLimits, over_limit
 from ...core.safe_parsers import safe_xml_fromstring
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
 from ...models import FileRecord, Finding
@@ -104,6 +105,11 @@ class BuildManifestAnalyzer(Analyzer):
     """Inventory build targets, scripts and CI workflow files."""
 
     name = "build-manifests"
+    limits = AnalyzerLimits(
+        _MAX_BUILD_MANIFEST_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth, read or parse failure",
+    )
     domains = ("build_systems", "ci_cd")
 
     def supports(self, record: FileRecord) -> bool:
@@ -117,7 +123,7 @@ class BuildManifestAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         name = Path(record.path).name.lower()
-        if record.size_bytes > _MAX_BUILD_MANIFEST_BYTES:
+        if over_limit(record.size_bytes, _MAX_BUILD_MANIFEST_BYTES):
             return [Finding(
                 "build",
                 f"Build manifest resource limit: {record.path}",
