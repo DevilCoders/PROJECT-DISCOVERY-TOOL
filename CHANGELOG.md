@@ -228,6 +228,18 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: language packages in archives
+- A ZIP or TAR archive that is a language package names it from its manifest (read in memory up to
+  1 MiB, parsed and never evaluated): wheels, eggs and sdists, npm tarballs, gems, crates, NuGet
+  packages, Maven JARs, conda packages (`.conda` and `.tar.bz2`), Go module zips, Composer packages
+  and VS Code extensions. The archive record gets a `package` with the ecosystem, name, version and
+  dependencies, and the inventory finding names it. A ZIP's manifests are read before its samples.
+- "Package runs code when installed" (MEDIUM, supply chain): npm install scripts, a wheel's `.pth`
+  startup hooks with `import` lines and NuGet install scripts. Checked on real packages: pip,
+  setuptools (its `distutils-precedence.pth` hook) and wheel, crates, NuGet packages (AWSSDK.S3's
+  install script), a conda package and npm tarballs.
+- `.gem`, `.crate`, `.conda` and `.vsix` are read by name too, also inside other archives.
+
 ### Added: 7z and RAR readers
 - 7z: the header, decompressed when 7-Zip packed it (LZMA, LZMA2, Deflate, BZip2, Copy), with each
   member's size (solid folders included), time, attributes and Unix mode, the folders' coders and

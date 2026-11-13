@@ -52,6 +52,7 @@ from .archive_formats import (
     read_rpm,
     zstd_reader,
 )
+from .packages import MANIFEST_BYTES, Packages
 
 _MAX_ARCHIVE_ENTRIES = 200_000
 _MAX_ARCHIVE_INDEX_BYTES = 64 * 1024 * 1024
@@ -459,6 +460,17 @@ def _unsafe_package_path(name: str) -> bool:
     return _PATH_DRIVE.match(normalized) is not None or ".." in PurePosixPath(normalized).parts
 
 
+def _package_text(package: dict) -> str:
+    """"name version (ecosystem)" of a language package found in an archive."""
+    name = " ".join(str(part) for part in (package.get("name"), package.get("version")) if part)
+    return f"{name or 'unnamed'} ({package['ecosystem']})"
+
+
+def _package_part(archive: str, member: str) -> bool:
+    """Whether a nested archive belongs to its container's package: a conda package's info tarball."""
+    return archive.lower().endswith(".conda") and PurePosixPath(member.replace("\\", "/")).name.startswith("info-")
+
+
 def _package_label(metadata: dict) -> str | None:
     """"name version (architecture)" of a DEB or RPM package, from its reader's metadata."""
     deb, rpm = metadata.get("deb") or {}, metadata.get("rpm") or {}
@@ -593,9 +605,10 @@ class _Nested:
         self.remaining = budget
 
 
-_NESTED_ZIP_SUFFIXES = (".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg", ".nupkg")
+_NESTED_ZIP_SUFFIXES = (".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg", ".nupkg", ".conda",
+                        ".vsix")
 _NESTED_TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst",
-                        ".tar.lzma", ".tlz")
+                        ".tar.lzma", ".tlz", ".gem", ".crate")
 _TAR_SUFFIXES = _NESTED_TAR_SUFFIXES
 _STREAM_SUFFIXES = (".gz", ".bz2", ".xz", ".lzma", ".zst")
 # Member names these readers inspect as archives, most specific first (.tar.gz before .gz).
@@ -848,9 +861,11 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
     def _zip(self, path: Path, record: FileRecord, limits: _Limits | None = None, *,
              data: bytes | _Slice | None = None, depth: int = 0, nested: _Nested | None = None,
-             deadline: float | None = None) -> list[Finding]:
+             deadline: float | None = None, packages: Packages | None = None) -> list[Finding]:
         limits = limits or _Limits()
         nested = nested or _Nested(limits.nested_bytes)
+        own_packages = packages is None  # a conda info tarball reports to its package
+        packages = packages or Packages(record.path)
         inspection = _Inspection(record, "zip", limits)
         index_hint = _zip_index_hint(path, record.analysis_identity, data)
         if index_hint is None:
@@ -920,6 +935,19 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 )
                 if structure_stopped:
                     time_budget_reached = True
+                # Package manifests first, before the samples spend the wall time: a ZIP can be read
+                # in any order, and a wheel's METADATA comes last.
+                for ordinal, info in enumerate(infos[:limits.entries]):
+                    manifest = packages.wants(info.filename, info.file_size)
+                    if (manifest is None or info.is_dir() or info.flag_bits & 0x1
+                            or stat.S_ISLNK((info.external_attr >> 16) & 0xFFFF)
+                            or "overlapping" in structure.get(ordinal, ())):
+                        continue
+                    try:
+                        with archive.open(info, "r") as manifest_stream:
+                            packages.add(manifest, info.filename, manifest_stream.read(MANIFEST_BYTES + 1))
+                    except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile, EOFError):
+                        pass
                 for ordinal, info in enumerate(infos[:limits.entries]):
                     if time.monotonic() >= deadline:
                         time_budget_reached = True
@@ -982,6 +1010,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             nested.remaining -= len(inner)
                             content_findings.extend(self._nested(
                                 inner, f"{record.path}::{info.filename}", nested_kind, limits, depth + 1, nested, deadline,
+                                packages=packages if _package_part(record.path, info.filename) else None,
                             ))
                             if time.monotonic() >= deadline:
                                 time_budget_reached = True
@@ -1067,6 +1096,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             inspection.limit("wall_seconds", limits.wall_seconds)
         if total > limits.entries:
             inspection.limit("entries", limits.entries, total)
+        package = packages.result() if own_packages else None
+        if package:
+            inspection.extra["package"] = package
         inspection.emit()
         evidence = [
             f"{counts['file']} regular file(s)",
@@ -1084,9 +1116,10 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             f"compressed file size {record.size_bytes:,} bytes. Member bytes were inspected "
             "only through bounded in-memory streams; no member was written to disk.",
             confidence="CONFIRMED",
-            evidence=evidence,
+            evidence=([f"package: {_package_text(package)}"] if package else []) + evidence,
             analyzer=self.name,
         )]
+        findings.extend(self._package_findings(record, package))
         if over_limit(total, limits.entries, "entries"):
             findings.append(Finding(
                 "archive",
@@ -1112,7 +1145,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
     def _tar(self, path: Path, record: FileRecord, limits: _Limits | None = None, *,
              data: bytes | _Slice | None = None, depth: int = 0, nested: _Nested | None = None,
-             deadline: float | None = None, package: bool = False, codec: str | None = None) -> list[Finding]:
+             deadline: float | None = None, package: bool = False, codec: str | None = None,
+             packages: Packages | None = None) -> list[Finding]:
         """Traverse every TAR header under budgets; content sampling never ends traversal.
 
         Stopping at the first large member would hide later traversal, link and setuid
@@ -1125,6 +1159,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         limits = limits or _Limits()
         nested = nested or _Nested(limits.nested_bytes)
         inspection = _Inspection(record, "tar", limits)
+        own_packages = packages is None
+        packages = packages or Packages(record.path)
         deadline = deadline if deadline is not None else time.monotonic() + limits.wall_seconds
         time_budget_reached = False
         stop_reason: str | None = None
@@ -1204,13 +1240,23 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
                             if kind != "file":
                                 continue
+                            # A streamed member is read once: a manifest's bytes also serve its sample.
+                            manifest_data = None
+                            manifest = packages.wants(member.name, member.size)
+                            if manifest is not None:
+                                handle = archive.extractfile(member)
+                                if handle is not None:
+                                    with handle:
+                                        manifest_data = handle.read(MANIFEST_BYTES + 1)
+                                    packages.add(manifest, member.name, manifest_data)
                             if nested_kind is not None:
                                 if depth >= limits.nested_depth:
                                     inspection.limit("nested_depth", limits.nested_depth, members=1)
                                 elif member.size > nested.remaining:
                                     inspection.limit("nested_bytes", limits.nested_bytes, members=1)
                                 else:
-                                    member_stream = archive.extractfile(member)
+                                    member_stream = (io.BytesIO(manifest_data) if manifest_data is not None
+                                                     else archive.extractfile(member))
                                     if member_stream is not None:
                                         with member_stream:
                                             inner = member_stream.read(member.size + 1)
@@ -1228,7 +1274,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                 content_truncated += 1
                                 inspection.skipped_sample()
                                 continue
-                            member_stream = archive.extractfile(member)
+                            member_stream = (io.BytesIO(manifest_data) if manifest_data is not None
+                                             else archive.extractfile(member))
                             if member_stream is None:
                                 continue
                             with member_stream:
@@ -1279,6 +1326,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             inspection.limit("entries", limits.entries)
         if declared_bytes > limits.uncompressed_bytes:
             inspection.limit("uncompressed_bytes", limits.uncompressed_bytes, declared_bytes)
+        package = packages.result() if own_packages else None
+        if package:
+            inspection.extra["package"] = package
         inspection.emit()
         findings = [Finding(
             "archive",
@@ -1291,9 +1341,10 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             f"{content_bytes:,} member bytes were inspected through bounded in-memory streams; "
             "no member was written to disk.",
             confidence="CONFIRMED",
-            evidence=[record.path],
+            evidence=[record.path] + ([f"package: {_package_text(package)}"] if package else []),
             analyzer=self.name,
         )]
+        findings.extend(self._package_findings(record, package))
         if stop_reason and not time_budget_reached:
             limit_reached("bytes", limits.tar_decompressed_bytes)
             findings.append(Finding(
@@ -1655,7 +1706,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         return findings
 
     def _nested(self, data: bytes | _Slice, display: str, kind: str, limits: _Limits, depth: int,
-                nested: _Nested, deadline: float, package: bool = False) -> list[Finding]:
+                nested: _Nested, deadline: float, package: bool = False,
+                packages: Packages | None = None) -> list[Finding]:
         """Inspect a member that is itself an archive, from its bytes in memory or in place; its
         archive and member records and findings name it "outer.zip::inner.jar"."""
         name = display.rsplit("::", 1)[-1]
@@ -1663,9 +1715,10 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             file_type=_NESTED_TYPES[kind])
         options = {"data": data, "depth": depth, "nested": nested, "deadline": deadline}
         if kind == "zip":
-            return self._zip(Path(name), record, limits, **options)
+            return self._zip(Path(name), record, limits, packages=packages, **options)
         if kind == "tar":
-            return self._tar(Path(name), record, limits, package=package, codec=_codec(name), **options)
+            return self._tar(Path(name), record, limits, package=package, codec=_codec(name), packages=packages,
+                             **options)
         if kind == "stream":
             return self._stream(Path(name), record, limits, _codec(name), **options)
         return self._listed(Path(name), record, limits, kind, **options)
@@ -1838,6 +1891,24 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         except (_ArchiveBudgetExceeded, _Unsupported, OSError, EOFError, lzma.LZMAError, *ZSTD_ERRORS):
             return None
         return None if more else content
+
+    def _package_findings(self, record: FileRecord, package: dict | None) -> list[Finding]:
+        """A package that runs code when it is installed: npm install scripts, Python startup
+        hooks (.pth files), NuGet install scripts."""
+        code = (package or {}).get("install_code")
+        if not code:
+            return []
+        return [Finding(
+            "supply_chain",
+            f"Package runs code when installed: {record.path}",
+            f"The {package['ecosystem']} package {_package_text(package)} declares {len(code):,} piece(s) of code "
+            "that run when it is installed, before anything imports it (npm install scripts, Python .pth startup "
+            "hooks, NuGet install scripts). Review them before installing the package.",
+            confidence="INFERRED",
+            evidence=[f"{record.path}::{redact_source_excerpt(item)}" for item in code[:_MAX_EVIDENCE]],
+            analyzer=self.name,
+            severity="MEDIUM",
+        )]
 
     def _link_findings(self, record: FileRecord, hardlinks: list[str], special_entries: list[str]) -> list[Finding]:
         findings = []
