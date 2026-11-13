@@ -680,6 +680,9 @@ def test_a_redirected_post_fails_fast_instead_of_hanging(tmp_path):
             return
 
         def do_POST(self):
+            # Read the body first: closing a socket with unread data makes Windows reset the
+            # connection, and the client could see that reset instead of the redirect.
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(302)
             self.send_header("Location", "/elsewhere")
             self.send_header("Content-Length", "0")
