@@ -228,6 +228,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: ZIP structure validation
+- Every ZIP member's local header and data descriptor are checked against the central directory
+  (name, method, CRC, sizes; 4-byte or ZIP64 descriptor sizes): a disagreement is a
+  `header-mismatch` or `descriptor-mismatch` member flag and a MEDIUM finding. Members whose data
+  overlaps another's are flagged `overlapping`, reported as a HIGH zip-bomb construction and not
+  opened (Python 3.14's zipfile also warns about them). Data past the central directory or the end
+  of the file marks the archive malformed (`out-of-bounds`), and an end-of-directory entry count that
+  disagrees with the directory is reported with `declared_entries` in the archive record.
+
 ### Added: nested archives
 - ZIP and TAR members named like archives (`.jar` in a `.war`, `.tgz` in a `.zip`, ...) are
   flagged `nested-archive` and inspected in memory: their own archive and member records and

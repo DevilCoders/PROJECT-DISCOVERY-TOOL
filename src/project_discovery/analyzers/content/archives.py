@@ -395,6 +395,71 @@ def _archive_format(record: FileRecord) -> str:
     return family_of(record.file_type) or record.extension.lstrip(".") or "unknown"
 
 
+
+_LOCAL_HEADER = struct.Struct("<4s5H3L2H")  # signature, version, flags, method, time, date, CRC, sizes, name/extra
+
+
+def _zip_structure_issues(stream, infos, start_dir: int, size: int, deadline: float) -> tuple[dict[int, list[str]], bool]:
+    """Check each member's local header and data descriptor against the central directory.
+
+    Returns ({member index: issues}, whether the wall-time budget stopped the check). The issues
+    are "header-mismatch" (the local header names another file, method, CRC or size: tools
+    that read local headers see another archive), "descriptor-mismatch" (a data descriptor
+    disagrees with the directory), "out-of-bounds" (the member's data runs past the central
+    directory or the end of the file: a truncated or corrupt archive) and "overlapping" (its
+    data overlaps another member's, the construction of non-recursive zip bombs).
+    """
+    issues: dict[int, list[str]] = {}
+    spans: list[tuple[int, int, int]] = []
+    for index, info in enumerate(infos):
+        if index % 1024 == 0 and time.monotonic() >= deadline:
+            return issues, True
+        found: list[str] = []
+        stream.seek(info.header_offset)
+        header = stream.read(_LOCAL_HEADER.size)
+        if len(header) < _LOCAL_HEADER.size or header[:4] != b"PK\x03\x04":
+            issues[index] = ["out-of-bounds" if info.header_offset + _LOCAL_HEADER.size > size else "header-mismatch"]
+            continue
+        _, _, flags, method, _, _, crc, compressed, uncompressed, name_length, extra_length = _LOCAL_HEADER.unpack(header)
+        name = stream.read(name_length)
+        try:
+            expected = info.orig_filename.encode("utf-8" if info.flag_bits & 0x800 else "cp437")
+        except UnicodeEncodeError:
+            expected = name
+        if name != expected or method != info.compress_type:
+            found.append("header-mismatch")
+        data_start = info.header_offset + _LOCAL_HEADER.size + name_length + extra_length
+        data_end = data_start + info.compress_size
+        if flags & 0x08:
+            # Sizes and CRC follow the data: optional signature, then 4- or 8-byte (ZIP64) sizes.
+            stream.seek(data_end)
+            tail = stream.read(24)
+            body = tail[4:] if tail[:4] == b"PK\x07\x08" else tail
+            short = struct.unpack_from("<3L", body) if len(body) >= 12 else None
+            wide = struct.unpack_from("<L2Q", body) if len(body) >= 20 else None
+            declared = (info.CRC, info.compress_size, info.file_size)
+            if declared not in (short, wide):
+                found.append("descriptor-mismatch")
+            data_end += (len(tail) - len(body)) + (20 if wide == declared and short != declared else 12)
+        elif 0xFFFFFFFF not in (compressed, uncompressed) and (crc, compressed, uncompressed) != (
+                info.CRC, info.compress_size, info.file_size):
+            found.append("header-mismatch")
+        if data_end > min(start_dir, size):
+            found.append("out-of-bounds")
+        spans.append((info.header_offset, data_end, index))
+        if found:
+            issues[index] = found
+    spans.sort()
+    reach, holder = -1, -1
+    for start, end, index in spans:
+        if start < reach:
+            for member in (index, holder):
+                if "overlapping" not in issues.setdefault(member, []):
+                    issues[member].append("overlapping")
+        if end > reach:
+            reach, holder = end, index
+    return issues, False
+
 class _Nested:
     """The bytes of nested archives one top-level archive may still buffer in memory."""
 
@@ -441,6 +506,7 @@ class _Inspection:
         self.malformed: str | None = None
         self.unsupported = False
         self.limits: dict[str, dict] = {}
+        self.extra: dict = {}  # format-specific record fields (ZIP structure issues)
         facts = current_facts()
         self._first_record = len(facts.archive_members) if facts is not None else 0
 
@@ -520,6 +586,7 @@ class _Inspection:
             "encrypted_members": self.encrypted, "member_records": self.records,
             "limits": [self.limits[name] for name in sorted(self.limits)],
         }
+        detail.update(self.extra)
         if self.malformed is not None:
             detail["error"] = self.malformed
         emit_archive(self.path, self.format, state, states, **detail)
@@ -638,6 +705,12 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     ).items() if count > 1
                 ]
                 collisions = _colliding_names({item.filename for item in infos})
+                archive_stream.seek(0, 2)
+                structure, structure_stopped = _zip_structure_issues(
+                    archive_stream, infos[:limits.entries], archive.start_dir, archive_stream.tell(), deadline,
+                )
+                if structure_stopped:
+                    time_budget_reached = True
                 for ordinal, info in enumerate(infos[:limits.entries]):
                     if time.monotonic() >= deadline:
                         time_budget_reached = True
@@ -672,9 +745,17 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                         high_ratios.append(info.filename)
                         flags.append("high-ratio")
                     inspection.compressed_bytes += info.compress_size
+                    flags.extend(structure.get(ordinal, ()))
                     link_target = None
 
-                    nested_kind = _nested_kind(info.filename) if kind == "file" and not encrypted_member else None
+                    # An overlapping member is reported already; opening it re-reads another's data, and
+                    # zipfile warns (or, in some versions, refuses): it is not read at all.
+                    overlapped = "overlapping" in structure.get(ordinal, ())
+                    readable = not encrypted_member and not overlapped
+                    if overlapped and kind in {"file", "symlink"}:
+                        content_truncated += 1
+                        inspection.truncated += 1
+                    nested_kind = _nested_kind(info.filename) if kind == "file" and readable else None
                     inspect_nested = False
                     if nested_kind is not None:
                         flags.append("nested-archive")
@@ -698,7 +779,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                         except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile, EOFError):
                             content_truncated += 1
                             inspection.truncated += 1
-                    elif not encrypted_member and kind in {"file", "symlink"}:
+                    elif readable and kind in {"file", "symlink"}:
                         remaining = limits.archive_sample_bytes - content_bytes
                         if remaining <= 0:
                             content_truncated += 1
@@ -754,6 +835,20 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             )]
 
         inspection.encrypted = encrypted
+        structure_counts = Counter(issue for found in structure.values() for issue in found)
+        if structure_counts:
+            inspection.extra["structure_issues"] = {
+                name.replace("-", "_"): structure_counts[name]
+                for name in ("header-mismatch", "descriptor-mismatch", "out-of-bounds", "overlapping")
+            }
+        if structure_counts["out-of-bounds"]:
+            inspection.malformed = (f"{structure_counts['out-of-bounds']:,} member(s) extend past the central "
+                                    "directory or the end of the file")
+        if entry_count != total:
+            # zipfile reads the directory by its size, not its declared count: a count that disagrees
+            # marks a truncated or rewritten directory.
+            inspection.declared = max(entry_count, total)
+            inspection.extra["declared_entries"] = entry_count
         declared_bytes = sum(item.file_size for item in infos)
         if declared_bytes > limits.uncompressed_bytes:
             inspection.limit("uncompressed_bytes", limits.uncompressed_bytes, declared_bytes)
@@ -799,6 +894,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         ))
         if declared_bytes > limits.uncompressed_bytes:
             findings.append(self._bomb_finding(record, declared_bytes, limits))
+        findings.extend(self._structure_findings(record, infos, structure, structure_counts, entry_count, total))
         if collisions:
             findings.append(self._collision_finding(record, collisions))
         findings.extend(content_findings)
@@ -1098,6 +1194,47 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             file_type="archive/zip" if kind == "zip" else "archive/tar")
         inspect = self._zip if kind == "zip" else self._tar
         return inspect(Path(name), record, limits, data=data, depth=depth, nested=nested, deadline=deadline)
+
+    def _structure_findings(self, record: FileRecord, infos, structure: dict[int, list[str]],
+                            counts: Counter, declared: int, total: int) -> list[Finding]:
+        """Findings for overlapping members, headers that disagree, truncation and a wrong entry count."""
+        def named(issue: str) -> list[str]:
+            return [f"{record.path}::{infos[index].filename}" for index, found in sorted(structure.items())
+                    if issue in found][:_MAX_EVIDENCE]
+
+        findings = []
+        if counts["overlapping"]:
+            findings.append(Finding(
+                "security", f"Overlapping ZIP members: {record.path}",
+                f"{counts['overlapping']:,} member(s) share or overlap their compressed data, the construction "
+                "of non-recursive zip bombs: extracting them writes far more data than the archive holds.",
+                confidence="CONFIRMED", evidence=named("overlapping"), analyzer=self.name, severity="HIGH",
+            ))
+        mismatched = counts["header-mismatch"] + counts["descriptor-mismatch"]
+        if mismatched:
+            findings.append(Finding(
+                "security", f"ZIP local headers disagree with the central directory: {record.path}",
+                f"{mismatched:,} member(s) have a local header or data descriptor that names another file, "
+                "method, CRC or size than the central directory. Tools that read local headers (streaming "
+                "extractors, some scanners) see a different archive from tools that read the directory.",
+                confidence="CONFIRMED", evidence=named("header-mismatch") + named("descriptor-mismatch"),
+                analyzer=self.name, severity="MEDIUM",
+            ))
+        if counts["out-of-bounds"]:
+            findings.append(Finding(
+                "archive", f"Truncated or corrupt ZIP members: {record.path}",
+                f"{counts['out-of-bounds']:,} member(s) extend past the central directory or the end of the "
+                "file, so their data is incomplete; their contents were not fully inspected.",
+                confidence="UNKNOWN", evidence=named("out-of-bounds"), analyzer=self.name, severity="MEDIUM",
+            ))
+        if declared != total:
+            findings.append(Finding(
+                "archive", f"ZIP entry count disagrees with its central directory: {record.path}",
+                f"The end-of-directory record declares {declared:,} entries; the central directory holds "
+                f"{total:,}. The directory is truncated or was rewritten.",
+                confidence="CONFIRMED", evidence=[record.path], analyzer=self.name, severity="MEDIUM",
+            ))
+        return findings
 
     def _bomb_finding(self, record: FileRecord, declared_bytes: int, limits: _Limits) -> Finding:
         return Finding(
