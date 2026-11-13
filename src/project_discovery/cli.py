@@ -25,7 +25,7 @@ from rich.text import Text
 from . import __version__
 from .analyzers import load_analyzers
 from .analyzers.code.tree_sitter_syntax import GRAMMARS, parser_capabilities
-from .analyzers.content.archives import ArchiveIntelligenceAnalyzer
+from .analyzers.content.archives import ArchiveIntelligenceAnalyzer, parse_archive_limits
 from .analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
 from .analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
 from .catalog.domains import analyzer_domain_catalog, analyzer_domain_count
@@ -249,7 +249,8 @@ def _print_security_findings(console: Console, findings, *, limit: int = 25) -> 
 
 
 def _budget_policy(timeout: float, memory_mb: int, domain_budgets: Sequence[str], read_mb: int = 0,
-                   cpu_seconds: float = 0, max_memory_mb: int = 0) -> BudgetPolicy:
+                   cpu_seconds: float = 0, max_memory_mb: int = 0,
+                   archive_limits: Sequence[str] = ()) -> BudgetPolicy:
     """The analyzer budget policy from --analyzer-timeout, --analyzer-memory-mb, --analyzer-read-mb,
     --analyzer-cpu-seconds and --domain-budget, with --max-memory-mb capping each call's memory."""
     # NaN would never trip a deadline, and infinity is spelled 0 (no limit).
@@ -266,9 +267,11 @@ def _budget_policy(timeout: float, memory_mb: int, domain_budgets: Sequence[str]
     from .catalog.domains import analyzer_domain_catalog
 
     domains = {item["id"] for item in analyzer_domain_catalog()}
+    archive = parse_archive_limits(archive_limits)
     return BudgetPolicy(timeout or None, memory_mb or None, parse_domain_budgets(domain_budgets, domains),
                         read_mb=read_mb or None, cpu_seconds=cpu_seconds or None,
-                        scan_memory_mb=max_memory_mb or None)
+                        scan_memory_mb=max_memory_mb or None,
+                        analyzer_limits={ArchiveIntelligenceAnalyzer.name: archive} if archive else {})
 
 
 class _BudgetUsage:
@@ -376,12 +379,22 @@ def _whole(value: float | None) -> float | int | None:
     return int(value) if float(value).is_integer() else round(value, 3)
 
 
-def _declared_limits(analyzers) -> dict[str, dict | None]:
-    """The content limits each loaded analyzer declares (None: it declares none)."""
-    return {
+def _declared_limits(analyzers, policy: BudgetPolicy | None = None) -> dict[str, dict | None]:
+    """The content limits each loaded analyzer declares (None: it declares none), with the values the
+    scan configured in place of the defaults (--archive-limit)."""
+    declared = {
         analyzer.name: limits.describe() if (limits := getattr(analyzer, "limits", None)) is not None else None
         for analyzer in sorted(analyzers, key=lambda item: item.name)
     }
+    archive = (policy.analyzer_limits if policy is not None else {}).get(ArchiveIntelligenceAnalyzer.name)
+    if archive and declared.get(ArchiveIntelligenceAnalyzer.name):
+        from .analyzers.content.archives import ARCHIVE_LIMIT_OPTIONS
+
+        caps = declared[ArchiveIntelligenceAnalyzer.name].setdefault("caps", {})
+        for name, value in archive.items():
+            limit, unit, whole = ARCHIVE_LIMIT_OPTIONS[name]
+            caps[limit] = int(value * unit) if whole else value
+    return declared
 
 
 def _describe_inventory_options(options: dict) -> dict[str, str]:
@@ -637,6 +650,7 @@ def run_scan(
     analyzer_read_mb: int = 0,
     analyzer_cpu_seconds: float = 0,
     max_memory_mb: int = 0,
+    archive_limits: Sequence[str] = (),
     source_metadata: dict | None = None,
     display_root: str | None = None,
     online_vulnerabilities: OnlineVulnerabilityOptions | None = None,
@@ -656,7 +670,7 @@ def run_scan(
     # Validates the plugin options before the (potentially long) inventory walk.
     PluginPolicy(plugin_isolation, plugin_timeout, plugin_memory_mb)
     budget_policy = _budget_policy(analyzer_timeout, analyzer_memory_mb, domain_budgets, analyzer_read_mb,
-                                   analyzer_cpu_seconds, max_memory_mb)
+                                   analyzer_cpu_seconds, max_memory_mb, archive_limits)
     if gpu_min_mb < 1:
         raise ValueError("--gpu-min-mb must be at least 1")
     if memory_source is not None:
@@ -1223,7 +1237,7 @@ def run_scan(
             # Per-analyzer time and memory budgets, what each analyzer used, and the stops.
             "analysis_budgets": {
                 **budget_policy.describe(), **budget_usage.metrics(),
-                "analyzer_limits": _declared_limits(analyzers),
+                "analyzer_limits": _declared_limits(analyzers, budget_policy),
                 "scan_memory": engine.scan_memory.describe(),
             },
             "execution": {
@@ -2137,6 +2151,11 @@ def build_parser() -> argparse.ArgumentParser:
              "repeatable",
     )
     scan.add_argument(
+        "--archive-limit", action="append", default=[], metavar="NAME=VALUE",
+        help="Override an archive inspection limit for this scan: entries, index_mb, member_sample_mb, sample_mb, "
+             "wall_seconds, decompressed_mb, uncompressed_mb or ratio (byte limits in MiB); repeatable",
+    )
+    scan.add_argument(
         "--max-memory-mb", type=int, default=0, metavar="MB",
         help="Memory budget for the whole scan: the resident memory of PDT and its worker processes. "
              "Over it, new work waits for queued work, and no analyzer call may grow by more. "
@@ -2561,6 +2580,7 @@ def main() -> None:
                 "analyzer_read_mb": args.analyzer_read_mb,
                 "analyzer_cpu_seconds": args.analyzer_cpu_seconds,
                 "max_memory_mb": args.max_memory_mb,
+                "archive_limits": list(args.archive_limit),
                 "domain_budgets": list(args.domain_budget),
                 "online_vulnerabilities": online_vulnerabilities,
             }
@@ -2601,7 +2621,7 @@ def main() -> None:
                 gpu=args.gpu, gpu_min_mb=args.gpu_min_mb,
                 analyzer_timeout=args.analyzer_timeout, analyzer_memory_mb=args.analyzer_memory_mb,
                 analyzer_read_mb=args.analyzer_read_mb, analyzer_cpu_seconds=args.analyzer_cpu_seconds,
-                max_memory_mb=args.max_memory_mb,
+                max_memory_mb=args.max_memory_mb, archive_limits=list(args.archive_limit),
                 domain_budgets=list(args.domain_budget),
                 online_vulnerabilities=online_vulnerabilities,
             ))

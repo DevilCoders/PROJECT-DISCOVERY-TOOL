@@ -5,6 +5,7 @@ import bz2
 import gzip
 import io
 import lzma
+import math
 import re
 import stat
 import struct
@@ -16,7 +17,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from ...core.limits import AnalyzerLimits, limit_reached, over_limit
+from ...core.limits import AnalyzerLimits, limit_overrides, limit_reached, over_limit
 from ...core.source_utils import LineIndex, describe_error, open_verified_binary, redact_source_excerpt
 from ...intelligence.facts import MAX_ARCHIVE_MEMBERS_PER_FILE, current_facts, emit_archive, emit_archive_member
 from ...inventory.signatures import family_of, is_archive
@@ -78,6 +79,73 @@ _MAX_ARCHIVE_WALL_SECONDS = 8.0
 # decompression work independently of the wall-time budget.
 _MAX_TAR_DECOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
 _MEMBER_SCAN_CHUNK = 64 * 1024
+# Members declaring more uncompressed bytes in total than this suggest an archive bomb.
+_MAX_DECLARED_UNCOMPRESSED_BYTES = 16 * 1024 * 1024 * 1024
+_HIGH_COMPRESSION_RATIO = 1000.0  # a member compressed more than this is flagged "high-ratio"
+_MIB = 1024 * 1024
+# `pdt scan --archive-limit NAME=VALUE`: option name -> (limit, unit in bytes or 1, whole number)
+ARCHIVE_LIMIT_OPTIONS = {
+    "entries": ("entries", 1, True),
+    "index_mb": ("index_bytes", _MIB, True),
+    "member_sample_mb": ("member_sample_bytes", _MIB, True),
+    "sample_mb": ("archive_sample_bytes", _MIB, True),
+    "wall_seconds": ("wall_seconds", 1, False),
+    "decompressed_mb": ("tar_decompressed_bytes", _MIB, True),
+    "uncompressed_mb": ("uncompressed_bytes", _MIB, True),
+    "ratio": ("compression_ratio", 1, False),
+}
+
+
+
+def parse_archive_limits(values) -> dict[str, float]:
+    """``--archive-limit NAME=VALUE`` values as {name: number}; a later value for a name wins.
+
+    Byte limits are in MiB. ``sample_mb`` and ``member_sample_mb`` may be 0 (no content
+    sampling); the other whole-number limits are at least 1, ``wall_seconds`` is above 0 and
+    ``ratio`` above 1.
+    """
+    limits: dict[str, float] = {}
+    for raw in values or ():
+        name, equals, value = str(raw).partition("=")
+        name = name.strip().lower()
+        if not equals or name not in ARCHIVE_LIMIT_OPTIONS:
+            raise ValueError(f"--archive-limit {raw}: expected NAME=VALUE, NAME one of {', '.join(ARCHIVE_LIMIT_OPTIONS)}")
+        try:
+            number = float(value)
+        except ValueError:
+            raise ValueError(f"--archive-limit {raw}: {name} must be a number") from None
+        whole = ARCHIVE_LIMIT_OPTIONS[name][2]
+        if whole:
+            minimum = 0 if name in {"sample_mb", "member_sample_mb"} else 1
+            if not math.isfinite(number) or number != int(number) or number < minimum:
+                raise ValueError(f"--archive-limit {raw}: {name} must be a whole number of at least {minimum}")
+            limits[name] = int(number)
+        else:
+            floor = 1 if name == "ratio" else 0
+            if not math.isfinite(number) or number <= floor:
+                raise ValueError(f"--archive-limit {raw}: {name} must be a number above {floor}")
+            limits[name] = number
+    return limits
+
+class _Limits:
+    """One call's archive limits: the module defaults with the scan's --archive-limit values."""
+
+    __slots__ = ("entries", "index_bytes", "member_sample_bytes", "archive_sample_bytes", "wall_seconds",
+                 "tar_decompressed_bytes", "uncompressed_bytes", "compression_ratio")
+
+    def __init__(self) -> None:
+        # Read when a call starts, so the defaults are the module's current values.
+        self.entries = _MAX_ARCHIVE_ENTRIES
+        self.index_bytes = _MAX_ARCHIVE_INDEX_BYTES
+        self.member_sample_bytes = _MAX_MEMBER_SCAN_BYTES
+        self.archive_sample_bytes = _MAX_ARCHIVE_SCAN_BYTES
+        self.wall_seconds = _MAX_ARCHIVE_WALL_SECONDS
+        self.tar_decompressed_bytes = _MAX_TAR_DECOMPRESSED_BYTES
+        self.uncompressed_bytes = _MAX_DECLARED_UNCOMPRESSED_BYTES
+        self.compression_ratio = _HIGH_COMPRESSION_RATIO
+        for name, value in limit_overrides("archive-intelligence").items():
+            attribute, unit, whole = ARCHIVE_LIMIT_OPTIONS[name]
+            setattr(self, attribute, int(value * unit) if whole else float(value))
 
 
 class _ArchiveBudgetExceeded(Exception):
@@ -153,9 +221,10 @@ def _read_member_sample(
     stream,
     budget_remaining: int,
     deadline: float | None = None,
+    member_limit: int | None = None,
 ) -> tuple[bytes, int, bool]:
     """Read a bounded in-memory sample; stop on byte or wall-time budget."""
-    limit = min(_MAX_MEMBER_SCAN_BYTES, max(0, budget_remaining))
+    limit = min(_MAX_MEMBER_SCAN_BYTES if member_limit is None else member_limit, max(0, budget_remaining))
     if limit <= 0:
         return b"", 0, True
     sample = bytearray()
@@ -322,8 +391,8 @@ class _Inspection:
     """How far one archive's inspection got: its states, member counts and coverage, and
     every limit that stopped deeper inspection, recorded with ``emit_archive`` at the end."""
 
-    def __init__(self, record: FileRecord, archive_format: str) -> None:
-        self.record, self.format = record, archive_format
+    def __init__(self, record: FileRecord, archive_format: str, limits: _Limits) -> None:
+        self.record, self.format, self.limits_in_force = record, archive_format, limits
         self.declared: int | None = None  # members the archive's index declares
         self.index_read = False
         self.indexed = 0
@@ -385,14 +454,14 @@ class _Inspection:
             return
         self.truncated += 1
         if consumed >= remaining:
-            self.limit("archive_sample_bytes", _MAX_ARCHIVE_SCAN_BYTES, members=1)
-        elif consumed >= _MAX_MEMBER_SCAN_BYTES:
-            self.limit("member_sample_bytes", _MAX_MEMBER_SCAN_BYTES, members=1)
+            self.limit("archive_sample_bytes", self.limits_in_force.archive_sample_bytes, members=1)
+        elif consumed >= self.limits_in_force.member_sample_bytes:
+            self.limit("member_sample_bytes", self.limits_in_force.member_sample_bytes, members=1)
 
     def skipped_sample(self) -> None:
         """A member that the spent archive sample budget left unread."""
         self.truncated += 1
-        self.limit("archive_sample_bytes", _MAX_ARCHIVE_SCAN_BYTES, members=1)
+        self.limit("archive_sample_bytes", self.limits_in_force.archive_sample_bytes, members=1)
 
     def emit(self) -> None:
         if self.records < self.indexed:
@@ -430,7 +499,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
     limits = AnalyzerLimits(
         None,
         "sampled",
-        {"entries": _MAX_ARCHIVE_ENTRIES, "index_bytes": _MAX_ARCHIVE_INDEX_BYTES, "member_sample_bytes": _MAX_MEMBER_SCAN_BYTES, "archive_sample_bytes": _MAX_ARCHIVE_SCAN_BYTES, "wall_seconds": _MAX_ARCHIVE_WALL_SECONDS, "tar_decompressed_bytes": _MAX_TAR_DECOMPRESSED_BYTES},
+        {"entries": _MAX_ARCHIVE_ENTRIES, "index_bytes": _MAX_ARCHIVE_INDEX_BYTES, "member_sample_bytes": _MAX_MEMBER_SCAN_BYTES, "archive_sample_bytes": _MAX_ARCHIVE_SCAN_BYTES, "wall_seconds": _MAX_ARCHIVE_WALL_SECONDS, "tar_decompressed_bytes": _MAX_TAR_DECOMPRESSED_BYTES, "uncompressed_bytes": _MAX_DECLARED_UNCOMPRESSED_BYTES, "compression_ratio": int(_HIGH_COMPRESSION_RATIO)},
         outcome="UNKNOWN or partial finding at an index, entry, sample, decompression or wall-time limit",
     )
     domains = ("archives", "filesystem_inventory", "supply_chain")
@@ -444,12 +513,12 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         if family_of(record.file_type) == "zip" or suffix.endswith((
             ".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg", ".nupkg",
         )):
-            return self._zip(path, record)
+            return self._zip(path, record, _Limits())
         if record.file_type == "archive/tar" or suffix.endswith((
             ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
         )):
-            return self._tar(path, record)
-        inspection = _Inspection(record, _archive_format(record))
+            return self._tar(path, record, _Limits())
+        inspection = _Inspection(record, _archive_format(record), _Limits())
         inspection.unsupported = True
         inspection.emit()
         return [Finding(
@@ -465,12 +534,13 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
     def budget_stopped(self, record: FileRecord, stop) -> None:
         """The engine stopped this analyzer on the file: record the archive as budget-stopped."""
-        inspection = _Inspection(record, _archive_format(record))
+        inspection = _Inspection(record, _archive_format(record), _Limits())
         inspection.limit(f"analyzer_{stop.kind}", stop.limit, round(stop.used, 3))
         inspection.emit()
 
-    def _zip(self, path: Path, record: FileRecord) -> list[Finding]:
-        inspection = _Inspection(record, "zip")
+    def _zip(self, path: Path, record: FileRecord, limits: _Limits | None = None) -> list[Finding]:
+        limits = limits or _Limits()
+        inspection = _Inspection(record, "zip", limits)
         index_hint = _zip_index_hint(path, record.analysis_identity)
         if index_hint is None:
             inspection.malformed = "the central directory could not be bounded from its ZIP/ZIP64 trailer"
@@ -486,13 +556,13 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 severity="MEDIUM",
             )]
         entry_count, index_bytes = index_hint
-        if (over_limit(entry_count, _MAX_ARCHIVE_ENTRIES, "entries")
-                or over_limit(index_bytes, _MAX_ARCHIVE_INDEX_BYTES)):
+        if (over_limit(entry_count, limits.entries, "entries")
+                or over_limit(index_bytes, limits.index_bytes)):
             inspection.declared = entry_count
-            if entry_count > _MAX_ARCHIVE_ENTRIES:
-                inspection.limit("entries", _MAX_ARCHIVE_ENTRIES, entry_count)
-            if index_bytes > _MAX_ARCHIVE_INDEX_BYTES:
-                inspection.limit("index_bytes", _MAX_ARCHIVE_INDEX_BYTES, index_bytes)
+            if entry_count > limits.entries:
+                inspection.limit("entries", limits.entries, entry_count)
+            if index_bytes > limits.index_bytes:
+                inspection.limit("index_bytes", limits.index_bytes, index_bytes)
             inspection.emit()
             return [Finding(
                 "archive",
@@ -504,13 +574,13 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 evidence=[
                     f"declared entries: {entry_count:,}",
                     f"central-directory bytes: {index_bytes:,}",
-                    f"entry limit: {_MAX_ARCHIVE_ENTRIES:,}",
-                    f"index-byte limit: {_MAX_ARCHIVE_INDEX_BYTES:,}",
+                    f"entry limit: {limits.entries:,}",
+                    f"index-byte limit: {limits.index_bytes:,}",
                 ],
                 analyzer=self.name,
                 severity="MEDIUM",
             )]
-        deadline = time.monotonic() + _MAX_ARCHIVE_WALL_SECONDS
+        deadline = time.monotonic() + limits.wall_seconds
         time_budget_reached = False
         counts: Counter[str] = Counter()
         unsafe_paths: list[str] = []
@@ -532,7 +602,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     ).items() if count > 1
                 ]
                 collisions = _colliding_names({item.filename for item in infos})
-                for ordinal, info in enumerate(infos[:_MAX_ARCHIVE_ENTRIES]):
+                for ordinal, info in enumerate(infos[:limits.entries]):
                     if time.monotonic() >= deadline:
                         time_budget_reached = True
                         break
@@ -561,7 +631,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                         flags.append(risk)
                     if info.file_size > 0 and (
                         info.compress_size == 0
-                        or info.file_size / max(info.compress_size, 1) > 1000
+                        or info.file_size / max(info.compress_size, 1) > limits.compression_ratio
                     ):
                         high_ratios.append(info.filename)
                         flags.append("high-ratio")
@@ -569,7 +639,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     link_target = None
 
                     if not encrypted_member and kind in {"file", "symlink"}:
-                        remaining = _MAX_ARCHIVE_SCAN_BYTES - content_bytes
+                        remaining = limits.archive_sample_bytes - content_bytes
                         if remaining <= 0:
                             content_truncated += 1
                             inspection.skipped_sample()
@@ -577,7 +647,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             try:
                                 with archive.open(info, "r") as member_stream:
                                     sample, consumed, truncated = _read_member_sample(
-                                        member_stream, remaining, deadline
+                                        member_stream, remaining, deadline, limits.member_sample_bytes
                                     )
                                 content_bytes += consumed
                                 inspection.sample(kind, info.file_size, consumed, truncated, remaining)
@@ -624,12 +694,15 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             )]
 
         inspection.encrypted = encrypted
+        declared_bytes = sum(item.file_size for item in infos)
+        if declared_bytes > limits.uncompressed_bytes:
+            inspection.limit("uncompressed_bytes", limits.uncompressed_bytes, declared_bytes)
         if duplicates:
             inspection.flag_duplicates(item.filename for item in infos)
         if time_budget_reached:
-            inspection.limit("wall_seconds", _MAX_ARCHIVE_WALL_SECONDS)
-        if total > _MAX_ARCHIVE_ENTRIES:
-            inspection.limit("entries", _MAX_ARCHIVE_ENTRIES, total)
+            inspection.limit("wall_seconds", limits.wall_seconds)
+        if total > limits.entries:
+            inspection.limit("entries", limits.entries, total)
         inspection.emit()
         evidence = [
             f"{counts['file']} regular file(s)",
@@ -643,19 +716,19 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         findings = [Finding(
             "archive",
             f"ZIP archive inventory: {record.path}",
-            f"Indexed {min(total, _MAX_ARCHIVE_ENTRIES)} of {total} member(s); "
+            f"Indexed {min(total, limits.entries)} of {total} member(s); "
             f"compressed file size {record.size_bytes:,} bytes. Member bytes were inspected "
             "only through bounded in-memory streams; no member was written to disk.",
             confidence="CONFIRMED",
             evidence=evidence,
             analyzer=self.name,
         )]
-        if over_limit(total, _MAX_ARCHIVE_ENTRIES, "entries"):
+        if over_limit(total, limits.entries, "entries"):
             findings.append(Finding(
                 "archive",
                 f"ZIP entry limit reached: {record.path}",
                 f"Archive contains {total} entries; metadata analysis was limited to "
-                f"{_MAX_ARCHIVE_ENTRIES}.",
+                f"{limits.entries}.",
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
@@ -664,16 +737,18 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         findings.extend(self._risk_findings(
             record, unsafe_paths, symlinks, risky_modes, high_ratios, duplicates, encrypted
         ))
+        if declared_bytes > limits.uncompressed_bytes:
+            findings.append(self._bomb_finding(record, declared_bytes, limits))
         if collisions:
             findings.append(self._collision_finding(record, collisions))
         findings.extend(content_findings)
         if content_truncated:
-            limit_reached("bytes", _MAX_ARCHIVE_SCAN_BYTES)
+            limit_reached("bytes", limits.archive_sample_bytes)
             findings.append(Finding(
                 "archive",
                 f"ZIP member content budget reached: {record.path}",
-                f"Content inspection was limited to {_MAX_ARCHIVE_SCAN_BYTES:,} total "
-                f"in-memory bytes and {_MAX_MEMBER_SCAN_BYTES:,} bytes per member. "
+                f"Content inspection was limited to {limits.archive_sample_bytes:,} total "
+                f"in-memory bytes and {limits.member_sample_bytes:,} bytes per member. "
                 f"{content_truncated} member(s) were not fully inspected.",
                 confidence="UNKNOWN",
                 evidence=[record.path],
@@ -681,11 +756,11 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 severity="LOW",
             ))
         if time_budget_reached:
-            limit_reached("wall_time", _MAX_ARCHIVE_WALL_SECONDS)
+            limit_reached("wall_time", limits.wall_seconds)
             findings.append(Finding(
                 "archive",
                 f"ZIP wall-time budget reached: {record.path}",
-                f"Archive inspection stopped after the {_MAX_ARCHIVE_WALL_SECONDS:g}-second "
+                f"Archive inspection stopped after the {limits.wall_seconds:g}-second "
                 "wall-time budget. Findings already collected are partial; remaining entries "
                 "were not inspected.",
                 confidence="UNKNOWN",
@@ -695,15 +770,16 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             ))
         return findings
 
-    def _tar(self, path: Path, record: FileRecord) -> list[Finding]:
+    def _tar(self, path: Path, record: FileRecord, limits: _Limits | None = None) -> list[Finding]:
         """Traverse every TAR header under budgets; content sampling never ends traversal.
 
         Stopping at the first large member would hide later traversal, link and setuid
         entries, so sampling limits only skip sampling. Compressed streams are read through
         a budgeted reader that enforces wall time and decompressed bytes inside each read.
         """
-        inspection = _Inspection(record, "tar")
-        deadline = time.monotonic() + _MAX_ARCHIVE_WALL_SECONDS
+        limits = limits or _Limits()
+        inspection = _Inspection(record, "tar", limits)
+        deadline = time.monotonic() + limits.wall_seconds
         time_budget_reached = False
         stop_reason: str | None = None
         counts: Counter[str] = Counter()
@@ -717,6 +793,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         content_bytes = 0
         content_truncated = 0
         total = 0
+        declared_bytes = 0
         compressed = False
         try:
             with open_verified_binary(path, record.analysis_identity) as archive_stream:
@@ -731,7 +808,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                         else "bzip2" if isinstance(decompressor, bz2.BZ2File) else "xz"
                     )
                     archive = tarfile.open(
-                        fileobj=_BudgetedReader(decompressor, deadline, _MAX_TAR_DECOMPRESSED_BYTES),
+                        fileobj=_BudgetedReader(decompressor, deadline, limits.tar_decompressed_bytes),
                         mode="r|",
                     )
                 with archive:
@@ -742,9 +819,10 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                 time_budget_reached = True
                                 break
                             total += 1
-                            if total > _MAX_ARCHIVE_ENTRIES:  # recorded with the finding below
+                            if total > limits.entries:  # recorded with the finding below
                                 break
                             names.append(member.name)
+                            declared_bytes += max(0, member.size)
                             if member.isdir():
                                 kind = "directory"
                             elif member.issym():
@@ -778,7 +856,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
                             if kind != "file":
                                 continue
-                            remaining = _MAX_ARCHIVE_SCAN_BYTES - content_bytes
+                            remaining = limits.archive_sample_bytes - content_bytes
                             if remaining <= 0:
                                 content_truncated += 1
                                 inspection.skipped_sample()
@@ -788,7 +866,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                 continue
                             with member_stream:
                                 sample, consumed, truncated = _read_member_sample(
-                                    member_stream, remaining, deadline
+                                    member_stream, remaining, deadline, limits.member_sample_bytes
                                 )
                             content_bytes += consumed
                             inspection.sample(kind, member.size, consumed, truncated, remaining)
@@ -816,19 +894,21 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
 
-        indexed = min(total, _MAX_ARCHIVE_ENTRIES)
-        traversal_complete = not (time_budget_reached or stop_reason or total > _MAX_ARCHIVE_ENTRIES)
+        indexed = min(total, limits.entries)
+        traversal_complete = not (time_budget_reached or stop_reason or total > limits.entries)
         inspection.flag_duplicates(names)
         if traversal_complete:
             inspection.declared = indexed  # every header was read: the archive holds no more
         if compressed:
             inspection.compressed_bytes = record.size_bytes
         if time_budget_reached:
-            inspection.limit("wall_seconds", _MAX_ARCHIVE_WALL_SECONDS)
+            inspection.limit("wall_seconds", limits.wall_seconds)
         if stop_reason and not time_budget_reached:
-            inspection.limit("tar_decompressed_bytes", _MAX_TAR_DECOMPRESSED_BYTES)
-        if total > _MAX_ARCHIVE_ENTRIES:
-            inspection.limit("entries", _MAX_ARCHIVE_ENTRIES)
+            inspection.limit("tar_decompressed_bytes", limits.tar_decompressed_bytes)
+        if total > limits.entries:
+            inspection.limit("entries", limits.entries)
+        if declared_bytes > limits.uncompressed_bytes:
+            inspection.limit("uncompressed_bytes", limits.uncompressed_bytes, declared_bytes)
         inspection.emit()
         findings = [Finding(
             "archive",
@@ -845,11 +925,11 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             analyzer=self.name,
         )]
         if stop_reason and not time_budget_reached:
-            limit_reached("bytes", _MAX_TAR_DECOMPRESSED_BYTES)
+            limit_reached("bytes", limits.tar_decompressed_bytes)
             findings.append(Finding(
                 "archive",
                 f"TAR decompression budget reached: {record.path}",
-                f"Traversal stopped after {_MAX_TAR_DECOMPRESSED_BYTES:,} decompressed bytes. "
+                f"Traversal stopped after {limits.tar_decompressed_bytes:,} decompressed bytes. "
                 "Members after that point were not indexed; this is not a clean result.",
                 confidence="UNKNOWN",
                 evidence=[record.path, f"members_indexed: {indexed:,}"],
@@ -859,11 +939,11 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         collisions = _colliding_names(names)
         if collisions:
             findings.append(self._collision_finding(record, collisions))
-        if over_limit(total, _MAX_ARCHIVE_ENTRIES, "entries"):
+        if over_limit(total, limits.entries, "entries"):
             findings.append(Finding(
                 "archive",
                 f"TAR entry limit reached: {record.path}",
-                f"Metadata traversal stopped after {_MAX_ARCHIVE_ENTRIES} members.",
+                f"Metadata traversal stopped after {limits.entries} members.",
                 confidence="UNKNOWN",
                 evidence=[record.path],
                 analyzer=self.name,
@@ -872,6 +952,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         findings.extend(self._risk_findings(
             record, unsafe_paths, symlinks, risky_modes, [], [], 0
         ))
+        if declared_bytes > limits.uncompressed_bytes:
+            findings.append(self._bomb_finding(record, declared_bytes, limits))
         if hardlinks:
             findings.append(Finding(
                 "archive",
@@ -894,12 +976,12 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             ))
         findings.extend(content_findings)
         if content_truncated:
-            limit_reached("bytes", _MAX_ARCHIVE_SCAN_BYTES)
+            limit_reached("bytes", limits.archive_sample_bytes)
             findings.append(Finding(
                 "archive",
                 f"TAR member content budget reached: {record.path}",
-                f"Content inspection was limited to {_MAX_ARCHIVE_SCAN_BYTES:,} total "
-                f"in-memory bytes and {_MAX_MEMBER_SCAN_BYTES:,} bytes per member. "
+                f"Content inspection was limited to {limits.archive_sample_bytes:,} total "
+                f"in-memory bytes and {limits.member_sample_bytes:,} bytes per member. "
                 f"{content_truncated} member(s) were not fully inspected.",
                 confidence="UNKNOWN",
                 evidence=[record.path],
@@ -907,11 +989,11 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 severity="LOW",
             ))
         if time_budget_reached:
-            limit_reached("wall_time", _MAX_ARCHIVE_WALL_SECONDS)
+            limit_reached("wall_time", limits.wall_seconds)
             findings.append(Finding(
                 "archive",
                 f"TAR wall-time budget reached: {record.path}",
-                f"Archive inspection stopped after the {_MAX_ARCHIVE_WALL_SECONDS:g}-second "
+                f"Archive inspection stopped after the {limits.wall_seconds:g}-second "
                 "wall-time budget. Findings already collected are partial; remaining entries "
                 "were not inspected.",
                 confidence="UNKNOWN",
@@ -920,6 +1002,19 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 severity="LOW",
             ))
         return findings
+
+    def _bomb_finding(self, record: FileRecord, declared_bytes: int, limits: _Limits) -> Finding:
+        return Finding(
+            "security",
+            f"Archive declares more uncompressed data than its budget: {record.path}",
+            f"Its members declare {declared_bytes:,} uncompressed bytes, more than the "
+            f"{limits.uncompressed_bytes:,}-byte budget (--archive-limit uncompressed_mb). Extracting it "
+            "could exhaust disk or memory (an archive bomb); PDT decompressed no more than its bounded samples.",
+            confidence="INFERRED",
+            evidence=[record.path, f"declared uncompressed bytes: {declared_bytes:,}"],
+            analyzer=self.name,
+            severity="HIGH",
+        )
 
     def _collision_finding(self, record: FileRecord, collisions: list[str]) -> Finding:
         return Finding(

@@ -36,16 +36,18 @@ An archive keeps up to 200,000 member records (its entry limit) and a scan up to
 
 ## Resource limits
 
-The current implementation has hard safety limits:
+These are the defaults; `pdt scan --archive-limit NAME=VALUE` overrides any of them for a scan (`entries`, `index_mb`, `member_sample_mb`, `sample_mb`, `wall_seconds`, `decompressed_mb`, `uncompressed_mb`, `ratio`; byte limits in MiB). The overrides travel with the budget policy to every worker process, and `metrics.analysis_budgets` reports them (`analyzer_limit_overrides`) with the values in force (`analyzer_limits`):
 
 - ZIP central-directory preflight: 200,000 entries and 64 MiB of declared central-directory bytes. The ZIP64 record is read the way `zipfile` reads it (whenever its locator precedes the EOCD, from just before the locator), so a classic EOCD that understates the entry count cannot slip past. If a valid bounded index cannot be established from the EOCD/ZIP64 trailer, the analyzer returns UNKNOWN without materializing ZipFile.infolist().
 - Member sample: 1 MiB maximum per regular member.
 - Total member sample: 32 MiB maximum per archive.
 - Compressed TAR (gzip, bzip2, xz): decompressed through a budgeted reader capped at 4 GiB of output. The reader also enforces the wall-time budget inside each read.
 - Wall time: 8 seconds per archive for metadata traversal and member sampling.
+- Declared uncompressed size: 16 GiB per archive. Members declaring more in total get an `INFERRED` HIGH "Archive declares more uncompressed data than its budget" finding (a possible archive bomb) and the archive record the `uncompressed_bytes` limit; traversal continues, since nothing is decompressed past the samples.
+- Compression ratio: members compressed more than 1,000:1, or to zero bytes, are flagged `high-ratio`.
 - Evidence: at most 100 source/member references per finding.
 
-When a count, byte or time budget is reached, the analyzer records an explicit UNKNOWN finding. A partial archive result must not be interpreted as a complete clean scan. These limits are currently code constants, not yet exposed as CLI configuration. Nested archive recursion is not implemented, and ZIP archives have no total-uncompressed-size budget (only per-member and per-archive sample caps).
+When a count, byte or time budget is reached, the analyzer records an explicit UNKNOWN finding. A partial archive result must not be interpreted as a complete clean scan. Nested archive recursion is not implemented.
 
 ## Evidence and checks
 
@@ -64,7 +66,7 @@ The member content scan is a conservative indicator scan, not malware detection,
 
 ## Production gates still open
 
-- CLI-configurable archive byte, entry, nesting, total-uncompressed-byte, compression-ratio, sample and wall-time policies.
+- A nesting-depth budget, with nested archive traversal.
 - Nested archive traversal under a shared recursion/decompression budget.
 - ZIP data-descriptor, self-extracting archive and malformed/truncated-header fixtures.
 - Additional metadata readers for 7z, RAR, CAB, ISO, Zstandard and package formats, using optional offline readers only.

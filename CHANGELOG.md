@@ -228,6 +228,16 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: configurable archive limits
+- `pdt scan --archive-limit NAME=VALUE` (repeatable) overrides an archive inspection limit for the
+  scan: `entries`, `index_mb`, `member_sample_mb`, `sample_mb` (`0` reads no member content),
+  `wall_seconds`, `decompressed_mb`, `uncompressed_mb` and `ratio`. The values travel with the
+  budget policy to the worker processes; `metrics.analysis_budgets` reports the overrides
+  (`analyzer_limit_overrides`) and the values in force in `analyzer_limits`.
+- Members declaring more uncompressed bytes in total than `uncompressed_mb` (16 GiB by default)
+  get an "Archive declares more uncompressed data than its budget" finding, and the high-ratio
+  threshold (1,000:1) is `ratio`.
+
 ### Added: archive inspection records
 - Every inspected archive has a record in the JSON report's `archives` list: its format, a primary
   inspection `state` and every state that applies (detected, index-read, metadata-complete,

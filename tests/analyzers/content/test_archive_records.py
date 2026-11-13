@@ -296,3 +296,54 @@ def test_undecodable_member_names_are_stored_with_backslash_escapes(tmp_path: Pa
     _, members, _ = _inspect(path, "archive/tar")
     # The reader decodes the byte as a lone surrogate; the record keeps it as an escape.
     assert list(members) == ["bad-\\udcff-name.txt"]
+
+
+def test_archive_limits_are_parsed_and_validated():
+    import re
+
+    from project_discovery.analyzers.content.archives import parse_archive_limits
+
+    assert parse_archive_limits(["entries=10", "sample_mb=0", "wall_seconds=2.5", "ratio=50", "entries=12"]) == {
+        "entries": 12, "sample_mb": 0, "wall_seconds": 2.5, "ratio": 50.0}
+    for value, message in (
+        ("depth=2", "expected NAME=VALUE"), ("entries", "expected NAME=VALUE"), ("entries=x", "entries must be a number"),
+        ("entries=0", "a whole number of at least 1"), ("entries=1.5", "a whole number"),
+        ("sample_mb=-1", "a whole number of at least 0"), ("index_mb=inf", "a whole number"),
+        ("wall_seconds=0", "a number above 0"), ("ratio=1", "a number above 1"),
+    ):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            parse_archive_limits([value])
+
+
+def test_a_scans_archive_limits_reach_its_worker_processes(tmp_path: Path):
+    from project_discovery.cli import run_scan
+    from project_discovery.core.limits import limit_overrides
+
+    project = tmp_path / "project"
+    project.mkdir()
+    with zipfile.ZipFile(project / "wide.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        for index in range(3):
+            archive.writestr(f"m{index}.txt", "x")
+    with zipfile.ZipFile(project / "bomb.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("zeros.bin", b"\0" * (2 * 1024 * 1024))
+    output = tmp_path / "out"
+    assert run_scan(project, output, {"json"}, 128, quiet=True, executor="process", jobs=2,
+                    archive_limits=["entries=2", "uncompressed_mb=1", "ratio=10", "member_sample_mb=0"]) == 0
+    assert limit_overrides("archive-intelligence") == {}  # the scan's limits do not outlive it
+    report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
+    by_path = {item["path"]: item for item in report["archives"]}
+    assert by_path["wide.zip"]["state"] == "budget-stopped"
+    assert by_path["wide.zip"]["limits"] == [{"limit": "entries", "value": 2, "used": 3}]
+    assert {item["limit"] for item in by_path["bomb.zip"]["limits"]} == {"uncompressed_bytes", "member_sample_bytes"}
+    assert "Archive declares more uncompressed data than its budget: bomb.zip" in {
+        item["title"] for item in report["findings"]}
+    [zeros] = [item for item in report["archive_members"] if item["archive"] == "bomb.zip"]
+    assert zeros["flags"] == ["high-ratio"]
+    measured = report["metrics"]["analysis_budgets"]
+    assert measured["analyzer_limit_overrides"] == {
+        "archive-intelligence": {"entries": 2, "uncompressed_mb": 1, "ratio": 10.0, "member_sample_mb": 0}}
+    caps = measured["analyzer_limits"]["archive-intelligence"]["caps"]
+    assert (caps["entries"], caps["uncompressed_bytes"], caps["compression_ratio"], caps["member_sample_bytes"]) == (
+        2, 1024 * 1024, 10.0, 0)
+    with pytest.raises(ValueError, match="--archive-limit nested=1"):
+        run_scan(project, tmp_path / "bad", {"json"}, 128, quiet=True, archive_limits=["nested=1"])

@@ -14,7 +14,7 @@ do nothing.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -115,3 +115,23 @@ def over_limit(size: int, limit: int, kind: str = "bytes") -> bool:
         limit_reached(kind, limit, size)
         return True
     return False
+
+
+# ---------------------------------------------------------------------------------------
+# Content limits a scan configures (``pdt scan --archive-limit``), by analyzer name. The
+# engine sets them with its budget policy in every process that runs analyzers; an analyzer
+# reads its own when a call starts and keeps its module defaults for the rest.
+_OVERRIDES: dict[str, dict[str, float]] = {}
+
+
+def configure_limits(overrides: Mapping[str, Mapping[str, float]] | None) -> None:
+    """Replace the configured content-limit overrides ({analyzer name: {limit: value}})."""
+    _OVERRIDES.clear()
+    for name, values in (overrides or {}).items():
+        if values:
+            _OVERRIDES[name] = dict(values)
+
+
+def limit_overrides(analyzer: str) -> Mapping[str, float]:
+    """The content-limit values the scan configured for one analyzer (empty: its defaults)."""
+    return _OVERRIDES.get(analyzer, {})

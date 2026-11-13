@@ -95,6 +95,8 @@ class BudgetPolicy:
     # --max-memory-mb: a call growing past the whole scan's budget would take the scan over
     # it, so it caps every call's memory budget (also an override's, and "no limit").
     scan_memory_mb: int | None = None
+    # Content limits configured per scan, by analyzer (--archive-limit: archive-intelligence).
+    analyzer_limits: dict[str, dict[str, float]] = field(default_factory=dict)
     _cache: dict[tuple[str, tuple[str, ...]], AnalyzerBudget] = field(default_factory=dict, repr=False)
 
     def _capped(self, memory: float | None) -> float | None:
@@ -140,6 +142,7 @@ class BudgetPolicy:
             "cpu_seconds": self.cpu_seconds or None,
             "cpu_enforced": bool(self.cpu_seconds) and cpu_supported(),
             "scan_memory_mb": self.scan_memory_mb or None,
+            "analyzer_limit_overrides": {name: dict(values) for name, values in sorted(self.analyzer_limits.items())},
             "domain_overrides": {
                 domain: {name: (int(self._capped(value)) if name == "memory_mb" and self._capped(value) else value)
                          for name, value in values.items()}
@@ -764,6 +767,9 @@ def set_policy(policy: BudgetPolicy | None) -> None:
     """The budget policy analyzer calls in this process run under (workers set it at start)."""
     global _policy
     _policy = policy or BudgetPolicy()
+    from ..core.limits import configure_limits
+
+    configure_limits(_policy.analyzer_limits)
 
 
 def current_policy() -> BudgetPolicy:

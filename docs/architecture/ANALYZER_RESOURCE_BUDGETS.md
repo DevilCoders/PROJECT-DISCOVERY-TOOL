@@ -46,7 +46,7 @@ Each built-in analyzer declares the limits it applies to one file in its `limits
 | `api-contracts` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth, read or parse failure |
 | `api-endpoints` | stream | 32 MiB | python_ast_bytes 4 MiB; line_chars 262,144; facts 500 | UNKNOWN or partial finding at the byte, Python AST or fact limit |
 | `api-type-classifier` | stream | 32 MiB | line_bytes 256 KiB; evidence_per_style 20 | UNKNOWN or partial finding at the byte limit |
-| `archive-intelligence` | sampled | — | entries 200,000; index_bytes 64 MiB; member_sample_bytes 1 MiB; archive_sample_bytes 32 MiB; wall_seconds 8; tar_decompressed_bytes 4 GiB | UNKNOWN or partial finding at an index, entry, sample, decompression or wall-time limit |
+| `archive-intelligence` | sampled | — | entries 200,000; index_bytes 64 MiB; member_sample_bytes 1 MiB; archive_sample_bytes 32 MiB; wall_seconds 8; tar_decompressed_bytes 4 GiB; uncompressed_bytes 16 GiB; compression_ratio 1,000 | UNKNOWN or partial finding at an index, entry, sample, decompression or wall-time limit |
 | `build-manifests` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth, read or parse failure |
 | `code-index` | model | 4 MiB | — | UNKNOWN finding for a file past the code model budget |
 | `concurrency` | model | 4 MiB | — | Files past the code model budget are not modelled; code-index reports them |
