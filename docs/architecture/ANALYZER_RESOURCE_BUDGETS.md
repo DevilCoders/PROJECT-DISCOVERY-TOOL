@@ -40,13 +40,13 @@ Each built-in analyzer declares the limits it applies to one file in its `limits
 | `dependency-manifests` | whole | 32 MiB | — | UNKNOWN finding on oversize, growth, read or parse failure |
 | `deployment-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
 | `document-formats` | whole | 32 MiB | binary_document_bytes 16 MiB; pdf_pages 5,000; extracted_chars 16,777,216; docx_entries 10,000; docx_uncompressed_bytes 32 MiB | UNKNOWN finding at an input, page, text, entry or uncompressed-byte limit |
-| `embedded` | whole | 4 MiB | — | Skipped; the limit reached is recorded in the budget metrics |
-| `firmware` | sampled | 64 MiB | header_sample_bytes 1 MiB; table_bytes 4 MiB; string_scan_bytes 8 MiB; uf2_blocks 65,536 | Partial header results; an over-budget build file is skipped and the limit recorded |
-| `frontend` | whole | 2 MiB | — | Skipped; the limit reached is recorded in the budget metrics |
+| `embedded` | whole | 4 MiB | — | UNKNOWN finding for a file past the budget |
+| `firmware` | sampled | 64 MiB | header_sample_bytes 1 MiB; table_bytes 4 MiB; string_scan_bytes 8 MiB; uf2_blocks 65,536 | Partial header results; UNKNOWN finding for an over-budget build file |
+| `frontend` | whole | 2 MiB | — | UNKNOWN finding for a file past the budget |
 | `game-engine-intelligence` | whole | 64 MiB | project_file_bytes 16 MiB | UNKNOWN finding on oversize, growth or read failure |
-| `hdl` | whole | 8 MiB | design_units 2,000 | Skipped; the limit reached is recorded in the budget metrics |
+| `hdl` | whole | 8 MiB | design_units 2,000 | UNKNOWN finding for a file past the budget |
 | `identity-intelligence` | whole | 16 MiB | evidence_lines 100 | UNKNOWN finding on oversize, growth, read or AST resource failure |
-| `integration-points` | whole | 2 MiB | facts 400 | Over-budget manifests are skipped and the limit recorded; facts past the cap are not recorded |
+| `integration-points` | whole | 2 MiB | facts 400 | UNKNOWN finding for an over-budget manifest; facts past the cap are not recorded |
 | `license-intelligence` | prefix | 8 MiB | header_window_bytes 64 KiB | Source and license files are checked within the header window; an unparsable manifest is an UNKNOWN finding |
 | `local-vulnerability-intelligence` | whole | 128 MiB | package_entries 250,000 | UNKNOWN finding at the byte or entry limit |
 | `localization-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
@@ -65,11 +65,11 @@ Each built-in analyzer declares the limits it applies to one file in its `limits
 | `ros-intelligence` | whole | 16 MiB | interface_bytes 4 MiB | UNKNOWN finding on oversize, growth or read failure |
 | `secret-patterns` | stream | 64 MiB | chunk_bytes 8 MiB; overlap_chars 4,096; findings 10,000 | UNKNOWN or partial finding at the byte or finding limit |
 | `secure-code-patterns` | whole | 16 MiB | rule_locations 100; excerpts_per_finding 20 | UNKNOWN finding on oversize, growth, read or AST resource failure |
-| `shaders` | whole | 4 MiB | spirv_words 2,000,000 | Skipped; the limit reached is recorded in the budget metrics |
+| `shaders` | whole | 4 MiB | spirv_words 2,000,000 | UNKNOWN finding for a file past the budget |
 | `sql-schema` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
 | `test-discovery` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
 | `tree-sitter-polyglot` | whole | 16 MiB | error_locations 10,000 | UNKNOWN finding on oversize, growth, read or parser failure |
-| `type-systems` | whole | 2 MiB | — | Skipped; the limit reached is recorded in the budget metrics |
+| `type-systems` | whole | 2 MiB | — | UNKNOWN finding for a file past the budget |
 | `vcs-hosting-intelligence` | whole | 2 MiB | — | An unreadable or over-budget file contributes no signals; the limit reached is recorded |
 
 Read modes:

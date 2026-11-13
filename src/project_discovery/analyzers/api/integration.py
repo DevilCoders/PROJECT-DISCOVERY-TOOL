@@ -30,7 +30,7 @@ from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...intelligence.model import model_for
 from ...models import FileRecord, Finding
-from ..base import Analyzer
+from ..base import Analyzer, oversize_finding
 
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_FACTS = 400
@@ -251,7 +251,7 @@ class IntegrationAnalyzer(Analyzer):
         MAX_MANIFEST_BYTES,
         "whole",
         {"facts": MAX_FACTS},
-        outcome="Over-budget manifests are skipped and the limit recorded; facts past the cap are not recorded",
+        outcome="UNKNOWN finding for an over-budget manifest; facts past the cap are not recorded",
     )
     version = "1.0.0"
     description = ("Outbound HTTP calls, message topics, gRPC services and package identity for integration maps "
@@ -269,7 +269,7 @@ class IntegrationAnalyzer(Analyzer):
         name = PurePosixPath(record.path.replace("\\", "/")).name.lower()
         if name in _MANIFESTS or name.endswith((".csproj", ".gemspec")) or record.language == "Protocol Buffers":
             if over_limit(record.size_bytes, MAX_MANIFEST_BYTES):
-                return []
+                return [oversize_finding(self, record, "integration", "Integration manifest", MAX_MANIFEST_BYTES)]
             try:
                 text = read_text_bounded(path, MAX_MANIFEST_BYTES, errors="replace",
                                          expected_identity=record.analysis_identity)

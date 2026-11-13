@@ -30,7 +30,7 @@ from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...intelligence.model import FUNCTION_KINDS, FileModel, model_for
 from ...models import FileRecord, Finding
-from ..base import Analyzer
+from ..base import Analyzer, oversize_finding
 from ..code.findings import code_finding
 
 _MAX_CONFIG_BYTES = 2 * 1024 * 1024
@@ -243,7 +243,7 @@ class FrontendAnalyzer(Analyzer):
     limits = AnalyzerLimits(
         _MAX_CONFIG_BYTES,
         "whole",
-        outcome="Skipped; the limit reached is recorded in the budget metrics",
+        outcome="UNKNOWN finding for a file past the budget",
     )
     version = "1.0.0"
     description = ("Frontend components (React, Vue, Svelte, Angular), component children, hooks, routes, libraries "
@@ -522,7 +522,7 @@ class FrontendAnalyzer(Analyzer):
 
     def _template_file(self, path: Path, record: FileRecord) -> list[Finding]:
         if over_limit(record.size_bytes, _MAX_CONFIG_BYTES):
-            return []
+            return [oversize_finding(self, record, "frontend", "Frontend template", _MAX_CONFIG_BYTES)]
         try:
             text = read_text_bounded(path, _MAX_CONFIG_BYTES, errors="replace", expected_identity=record.analysis_identity)
         except (OSError, SourceBudgetExceeded):
@@ -645,7 +645,7 @@ class FrontendAnalyzer(Analyzer):
     # -- configuration ------------------------------------------------------------------------
     def _config(self, path: Path, record: FileRecord, kind: str) -> list[Finding]:
         if over_limit(record.size_bytes, _MAX_CONFIG_BYTES):
-            return []
+            return [oversize_finding(self, record, "frontend", "Frontend configuration", _MAX_CONFIG_BYTES)]
         try:
             text = read_text_bounded(path, _MAX_CONFIG_BYTES, errors="replace", expected_identity=record.analysis_identity)
         except (OSError, SourceBudgetExceeded):

@@ -60,7 +60,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | GameMaker Project | game_source | inventory | — | — | — | 0 |
 | GDScript | game_source | inventory | — | — | — | 1 |
 | Gettext PO | localization | inventory | — | — | localization-intelligence, secret-patterns | 3 |
-| GLSL | shader | structure | structural lexer | glsl | code-index, concurrency, dataflow, performance-hotspots, resource-management, shaders, tree-sitter-polyglot | 2 |
+| GLSL | shader | structure | structural lexer | glsl | code-index, concurrency, dataflow, performance-hotspots, resource-management, shaders, tree-sitter-polyglot | 3 |
 | Go | source | structure | structural lexer, refined by Tree-sitter `go` | go | code-index, concurrency, coverage-artifacts, dataflow, dependency-lockfiles, identity-intelligence, messaging-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 12 |
 | Godot Resource | game_source | inventory | — | — | — | 1 |
 | Godot Scene | game_source | inventory | — | — | — | 2 |
@@ -71,7 +71,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | HCL | configuration | optional parser | — | hcl | secret-patterns, tree-sitter-polyglot | 4 |
 | HLSL | shader | structure | structural lexer | hlsl | code-index, concurrency, dataflow, performance-hotspots, resource-management, shaders, tree-sitter-polyglot | 1 |
 | HTML | markup | optional parser | — | html | accessibility-markup, secret-patterns, tree-sitter-polyglot | 6 |
-| INI | configuration | inventory | — | — | secret-patterns | 8 |
+| INI | configuration | inventory | — | — | secret-patterns | 9 |
 | Intel HEX | firmware | inventory | — | — | — | 2 |
 | Java | source | structure | structural lexer, refined by Tree-sitter `java` | java | code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 10 |
 | JavaScript | source | structure | structural lexer, refined by Tree-sitter `javascript` | javascript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 28 |
@@ -130,15 +130,15 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Text | documentation | inventory | — | — | secret-patterns | 35 |
 | Thrift | schema | inventory | — | — | — | 0 |
 | TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 6 |
-| TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 18 |
+| TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 19 |
 | UF2 Firmware | firmware | inventory | — | — | — | 2 |
 | Unity Asset YAML | game_source | inventory | — | — | — | 0 |
 | Unity Prefab | game_source | inventory | — | — | — | 0 |
 | Unity Scene | game_source | inventory | — | — | — | 0 |
 | Unreal Binary Asset | binary_asset | inventory | — | — | — | 2 |
 | Unreal Project | configuration | inventory | — | — | secret-patterns | 2 |
-| V | source | inventory | — | — | — | 2 |
-| Verilog | source | optional parser | — | verilog | hdl, tree-sitter-polyglot | 2 |
+| V | source | inventory | — | — | — | 3 |
+| Verilog | source | optional parser | — | verilog | hdl, tree-sitter-polyglot | 3 |
 | VHDL | source | optional parser | — | vhdl | hdl, tree-sitter-polyglot | 4 |
 | Visual Basic .NET | source | inventory | — | — | — | 0 |
 | Vue | source | structure | structural lexer | — | accessibility-markup, code-index, concurrency, dataflow, frontend, performance-hotspots, resource-management, type-systems | 4 |

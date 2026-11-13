@@ -326,8 +326,8 @@ lines, entries or findings), declared in its `limits` attribute and listed in
 `metrics.analysis_budgets` also reports them (`analyzer_limits`), the bytes each analyzer read
 (`bytes_read`, and the largest read with its file), and every content limit a call reached
 (`limits_reached` by kind and up to 100 `limited` entries with the analyzer, file, limit and
-value). A file past an analyzer's byte budget gets that analyzer's `UNKNOWN` finding or, for the
-few analyzers that skip such files, only the limit record.
+value). A file past an analyzer's byte budget gets that analyzer's `UNKNOWN` finding; no analyzer
+skips such a file silently.
 
 Limits of the mechanism:
 

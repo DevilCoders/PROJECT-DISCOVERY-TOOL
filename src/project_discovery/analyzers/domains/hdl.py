@@ -23,7 +23,7 @@ from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
-from ..base import Analyzer
+from ..base import Analyzer, oversize_finding
 
 MAX_HDL_BYTES = 8 * 1024 * 1024
 MAX_UNITS = 2000
@@ -416,7 +416,7 @@ class HardwareDescriptionAnalyzer(Analyzer):
         MAX_HDL_BYTES,
         "whole",
         {"design_units": MAX_UNITS},
-        outcome="Skipped; the limit reached is recorded in the budget metrics",
+        outcome="UNKNOWN finding for a file past the budget",
     )
     version = "1.0.0"
     description = ("Verilog/SystemVerilog/VHDL design units, ports, instances, clocks and RTL lint; FPGA constraints "
@@ -429,7 +429,7 @@ class HardwareDescriptionAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         if over_limit(record.size_bytes, MAX_HDL_BYTES):
-            return []
+            return [oversize_finding(self, record, "hardware_description", "HDL source", MAX_HDL_BYTES)]
         try:
             text = read_text_bounded(path, MAX_HDL_BYTES, errors="replace", expected_identity=record.analysis_identity)
         except (OSError, SourceBudgetExceeded):

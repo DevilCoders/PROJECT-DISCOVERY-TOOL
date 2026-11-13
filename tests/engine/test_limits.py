@@ -1,6 +1,7 @@
 """Declared per-analyzer content limits, byte accounting and the limits a call reaches."""
 from __future__ import annotations
 
+import importlib
 import json
 import re
 from pathlib import Path
@@ -80,6 +81,33 @@ def test_verified_reads_are_accounted_and_overruns_recorded(tmp_path: Path):
             limit_reached("entries", 3, 4)
         assert content_limits.current_account() is outer
     assert (outer.limits, inner.limits) == ([], [("entries", 3.0, 4.0)])
+
+
+@pytest.mark.parametrize(("module", "constant", "name", "language", "subject"), [
+    ("code.type_systems", "_MAX_CONFIG_BYTES", "tsconfig.json", "JSON", "Type checker configuration"),
+    ("domains.embedded", "_MAX_CONFIG_BYTES", "platformio.ini", "INI", "Embedded configuration"),
+    ("domains.frontend", "_MAX_CONFIG_BYTES", "vite.config.ts", "TypeScript", "Frontend configuration"),
+    ("domains.frontend", "_MAX_CONFIG_BYTES", "app.component.html", "HTML", "Frontend template"),
+    ("domains.hdl", "MAX_HDL_BYTES", "top.v", "Verilog", "HDL source"),
+    ("domains.shaders", "MAX_SHADER_BYTES", "light.glsl", "GLSL", "Shader source"),
+    ("domains.firmware", "MAX_TABLE_BYTES", "partitions.csv", "CSV", "Firmware build file"),
+    ("api.integration", "MAX_MANIFEST_BYTES", "package.json", "JSON", "Integration manifest"),
+])
+def test_a_file_past_an_analyzer_budget_is_reported_never_skipped_silently(
+    tmp_path: Path, monkeypatch, module, constant, name, language, subject,
+):
+    imported = importlib.import_module(f"project_discovery.analyzers.{module}")
+    monkeypatch.setattr(imported, constant, 64)
+    [analyzer] = [item for item in builtin_analyzers() if type(item).__module__ == imported.__name__]
+    path = tmp_path / name
+    path.write_bytes(b"x" * 100)
+    record = FileRecord(name, 100, Path(name).suffix, language)
+    assert analyzer.supports(record)
+    with accounting() as account:
+        findings = analyzer.analyze(path, record)
+    assert [(item.title, item.confidence) for item in findings] == [(f"{subject} resource limit: {name}", "UNKNOWN")]
+    assert f"the {analyzer.name} analyzer's 64-byte content budget" in findings[0].detail
+    assert account.limits == [("bytes", 64.0, 100.0)]
 
 
 def test_the_python_syntax_tree_budget_is_recorded_for_every_analyzer_that_asks(monkeypatch):

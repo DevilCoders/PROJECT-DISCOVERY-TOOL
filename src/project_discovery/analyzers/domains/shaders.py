@@ -25,7 +25,7 @@ from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, open_verified_binary, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
-from ..base import Analyzer
+from ..base import Analyzer, oversize_finding
 
 MAX_SHADER_BYTES = 4 * 1024 * 1024
 MAX_SPIRV_WORDS = 2_000_000
@@ -128,7 +128,7 @@ class ShaderAnalyzer(Analyzer):
         MAX_SHADER_BYTES,
         "whole",
         {"spirv_words": MAX_SPIRV_WORDS},
-        outcome="Skipped; the limit reached is recorded in the budget metrics",
+        outcome="UNKNOWN finding for a file past the budget",
     )
     version = "1.0.0"
     description = ("Shader stages, entry points and resource bindings (GLSL, HLSL, WGSL, Metal, Godot, ShaderLab) and "
@@ -145,7 +145,7 @@ class ShaderAnalyzer(Analyzer):
             if kind == "binary":
                 return self._binary(path, record)
             if over_limit(record.size_bytes, MAX_SHADER_BYTES):
-                return []
+                return [oversize_finding(self, record, "graphics_shaders", "Shader source", MAX_SHADER_BYTES)]
             text = read_text_bounded(path, MAX_SHADER_BYTES, errors="replace", expected_identity=record.analysis_identity)
         except (OSError, SourceBudgetExceeded, struct.error):
             return []

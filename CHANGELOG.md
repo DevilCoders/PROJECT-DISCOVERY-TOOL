@@ -259,9 +259,10 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   caps. `metrics.analysis_budgets` adds `analyzer_limits`, `limits_reached`, `limited` and, per
   analyzer, `bytes_read`, `max_bytes_read`, `max_bytes_path` and `limits_reached`; the Markdown
   "Analyzer Budgets" section (with a table of the declared limits) and an HTML "Analyzer reads"
-  card show them, and the terminal summary counts the limits reached. The type-system, embedded, frontend, HDL, shader,
-  firmware and integration-point analyzers skip a file past their byte budget without a
-  finding; those skips are now counted as limits reached.
+  card show them, and the terminal summary counts the limits reached.
+- The type-system, embedded, frontend, HDL, shader, firmware and integration-point analyzers
+  skipped a file past their byte budget without a finding; they now report it as an `UNKNOWN`
+  "resource limit" finding, counted as a limit reached (PDT-423).
 - A content budget an analyzer lets escape (a bounded read that raises, a Python module past the
   syntax-tree budget) is reported as `Analyzer content limit reached: NAME: PATH`, no longer as
   `Analyzer failed`.

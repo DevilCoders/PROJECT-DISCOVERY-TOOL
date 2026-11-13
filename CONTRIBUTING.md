@@ -15,7 +15,7 @@ A pull request that changes `src/` or `native/` without changing `CHANGELOG.md` 
 
 - Documentation describes what the code does. Plans belong in the [roadmap](docs/project/ROADMAP.md), whose checkboxes are ticked only for work implemented end to end and tested.
 - [CAPABILITY_MATRIX.md](docs/architecture/CAPABILITY_MATRIX.md) is generated: after changing languages, grammars, analyzers, domains or the files tests use, run `python tools/capability_matrix.py --write`.
-- The per-analyzer limit table in [ANALYZER_RESOURCE_BUDGETS.md](docs/architecture/ANALYZER_RESOURCE_BUDGETS.md) is generated from each analyzer's `limits` declaration: after changing one, run `python tools/analyzer_limits.py --write`. A new analyzer declares its limits, and records a cap it reaches with `limit_reached` or `over_limit` (`core/limits.py`).
+- The per-analyzer limit table in [ANALYZER_RESOURCE_BUDGETS.md](docs/architecture/ANALYZER_RESOURCE_BUDGETS.md) is generated from each analyzer's `limits` declaration: after changing one, run `python tools/analyzer_limits.py --write`. A new analyzer declares its limits, records a cap it reaches with `limit_reached` or `over_limit` (`core/limits.py`), and reports a file past its byte budget with `oversize_finding` (`analyzers/base.py`), never by skipping it silently.
 - `tests/test_documentation.py` checks the README figures, documented `pdt` options, links and anchors, the capability matrix, and plugin API version 1 against the code.
 
 ## Tests

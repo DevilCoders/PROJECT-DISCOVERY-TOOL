@@ -6,6 +6,20 @@ from ..core.limits import AnalyzerLimits
 from ..models import FileRecord, Finding
 
 
+def oversize_finding(analyzer: "Analyzer", record: FileRecord, category: str, subject: str,
+                     limit: int) -> Finding:
+    """The UNKNOWN finding for a file past an analyzer's byte budget, which it did not analyze.
+
+    Record the limit first (``core.limits.over_limit``), so the budget metrics count it too.
+    """
+    return Finding(
+        category, f"{subject} resource limit: {record.path}",
+        f"File size {record.size_bytes:,} bytes exceeds the {analyzer.name} analyzer's {limit:,}-byte "
+        "content budget, so the file was not analyzed. This is not a clean result.",
+        confidence="UNKNOWN", evidence=[record.path], analyzer=analyzer.name, severity="LOW",
+    )
+
+
 class Analyzer(ABC):
     """Base class for local, read-only project analyzers.
 

@@ -31,7 +31,7 @@ from ...core.source_utils import SourceBudgetExceeded, open_verified_binary, rea
 from ...intelligence import facts as code_facts
 from ...inventory.signatures import family_of
 from ...models import FileRecord, Finding
-from ..base import Analyzer
+from ..base import Analyzer, oversize_finding
 
 MAX_HEADER_BYTES = 1024 * 1024
 MAX_TABLE_BYTES = 4 * 1024 * 1024
@@ -152,7 +152,7 @@ class FirmwareAnalyzer(Analyzer):
         MAX_TEXT_IMAGE_BYTES,
         "sampled",
         {"header_sample_bytes": MAX_HEADER_BYTES, "table_bytes": MAX_TABLE_BYTES, "string_scan_bytes": MAX_STRING_SCAN_BYTES, "uf2_blocks": MAX_UF2_BLOCKS},
-        outcome="Partial header results; an over-budget build file is skipped and the limit recorded",
+        outcome="Partial header results; UNKNOWN finding for an over-budget build file",
     )
     version = "1.0.0"
     description = ("Firmware images and binaries (ELF, HEX, S-record, UF2, DTB/FIT, uImage, Android boot, ESP32, "
@@ -168,7 +168,7 @@ class FirmwareAnalyzer(Analyzer):
             if kind == "binary":
                 return self._binary(path, record)
             if over_limit(record.size_bytes, MAX_TABLE_BYTES):
-                return []
+                return [oversize_finding(self, record, "firmware", "Firmware build file", MAX_TABLE_BYTES)]
             text = read_text_bounded(path, MAX_TABLE_BYTES, errors="replace",
                                      expected_identity=record.analysis_identity)
         except (OSError, SourceBudgetExceeded, struct.error):

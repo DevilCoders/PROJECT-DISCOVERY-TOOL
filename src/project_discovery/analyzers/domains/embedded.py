@@ -24,7 +24,7 @@ from ...core.source_utils import SourceBudgetExceeded, read_text_bounded
 from ...intelligence import facts as code_facts
 from ...intelligence.model import FUNCTION_KINDS, model_for
 from ...models import FileRecord, Finding
-from ..base import Analyzer
+from ..base import Analyzer, oversize_finding
 from ..code.findings import code_finding
 
 _MAX_CONFIG_BYTES = 4 * 1024 * 1024
@@ -191,7 +191,7 @@ class EmbeddedAnalyzer(Analyzer):
     limits = AnalyzerLimits(
         _MAX_CONFIG_BYTES,
         "whole",
-        outcome="Skipped; the limit reached is recorded in the budget metrics",
+        outcome="UNKNOWN finding for a file past the budget",
     )
     version = "1.0.0"
     description = ("Embedded targets (PlatformIO, ESP-IDF, Zephyr, STM32CubeMX, Rust), memory maps, device trees, "
@@ -207,7 +207,7 @@ class EmbeddedAnalyzer(Analyzer):
         if kind == "source":
             return self._source(path, record)
         if over_limit(record.size_bytes, _MAX_CONFIG_BYTES):
-            return []
+            return [oversize_finding(self, record, "embedded", "Embedded configuration", _MAX_CONFIG_BYTES)]
         try:
             text = read_text_bounded(path, _MAX_CONFIG_BYTES, errors="replace",
                                      expected_identity=record.analysis_identity)
