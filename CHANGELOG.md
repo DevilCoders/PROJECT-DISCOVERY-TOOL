@@ -147,6 +147,9 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   `dedup`, `af_unix`, ...), counted in `metrics.reparse_tags`. AF_UNIX sockets and WSL FIFOs and
   device nodes, which both walkers reported as regular files, are special entries. The Rust
   walker reports device numbers as a 16th field.
+- Link fixtures: broken, self, cyclic, dangling-relative, chained, absolute-internal and external
+  symbolic links, and broken and external Windows junctions, are each recorded once with their
+  target text and lexical scope by both walkers, and nothing behind them is read.
 - Report schema 1.9: `mtime_ns` and `reparse_tag` on directory, symlink and special-entry
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
