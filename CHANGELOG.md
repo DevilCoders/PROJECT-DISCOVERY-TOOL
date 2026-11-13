@@ -228,6 +228,14 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: socket call sites in code
+- `network-sockets`: the listeners (bind, listen, accept, server constructors), outbound connections
+  and sockets code opens, by each language's API: Python from its syntax tree with imports resolved;
+  Go, JavaScript/TypeScript, Java, Kotlin, Scala, Groovy, C#, C, C++, Rust, PHP, Swift and Dart from
+  the structural lexer; Ruby from the text. Literal addresses and ports are given, and an explicit bind
+  to every interface (`0.0.0.0`, `::`) is a MEDIUM finding. Declarations (a port in configuration, a
+  `PORT` constant) stay network indicators, so call sites and declarations are told apart.
+
 ### Added: network host-name edge cases
 - Zone-scoped IPv6 addresses keep their zone (`fe80::1%eth0`; `[fe80::1%25eth0]` in a URL).
 - Internationalized domain names: Unicode and IDNA (`xn--`) labels are one name, listed with the

@@ -77,6 +77,7 @@ def builtin_analyzers() -> list[Analyzer]:
     from .environment.network import NetworkIndicatorAnalyzer
     from .environment.observability import ObservabilityAnalyzer
     from .environment.operating_systems import OperatingSystemAnalyzer
+    from .environment.sockets import SocketCallSiteAnalyzer
     from .security.dataflow import DataFlowAnalyzer
     from .security.identity import IdentityIntelligenceAnalyzer
     from .security.privacy import DataExposureAnalyzer
@@ -103,6 +104,7 @@ def builtin_analyzers() -> list[Analyzer]:
         ArchiveIntelligenceAnalyzer(),
         DataExposureAnalyzer(),
         NetworkIndicatorAnalyzer(),
+        SocketCallSiteAnalyzer(),
         OperatingSystemAnalyzer(),
         APITypeAnalyzer(),
         DependencyManifestAnalyzer(),

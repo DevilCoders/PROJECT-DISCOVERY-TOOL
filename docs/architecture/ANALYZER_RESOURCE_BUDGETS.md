@@ -73,6 +73,7 @@ Each built-in analyzer declares the limits it applies to one file in its `limits
 | `migration-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
 | `mobile-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
 | `network-indicators` | stream | 64 MiB | line_bytes 256 KiB; indicators 25,000; evidence_lines 100 | UNKNOWN or partial finding at the byte, line or indicator limit |
+| `network-sockets` | model | 4 MiB | call_sites 1,000; evidence_lines 100 | Files past the code model budget are not modelled (code-index reports them; an oversized Ruby file is an UNKNOWN finding); call sites past the per-file limit are an UNKNOWN finding |
 | `nosql-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
 | `observability-intelligence` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
 | `operating-system-intelligence` | stream | — | chars 67,108,864; line_chars 262,144; evidence_lines 20 | UNKNOWN finding when the character budget is reached |
