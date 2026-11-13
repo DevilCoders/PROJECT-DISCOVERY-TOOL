@@ -39,6 +39,7 @@ class PrismaSchemaAnalyzer(Analyzer):
 
     name = "prisma-schema"
     domains = ("orm", "databases_sql",)
+    languages = ("Prisma",)
 
     def supports(self, record: FileRecord) -> bool:
         return record.extension == ".prisma" and record.error is None

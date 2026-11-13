@@ -13,6 +13,7 @@ from ..base import Analyzer
 class PythonAnalyzer(Analyzer):
     name = "python-ast"
     domains = ("source_structure", "symbol_index", "imports",)
+    languages = ("Python",)
     def supports(self, record: FileRecord) -> bool:
         return (
             record.extension in {".py", ".pyi"}

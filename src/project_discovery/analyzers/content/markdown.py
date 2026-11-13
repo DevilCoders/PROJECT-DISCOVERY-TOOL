@@ -25,6 +25,7 @@ def _heading_title(raw: str) -> str:
 class MarkdownAnalyzer(Analyzer):
     name = "markdown"
     domains = ("documentation",)
+    languages = ("Markdown",)
     def supports(self, record: FileRecord) -> bool:
         return record.extension == ".md" and record.error is None
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:

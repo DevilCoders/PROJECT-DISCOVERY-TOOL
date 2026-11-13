@@ -415,6 +415,7 @@ class HardwareDescriptionAnalyzer(Analyzer):
     description = ("Verilog/SystemVerilog/VHDL design units, ports, instances, clocks and RTL lint; FPGA constraints "
                    "and project targets.")
     domains = ("hardware_description",)
+    languages = ("Verilog", "SystemVerilog", "VHDL", "FPGA Constraints", "FPGA Project")
 
     def supports(self, record: FileRecord) -> bool:
         return record.error is None and record.content_skipped_reason is None and _hdl_kind(record) is not None

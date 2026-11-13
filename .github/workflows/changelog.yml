@@ -1,0 +1,32 @@
+name: Changelog
+
+# A pull request that changes the product says so in CHANGELOG.md (see CONTRIBUTING.md). Its own
+# workflow, so adding or removing the skip-changelog label re-runs only this check.
+on:
+  pull_request:
+    branches: [master, main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Require a changelog entry for code changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed="$(git diff --name-only "$BASE"...HEAD)"
+          if printf '%s\n' "$changed" | grep -qE '^(src|native)/' \
+              && ! printf '%s\n' "$changed" | grep -qx 'CHANGELOG.md'; then
+            echo "::error::src/ or native/ changed without a CHANGELOG.md entry: add one, or label the pull request skip-changelog (CONTRIBUTING.md)."
+            exit 1
+          fi
+          echo "Changelog requirement met."

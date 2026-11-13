@@ -127,6 +127,7 @@ class ShaderAnalyzer(Analyzer):
     description = ("Shader stages, entry points and resource bindings (GLSL, HLSL, WGSL, Metal, Godot, ShaderLab) and "
                    "compiled shaders (SPIR-V, DXBC/DXIL, metallib).")
     domains = ("graphics_shaders",)
+    languages = (*sorted(_SOURCE_LANGUAGES), "SPIR-V Binary")
 
     def supports(self, record: FileRecord) -> bool:
         return record.error is None and record.content_skipped_reason is None and _shader_kind(record) is not None

@@ -26,7 +26,7 @@ PDT scans a local directory or a remote repository, inventories every file, dire
 | Domains | Embedded and firmware, HDL/FPGA with an elaborated design hierarchy, shaders, frontend components, AI/ML including notebooks, ROS, mobile, game engines, accessibility, localization and archives |
 | Multi-project | Report comparison, integration maps and a local project catalog |
 
-PDT recognizes 128 languages and formats (81 source languages) and maps 61 optional Tree-sitter grammars. Recognition, parsing and semantic analysis are distinct capability levels, and each language and analyzer reports its own: see [Polyglot Parsers](docs/architecture/POLYGLOT_PARSERS.md) and [Analyzer Coverage](docs/architecture/ANALYZER_COVERAGE.md).
+PDT recognizes 128 languages and formats (81 source languages) and maps 61 optional Tree-sitter grammars. Recognition, parsing and semantic analysis are distinct capability levels; the generated [Capability Matrix](docs/architecture/CAPABILITY_MATRIX.md) gives each language's level and analyzers, and [Analyzer Coverage](docs/architecture/ANALYZER_COVERAGE.md) what each domain covers.
 
 ## Installation
 
@@ -134,6 +134,6 @@ Plugins depend only on `project_discovery.analyzers.base` and `project_discovery
 
 ## Documentation
 
-[Documentation index](docs/README.md) · [Roadmap](docs/project/ROADMAP.md) · [Audit and defect register](docs/project/AUDIT.md) · [Changelog](CHANGELOG.md)
+[Documentation index](docs/README.md) · [Roadmap](docs/project/ROADMAP.md) · [Audit and defect register](docs/project/AUDIT.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
 This branch is unmerged; only the repository owner decides when it is merged.

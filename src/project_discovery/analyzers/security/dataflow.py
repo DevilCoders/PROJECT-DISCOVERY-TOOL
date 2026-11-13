@@ -160,9 +160,11 @@ def _followed(target: str) -> bool:
 class DataFlowAnalyzer(Analyzer):
     name = "dataflow"
     version = "1.0.0"
-    description = ("Taint tracking from untrusted input (web requests, sockets, stdin) to SQL, command, "
-                   "code, deserialization, template, path, SSRF, XSS and redirect sinks.")
+    description = ("Taint tracking from untrusted input (web requests and sockets; stdin, argv and the environment "
+                   "in C/C++) to SQL, command, code, deserialization, template, path, SSRF, XSS and redirect sinks.")
     domains = ("dataflow",)
+    # Python, and every lexically modelled language whose group has taint rules.
+    languages = ("Python", *sorted(name for name, group in LEXICAL_LANGUAGES.items() if group in RULES))
 
     def supports(self, record: FileRecord) -> bool:
         if record.error or record.content_skipped_reason:

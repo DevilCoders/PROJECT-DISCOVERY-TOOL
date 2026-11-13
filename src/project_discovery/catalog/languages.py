@@ -210,6 +210,15 @@ def language_catalog() -> list[dict[str, str | None]]:
     return result
 
 
+def language_files() -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """(extensions, file names) by which each catalog language is recognized."""
+    found: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+    for spec in _SPECS:
+        extensions, filenames = found.get(spec.name, ((), ()))
+        found[spec.name] = (extensions + spec.extensions, filenames + spec.filenames)
+    return found
+
+
 def recognized_language_count() -> int:
     return len({spec.name for spec in _SPECS})
 

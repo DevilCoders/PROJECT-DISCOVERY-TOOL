@@ -191,6 +191,7 @@ class EmbeddedAnalyzer(Analyzer):
     description = ("Embedded targets (PlatformIO, ESP-IDF, Zephyr, STM32CubeMX, Rust), memory maps, device trees, "
                    "RTOS usage and interrupt-handler safety.")
     domains = ("embedded",)
+    languages = tuple(sorted(_SOURCE_LANGUAGES))
 
     def supports(self, record: FileRecord) -> bool:
         return record.error is None and record.content_skipped_reason is None and _kind(record) is not None

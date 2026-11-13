@@ -5,6 +5,7 @@
 - [Native execution backend](architecture/NATIVE_ENGINE.md): native extensions, bounded concurrent analysis, persistence and resume.
 - [Code intelligence](architecture/CODE_INTELLIGENCE.md): the shared code model, code facts, the cross-file index and the domain analyzers built on them.
 - [Polyglot parsing](architecture/POLYGLOT_PARSERS.md): the language catalog, capability levels and optional Tree-sitter grammars.
+- [Capability matrix](architecture/CAPABILITY_MATRIX.md): every language and analyzer domain with its level, analyzers and test fixtures (generated).
 - [Analyzer domain coverage](architecture/ANALYZER_COVERAGE.md): what each analyzer domain covers today.
 - [Analyzer resource budgets](architecture/ANALYZER_RESOURCE_BUDGETS.md): per-analyzer byte, entry and time limits.
 - [Fingerprint cache](architecture/CACHE.md): incremental hashing and how cached digests are validated.
@@ -35,4 +36,4 @@
 ## Project
 - [Production roadmap](project/ROADMAP.md): the plan and the verified status of every capability.
 - [Production-readiness audit](project/AUDIT.md): the audit and its defect register.
-- [Changelog](../CHANGELOG.md)
+- [Changelog](../CHANGELOG.md) and [contribution rules](../CONTRIBUTING.md)

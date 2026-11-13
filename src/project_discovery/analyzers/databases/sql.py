@@ -80,6 +80,7 @@ class SQLSchemaAnalyzer(Analyzer):
 
     name = "sql-schema"
     domains = ("databases_sql", "migrations",)
+    languages = ("SQL",)
 
     def supports(self, record: FileRecord) -> bool:
         return record.extension == ".sql" and record.error is None

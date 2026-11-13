@@ -243,6 +243,7 @@ class FrontendAnalyzer(Analyzer):
     description = ("Frontend components (React, Vue, Svelte, Angular), component children, hooks, routes, libraries "
                    "and bundler configuration.")
     domains = ("frontend",)
+    languages = (*sorted(_SCRIPT_LANGUAGES), "Astro")
 
     def supports(self, record: FileRecord) -> bool:
         if record.error or record.content_skipped_reason:
