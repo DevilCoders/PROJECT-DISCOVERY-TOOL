@@ -32,8 +32,10 @@ from typing import Any, Literal, Sequence
 # metrics.native_backend.gpu_enabled (GPU counting is opt-in, --gpu) and the gpu_status "disabled",
 # and the GPU counters count the scan's own dispatches and fallbacks. 1.19 added to
 # metrics.analysis_budgets the read and CPU budgets (read_mb, cpu_seconds, cpu_enforced and the
-# read and cpu stop counts), scan_memory_mb and the scan_memory block (--max-memory-mb).
-REPORT_SCHEMA_VERSION = "1.19"
+# read and cpu stop counts), scan_memory_mb and the scan_memory block (--max-memory-mb). 1.20
+# added metrics.performance.phases: the scan's six phases (inventory, hashing, analyzer
+# domains, archive inspection, correlation, reporting) with their state, time and counts.
+REPORT_SCHEMA_VERSION = "1.20"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

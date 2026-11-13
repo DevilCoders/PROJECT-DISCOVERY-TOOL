@@ -110,6 +110,12 @@ def test_no_download_scan_end_to_end_for_each_provider(provider, tmp_path: Path,
     assert remote["revision"] == COMMIT and remote["branch"] == "main"
     assert remote["credential_source"] == f"env:{variable}"
     assert remote["files_fetched"] >= 8
+    # Fetched content is hashed and analyzed in memory: the same phases as a local scan.
+    phases = {item["phase"]: item for item in report["metrics"]["performance"]["phases"]}
+    assert [phases[key]["state"] for key in ("inventory", "hashing", "analysis", "archives", "correlation")] == [
+        "done"] * 5
+    assert phases["hashing"]["done"] == remote["files_fetched"] and phases["hashing"]["bytes"] > 0
+    assert phases["analysis"]["done"] == phases["analysis"]["total"] == len(report["files"])
 
     files = {item["path"]: item for item in report["files"]}
     assert files["assets/big.bin"]["size_bytes"] == 1536 * 1024

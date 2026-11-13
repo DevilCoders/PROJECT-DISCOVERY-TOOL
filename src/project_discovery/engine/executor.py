@@ -74,6 +74,8 @@ class FileOutcome:
     budget_usage: list[tuple[str, float, float | None, int]] = field(default_factory=list)
     budget_stops: list[tuple[str, str, float, float]] = field(default_factory=list)
     limit_hits: list[tuple[str, str, float, float]] = field(default_factory=list)
+    # Seconds spent reading and hashing the file (0 when the fingerprint cache had its digest).
+    hash_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -188,6 +190,7 @@ def analyze_file(analyzers, locks, task: FileTask) -> FileOutcome:
     record, path = task.record, Path(task.path)
     outcome = FileOutcome(digest=task.digest_hint)
     content = None
+    started = time.perf_counter()
     try:
         verified_regular_file_stat(path, task.expected_stat)
         if record.size_bytes <= PREFETCH_MAX_BYTES:
@@ -198,8 +201,10 @@ def analyze_file(analyzers, locks, task: FileTask) -> FileOutcome:
                 raise OSError(f"file changed while being read: {path}")
             if outcome.digest is None:
                 outcome.digest = hashlib.sha256(content).hexdigest()
+                outcome.hash_seconds = time.perf_counter() - started
         elif outcome.digest is None:
             outcome.digest = sha256_file(path, expected_info=task.expected_stat)
+            outcome.hash_seconds = time.perf_counter() - started
     except OSError as exc:
         outcome.file_error = f"{record.path}: {type(exc).__name__}: {exc}"
         outcome.errors.append(outcome.file_error)

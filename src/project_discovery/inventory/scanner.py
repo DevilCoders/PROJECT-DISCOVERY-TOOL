@@ -675,6 +675,7 @@ def discover_inventory(
     security_metadata: bool = False,
     exclude_profiles: frozenset[str] = frozenset(),
     development_trees: str = "deep",
+    counters: Counter[str] | None = None,
 ) -> tuple[
     Sequence[FileRecord],
     Sequence[DirectoryRecord],
@@ -695,6 +696,8 @@ def discover_inventory(
     ``exclude_profiles`` prunes the confirmed and distinctively named development trees of
     those --exclude-profile presets (see ``markers``); ``development_trees`` (deep, inventory
     or directory-only) decides what is recorded and read inside the other such trees.
+    ``counters``, an empty Counter, receives the walk's counters as it goes (entry_count,
+    total_bytes, ...), so a progress display can read them while the walk runs.
     """
     if security_metadata and not security_supported():
         raise ValueError("--security-metadata reads Windows security descriptors and Linux POSIX ACLs only")
@@ -710,7 +713,7 @@ def discover_inventory(
     validate_tree_mode(development_trees)
 
     excluded_names, excluded_paths = normalize_exclusions(ignores, root)
-    stats: Counter[str] = Counter()
+    stats: Counter[str] = counters if counters is not None else Counter()
     try:
         root_info = root.stat()
         root_mode = _mode(root_info)

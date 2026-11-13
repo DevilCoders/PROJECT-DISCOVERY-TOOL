@@ -401,10 +401,26 @@ They never trigger `--fail-on`; `--strict` gates on completeness and counts ever
 finding above INFO. The FAILED line names the counts behind it. Entries whose metadata
 could not be read during the walk are listed as diagnostics in every report.
 
+## Scan progress
+
+While a scan runs, the terminal shows one row per phase, redrawn a few times a second:
+
+| Phase | Shows |
+|---|---|
+| Inventory | entries, files and bytes walked so far |
+| Hashing | files and bytes hashed, throughput, digests the fingerprint cache supplied |
+| Analyzer domains | files analyzed of the total, a progress bar, the time left at the current rate, and analyzer calls in the busiest domains |
+| Archive inspection | archives inspected of the archive files the inventory found |
+| Correlation | the step running (inventory aggregates, online advisories, the Python dependency graph, the architecture layout, the code index) and each step's time |
+| Reporting | the format being written and each format's time |
+
+Hashing, the analyzer domains and archive inspection share one pass over the files (each file is read once, hashed and analyzed in a worker), so they run at the same time. Each row shows its state (`....` waiting, a spinner while running, `done`, `skip`) and its time. Redirected to a file or a pipe, the rows are printed once, when the reports are written, without control sequences; `--quiet` hides them. The rows show counts only, never paths.
+
 ## Performance data
 
 Every JSON report contains `metrics.performance`:
 
+- `phases`: the six phases above, in order, each with its `state` (`waiting`, `running`, `done` or `skipped` with a `note`), `seconds` (its wall time once done), `done` and `total` in its `unit`, and what is particular to it: `bytes` and `files` (inventory); `bytes`, `reused` and `work_seconds`, the time the workers spent reading and hashing (hashing); `domains`, analyzer calls and time per analyzer domain (analyzer domains; an analyzer in several domains counts in each); `work_seconds` (archive inspection); `steps` with their seconds (correlation and reporting). The reports are written in the reporting phase, so they record it as `running` with the `formats` requested; the terminal shows its time. The Markdown report has a *Scan Phases* section and the HTML report a *Scan phases* card.
 - `phase_seconds`: inventory, analysis, cache_maintenance, online_vulnerabilities (with
   `--vuln-online`), python_graph, architecture, code_index and shutdown (the worker pool and
   plugin hosts). Report writing comes after the JSON report is assembled, so its time is not in

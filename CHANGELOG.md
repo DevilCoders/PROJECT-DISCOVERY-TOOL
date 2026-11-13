@@ -228,6 +228,19 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: scan progress by phase
+- The terminal shows one live row per scan phase in place of the single analysis progress bar:
+  inventory (entries, files and bytes walked, read from the walk's own counters), hashing (files
+  and bytes hashed, throughput, digests from the fingerprint cache), analyzer domains (a progress
+  bar, the time left and analyzer calls in the busiest domains), archive inspection (archives
+  inspected of the archive files found), correlation and reporting (the step running and each
+  step's time). Redirected output prints the rows once, without control sequences; `--quiet`
+  hides them.
+- `metrics.performance.phases` records each phase's state, time and counts, including the
+  workers' hashing and archive-inspection time and analyzer calls and time per analyzer domain;
+  the Markdown report has a *Scan Phases* section and the HTML report a *Scan phases* card.
+- Report schema 1.20: `metrics.performance.phases`.
+
 ### Added: analyzer budgets
 - Every built-in and in-process plugin analyzer call on a file runs under a time budget,
   `pdt scan --analyzer-timeout SECONDS` (default 120), and a memory budget,

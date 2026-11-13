@@ -119,6 +119,22 @@ def family_of(label: str | None) -> str | None:
     return None if kind is None else kind.family
 
 
+ARCHIVE_EXTENSIONS = frozenset({
+    ".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg",
+    ".nupkg", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".zst", ".7z", ".rar",
+    ".cab", ".iso", ".deb", ".rpm",
+})
+# Signature families that are archives whatever their label: Office Open XML, OpenDocument,
+# EPUB, APK and PyTorch files are ZIP archives, static libraries ar archives.
+ARCHIVE_FAMILIES = frozenset({"zip", "tar", "gzip", "bzip2", "xz", "zstandard", "7z", "rar", "cab", "ar", "rpm", "cpio"})
+
+
+def is_archive(record) -> bool:
+    """Whether a file record is an archive the archive analyzer inspects (by type or name)."""
+    return (record.file_type.startswith("archive/") or family_of(record.file_type) in ARCHIVE_FAMILIES
+            or record.extension in ARCHIVE_EXTENSIONS)
+
+
 def _le(data: bytes, offset: int, width: int) -> int:
     return int.from_bytes(data[offset:offset + width], "little")
 
@@ -1802,6 +1818,8 @@ def count_classification(stats, record) -> None:
         stats[f"type_mismatch:{record.name_type} → {record.file_type}"] += 1
     if record.signature == _LFS.label:
         stats["git_lfs_pointer_count"] += 1
+    if is_archive(record):
+        stats["archive_file_count"] += 1  # the archive inspection phase's total
 
 
 def render_cpp_rules() -> str:

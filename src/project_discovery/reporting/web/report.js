@@ -67,6 +67,15 @@ fillBars("entry-attributes",metrics.entry_attributes);
 const aggregates=metrics.inventory_aggregates||{};
 fillBars("fan-out",(aggregates.fan_out||{}).buckets);
 fillBars("mime-types",metrics.mime_types);
+{const phases=(metrics.performance||{}).phases||[],seconds={},list=$("scan-phases");
+ for(const item of phases)if(item.seconds!=null)seconds[item.label]=item.seconds;
+ fillBars("phase-time",seconds);list.replaceChildren();
+ if(!phases.length)list.textContent="Phases not recorded";
+ for(const item of phases){const row=document.createElement("div");
+  row.textContent=item.label+": "+item.state+(item.state==="skipped"&&item.note?" ("+item.note+")":"")+" / "+
+   number(item.done)+(item.total!=null?" of "+number(item.total):"")+" "+item.unit+
+   (item.bytes?" / "+number(Math.round(item.bytes/10485.76)/100)+" MiB":"")+(item.reused?" / "+number(item.reused)+" from the cache":"");
+  list.append(row);}}
 const budgets=metrics.analysis_budgets||{};
 {const seconds={};for(const [name,entry] of Object.entries(budgets.analyzers||{}))seconds[name]=Math.round(entry.seconds*100)/100;
  fillBars("analyzer-time",seconds);

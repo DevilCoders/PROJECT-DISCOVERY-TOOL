@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 from collections import Counter
+from collections.abc import Callable
 from importlib.resources import files as resource_files
 from itertools import islice
 from pathlib import Path
@@ -143,6 +144,45 @@ def size_text(value: Any) -> str:
     return f"{value:,.0f} bytes"
 
 
+def duration_text(seconds: Any) -> str:
+    """"0.4 s", "1:02:03"; "-" when not measured."""
+    if seconds is None:
+        return "-"
+    seconds = float(seconds)
+    if seconds < 60:
+        return f"{seconds:.1f} s"
+    whole = int(seconds)
+    return f"{whole // 3600}:{whole // 60 % 60:02d}:{whole % 60:02d}"
+
+
+def phase_text(item: dict[str, Any]) -> str:
+    """What one scan phase did: "1,234 entries / 980 files / 56 MiB", "150 of 150 files / ...", ..."""
+    key, done, total = item.get("phase"), item.get("done", 0), item.get("total")
+    if item.get("state") == "skipped":
+        return f"skipped: {item.get('note') or 'not run'}"
+    if key == "inventory":
+        files = f" / {item['files']:,} files" if item.get("files") is not None else ""
+        return f"{done:,} entries{files} / {size_text(item.get('bytes', 0))}"
+    if key == "hashing":
+        text = f"{done:,} files / {size_text(item.get('bytes', 0))} hashed"
+        return text + (f" / {item['reused']:,} digests from the fingerprint cache" if item.get("reused") else "")
+    if key == "analysis":
+        text = f"{done:,} of {total:,} files" if total is not None else f"{done:,} files"
+        domains = list((item.get("domains") or {}).items())
+        if domains:
+            text += " / analyzer calls: " + ", ".join(f"{name} {value['calls']:,}" for name, value in domains[:4])
+            text += f", +{len(domains) - 4} more domains" if len(domains) > 4 else ""
+        return text
+    if key == "archives":
+        return f"{done:,} of {total:,} archives" if total is not None else f"{done:,} archives"
+    steps = ", ".join(f"{name.replace('_', ' ')} {duration_text(value)}"
+                      for name, value in (item.get("steps") or {}).items())
+    if key == "reporting":
+        formats = ", ".join(item.get("formats") or [])
+        return steps or (f"{formats} (being written)" if formats else "no report")
+    return steps or "no step ran"
+
+
 def cap_text(name: str, value: Any) -> str:
     """One declared cap for people: "line_bytes 256 KiB", "findings 10,000"."""
     if name.endswith("_bytes"):
@@ -201,6 +241,29 @@ def scan_memory_text(scan: dict[str, Any] | None) -> str:
     text += f", {scan.get('waits', 0):,} wait(s)"
     over = scan.get("over_budget_submissions", 0)
     return text + (f", {over:,} batch(es) queued over it" if over else "")
+
+
+def _write_markdown_phases(line, phases: list[dict[str, Any]]) -> None:
+    line("## Scan Phases")
+    line()
+    line("Hashing, the analyzer domains and archive inspection share one pass over the files, so they run "
+         "together; their work time is summed over the workers. The reports are written in the reporting "
+         "phase, so they record it as running.")
+    line()
+    line("| Phase | State | Time | Work time | Progress |")
+    line("|---|---|---:|---:|---|")
+    for item in phases:
+        line(f"| {_md(item.get('label', item.get('phase')))} | {_md(item.get('state'))} | "
+             f"{duration_text(item.get('seconds'))} | {duration_text(item.get('work_seconds'))} | "
+             f"{_md(phase_text(item))} |")
+    domains = next((item.get("domains") for item in phases if item.get("phase") == "analysis"), None) or {}
+    if domains:
+        line()
+        line("| Analyzer domain | Analyzer calls | Analyzer time |")
+        line("|---|---:|---:|")
+        for name, value in domains.items():
+            line(f"| {_md(name)} | {value.get('calls', 0):,} | {duration_text(value.get('seconds'))} |")
+    line()
 
 
 def _write_markdown_budgets(line, budgets: dict[str, Any]) -> None:
@@ -591,6 +654,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>Directory fan-out</h3><div id="fan-out"></div></div>
      <div class="profile-card"><h3>MIME types</h3><div id="mime-types"></div></div>
      <div class="profile-card"><h3>Host & native engine</h3><div id="host-os" class="mono muted"></div></div>
+     <div class="profile-card"><h3>Scan phases (seconds)</h3><div id="scan-phases" class="mono muted"></div><div id="phase-time"></div></div>
      <div class="profile-card"><h3>Analyzer time (seconds)</h3><div id="analyzer-budgets" class="muted"></div><div id="analyzer-time"></div></div>
      <div class="profile-card"><h3>Analyzer reads (MiB)</h3><div id="analyzer-limits" class="muted"></div><div id="analyzer-bytes"></div><details><summary>Declared content limits</summary><div id="analyzer-declared" class="mono muted"></div></details></div>
      <div class="profile-card"><h3>Vulnerability intelligence</h3><div id="vuln-summary" class="mono muted"></div></div>
@@ -949,6 +1013,9 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     ):
         line(value)
     _write_markdown_source(line, metrics, summary)
+    phases = (metrics.get("performance") or {}).get("phases")
+    if phases:
+        _write_markdown_phases(line, phases)
     if metrics.get("analysis_budgets") and execution.get("analysis_mode") != "inventory-only":
         _write_markdown_budgets(line, metrics["analysis_budgets"])
     line("## File Type Distribution")
@@ -1292,22 +1359,23 @@ def write_remote_batch_summary(
     return [json_path, markdown_path]
 
 
-def write_reports(result: ScanResult, output: Path, formats: set[str]) -> list[Path]:
+def write_reports(result: ScanResult, output: Path, formats: set[str],
+                  on_format: Callable[[str], None] | None = None) -> list[Path]:
+    """Write the requested formats in order (JSON, Markdown, HTML); ``on_format`` is told
+    each format before it is written (the scan's reporting phase)."""
     output.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    if "json" in formats:
-        path = output / "discovery-report.json"
+    for name, filename, writer in (
+        ("json", "discovery-report.json", _write_json_report),
+        ("markdown", "discovery-report.md", _write_markdown_report),
+        ("html", "discovery-report.html", _write_html_report),
+    ):
+        if name not in formats:
+            continue
+        if on_format is not None:
+            on_format(name)
+        path = output / filename
         with path.open("w", encoding="utf-8", errors="backslashreplace", newline="\n") as stream:
-            _write_json_report(stream, result)
-        written.append(path)
-    if "markdown" in formats:
-        path = output / "discovery-report.md"
-        with path.open("w", encoding="utf-8", errors="backslashreplace", newline="\n") as stream:
-            _write_markdown_report(stream, result)
-        written.append(path)
-    if "html" in formats:
-        path = output / "discovery-report.html"
-        with path.open("w", encoding="utf-8", errors="backslashreplace", newline="\n") as stream:
-            _write_html_report(stream, result)
+            writer(stream, result)
         written.append(path)
     return written

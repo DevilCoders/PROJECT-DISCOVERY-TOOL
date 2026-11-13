@@ -1025,7 +1025,7 @@ def test_security_metadata_reaches_every_report_and_strict(tmp_path: Path, capsy
     output = tmp_path / "out"
     assert run_scan(project, output, {"json", "markdown", "html"}, 128, quiet=True, security_metadata=True) == 0
     report = _json_report(output)
-    assert report["schema_version"] == "1.19"
+    assert report["schema_version"] == "1.20"
     security = report["metrics"]["security_metadata"]
     assert (security["enabled"], security["entries"], security["errors"]) == (True, 2, 0)
     for record in (report["files"][0], report["directories"][0]):

@@ -11,27 +11,21 @@ import sqlite3
 import sys
 import time
 from collections import Counter, deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
 from rich.table import Table
 from rich.text import Text
 
 from . import __version__
 from .analyzers import load_analyzers
 from .analyzers.code.tree_sitter_syntax import GRAMMARS, parser_capabilities
+from .analyzers.content.archives import ArchiveIntelligenceAnalyzer
 from .analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
 from .analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
 from .catalog.domains import analyzer_domain_catalog, analyzer_domain_count
@@ -50,6 +44,7 @@ from .engine.executor import (
     verified_regular_file_stat,
 )
 from .engine.metrics import PhaseTimer, peak_rss_bytes
+from .engine.progress import ScanProgress
 from .engine.native import capabilities as native_capabilities
 from .engine.native import GPU_DEFAULT_THRESHOLD_BYTES, gpu_configuration, native_available, probe_gpu
 from .intelligence.architecture import analyze_project_architecture
@@ -116,6 +111,7 @@ from .plugins.isolation import (
 )
 from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
+from .reporting.terminal import PhaseDisplay
 from .reporting.writers import (
     aggregate_summary, attribute_summary, budget_summary, development_summary, gpu_fallback_text,
     gpu_status_text, tree_mode_summary, type_summary,
@@ -332,6 +328,44 @@ class _BudgetUsage:
             "limited": self.limited,
             "analyzers": analyzers,
         }
+
+
+_FILE_PASS_PHASES = ("hashing", "analysis", "archives")
+
+
+@contextmanager
+def _file_pass_phases(phases: ScanProgress, analyzers, file_count: int, walk_stats, inventory_only: bool
+                      ) -> Iterator[None]:
+    """Hashing, the analyzer domains and archive inspection: one pass over the files."""
+    if inventory_only:
+        for key in _FILE_PASS_PHASES:
+            phases.skip(key, "--inventory-only reads no file contents")
+        yield
+        return
+    phases.set_analyzer_domains(analyzers)
+    phases.begin("hashing")
+    phases.begin("analysis", total=file_count)
+    # Counted while the files were classified: in the walk, or (no-download) as they are fetched.
+    phases.begin("archives", total=walk_stats.get("archive_file_count"))
+    yield
+    phases.finish("hashing")
+    phases.finish("analysis")
+    phases.finish("archives", total=walk_stats.get("archive_file_count", 0))
+
+
+def _count_file_phases(phases: ScanProgress, outcome, hashed: bool, size: int) -> None:
+    """One file's part in hashing (or a digest the fingerprint cache supplied), the analyzer
+    domains and archive inspection."""
+    if outcome.digest:
+        if hashed:
+            phases.advance("hashing", size=size, work_seconds=outcome.hash_seconds)
+        else:
+            phases.advance("hashing", 0, reused=1)
+    usage = outcome.budget_usage or ()
+    phases.analyzer_calls(usage)
+    for name, seconds, *_ in usage:
+        if name == ArchiveIntelligenceAnalyzer.name:
+            phases.advance("archives", work_seconds=seconds)
 
 
 def _whole(value: float | None) -> float | int | None:
@@ -662,9 +696,13 @@ def run_scan(
         development_trees=development_trees,
     )
 
+    # The scan's phases (inventory, hashing, analyzer domains, archive inspection, correlation,
+    # reporting), shown live from the walk to the reports and recorded in metrics.performance.
+    phases = ScanProgress()
     # One scan per output directory: a second scan cleared the shared inventory under the
     # first, and both reports mixed two roots.
-    with output_lock(output), gpu_configuration(gpu, gpu_min_mb * 1024 * 1024):
+    with output_lock(output), gpu_configuration(gpu, gpu_min_mb * 1024 * 1024), \
+            PhaseDisplay(console, phases) as display:
         # Validate the advisory database before the (potentially long) inventory walk.
         vulnerability_db_status = {"enabled": False, "advisory_count": 0}
         if vulnerability_db is not None:
@@ -730,6 +768,7 @@ def run_scan(
                 console, "WARNING",
                 "No completed inventory of this root to resume; starting a fresh scan.", "yellow",
             )
+        display.start()
         if resumed:
             # Continue the interrupted scan: reuse its inventory and stored findings, and skip
             # files whose analysis already completed. New or removed files are not picked up.
@@ -738,6 +777,7 @@ def run_scan(
             directories = StoredRecordSequence(inventory_path, "directory", DirectoryRecord)
             symlinks = StoredRecordSequence(inventory_path, "symlink", SymlinkRecord)
             special_entries = StoredRecordSequence(inventory_path, "special", SpecialEntryRecord)
+            phases.skip("inventory", "resumed from the stored inventory")
         else:
             moved = set_aside_unreadable_database(inventory_path)
             if moved is not None:
@@ -745,9 +785,10 @@ def run_scan(
                         f"{moved.name}; this scan rebuilds it.")
                 storage_notes.append(note)
                 _status(console, "WARNING", note, "yellow")
-            with InventoryStore(inventory_path) as inventory_store, console.status(
-                "Inventorying filesystem entries…", spinner="dots",
-            ):
+            walk_counters: Counter = Counter()  # the walk's counters, read live by the display
+            phases.begin("inventory")
+            phases.watch_walk(walk_counters)
+            with InventoryStore(inventory_path) as inventory_store:
                 if memory_source is not None:
                     records, directories, symlinks, special_entries, walk_stats = memory_source.build_inventory(
                         inventory_store, ignores=ignores,
@@ -765,7 +806,15 @@ def run_scan(
                         security_metadata=security_metadata,
                         exclude_profiles=exclude_profiles,
                         development_trees=development_trees,
+                        counters=walk_counters,
                     )
+            phases.finish("inventory")
+        phases.walked(
+            walk_stats.get("entry_count") or len(records) + max(0, len(directories) - 1) + len(symlinks)
+            + len(special_entries),
+            len(records), walk_stats.get("total_bytes", 0),
+        )
+        if not resumed:
             for value in unused_exclusions(walk_stats, excluded_names, excluded_paths):
                 note = f"--exclude-dir {value} matched no directory, so nothing was pruned for it."
                 storage_notes.append(note)
@@ -799,13 +848,6 @@ def run_scan(
                 if len(record_updates) >= RECORD_UPDATE_BATCH:
                     commit_record_updates()
 
-        progress_columns = (
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-        )
         plugin_work_dir = output / ".pdt-cache" / "plugins"
         shutil.rmtree(plugin_work_dir, ignore_errors=True)  # staging left by a killed scan
         plugin_policy = PluginPolicy(
@@ -856,8 +898,7 @@ def run_scan(
                     # "history not imported" stay report metadata only.
                     finding_store.extend_diagnostics(source_metadata.get("coverage_gaps", []))
                     finding_store.extend_findings(_remote_coverage_findings(source_metadata))
-                with Progress(*progress_columns, console=console) as progress:
-                    task = progress.add_task("Analyzing project files", total=len(records))
+                with _file_pass_phases(phases, analyzers, len(records), walk_stats, inventory_only):
                     max_pending = max(2, engine.workers * 2)
                     pending: deque = deque()
                     batch: list[FileTask] = []
@@ -908,6 +949,7 @@ def run_scan(
                             worker_gpu[2].update(outcome.gpu_counts[2])
                         cache_miss = item.digest_hint is None
                         budget_usage.add(record.path, outcome)
+                        _count_file_phases(phases, outcome, cache_miss, record.size_bytes)
                         try:
                             record.analyzed = outcome.analyzed
                             finding_store.extend_findings(outcome.findings)
@@ -956,7 +998,7 @@ def run_scan(
                             finding_store.append_diagnostic(message)
                         finally:
                             persist_record(record)
-                            progress.advance(task)
+                            phases.advance("analysis")
 
                     def apply_memory_result(record, outcome, reason, fetched_size):
                         count_classification(walk_stats, record)
@@ -973,6 +1015,7 @@ def run_scan(
                             record.analyzed = outcome.analyzed
                             record.sha256 = outcome.digest
                             budget_usage.add(record.path, outcome)
+                            _count_file_phases(phases, outcome, True, fetched_size)
                             finding_store.extend_findings(outcome.findings)
                             if outcome.facts:
                                 finding_store.extend_code_facts(record.path, outcome.facts)
@@ -992,14 +1035,14 @@ def run_scan(
                                 for ancestor in memory_source.ancestors(record.path):
                                     finding_store.adjust_directory(ancestor, total_bytes_delta=delta)
                         persist_record(record)
-                        progress.advance(task)
+                        phases.advance("analysis")
 
                     def eligible_memory_records():
                         for record in records:
                             counts[record.language] += 1
                             if record.error or record.content_skipped_reason or inventory_only:
                                 count_classification(walk_stats, record)
-                                progress.advance(task)
+                                phases.advance("analysis")
                                 continue
                             yield record
 
@@ -1018,11 +1061,11 @@ def run_scan(
                                 if inventory_error_count <= MAX_INVENTORY_ERROR_DIAGNOSTICS:
                                     finding_store.append_diagnostic(f"{record.path}: inventory error: {record.error}")
                             if record.error or record.content_skipped_reason or inventory_only:
-                                progress.advance(task)
+                                phases.advance("analysis")
                                 continue
                             if resumed and record.sha256:
                                 resumed_skipped += 1
-                                progress.advance(task)
+                                phases.advance("analysis")
                                 continue
                             path = root / record.path
                             try:
@@ -1053,7 +1096,7 @@ def run_scan(
                                 record.error = str(exc)
                                 finding_store.append_diagnostic(record.path + ": " + str(exc))
                                 persist_record(record)
-                                progress.advance(task)
+                                phases.advance("analysis")
                                 continue
                             batch.append(FileTask(record, str(path), digest_hint, file_stat, change_ns))
                             batch_bytes += record.size_bytes
@@ -1078,6 +1121,8 @@ def run_scan(
                 timer.lap("cache_maintenance")
 
             with InventoryStore(inventory_path) as finding_store:
+                phases.begin("correlation", total=2 + (online_vulnerabilities is not None) + 2 * (not inventory_only))
+                phases.step("correlation", "inventory_aggregates")
                 aggregates = inventory_aggregates(finding_store, scan_started_ns=scan_started_ns)
                 if memory_source is not None:
                     memory_metadata = memory_source.finalize()
@@ -1105,6 +1150,7 @@ def run_scan(
                         ))
                 if online_vulnerabilities is not None:
                     # Coordinator only: worker processes never touch the network.
+                    phases.step("correlation", "online_vulnerabilities")
                     vulnerability_db_status["online"] = _run_online_vulnerability_lookup(
                         console, online_vulnerabilities, root, records, finding_store,
                         inventory_only=inventory_only, memory_source=memory_source,
@@ -1114,6 +1160,7 @@ def run_scan(
                     python_graph = {"summary": {"skipped": "inventory-only scan"}}
                     graph_findings = []
                 else:
+                    phases.step("correlation", "python_graph")
                     python_graph, graph_findings = analyze_python_dependencies(
                         root, records, finding_sink=finding_store.append_finding, store=finding_store,
                         import_parser=(
@@ -1125,6 +1172,7 @@ def run_scan(
                         ),
                     )
                 timer.lap("python_graph")
+                phases.step("correlation", "architecture")
                 architecture_layout, architecture_findings = analyze_project_architecture(records, store=finding_store)
                 finding_store.extend_findings(graph_findings)
                 finding_store.extend_findings(architecture_findings)
@@ -1133,9 +1181,11 @@ def run_scan(
                     code_index = {"skipped": "inventory-only scan"}
                 else:
                     # Symbol index, call graph, module graph and other cross-file passes.
+                    phases.step("correlation", "code_index")
                     code_index, index_findings = analyze_code_index(inventory_path, records)
                     finding_store.extend_findings(index_findings)
                 timer.lap("code_index")
+                phases.finish("correlation")
         except BaseException:
             engine.shutdown(cancel=True)  # also stops plugin hosts
             shutil.rmtree(plugin_work_dir, ignore_errors=True)
@@ -1143,6 +1193,9 @@ def run_scan(
         engine.shutdown()
         shutil.rmtree(plugin_work_dir, ignore_errors=True)
         timer.lap("shutdown")  # the worker pool, plugin hosts and their staging folder
+        # The reports are written in this phase, so they record it as running.
+        phases.begin("reporting", total=len(formats))
+        phases.annotate("reporting", formats=[name for name in ("json", "markdown", "html") if name in formats])
         findings = StoredFindingRecords(inventory_path)
         errors = StoredDiagnosticRecords(inventory_path)
         domain_catalog = analyzer_domain_catalog()
@@ -1338,6 +1391,8 @@ def run_scan(
             "code_index": code_index,
             "performance": {
                 "phase_seconds": dict(timer.phases),
+                # Inventory, hashing, analyzer domains, archive inspection, correlation, reporting.
+                "phases": phases.describe(),
                 "elapsed_seconds_before_reporting": timer.elapsed(),
                 "files_per_second": round(len(records) / max(timer.elapsed(), 1e-9), 1),
                 "bytes_per_second": round(walk_stats.get("total_bytes", 0) / max(timer.elapsed(), 1e-9)),
@@ -1353,8 +1408,10 @@ def run_scan(
             symlinks=symlinks,
             special_entries=special_entries,
         )
-        reports = write_reports(result, output, formats)
+        reports = write_reports(result, output, formats, on_format=lambda name: phases.step("reporting", name))
         timer.lap("reporting")
+        phases.finish("reporting")
+        display.stop()  # the final phase rows, before the report paths and the summary
         for report in reports:
             _status(console, "SUCCESS", "Report: " + str(report), "green")
 

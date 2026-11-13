@@ -525,7 +525,9 @@ class NoDownloadSource:
                 return record, None, reason, 0
             path = self.virtual_root / record.path
             apply_classification(record, classify_content(content, record.path))
-            outcome = FileOutcome(digest=hashlib.sha256(content).hexdigest())
+            started = time.perf_counter()
+            digest = hashlib.sha256(content).hexdigest()
+            outcome = FileOutcome(digest=digest, hash_seconds=time.perf_counter() - started)
             with prefetched_content(path, content, None), collecting_facts() as facts:
                 _run_analyzers(analyzers, locks, record, path, outcome)
                 if record.extension in {".py", ".pyi"} and len(content) <= MAX_GRAPH_AST_FILE_BYTES:
