@@ -228,6 +228,16 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: 7z and RAR readers
+- 7z: the header, decompressed when 7-Zip packed it (LZMA, LZMA2, Deflate, BZip2, Copy), with each
+  member's size (solid folders included), time, attributes and Unix mode, the folders' coders and
+  their AES encryption; stored members are sampled in place. An encrypted header makes the archive
+  `encrypted`, now a primary state, with a MEDIUM finding. Checked against archives 7-Zip writes.
+- RAR 4 and 5: the block headers, each checked against its CRC, with names (RAR 4 Unicode names
+  too), sizes, times, modes, encryption, RAR 5 symlinks, hard links and owners, and members that
+  span volumes; link targets that escape are traversal findings, and outside solid archives a
+  member compressed past the ratio is `high-ratio`. Stored members are sampled in place.
+
 ### Added: ISO 9660 images and single compressed files
 - ISO 9660 images, whatever their name: the Rock Ridge tree (POSIX names, modes, owners, symlinks,
   relocated deep directories) or the Joliet or primary tree, multi-extent files, El Torito and UDF

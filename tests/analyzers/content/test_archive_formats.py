@@ -131,8 +131,8 @@ def _deb(data_compress="xz", control_compress="gz", data_members=None) -> bytes:
     ("app.jar", "text", "zip"), ("broken.deb", "binary/unknown", "ar"), ("broken.cab", "unknown", "cab"),
     ("broken.gz", "binary/unknown", "stream"), ("broken.iso", "unknown", "iso"),
     # ... but not when the content is another archive format.
-    ("misnamed.zip", "archive/rar", None), ("setup.cab", "archive/installshield-cab", None),
-    ("backup.gz", "archive/7z", None),
+    ("misnamed.zip", "archive/rar", "rar"), ("backup.gz", "archive/7z", "7z"), ("x.rar", "archive/rar", "rar"),
+    ("misnamed.zip", "archive/xar", None), ("setup.cab", "archive/installshield-cab", None),
 ])
 def test_archives_are_dispatched_by_content_family_then_by_name(name, file_type, reader):
     assert _reader(FileRecord(name, 10, Path(name).suffix, "Archive", file_type=file_type)) == reader

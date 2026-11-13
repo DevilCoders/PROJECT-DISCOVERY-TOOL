@@ -1,10 +1,12 @@
 """Metadata readers for archive formats beyond ZIP and TAR: ar (Debian packages and static
-libraries), Microsoft Cabinet, RPM and ISO 9660 images; the metadata of single compressed
-files (gzip, bzip2, xz, LZMA, Zstandard); and the Zstandard decompressor the TAR reader uses.
+libraries), Microsoft Cabinet, RPM, ISO 9660 images, 7z and RAR (4 and 5); the metadata of
+single compressed files (gzip, bzip2, xz, LZMA, Zstandard); and the Zstandard decompressor
+the TAR reader uses.
 
 Each archive reader parses the format's own headers from a seekable binary stream, returns at
-most ``max_entries`` member entries and decompresses no member data; a DEB's control tarball,
-a few KiB, is the one exception, read for its package fields under a decompressed-byte cap.
+most ``max_entries`` member entries and decompresses no member data (a 7z header 7-Zip packed
+is decompressed, under the index budget); a DEB's control tarball, a few KiB, is the one
+exception, read for its package fields under a decompressed-byte cap.
 Malformed input raises ``ArchiveFormatError``, an index larger than its budget
 ``ArchiveLimitError`` and a format variant without a reader ``ArchiveUnsupportedError``. The
 standard library suffices, except for Zstandard before Python 3.14, which needs the optional
@@ -20,6 +22,7 @@ import stat
 import struct
 import tarfile
 import time
+import zlib
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -40,6 +43,10 @@ class ArchiveLimitError(Exception):
 
 class ArchiveUnsupportedError(Exception):
     """A variant of the format that has no built-in reader (a UDF-only disc image)."""
+
+
+class ArchiveEncryptedError(Exception):
+    """The archive's index is encrypted (a 7z header packed with AES)."""
 
 
 @dataclass(slots=True)
@@ -1077,3 +1084,596 @@ def read_compressed(stream: BinaryIO, size: int, codec: str, max_index_bytes: in
         dictionary, declared = struct.unpack_from("<LQ", head, 1)
         return {"dictionary_bytes": dictionary, "content_bytes": None if declared == (1 << 64) - 1 else declared}
     raise ValueError(f"unknown codec {codec!r}")
+
+
+# ---------------------------------------------------------------------------------------
+# 7z
+
+_7Z_SIGNATURE = b"7z\xbc\xaf\x27\x1c"
+_7Z_CODERS = {b"\x00": "copy", b"\x03\x01\x01": "lzma", b"\x21": "lzma2", b"\x03\x03\x01\x03": "bcj",
+              b"\x03\x03\x01\x1b": "bcj2", b"\x03\x03\x02\x05": "ppc", b"\x03\x03\x04\x01": "ia64",
+              b"\x03\x03\x05\x01": "arm", b"\x03\x03\x07\x01": "armt", b"\x03\x03\x08\x05": "sparc",
+              b"\x0a": "arm64", b"\x03": "delta", b"\x03\x04\x01": "ppmd", b"\x04\x01\x08": "deflate",
+              b"\x04\x01\x09": "deflate64", b"\x04\x02\x02": "bzip2", b"\x04\xf7\x11\x01": "zstd",
+              b"\x06\xf1\x07\x01": "aes"}
+_FILETIME_EPOCH = 11_644_473_600  # seconds from 1601-01-01 to 1970-01-01
+
+
+def _filetime(value: int) -> str | None:
+    return _utc(value / 10_000_000 - _FILETIME_EPOCH) if value else None
+
+
+class _Cursor:
+    """A position in a 7z header, reading its variable-length numbers and bit vectors."""
+
+    def __init__(self, data: bytes) -> None:
+        self.data, self.position = data, 0
+
+    def byte(self) -> int:
+        if self.position >= len(self.data):
+            raise ArchiveFormatError("a truncated 7z header")
+        self.position += 1
+        return self.data[self.position - 1]
+
+    def take(self, count: int) -> bytes:
+        if count < 0 or self.position + count > len(self.data):
+            raise ArchiveFormatError("a truncated 7z header")
+        self.position += count
+        return self.data[self.position - count:self.position]
+
+    def number(self) -> int:
+        first, mask, value = self.byte(), 0x80, 0
+        for index in range(8):
+            if not first & mask:
+                return value | ((first & (mask - 1)) << (8 * index))
+            value |= self.byte() << (8 * index)
+            mask >>= 1
+        return value
+
+    def count(self, limit: int) -> int:
+        """A count that must not exceed ``limit`` (what the rest of the header could hold)."""
+        value = self.number()
+        if value > limit:
+            raise ArchiveFormatError(f"a 7z header count of {value:,} past what the header holds")
+        return value
+
+    def bits(self, count: int) -> list[bool]:
+        data = self.take((count + 7) // 8)
+        return [bool(data[index // 8] & (0x80 >> (index % 8))) for index in range(count)]
+
+    def defined(self, count: int) -> list[bool]:
+        return [True] * count if self.byte() else self.bits(count)
+
+
+@dataclass(slots=True)
+class _Folder:
+    coders: list[tuple[str, bytes]]  # (method, properties), in the folder's order
+    outputs: int  # coder output streams, each with an unpack size
+    packed_streams: int  # the folder's packed input streams
+    main_output: int  # the output no bind pair consumes: the folder's content
+    unpack_sizes: list[int] = field(default_factory=list)
+    streams: int = 1  # files (substreams) the folder holds
+    crc_known: bool = False
+    pack_bytes: int = 0
+    pack_offset: int = 0  # where its first packed stream starts in the file
+
+    @property
+    def size(self) -> int:
+        return self.unpack_sizes[self.main_output] if self.main_output < len(self.unpack_sizes) else 0
+
+
+def _7z_folder(cursor: _Cursor) -> _Folder:
+    coders, total_in, total_out = [], 0, 0
+    for _ in range(cursor.count(64)):
+        flags = cursor.byte()
+        if flags & 0x80:
+            raise ArchiveFormatError("a 7z coder with alternative methods")
+        method = cursor.take(flags & 0x0F)
+        inputs, outputs = (cursor.count(64), cursor.count(64)) if flags & 0x10 else (1, 1)
+        properties = cursor.take(cursor.count(len(cursor.data))) if flags & 0x20 else b""
+        coders.append((_7Z_CODERS.get(method, method.hex()), properties))
+        total_in, total_out = total_in + inputs, total_out + outputs
+    if not total_out:
+        raise ArchiveFormatError("a 7z folder without coders")
+    bound: set[int] = set()
+    for _ in range(total_out - 1):  # bind pairs: (input index, output index)
+        cursor.count(total_in)
+        bound.add(cursor.count(total_out))
+    packed = total_in - (total_out - 1)
+    if packed < 1:
+        raise ArchiveFormatError("a 7z folder without a packed stream")
+    if packed > 1:
+        for _ in range(packed):
+            cursor.count(total_in)
+    main = next((index for index in range(total_out) if index not in bound), 0)
+    return _Folder(coders, total_out, packed, main)
+
+
+def _7z_streams(cursor: _Cursor) -> tuple[int, list[int], list[_Folder], list[int] | None]:
+    """A StreamsInfo block: (pack position, pack sizes, folders, file sizes by substream)."""
+    pack_position, pack_sizes, folders, sizes = 0, [], [], None
+    while True:
+        kind = cursor.byte()
+        if kind == 0x00:
+            break
+        if kind == 0x06:  # PackInfo
+            pack_position = cursor.number()
+            pack_sizes = [0] * cursor.count(len(cursor.data))
+            while (item := cursor.byte()) != 0x00:
+                if item == 0x09:
+                    pack_sizes = [cursor.number() for _ in pack_sizes]
+                elif item == 0x0A:
+                    cursor.take(4 * sum(cursor.defined(len(pack_sizes))))
+                else:
+                    raise ArchiveFormatError(f"an unknown 7z pack property {item}")
+        elif kind == 0x07:  # UnPackInfo
+            if cursor.byte() != 0x0B:
+                raise ArchiveFormatError("no folders in a 7z unpack block")
+            count = cursor.count(len(cursor.data))
+            if cursor.byte():
+                raise ArchiveFormatError("7z folders stored outside the header")
+            folders = [_7z_folder(cursor) for _ in range(count)]
+            if cursor.byte() != 0x0C:
+                raise ArchiveFormatError("no unpack sizes in a 7z unpack block")
+            for folder in folders:
+                folder.unpack_sizes = [cursor.number() for _ in range(folder.outputs)]
+            while (item := cursor.byte()) != 0x00:
+                if item == 0x0A:
+                    defined = cursor.defined(len(folders))
+                    cursor.take(4 * sum(defined))
+                    for folder, known in zip(folders, defined, strict=True):
+                        folder.crc_known = known
+                else:
+                    raise ArchiveFormatError(f"an unknown 7z unpack property {item}")
+        elif kind == 0x08:  # SubStreamsInfo
+            item = cursor.byte()
+            if item == 0x0D:
+                for folder in folders:
+                    folder.streams = cursor.count(len(cursor.data))
+                item = cursor.byte()
+            sizes = []
+            for folder in folders:
+                if not folder.streams:
+                    continue
+                parts = [cursor.number() for _ in range(folder.streams - 1)] if item == 0x09 else []
+                if item != 0x09 and folder.streams > 1:
+                    raise ArchiveFormatError("7z substream sizes are missing")
+                sizes.extend(parts + [folder.size - sum(parts)])
+            if item == 0x09:
+                item = cursor.byte()
+            while item != 0x00:
+                if item == 0x0A:  # the CRCs the folders do not give
+                    unknown = sum(folder.streams for folder in folders
+                                  if not (folder.streams == 1 and folder.crc_known))
+                    cursor.take(4 * sum(cursor.defined(unknown)))
+                else:
+                    raise ArchiveFormatError(f"an unknown 7z substream property {item}")
+                item = cursor.byte()
+        else:
+            raise ArchiveFormatError(f"an unknown 7z streams property {kind}")
+    if sizes is None:
+        sizes = [folder.size for folder in folders]
+    index, offset = 0, 32 + pack_position
+    for folder in folders:  # each folder's packed streams, in order
+        folder.pack_offset = offset
+        folder.pack_bytes = sum(pack_sizes[index:index + folder.packed_streams])
+        index += folder.packed_streams
+        offset += folder.pack_bytes
+    return pack_position, pack_sizes, folders, sizes
+
+
+def _7z_decode(data: bytes, folder: _Folder) -> bytes:
+    """A header's packed bytes through its folder's coders (one coder, the way 7-Zip packs headers)."""
+    if any(method == "aes" for method, _ in folder.coders):
+        raise ArchiveEncryptedError("the 7z header is encrypted")
+    if len(folder.coders) != 1:
+        raise ArchiveUnsupportedError(f"a 7z header packed with {len(folder.coders)} coders")
+    method, properties = folder.coders[0]
+    size = folder.size
+    if method == "copy":
+        return data[:size]
+    if method == "lzma":
+        if len(properties) < 5:
+            raise ArchiveFormatError("7z LZMA properties are truncated")
+        value, dictionary = properties[0], struct.unpack_from("<L", properties, 1)[0]
+        filters = [{"id": lzma.FILTER_LZMA1, "dict_size": dictionary, "lc": value % 9, "lp": value // 9 % 5,
+                    "pb": value // 45}]
+    elif method == "lzma2":
+        value = properties[0] if properties else 0
+        dictionary = 0xFFFFFFFF if value >= 40 else (2 | (value & 1)) << (value // 2 + 11)
+        filters = [{"id": lzma.FILTER_LZMA2, "dict_size": dictionary}]
+    elif method == "deflate":
+        try:
+            return zlib.decompressobj(-15).decompress(data, size)
+        except zlib.error as exc:
+            raise ArchiveFormatError(f"the 7z header does not decompress: {exc}") from None
+    elif method == "bzip2":
+        try:
+            return bz2.BZ2Decompressor().decompress(data, max_length=size)
+        except OSError as exc:
+            raise ArchiveFormatError(f"the 7z header does not decompress: {exc}") from None
+    else:
+        raise ArchiveUnsupportedError(f"a 7z header packed with {method}")
+    try:
+        return lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=filters).decompress(data, size)
+    except lzma.LZMAError as exc:
+        raise ArchiveFormatError(f"the 7z header does not decompress: {exc}") from None
+
+
+def read_7z(stream: BinaryIO, size: int, max_entries: int, max_index_bytes: int) -> Listing:
+    """A 7z archive's files from its header (decompressed when it is packed, as 7-Zip writes
+    it): names, sizes, times, attributes, and which folders are encrypted or solid."""
+    stream.seek(0)
+    start = stream.read(32)
+    if len(start) < 32 or start[:6] != _7Z_SIGNATURE:
+        raise ArchiveFormatError("not a 7z archive (no signature)")
+    if zlib.crc32(start[12:32]) != struct.unpack_from("<L", start, 8)[0]:
+        raise ArchiveFormatError("the 7z start header's CRC does not match")
+    offset, length, crc = struct.unpack_from("<QQL", start, 12)
+    info: dict[str, Any] = {"version": f"{start[6]}.{start[7]}", "encoded_header": False, "headers_encrypted": False}
+    listing = Listing(metadata={"7z": info})
+    if length == 0:
+        listing.declared = 0
+        return listing  # an empty archive
+    if 32 + offset + length > size:
+        raise ArchiveFormatError("the 7z header is past the end of the file (one volume of several?)")
+    if length > max_index_bytes:
+        raise ArchiveLimitError("index_bytes", length, f"the 7z header holds {length:,} bytes")
+    stream.seek(32 + offset)
+    header = stream.read(length)
+    if zlib.crc32(header) != crc:
+        raise ArchiveFormatError("the 7z header's CRC does not match")
+    cursor = _Cursor(header)
+    kind = cursor.byte()
+    if kind == 0x17:  # an encoded header: its streams describe the packed real header
+        info["encoded_header"] = True
+        pack_position, pack_sizes, folders, _ = _7z_streams(cursor)
+        if not folders:
+            raise ArchiveFormatError("an encoded 7z header without a folder")
+        folder = folders[0]
+        if folder.size > max_index_bytes:
+            raise ArchiveLimitError("index_bytes", folder.size, f"the 7z header unpacks to {folder.size:,} bytes")
+        if 32 + pack_position + sum(pack_sizes) > size:
+            raise ArchiveFormatError("the packed 7z header is past the end of the file")
+        stream.seek(32 + pack_position)
+        try:
+            cursor = _Cursor(_7z_decode(stream.read(sum(pack_sizes)), folder))
+        except ArchiveEncryptedError:
+            info["headers_encrypted"] = True
+            listing.complete = False
+            return listing
+        kind = cursor.byte()
+    if kind != 0x01:
+        raise ArchiveFormatError(f"no 7z header (property {kind})")
+    folders, sizes = [], []
+    names: list[str] = []
+    empty_stream: list[bool] = []
+    empty_file: list[bool] = []
+    mtimes: list[int | None] = []
+    attributes: list[int | None] = []
+    files = 0
+    while (kind := cursor.byte()) != 0x00:
+        if kind == 0x02:  # archive properties
+            while cursor.byte() != 0x00:
+                cursor.take(cursor.count(len(header)))
+        elif kind == 0x03:  # additional streams
+            _7z_streams(cursor)
+        elif kind == 0x04:
+            _, _, folders, sizes = _7z_streams(cursor)
+        elif kind == 0x05:
+            files = cursor.count(len(cursor.data))
+            while (item := cursor.byte()) != 0x00:
+                length = cursor.count(len(cursor.data))
+                data = _Cursor(cursor.take(length))
+                if item == 0x0E:
+                    empty_stream = data.bits(files)
+                elif item == 0x0F:
+                    empty_file = data.bits(sum(empty_stream))
+                elif item == 0x11:
+                    if data.byte():
+                        raise ArchiveFormatError("7z names stored outside the header")
+                    text = data.data[1:].decode("utf-16-le", "replace")
+                    names = text.split("\x00")[:files]
+                elif item == 0x14:
+                    defined = data.defined(files)
+                    if data.byte():
+                        raise ArchiveFormatError("7z times stored outside the header")
+                    mtimes = [struct.unpack("<Q", data.take(8))[0] if present else None for present in defined]
+                elif item == 0x15:
+                    defined = data.defined(files)
+                    if data.byte():
+                        raise ArchiveFormatError("7z attributes stored outside the header")
+                    attributes = [struct.unpack("<L", data.take(4))[0] if present else None for present in defined]
+        else:
+            raise ArchiveFormatError(f"an unknown 7z header property {kind}")
+    methods = sorted({method for folder in folders for method, _ in folder.coders})
+    info.update(folders=len(folders), methods=methods, solid=any(folder.streams > 1 for folder in folders),
+                packed_bytes=sum(folder.pack_bytes for folder in folders))
+    listing.declared = files
+    # The files with data take the folders' substreams in order: (folder, size, offset in its content).
+    substreams: list[tuple[_Folder, int, int]] = []
+    index = 0
+    for folder in folders:
+        within = 0
+        for _ in range(folder.streams):
+            length = sizes[index] if index < len(sizes) else 0
+            substreams.append((folder, length, within))
+            within, index = within + length, index + 1
+    next_stream = empty_index = 0
+    for item in range(files):
+        if len(listing.entries) >= max_entries:
+            listing.complete, listing.stopped = False, "entries"
+            break
+        name = names[item] if item < len(names) else f"<unnamed {item}>"
+        attribute = attributes[item] if item < len(attributes) else None
+        mode = attribute >> 16 if attribute is not None and attribute & 0x8000 else None  # a Unix mode
+        directory = bool(attribute is not None and attribute & 0x10)
+        size_value, compressed, encrypted, offset = 0, None, False, None
+        if not (empty_stream[item] if item < len(empty_stream) else False):
+            if next_stream < len(substreams):
+                folder, size_value, within = substreams[next_stream]
+                encrypted = any(method == "aes" for method, _ in folder.coders)
+                compressed = folder.pack_bytes if folder.streams == 1 else None
+                if [method for method, _ in folder.coders] == ["copy"]:
+                    offset = folder.pack_offset + within  # stored: the content is the packed bytes
+            next_stream += 1
+        else:
+            # An empty stream is a directory unless the empty-file vector says it is a file.
+            if not (empty_file[empty_index] if empty_index < len(empty_file) else False):
+                directory = True
+            empty_index += 1
+        kind_name = "directory" if directory else _kind(mode) if mode else "file"
+        listing.entries.append(Entry(
+            name.replace("\\", "/"), kind_name, None if directory else size_value, compressed_size=compressed,
+            mode=mode, encrypted=encrypted, offset=offset if kind_name == "file" else None,
+            mtime=_filetime(mtimes[item]) if item < len(mtimes) and mtimes[item] else None,
+        ))
+    return listing
+
+
+# ---------------------------------------------------------------------------------------
+# RAR 4 and 5
+
+_RAR4 = b"Rar!\x1a\x07\x00"
+_RAR5 = b"Rar!\x1a\x07\x01\x00"
+
+
+def _rar_unicode(plain: bytes, encoded: bytes) -> str | None:
+    """A RAR 4 file name stored in RAR's compressed UTF-16 form (after the plain name)."""
+    try:
+        high, position, flags, flag_bits, out = encoded[0], 1, 0, 0, []
+        while position < len(encoded):
+            if flag_bits == 0:
+                flags, position, flag_bits = encoded[position], position + 1, 8
+            mode = flags >> 6
+            flags, flag_bits = (flags << 2) & 0xFF, flag_bits - 2
+            if mode == 0:
+                out.append(encoded[position])
+                position += 1
+            elif mode == 1:
+                out.append(encoded[position] + (high << 8))
+                position += 1
+            elif mode == 2:
+                out.append(encoded[position] + (encoded[position + 1] << 8))
+                position += 2
+            else:
+                length = encoded[position]
+                position += 1
+                if length & 0x80:
+                    correction = encoded[position]
+                    position += 1
+                    for _ in range((length & 0x7F) + 2):
+                        out.append(((plain[len(out)] + correction) & 0xFF) + (high << 8))
+                else:
+                    for _ in range(length + 2):
+                        out.append(plain[len(out)])
+        return "".join(map(chr, out))
+    except (IndexError, ValueError):
+        return None
+
+
+def _rar4(stream: BinaryIO, size: int, max_entries: int, deadline: float | None, listing: Listing) -> None:
+    info = listing.metadata["rar"]
+    position, steps = len(_RAR4), 0
+    while position + 7 <= size:
+        steps += 1
+        if deadline is not None and steps % 1024 == 0 and time.monotonic() >= deadline:
+            listing.complete, listing.stopped = False, "wall_seconds"
+            return
+        stream.seek(position)
+        head = stream.read(7)
+        crc, kind, flags, head_size = struct.unpack("<HBHH", head)
+        if head_size < 7:
+            raise ArchiveFormatError(f"a RAR block header of {head_size} bytes at offset {position}")
+        stream.seek(position)
+        block = stream.read(head_size)
+        if len(block) < head_size:
+            raise ArchiveFormatError(f"a truncated RAR block at offset {position}")
+        if zlib.crc32(block[2:]) & 0xFFFF != crc and kind != 0x72:
+            raise ArchiveFormatError(f"the RAR block header at offset {position} fails its CRC")
+        add_size = struct.unpack_from("<L", block, 7)[0] if flags & 0x8000 and head_size >= 11 else 0
+        if kind == 0x73:  # the archive header
+            info.update(volume=bool(flags & 0x0001), solid=bool(flags & 0x0008), locked=bool(flags & 0x0004),
+                        recovery_record=bool(flags & 0x0040), comment=bool(flags & 0x0002))
+            if flags & 0x0080:
+                info["headers_encrypted"] = True
+                listing.complete = False
+                return
+        elif kind == 0x74:  # a file
+            if len(listing.entries) >= max_entries:
+                listing.complete, listing.stopped = False, "entries"
+                return
+            if head_size < 32:
+                raise ArchiveFormatError(f"a truncated RAR file header at offset {position}")
+            packed, unpacked, host, _, dos_time, _, method, name_size, attribute = struct.unpack_from(
+                "<LLBLLBBHL", block, 7)
+            cursor = 32
+            if flags & 0x0100:
+                high_packed, high_unpacked = struct.unpack_from("<LL", block, cursor)
+                packed, unpacked = packed | high_packed << 32, unpacked | high_unpacked << 32
+                cursor += 8
+            raw = block[cursor:cursor + name_size]
+            name = None
+            if flags & 0x0200 and b"\x00" in raw:
+                plain, encoded = raw.split(b"\x00", 1)
+                name = _rar_unicode(plain, encoded)
+                raw = plain
+            if name is None:
+                name = raw.decode("utf-8" if flags & 0x0200 else "cp437", "replace")
+            directory = (flags & 0x00E0) == 0x00E0
+            mode = attribute if host == 3 else None
+            kind_name = "directory" if directory else _kind(mode) if mode else "file"
+            # A stored (method 0x30), unencrypted member that does not span volumes is its bytes.
+            stored = kind_name == "file" and method == 0x30 and not flags & 0x0007 and packed == unpacked
+            listing.entries.append(Entry(
+                name.replace("\\", "/"), kind_name, None if directory else unpacked,
+                compressed_size=None if directory else packed, mode=mode, encrypted=bool(flags & 0x0004),
+                mtime=_dos_time(dos_time >> 16, dos_time & 0xFFFF), offset=position + head_size if stored else None,
+                flags=tuple(flag for flag, bit in (("continued", 0x0001), ("continues", 0x0002)) if flags & bit),
+            ))
+            add_size = packed
+        elif kind == 0x7B:  # the end of the archive
+            return
+        position += head_size + add_size
+    if position < size:
+        raise ArchiveFormatError("a truncated RAR block header")
+
+
+def _rar_vint(data: bytes, cursor: int) -> tuple[int, int]:
+    value = 0
+    for shift in range(0, 70, 7):
+        if cursor >= len(data):
+            raise ArchiveFormatError("a truncated RAR 5 header")
+        byte = data[cursor]
+        cursor += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, cursor
+    raise ArchiveFormatError("a RAR 5 number longer than 10 bytes")
+
+
+def _rar5(stream: BinaryIO, size: int, max_entries: int, deadline: float | None, listing: Listing) -> None:
+    info = listing.metadata["rar"]
+    position, steps = len(_RAR5), 0
+    while position < size:
+        steps += 1
+        if deadline is not None and steps % 1024 == 0 and time.monotonic() >= deadline:
+            listing.complete, listing.stopped = False, "wall_seconds"
+            return
+        stream.seek(position)
+        head = stream.read(4 + 3)  # the CRC and the header size (a number of at most 3 bytes)
+        if len(head) < 5:
+            raise ArchiveFormatError(f"a truncated RAR 5 block at offset {position}")
+        crc = struct.unpack_from("<L", head)[0]
+        header_size, size_length = _rar_vint(head[4:], 0)
+        if header_size < 2 or header_size > 2 * 1024 * 1024:
+            raise ArchiveFormatError(f"a RAR 5 header of {header_size:,} bytes at offset {position}")
+        stream.seek(position + 4)
+        block = stream.read(size_length + header_size)
+        if len(block) < size_length + header_size:
+            raise ArchiveFormatError(f"a truncated RAR 5 block at offset {position}")
+        if zlib.crc32(block) != crc:
+            raise ArchiveFormatError(f"the RAR 5 block header at offset {position} fails its CRC")
+        kind, cursor = _rar_vint(block, size_length)
+        flags, cursor = _rar_vint(block, cursor)
+        extra_size = data_size = 0
+        if flags & 0x0001:
+            extra_size, cursor = _rar_vint(block, cursor)
+        if flags & 0x0002:
+            data_size, cursor = _rar_vint(block, cursor)
+        if kind == 1:  # the main archive header
+            archive_flags, _ = _rar_vint(block, cursor)
+            info.update(volume=bool(archive_flags & 0x0001), solid=bool(archive_flags & 0x0004),
+                        recovery_record=bool(archive_flags & 0x0008), locked=bool(archive_flags & 0x0010))
+        elif kind == 4:  # archive encryption: every later header is encrypted
+            info["headers_encrypted"] = True
+            listing.complete = False
+            return
+        elif kind == 2:  # a file (3 is a service header: a comment, a recovery record, NTFS streams)
+            if len(listing.entries) >= max_entries:
+                listing.complete, listing.stopped = False, "entries"
+                return
+            file_flags, cursor = _rar_vint(block, cursor)
+            unpacked, cursor = _rar_vint(block, cursor)
+            attribute, cursor = _rar_vint(block, cursor)
+            mtime = None
+            if file_flags & 0x0002:
+                mtime = _utc(struct.unpack_from("<L", block, cursor)[0])
+                cursor += 4
+            if file_flags & 0x0004:
+                cursor += 4
+            compression, cursor = _rar_vint(block, cursor)
+            host, cursor = _rar_vint(block, cursor)
+            name_length, cursor = _rar_vint(block, cursor)
+            name = block[cursor:cursor + name_length].decode("utf-8", "replace")
+            cursor += name_length
+            entry = Entry(name, "directory" if file_flags & 0x0001 else "file",
+                          None if file_flags & 0x0001 or file_flags & 0x0008 else unpacked,
+                          compressed_size=None if file_flags & 0x0001 else data_size, mtime=mtime,
+                          mode=attribute if host == 1 else None)
+            if host == 1 and entry.kind == "file":
+                entry.kind = _kind(attribute)
+            _rar5_extra(block[len(block) - extra_size:] if extra_size else b"", entry)
+            entry.flags = tuple(flag for flag, bit in (("continued", 0x0008), ("continues", 0x0010)) if flags & bit)
+            # A stored (method 0), unencrypted member that does not span volumes is its bytes.
+            if (entry.kind == "file" and not (compression >> 7) & 7 and not entry.encrypted and not entry.flags
+                    and entry.size == data_size):
+                entry.offset = position + 4 + size_length + header_size
+            listing.entries.append(entry)
+        elif kind == 5:  # the end of the archive
+            return
+        position += 4 + size_length + header_size + data_size
+
+
+def _rar5_extra(area: bytes, entry: Entry) -> None:
+    """A RAR 5 file header's extra records: encryption, times, links and owners."""
+    cursor = 0
+    while cursor < len(area):
+        record_size, start = _rar_vint(area, cursor)
+        end = start + record_size
+        kind, inner = _rar_vint(area, start)
+        if kind == 0x01:  # encryption
+            entry.encrypted = True
+        elif kind == 0x03:  # times
+            time_flags, inner = _rar_vint(area, inner)
+            if time_flags & 0x0002:
+                if time_flags & 0x0001:
+                    entry.mtime = _utc(struct.unpack_from("<L", area, inner)[0])
+                else:
+                    entry.mtime = _filetime(struct.unpack_from("<Q", area, inner)[0])
+        elif kind == 0x05:  # a redirection: a symlink, junction or hard link
+            redirection, inner = _rar_vint(area, inner)
+            _, inner = _rar_vint(area, inner)
+            length, inner = _rar_vint(area, inner)
+            entry.link_target = area[inner:inner + length].decode("utf-8", "replace")
+            entry.kind = "hardlink" if redirection == 4 else "symlink" if redirection in (1, 2, 3) else entry.kind
+        elif kind == 0x06:  # the owner
+            owner_flags, inner = _rar_vint(area, inner)
+            if owner_flags & 0x0001:
+                length, inner = _rar_vint(area, inner)
+                entry.owner, inner = area[inner:inner + length].decode("utf-8", "replace"), inner + length
+            if owner_flags & 0x0002:
+                length, inner = _rar_vint(area, inner)
+                entry.group, inner = area[inner:inner + length].decode("utf-8", "replace"), inner + length
+            if owner_flags & 0x0004:
+                entry.uid, inner = _rar_vint(area, inner)
+            if owner_flags & 0x0008:
+                entry.gid, inner = _rar_vint(area, inner)
+        cursor = end
+
+
+def read_rar(stream: BinaryIO, size: int, max_entries: int, deadline: float | None = None) -> Listing:
+    """A RAR archive's files from its block headers (RAR 4 and RAR 5); no data is decompressed."""
+    stream.seek(0)
+    head = stream.read(8)
+    if head.startswith(_RAR5):
+        listing = Listing(metadata={"rar": {"version": 5, "headers_encrypted": False}})
+        _rar5(stream, size, max_entries, deadline, listing)
+    elif head.startswith(_RAR4):
+        listing = Listing(metadata={"rar": {"version": 4, "headers_encrypted": False}})
+        _rar4(stream, size, max_entries, deadline, listing)
+    else:
+        raise ArchiveFormatError("not a RAR archive (no signature)")
+    if listing.complete:
+        listing.declared = len(listing.entries)
+    return listing

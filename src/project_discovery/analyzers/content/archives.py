@@ -43,10 +43,12 @@ from .archive_formats import (
     ArchiveFormatError,
     ArchiveLimitError,
     ArchiveUnsupportedError,
+    read_7z,
     read_ar,
     read_cab,
     read_compressed,
     read_iso,
+    read_rar,
     read_rpm,
     zstd_reader,
 )
@@ -599,21 +601,23 @@ _STREAM_SUFFIXES = (".gz", ".bz2", ".xz", ".lzma", ".zst")
 # Member names these readers inspect as archives, most specific first (.tar.gz before .gz).
 _NESTED_KINDS = (
     (_NESTED_ZIP_SUFFIXES, "zip"), (_NESTED_TAR_SUFFIXES, "tar"), ((".deb", ".udeb"), "ar"), ((".rpm",), "rpm"),
-    ((".cab",), "cab"), ((".iso",), "iso"), (_STREAM_SUFFIXES, "stream"),
+    ((".cab",), "cab"), ((".iso",), "iso"), ((".7z",), "7z"), ((".rar",), "rar"), (_STREAM_SUFFIXES, "stream"),
 )
 _NESTED_TYPES = {"zip": "archive/zip", "tar": "archive/tar", "ar": "archive/deb", "rpm": "archive/rpm",
-                 "cab": "archive/cab", "iso": "disk-image/iso9660", "stream": "archive/compressed"}
+                 "cab": "archive/cab", "iso": "disk-image/iso9660", "7z": "archive/7z", "rar": "archive/rar",
+                 "stream": "archive/compressed"}
 # The readers by content family, then by name: a name decides unless the content is another
 # archive format (a .zip holding a RAR archive). Compressed content is a TAR stream under a TAR
 # name (.tgz, .tar.zst, .ipk) and otherwise a single compressed file, whose content may still
 # turn out to be TAR. Content whose start is no archive (a .jar behind a launcher script, a
 # self-extracting .zip) is read by name, as ZIP readers find the directory from the end.
 _READER_FAMILIES = {"zip": "zip", "tar": "tar", "ar": "ar", "cab": "cab", "rpm": "rpm", "iso9660": "iso",
-                    "udf": "iso"}
+                    "udf": "iso", "7z": "7z", "rar": "rar"}
 _COMPRESSION_FAMILIES = frozenset({"gzip", "bzip2", "xz", "lzma", "zstandard"})
 _READER_SUFFIXES = (
     (_NESTED_ZIP_SUFFIXES, "zip"), (_TAR_SUFFIXES + (".ipk",), "tar"), ((".deb", ".udeb"), "ar"),
-    ((".cab",), "cab"), ((".rpm",), "rpm"), ((".iso",), "iso"), (_STREAM_SUFFIXES, "stream"),
+    ((".cab",), "cab"), ((".rpm",), "rpm"), ((".iso",), "iso"), ((".7z",), "7z"), ((".rar",), "rar"),
+    (_STREAM_SUFFIXES, "stream"),
 )
 _CODEC_FAMILIES = {"gzip": "gzip", "bzip2": "bzip2", "xz": "xz", "lzma": "lzma", "zstandard": "zstd"}
 _CODEC_SUFFIXES = (
@@ -626,7 +630,8 @@ _UNCOMPRESSED_SUFFIXES = {".tgz": ".tar", ".tbz2": ".tar", ".tbz": ".tar", ".txz
 
 
 def _reader(record: FileRecord) -> str | None:
-    """The reader for an archive record ("zip", "tar", "ar", "cab", "rpm", "iso" or "stream"), or None."""
+    """The reader for an archive record ("zip", "tar", "ar", "cab", "rpm", "iso", "7z", "rar" or "stream"),
+    or None."""
     family = family_of(record.file_type)
     if family in _READER_FAMILIES:
         return _READER_FAMILIES[family]
@@ -691,6 +696,7 @@ class _Inspection:
         self.regular_sample_bytes = 0
         self.truncated = 0  # members eligible for sampling that were not read in full
         self.encrypted = 0
+        self.headers_encrypted = False  # the index itself is encrypted: no member can be listed
         self.records = 0
         self.malformed: str | None = None
         self.unsupported = False
@@ -757,14 +763,15 @@ class _Inspection:
             self.limit("member_records", MAX_ARCHIVE_MEMBERS_PER_FILE, members=self.indexed - self.records)
         stopped = bool(_TRAVERSAL_LIMITS & set(self.limits))
         complete = self.index_read and not stopped and self.malformed is None
+        encrypted = self.encrypted > 0 or self.headers_encrypted
         states = ["detected"] + [name for name, applies in (
             ("unsupported", self.unsupported), ("index-read", self.index_read), ("metadata-complete", complete),
             ("sample-read", self.sampled > 0), ("sample-truncated", self.truncated > 0),
-            ("encrypted", self.encrypted > 0), ("malformed", self.malformed is not None), ("budget-stopped", stopped),
+            ("encrypted", encrypted), ("malformed", self.malformed is not None), ("budget-stopped", stopped),
         ) if applies]
         state = ("malformed" if self.malformed is not None else "unsupported" if self.unsupported
-                 else "budget-stopped" if stopped else "metadata-complete" if complete
-                 else "index-read" if self.index_read else "detected")
+                 else "encrypted" if self.headers_encrypted else "budget-stopped" if stopped
+                 else "metadata-complete" if complete else "index-read" if self.index_read else "detected")
         detail = {
             "archive_bytes": self.record.size_bytes, "compressed_bytes": self.compressed_bytes,
             "members_declared": self.declared, "members_indexed": self.indexed,
@@ -1346,6 +1353,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         hardlinks: list[str] = []
         risky_modes: list[str] = []
         special_entries: list[str] = []
+        high_ratios: list[str] = []
         content_findings: list[Finding] = []
         content_bytes = content_truncated = 0
         try:
@@ -1359,16 +1367,28 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     listing = read_cab(stream, size, limits.entries, limits.index_bytes)
                 elif reader == "iso":
                     listing = read_iso(stream, size, limits.entries, limits.index_bytes, deadline)
+                elif reader == "7z":
+                    listing = read_7z(stream, size, limits.entries, limits.index_bytes)
+                elif reader == "rar":
+                    listing = read_rar(stream, size, limits.entries, deadline)
                 else:
                     listing = read_rpm(stream, size, limits.entries, limits.index_bytes)
                 deb = "deb" in listing.metadata
                 if deb:
                     inspection.format = "deb"
-                inspection.index_read = True
+                info = listing.metadata.get(reader, {})
+                # An encrypted index (7z -mhe, RAR -hp) lists no member at all.
+                inspection.headers_encrypted = bool(info.get("headers_encrypted"))
+                inspection.index_read = not inspection.headers_encrypted
                 inspection.extra.update(listing.metadata)
+                # A solid archive compresses its members together, so a member's own packed size
+                # says nothing of its ratio.
+                member_ratios = reader in ("7z", "rar") and not info.get("solid")
+                encrypted = 0
                 # An RPM installs its paths from /: absolute paths are its design, a parent
                 # traversal is not, and its links, like any package's, may point anywhere. An
-                # image's symlinks are checked like a TAR's.
+                # image's and a RAR archive's links are checked like a TAR's (7z keeps a link's
+                # target in its compressed data).
                 unsafe = _unsafe_package_path if reader == "rpm" else _unsafe_member_path
                 for ordinal, entry in enumerate(listing.entries):
                     if ordinal % 256 == 0 and time.monotonic() >= deadline:
@@ -1377,8 +1397,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     names.append(entry.name)
                     counts[entry.kind] += 1
                     flags = []
-                    if unsafe(entry.name) or (reader == "iso" and entry.kind == "symlink" and entry.link_target
-                                              and _unsafe_member_path(entry.link_target)):
+                    if unsafe(entry.name) or (reader in ("iso", "rar") and entry.kind in ("symlink", "hardlink")
+                                              and entry.link_target and _unsafe_member_path(entry.link_target)):
                         unsafe_paths.append(entry.name)
                         flags.append("unsafe-path")
                     flags.extend(entry.flags)
@@ -1392,7 +1412,16 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                         for risk in _mode_risks(entry.mode):
                             risky_modes.append(f"{entry.name} ({risk})")
                             flags.append(risk)
-                    stored = entry.kind == "file" and entry.offset is not None and entry.size is not None
+                    if entry.encrypted:
+                        encrypted += 1
+                        flags.append("encrypted")
+                    if (member_ratios and entry.kind == "file" and entry.size and entry.compressed_size is not None
+                            and (entry.compressed_size == 0
+                                 or entry.size / entry.compressed_size > limits.compression_ratio)):
+                        high_ratios.append(entry.name)
+                        flags.append("high-ratio")
+                    stored = (entry.kind == "file" and entry.offset is not None and entry.size is not None
+                              and not entry.encrypted)
                     nested_kind = _nested_kind(entry.name) if stored else None
                     if nested_kind is not None:
                         flags.append("nested-archive")
@@ -1473,7 +1502,10 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         # Cabinet folders and an RPM payload compress every member together, so the ratio is the
         # archive's; an ISO image stores its files as is, so files that declare more than the
         # image holds share their data.
-        compressed = {"cab": size, "rpm": listing.metadata.get("rpm", {}).get("payload_bytes")}.get(reader)
+        compressed = {"cab": size, "rpm": listing.metadata.get("rpm", {}).get("payload_bytes"),
+                      "7z": listing.metadata.get("7z", {}).get("packed_bytes"),
+                      "rar": sum(entry.compressed_size or 0 for entry in listing.entries)}.get(reader)
+        inspection.encrypted = encrypted
         inspection.compressed_bytes = compressed
         base = size if reader == "iso" else compressed
         ratio = member_bytes / base if base else None
@@ -1504,6 +1536,14 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         elif reader == "rpm":
             compressor = listing.metadata["rpm"].get("payload_compressor") or "compressed"
             source_note = f"the package header; the {compressor} payload was not decompressed"
+        elif reader in ("7z", "rar"):
+            info = listing.metadata[reader]
+            methods = ", ".join(info.get("methods", ())) or None
+            index_name = "the 7z header" if reader == "7z" else f"the RAR {info['version']} block headers"
+            source_note = (index_name + (" (encrypted: no member could be listed)" if inspection.headers_encrypted
+                                         else "")
+                           + f"; {content_bytes:,} bytes of stored members were inspected in memory and compressed "
+                           + "members were not decompressed" + (f" ({methods})" if methods else ""))
         else:
             headers = ("the ar member headers" if reader == "ar"
                        else f"the image's {listing.metadata['iso']['tree']} ISO 9660 directory tree")
@@ -1535,7 +1575,15 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 analyzer=self.name,
                 severity="MEDIUM",
             ))
-        findings.extend(self._risk_findings(record, unsafe_paths, symlinks, risky_modes, [], duplicates, 0))
+        findings.extend(self._risk_findings(record, unsafe_paths, symlinks, risky_modes, high_ratios, duplicates,
+                                            encrypted))
+        if inspection.headers_encrypted:
+            findings.append(Finding(
+                "archive", f"Encrypted archive index: {record.path}",
+                "The archive encrypts its index (file names included), so no member could be listed or "
+                "inspected without the password.",
+                confidence="CONFIRMED", evidence=[record.path], analyzer=self.name, severity="MEDIUM",
+            ))
         if member_bytes > limits.uncompressed_bytes:
             findings.append(self._bomb_finding(record, member_bytes, limits))
         if ratio is not None and member_bytes and ratio > limits.compression_ratio:

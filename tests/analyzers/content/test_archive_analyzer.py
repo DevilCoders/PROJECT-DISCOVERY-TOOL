@@ -72,11 +72,11 @@ def test_tar_symlink_hardlink_and_parent_traversal_metadata(tmp_path: Path):
 
 
 def test_archive_with_unsupported_metadata_format_is_identified(tmp_path: Path):
-    path = tmp_path / "backup.7z"
-    path.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"metadata")
+    path = tmp_path / "installer.xar"
+    path.write_bytes(b"xar!\x00\x1c\x00\x01" + bytes(20))
     findings = ArchiveIntelligenceAnalyzer().analyze(
         path,
-        FileRecord("backup.7z", path.stat().st_size, ".7z", "Archive", file_type="archive/7z"),
+        FileRecord("installer.xar", path.stat().st_size, ".xar", "Archive", file_type="archive/xar"),
     )
     assert findings[0].confidence == "CONFIRMED"
     assert "no extraction" in findings[0].detail

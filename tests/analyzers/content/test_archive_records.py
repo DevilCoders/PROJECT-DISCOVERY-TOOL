@@ -157,10 +157,10 @@ def test_compressed_tars_name_their_compression(mode, name, tmp_path: Path):
 
 
 def test_unsupported_and_malformed_archives_say_so(tmp_path: Path):
-    seven = tmp_path / "disk.7z"
-    seven.write_bytes(b"7z\xbc\xaf\x27\x1c" + bytes(64))
-    summary, members, _ = _inspect(seven, "archive/7z")
-    assert (summary["format"], summary["state"], summary["states"]) == ("7z", "unsupported", ["detected", "unsupported"])
+    xar = tmp_path / "installer.xar"
+    xar.write_bytes(b"xar!\x00\x1c\x00\x01" + bytes(20))
+    summary, members, _ = _inspect(xar, "archive/xar")
+    assert (summary["format"], summary["state"], summary["states"]) == ("xar", "unsupported", ["detected", "unsupported"])
     assert members == {} and summary["content_coverage_pct"] is None
     broken = tmp_path / "broken.zip"
     broken.write_bytes(b"PK\x03\x04" + b"garbage" * 20)
@@ -245,7 +245,7 @@ def _project(root: Path) -> Path:
         member = tarfile.TarInfo("bin/release.sh")
         member.size, member.mode = len(data), 0o755
         archive.addfile(member, io.BytesIO(data))
-    (root / "image.7z").write_bytes(b"7z\xbc\xaf\x27\x1c" + bytes(32))
+    (root / "installer.xar").write_bytes(b"xar!\x00\x1c\x00\x01" + bytes(20))
     return root
 
 
@@ -258,7 +258,8 @@ def test_a_scan_reports_archives_members_and_their_metrics(tmp_path: Path):
     report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
     by_path = {item["path"]: item for item in report["archives"]}
     assert {path: item["state"] for path, item in by_path.items()} == {
-        "image.7z": "unsupported", "lib/plugin.jar": "metadata-complete", "release.tar.gz": "metadata-complete"}
+        "installer.xar": "unsupported", "lib/plugin.jar": "metadata-complete",
+        "release.tar.gz": "metadata-complete"}
     assert by_path["release.tar.gz"]["format"] == "tar+gzip"
     assert [(item["archive"], item["path"]) for item in report["archive_members"]] == [
         ("lib/plugin.jar", "META-INF/MANIFEST.MF"), ("lib/plugin.jar", "com/example/App.class"),
@@ -268,7 +269,7 @@ def test_a_scan_reports_archives_members_and_their_metrics(tmp_path: Path):
     assert metrics["by_state"] == {"metadata-complete": 2, "unsupported": 1}
     assert metrics["member_coverage_pct"] == 100.0 and metrics["content_coverage_pct"] == 100.0
     markdown = (output / "discovery-report.md").read_text(encoding="utf-8")
-    assert "## Archives" in markdown and "| image.7z | 7z | unsupported | 0 | - | - |" in markdown
+    assert "## Archives" in markdown and "| installer.xar | xar | unsupported | 0 | - | - |" in markdown
     assert '"archives":[{' in (output / "discovery-report.html").read_text(encoding="utf-8")
     # --resume keeps one record per archive and member.
     assert run_scan(project, output, {"json"}, 128, quiet=True, executor="thread", resume=True) == 0
