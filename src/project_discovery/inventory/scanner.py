@@ -24,6 +24,8 @@ from .entry_metadata import (
     stat_ownership,
 )
 from .links import classify_links, local_flavor, memory_lookup, root_components, store_lookup, stored_links
+from .markers import CATALOG_VERSION as MARKER_CATALOG_VERSION
+from .markers import Marker, apply_marker, count_marker, detect_marker, profile_match
 from .signatures import (
     CATALOG_VERSION,
     SAMPLE_BYTES,
@@ -41,55 +43,22 @@ _REPARSE_TAG_NAME_SURROGATE = 0x20000000
 # Kept as a compatibility constant. No directory is excluded by default.
 DEFAULT_IGNORES: set[str] = set()
 
-# Directory names that mark a development, dependency, build or cache tree on their own.
-# Stored casefolded: both walkers compare name.casefold(), so a capitalized entry
-# ("Pods") could never match.
-_DEVELOPMENT_MARKERS = frozenset(name.casefold() for name in (
-    ".cache", ".cargo", ".gradle", ".m2", ".ivy2", ".coursier", ".npm",
-    ".pnpm-store", ".yarn", ".venv", ".tox", ".nox", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", ".next", ".nuxt", ".svelte-kit",
-    ".angular", ".parcel-cache", ".turbo", ".vite", ".webpack",
-    ".nyc_output", ".fuff", ".fuzz", ".fuzzing", ".idea", ".vscode",
-    ".git", ".hg", ".svn", "node_modules", "bower_components", "vendor",
-    "target", "build", "dist", "out", "coverage", "htmlcov",
-    "venv", "site-packages", "third_party", "third-party",
-    "bazel-out", "bazel-bin", "bazel-testlogs", "Pods", "Carthage",
-    "DerivedData", "maven", "obj",
-    "__pycache__", "_build", "_opam", "_site", "artifacts", "generated",
-    "generated_code", "tmp", "temp", "cache", "caches",
-    "fuzz", "corpus", "corpora", "crashers", "seeds",
-))
-# Generic names that are as often project source: a JavaScript monorepo's packages/, a Go
-# repository's pkg/ and go/, scripts in bin/, configuration in env/, the Gradle wrapper in
-# gradle/. They are marked only when an entry that identifies the tree is present.
-_CORROBORATED_MARKERS: dict[str, tuple[str, ...]] = {
-    "packages": ("repositories.config",),   # NuGet packages folder
-    "go": ("pkg/mod",),                       # GOPATH
-    "pkg": ("mod/cache",),                    # GOPATH/pkg (the module cache)
-    "bin": ("Debug", "Release"),              # MSBuild output
-    "env": ("pyvenv.cfg", "conda-meta"),      # Python virtual or conda environment
-    "gradle": ("caches",),                    # a relocated Gradle user home
-}
-
-
 def development_marker(name: str, has_entry: Callable[[str], bool] | None = None) -> str | None:
-    """The development-tree marker of a directory name, or None.
-
-    ``has_entry(relative)`` says whether the directory contains that entry; without it a
-    generic name is never marked, because nothing can corroborate it.
-    """
-    key = name.casefold()
-    if key in _DEVELOPMENT_MARKERS:
-        return key
-    evidence = _CORROBORATED_MARKERS.get(key)
-    if evidence and has_entry is not None and any(has_entry(item) for item in evidence):
-        return key
-    return None
+    """The marker catalog key of a directory name, or None (inventory.markers has the rest)."""
+    marker = detect_marker(name, has_entry)
+    return None if marker is None else marker.key
 
 
 def _on_disk(directory: str) -> Callable[[str], bool]:
-    """``has_entry`` for a directory on disk (lexists: a link is evidence, never followed)."""
+    """Whether a directory on disk holds an entry (lexists: a link is evidence, never followed)."""
     return lambda relative: os.path.lexists(os.path.join(directory, relative))
+
+
+def _directory_marker(name: str, directory: str, parent: str) -> Marker | None:
+    """The marker of a directory on disk, confirmed by entries inside it or beside it."""
+    return detect_marker(name, _on_disk(directory), _on_disk(parent))
+
+
 _SIZE_BUCKETS = (
     (1024, "under_1_kib"),
     (1024 * 1024, "1_kib_to_1_mib"),
@@ -395,6 +364,7 @@ def unused_exclusions(stats, excluded_names: set[str], excluded_paths: set[str])
 def inventory_options(
     *, read_signatures: bool, skip_oversized: bool, max_file_bytes: int,
     excluded_names: set[str], excluded_paths: set[str], security_metadata: bool = False,
+    exclude_profiles: frozenset[str] | set[str] = frozenset(),
 ) -> dict:
     """The options that shape a stored inventory; --resume continues only an identical one."""
     return {
@@ -403,23 +373,26 @@ def inventory_options(
         "max_file_bytes": int(max_file_bytes) if skip_oversized else None,
         "exclude_names": sorted(excluded_names),
         "exclude_paths": sorted(excluded_paths),
+        "exclude_profiles": sorted(exclude_profiles),
         "security_metadata": bool(security_metadata),
-        # File types from another catalog version would mix with this one's.
+        # File types and markers from another catalog version would mix with this one's.
         "signature_catalog": CATALOG_VERSION,
+        "marker_catalog": MARKER_CATALOG_VERSION,
     }
 
 
 def _exclusion_match(
     relative_path: str, name: str, excluded_names: set[str], excluded_paths: set[str],
+    marker: Marker | None = None, profiles: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[str, str] | None:
-    """The --exclude-dir value a directory matches, as (stats key, prune reason)."""
+    """The --exclude-dir value or --exclude-profile a directory matches, as (stats key, prune reason)."""
     folded = name.casefold()
     if folded in excluded_names:
         return f"exclusion_used:name:{folded}", f"explicit --exclude-dir name: {name}"
     folded_path = relative_path.casefold()
     if folded_path in excluded_paths:
         return f"exclusion_used:path:{folded_path}", f"explicit --exclude-dir path: {relative_path}"
-    return None
+    return profile_match(marker, profiles) if profiles else None
 
 
 def discover_files(
@@ -454,6 +427,7 @@ def _discover_with_rust(
     store: InventoryStore | None = None,
     classify=None,
     security_metadata: bool = False,
+    profiles: frozenset[str] = frozenset(),
 ) -> bool:
     """Consume the optional Rust directory iterator; return False if unavailable."""
     try:
@@ -541,24 +515,22 @@ def _discover_with_rust(
             continue
         if kind == "directory":
             name = PurePosixPath(relative).name
-            marker = development_marker(name, _on_disk(os.path.join(root, relative)))
-            match = _exclusion_match(relative, name, excluded_names, excluded_paths)
+            marker = _directory_marker(name, os.path.join(root, relative), os.path.join(root, parent))
+            match = _exclusion_match(relative, name, excluded_names, excluded_paths, marker, profiles)
             exclusion = match[1] if match else None
             record = DirectoryRecord(
                 relative, depth, is_hidden=hidden, permissions=mode,
-                development_marker=marker, pruned=exclusion is not None,
-                prune_reason=exclusion, error=error,
+                pruned=exclusion is not None, prune_reason=exclusion, error=error,
                 uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
                 mtime_ns=mtime_ns, reparse_tag=reparse_tag_name(reparse_tag),
             )
+            apply_marker(record, marker)
             _record_metadata(record, os.path.join(root, relative), kind, stats, security_metadata)
             if store is None:
                 directories_by_path[relative] = record
             else:
                 store.append("directory", record)
-            if marker:
-                stats["development_directory_count"] += 1
-                stats[f"development_dir:{marker}"] += 1
+            count_marker(stats, marker)
             if match:
                 stats["pruned_directory_count"] += 1
                 stats[f"pruned_dir:{name.casefold()}"] += 1
@@ -646,6 +618,7 @@ def discover_inventory(
     store: InventoryStore | None = None,
     read_signatures: bool = True,
     security_metadata: bool = False,
+    exclude_profiles: frozenset[str] = frozenset(),
 ) -> tuple[
     Sequence[FileRecord],
     Sequence[DirectoryRecord],
@@ -663,6 +636,8 @@ def discover_inventory(
 
     Every record carries its owner and group IDs and platform attributes;
     ``security_metadata`` also reads each entry's ACLs (see ``entry_metadata``).
+    ``exclude_profiles`` prunes the confirmed and distinctively named development trees of
+    those --exclude-profile presets (see ``markers``).
     """
     if security_metadata and not security_supported():
         raise ValueError("--security-metadata reads Windows security descriptors and Linux POSIX ACLs only")
@@ -698,7 +673,7 @@ def discover_inventory(
                 read_signatures=read_signatures, skip_oversized=skip_oversized,
                 max_file_bytes=max_file_bytes,
                 excluded_names=excluded_names, excluded_paths=excluded_paths,
-                security_metadata=security_metadata,
+                security_metadata=security_metadata, exclude_profiles=exclude_profiles,
             ),
         })
     root_directory = DirectoryRecord(
@@ -721,7 +696,7 @@ def discover_inventory(
     used_rust = _discover_with_rust(
         root, excluded_names, excluded_paths, max_file_bytes, skip_oversized,
         directories_by_path, files, symlinks, special_entries, stats, store, classify,
-        security_metadata,
+        security_metadata, exclude_profiles,
     )
     scandir_stack = []
     if not used_rust:
@@ -800,9 +775,9 @@ def discover_inventory(
             # A Windows AF_UNIX socket or WSL FIFO or device node reads as a regular file.
             windows_special = WINDOWS_SPECIAL_TAGS.get(reparse_tag) if reparse_tag else None
             if stat.S_ISDIR(info.st_mode) and windows_special is None:
-                marker = development_marker(entry.name, _on_disk(entry.path))
+                marker = _directory_marker(entry.name, entry.path, str(current))
                 match = _exclusion_match(
-                    relative, entry.name, excluded_names, excluded_paths,
+                    relative, entry.name, excluded_names, excluded_paths, marker, exclude_profiles,
                 )
                 exclusion = match[1] if match else None
                 record = DirectoryRecord(
@@ -810,7 +785,6 @@ def discover_inventory(
                     depth + 1,
                     is_hidden=hidden,
                     permissions=_mode(info),
-                    development_marker=marker,
                     pruned=exclusion is not None,
                     prune_reason=exclusion,
                     uid=uid,
@@ -819,14 +793,13 @@ def discover_inventory(
                     mtime_ns=info.st_mtime_ns,
                     reparse_tag=tag_name,
                 )
+                apply_marker(record, marker)
                 _record_metadata(record, entry.path, "directory", stats, security_metadata)
                 if store is None:
                     directories_by_path[relative] = record
                 else:
                     store.append("directory", record)
-                if marker:
-                    stats["development_directory_count"] += 1
-                    stats[f"development_dir:{marker}"] += 1
+                count_marker(stats, marker)
                 if match:
                     stats["pruned_directory_count"] += 1
                     stats[f"pruned_dir:{entry.name.casefold()}"] += 1

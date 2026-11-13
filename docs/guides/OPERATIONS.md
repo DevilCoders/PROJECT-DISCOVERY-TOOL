@@ -42,6 +42,7 @@ read its exit codes and performance data.
 | Continue an interrupted scan | rerun the same command with `--resume` |
 | Skip content of huge files | `--skip --max-file-mb 512` (skipped files stay inventoried; `--max-file-mb` requires `--skip`) |
 | Prune directories explicitly | `--exclude-dir node_modules --exclude-dir build/cache` |
+| Prune dependency and cache trees by preset | `--exclude-profile dependencies,caches` |
 | CI gate | `pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color` |
 | Remote repository, downloaded | `pdt scan https://github.com/org/repo --output /reports/repo` |
 | Remote repository, not downloaded | `pdt scan https://github.com/org/repo --no-download --output /reports/repo` |
@@ -79,7 +80,8 @@ rebuilt. Files whose analysis failed in the interrupted run (for example a shari
 terminated worker) keep their error and are not retried; run a fresh scan to retry them. Files added or removed after the original traversal are not picked up: run a fresh
 scan for a current view. When no resumable inventory exists, PDT warns and starts a fresh scan.
 The inventory-shaping options must match the original command: `--inventory-only`, `--skip` with
-its `--max-file-mb`, the `--exclude-dir` values (however they are spelled) and `--security-metadata`. When one differs,
+its `--max-file-mb`, the `--exclude-dir` values (however they are spelled), the `--exclude-profile`
+presets and `--security-metadata`. When one differs,
 `--resume` stops with exit 2 and names it; rerun with the original options, or without `--resume`.
 A file that was being analyzed when the process died is analyzed again, and its code-index rows
 and truncation are stored and counted once.
@@ -150,6 +152,40 @@ matches names without regard to case, as macOS does on case-insensitive volumes.
 target is inside the tree only along the root's real path (`/var` is not `/private/var` on
 macOS). `target_scope` stays the lexical classification of the target text.
 `metrics.symlink_states` counts the states.
+
+## Development and dependency trees
+
+Every directory is checked against a catalog of development, dependency, build and cache
+trees (`inventory/markers.py`): installed packages and environments (npm, pnpm, Yarn and Bun
+`node_modules`, Python virtual and conda environments, Go and Composer `vendor`, CocoaPods,
+Carthage, NuGet, Mix, Terraform), build output (CMake, Meson, Gradle, Maven, Cargo, sbt, .NET,
+Bazel, Buck, Pants, SCons, Xcode, SwiftPM, Flutter, JavaScript frameworks), caches (package
+managers, compilers, linters, language servers), IDE state, version control, test output,
+fuzzing corpora, and model caches and experiment tracking. A marked directory records its
+catalog key (`development_marker`), `marker_category`, `marker_ecosystem`, and how sure the
+marker is:
+
+| `marker_confidence` | Meaning |
+|---|---|
+| `confirmed` | An entry that only that kind of tree has was found inside it or beside it, named in `marker_evidence`: `pyvenv.cfg` in a virtual environment, `CACHEDIR.TAG` in a Cargo `target`, `../Cargo.toml` next to it. |
+| `name` | The name is distinctive on its own: `node_modules`, `__pycache__`, `bazel-out`, `.gradle`. |
+| `possible` | A common name (`build`, `dist`, `target`, `vendor`, `tmp`) that nothing confirmed: the directory may be project source, and its ecosystem is unknown when several are possible. |
+
+Names that are mostly project source (`packages`, `bin`, `env`, `deps`, `go`, `pkg`, `site`)
+are marked only with evidence. Evidence is checked with `lstat`: a link counts as present and
+is never followed. Marked directories are traversed and analyzed like any other unless an
+option prunes them; `metrics.development_directories`, `metrics.development_categories` and
+`metrics.development_confidence` count them.
+
+`--exclude-profile NAME` prunes the marked trees of a preset: `vcs`, `dependencies`, `build`
+(build output and generated code), `caches`, `ide`, `test-output`, `fuzzing`, `models`, or
+`all`. It is repeatable and takes comma-separated names. Only `confirmed` and `name` markers are
+pruned; a `possible` one, such as a project's own `build/` or `vendor/` source, never is (use
+`--exclude-dir` for that). A pruned directory keeps its record, and its `prune_reason` names the
+preset and the marker (`--exclude-profile dependencies: node_modules: dependencies
+(npm/pnpm/Yarn/Bun), confirmed by .package-lock.json`); `metrics.pruned_by_profile` counts the
+directories each preset pruned. `--resume` requires the same presets, and an inventory marked
+with another catalog version is not resumed.
 
 ## Inventory aggregates
 

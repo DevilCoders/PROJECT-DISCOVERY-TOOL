@@ -193,6 +193,23 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   build from another catalog is not used, and `pdt capabilities --json` reports it as
   `cpp_signature_classifier_outdated`. An inventory classified with another catalog version is
   not resumed.
+- Development-tree markers come from a catalog that covers npm, pnpm, Yarn and Bun, pip, uv,
+  Poetry and conda, Maven and Gradle, Cargo, Go modules, NuGet, Composer, Bundler, SwiftPM and
+  CocoaPods, Dart and Flutter, .NET, Bazel, Buck, Pants, SCons and CMake, IDEs, compiler and
+  language-server caches, fuzzing corpora and model caches. Each marked directory records
+  `marker_category`, `marker_ecosystem` and `marker_confidence`: `confirmed` by an entry inside
+  or beside it (`marker_evidence`, such as `pyvenv.cfg` or `../Cargo.toml`), `name` for a
+  distinctive name, or `possible` for a common name such as `build` or `vendor` that nothing
+  confirmed. `metrics.development_categories` and `metrics.development_confidence` count them,
+  in every report.
+- `pdt scan --exclude-profile NAME` prunes the development trees of a preset (`vcs`,
+  `dependencies`, `build`, `caches`, `ide`, `test-output`, `fuzzing`, `models`, `all`). Only
+  confirmed and distinctively named trees are pruned, never a possible one; each keeps its record
+  with a reason naming the preset and the marker, and `metrics.pruned_by_profile` counts them.
+  `--resume` requires the same presets.
+- Report schema 1.13: `marker_category`, `marker_ecosystem`, `marker_confidence` and
+  `marker_evidence` on directory records, and `metrics.development_categories`,
+  `metrics.development_confidence` and `metrics.pruned_by_profile`.
 - Report schema 1.12: `type_source`, `signature`, `type_detail`, `mime_type`, `name_type` and
   `type_mismatch` on file records, and `metrics.type_sources`, `metrics.mime_types`,
   `metrics.type_mismatches` and `metrics.git_lfs_pointer_count`.

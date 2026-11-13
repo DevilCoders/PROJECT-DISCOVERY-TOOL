@@ -18,8 +18,11 @@ from typing import Any, Literal, Sequence
 # file timestamps). 1.12 added type_source, signature, type_detail, mime_type, name_type and
 # type_mismatch to file records (file_type is the verified signature, text, binary/unknown or
 # empty, from the name only when the content was not read), and metrics.type_sources,
-# metrics.mime_types, metrics.type_mismatches and metrics.git_lfs_pointer_count.
-REPORT_SCHEMA_VERSION = "1.12"
+# metrics.mime_types, metrics.type_mismatches and metrics.git_lfs_pointer_count. 1.13 added
+# marker_category, marker_ecosystem, marker_confidence and marker_evidence to directory
+# records (development_marker is the marker catalog's key), metrics.development_categories,
+# metrics.development_confidence and metrics.pruned_by_profile.
+REPORT_SCHEMA_VERSION = "1.13"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -182,6 +185,14 @@ class DirectoryRecord:
     security: dict[str, Any] | None = None
     mtime_ns: int | None = None
     reparse_tag: str | None = None
+    # A development, dependency, build or cache tree (inventory.markers): its category
+    # (dependencies, build, cache, vcs, ide, ...), ecosystem, and how sure that is
+    # (confirmed by marker_evidence, the entry found inside or beside it; name, a
+    # distinctive name; possible, a common name nothing confirmed).
+    marker_category: str | None = None
+    marker_ecosystem: str | None = None
+    marker_confidence: str | None = None
+    marker_evidence: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

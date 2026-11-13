@@ -56,6 +56,7 @@ from .inventory.aggregates import inventory_aggregates
 from .inventory.cache import ScanCache
 from .inventory.entry_metadata import security_supported
 from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
+from .inventory.markers import describe_profiles, normalize_profiles
 from .inventory.signatures import count_classification
 from .inventory.store import (
     InventoryStore,
@@ -110,7 +111,8 @@ from .plugins.isolation import (
 from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
 from .reporting.writers import (
-    aggregate_summary, attribute_summary, type_summary, write_remote_batch_summary, write_reports,
+    aggregate_summary, attribute_summary, development_summary, type_summary, write_remote_batch_summary,
+    write_reports,
 )
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
 
@@ -248,6 +250,7 @@ def _describe_inventory_options(options: dict) -> dict[str, str]:
         "analysis": "full analysis" if options.get("read_signatures") else "--inventory-only",
         "size skip": f"--skip --max-file-mb {megabytes}" if options.get("skip_oversized") else "no --skip",
         "--exclude-dir": ", ".join(exclusions) or "none",
+        "--exclude-profile": ", ".join(options.get("exclude_profiles") or []) or "none",
         "--security-metadata": "on" if options.get("security_metadata") else "off",
     }
 
@@ -274,7 +277,7 @@ def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict) -> di
         return None  # an unreadable inventory has nothing to resume; a fresh scan replaces it
     if not isinstance(stored, dict):
         return None  # an earlier PDT version did not record its options: start fresh
-    if stored.get("signature_catalog") != options.get("signature_catalog"):
+    if any(stored.get(key) != options.get(key) for key in ("signature_catalog", "marker_catalog")):
         return None  # classified with another file-type catalog: start fresh, do not mix types
     before, now = _describe_inventory_options(stored), _describe_inventory_options(options)
     differences = [f"{name}: stored {before[name]}, now {now[name]}" for name in now if before[name] != now[name]]
@@ -488,6 +491,7 @@ def run_scan(
     online_vulnerabilities: OnlineVulnerabilityOptions | None = None,
     memory_source: NoDownloadSource | None = None,
     security_metadata: bool = False,
+    exclude_profiles: set[str] | frozenset[str] = frozenset(),
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -526,11 +530,12 @@ def run_scan(
     # the name or root-relative path the walk compares; a value that can never match is a
     # usage error instead of a scan that silently prunes nothing.
     excluded_names, excluded_paths = normalize_exclusions(ignores, None if memory_source is not None else root)
+    exclude_profiles = normalize_profiles(exclude_profiles)
     requested_inventory = inventory_options(
         read_signatures=not inventory_only, skip_oversized=skip_oversized,
         max_file_bytes=max_file_mb * 1024 * 1024,
         excluded_names=excluded_names, excluded_paths=excluded_paths,
-        security_metadata=security_metadata,
+        security_metadata=security_metadata, exclude_profiles=exclude_profiles,
     )
 
     # One scan per output directory: a second scan cleared the shared inventory under the
@@ -623,6 +628,7 @@ def run_scan(
                     records, directories, symlinks, special_entries, walk_stats = memory_source.build_inventory(
                         inventory_store, ignores=ignores,
                         max_file_bytes=max_file_mb * 1024 * 1024, skip_oversized=skip_oversized,
+                        exclude_profiles=exclude_profiles,
                     )
                 else:
                     records, directories, symlinks, special_entries, walk_stats = discover_inventory(
@@ -633,6 +639,7 @@ def run_scan(
                         store=inventory_store,
                         read_signatures=not inventory_only,
                         security_metadata=security_metadata,
+                        exclude_profiles=exclude_profiles,
                     )
             for value in unused_exclusions(walk_stats, excluded_names, excluded_paths):
                 note = f"--exclude-dir {value} matched no directory, so nothing was pruned for it."
@@ -1055,6 +1062,11 @@ def run_scan(
                 for key, value in walk_stats.items() if key.startswith("reparse_tag:") and value
             )),
             "pruned_directory_count": walk_stats.get("pruned_directory_count", 0),
+            # Directories pruned by each --exclude-profile preset.
+            "pruned_by_profile": {
+                key.rsplit(":", 1)[1]: value
+                for key, value in walk_stats.items() if key.startswith("exclusion_used:profile:") and value
+            },
             "entry_count": walk_stats.get("entry_count", 0) + 1,
             "hidden_entry_count": walk_stats.get("hidden_entry_count", 0),
             # Windows FILE_ATTRIBUTE_* or macOS file-flag names, counted over every entry.
@@ -1072,6 +1084,15 @@ def run_scan(
             "development_directories": {
                 key.split(":", 1)[1]: value
                 for key, value in walk_stats.items() if key.startswith("development_dir:")
+            },
+            # The same marked directories by category and by how sure the marker is.
+            "development_categories": {
+                key.split(":", 1)[1]: value
+                for key, value in walk_stats.items() if key.startswith("development_category:")
+            },
+            "development_confidence": {
+                key.split(":", 1)[1]: value
+                for key, value in walk_stats.items() if key.startswith("development_confidence:")
             },
             "file_types": {
                 key.split(":", 1)[1]: value
@@ -1205,7 +1226,7 @@ def run_scan(
                 f"{security_summary['entries']:,} entries / {security_summary['explicit_acl_entries']:,} "
                 f"with own ACL entries / {security_summary['errors']:,} unreadable",
             )
-        summary.add_row("Development/cache trees", str(metrics["development_directory_count"]))
+        summary.add_row("Development/cache trees", development_summary(metrics))
         for label, value in aggregate_summary(metrics["inventory_aggregates"]):
             # The paths come from the scanned tree: no control sequence may reach the terminal.
             summary.add_row(label, escape(neutralize_controls(value)))
@@ -1720,6 +1741,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Size threshold for --skip, which it requires (default: {DEFAULT_MAX_FILE_MB} MiB)",
     )
     scan.add_argument(
+        "--exclude-profile", action="append", default=[], metavar="NAME",
+        help="Prune the development trees of a preset: " + describe_profiles() + ". Only trees confirmed "
+             "by their contents or named distinctively (node_modules) are pruned, never a possible one "
+             "such as a build/ that may be source; repeatable or comma-separated",
+    )
+    scan.add_argument(
         "--exclude-dir", action="append", default=[],
         metavar="NAME",
         help="Explicitly prune a directory name (at any depth), or one directory by its path relative "
@@ -2208,6 +2235,7 @@ def main() -> None:
                 "resume": args.resume,
                 "inventory_only": args.inventory_only,
                 "security_metadata": args.security_metadata,
+                "exclude_profiles": set(args.exclude_profile),
                 "plugin_isolation": args.plugin_isolation,
                 "plugin_timeout": args.plugin_timeout,
                 "plugin_memory_mb": args.plugin_memory_mb,
@@ -2244,6 +2272,7 @@ def main() -> None:
                 quiet=args.quiet, no_color=args.no_color, executor=args.executor,
                 resume=args.resume, inventory_only=args.inventory_only,
                 security_metadata=args.security_metadata,
+                exclude_profiles=set(args.exclude_profile),
                 plugin_isolation=args.plugin_isolation, plugin_timeout=args.plugin_timeout,
                 plugin_memory_mb=args.plugin_memory_mb,
                 online_vulnerabilities=online_vulnerabilities,

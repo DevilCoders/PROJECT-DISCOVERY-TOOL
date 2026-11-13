@@ -94,6 +94,28 @@ def _link_outcome(item) -> str:
     return f"{state}: {detail}" if detail else state
 
 
+def development_summary(metrics: dict[str, Any]) -> str:
+    """"412 (380 confirmed, 20 by name, 12 possible)": marked trees by marker confidence."""
+    count = metrics.get("development_directory_count", 0)
+    confidence = metrics.get("development_confidence") or {}
+    parts = [
+        f"{confidence[key]:,} {label}" for key, label in (
+            ("confirmed", "confirmed"), ("name", "by name"), ("possible", "possible"),
+        ) if confidence.get(key)
+    ]
+    return f"{count:,}" + (f" ({', '.join(parts)})" if parts else "")
+
+
+def _marker_label(item) -> str:
+    """"node_modules: dependencies, confirmed by .package-lock.json" for a marked directory."""
+    confidence = getattr(item, "marker_confidence", None)
+    category = getattr(item, "marker_category", None)
+    if not confidence:
+        return item.development_marker
+    how = {"confirmed": f"confirmed by {item.marker_evidence}", "name": "by name"}.get(confidence, "possible")
+    return f"{item.development_marker}: {category}, {how}"
+
+
 _TYPE_SOURCES = ("signature", "content", "name")
 _MISMATCH_EXAMPLES = 20
 
@@ -396,6 +418,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>File type distribution</h3><div id="file-types"></div></div>
      <div class="profile-card"><h3>File size distribution</h3><div id="size-buckets"></div></div>
      <div class="profile-card"><h3>Development dependency trees</h3><div id="development-dirs"></div></div>
+     <div class="profile-card"><h3>Development trees by category</h3><div id="development-categories"></div></div>
      <div class="profile-card"><h3>Entry attributes</h3><div id="entry-attributes"></div></div>
      <div class="profile-card"><h3>Directory fan-out</h3><div id="fan-out"></div></div>
      <div class="profile-card"><h3>MIME types</h3><div id="mime-types"></div></div>
@@ -711,7 +734,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- Security metadata: {_md(security_metadata_summary(metrics))}",
         *([f"- Windows reparse points: {_md(attribute_summary(metrics['reparse_tags']))}"]
           if metrics.get("reparse_tags") else []),
-        f"- Development/cache trees: {metrics.get('development_directory_count', 0):,}",
+        f"- Development/cache trees: {development_summary(metrics)}",
         *(f"- {label}: {_md(text)}" for label, text in aggregate_summary(metrics.get("inventory_aggregates"))),
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
         f"- Analysis queue limit: {execution.get('max_pending_tasks', 'not reported')} pending batches",
@@ -757,6 +780,15 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     for name, count in sorted(metrics.get("development_directories", {}).items()):
         line(f"- {_md(name)}: {count:,}")
     line()
+    if metrics.get("development_categories"):
+        line(f"- By category: {_md(attribute_summary(metrics['development_categories'], limit=9))}")
+        line(f"- By confidence: {_md(attribute_summary(metrics.get('development_confidence') or {}, limit=3))}")
+        line("- Possible markers are common names (build, vendor, dist) that nothing confirmed; "
+             "presets never prune them.")
+        line()
+    if metrics.get("pruned_by_profile"):
+        line(f"- Pruned by --exclude-profile: {_md(attribute_summary(metrics['pruned_by_profile'], limit=9))}")
+        line()
     line("## Largest Directories")
     line()
     largest = heapq.nlargest(
@@ -765,7 +797,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         key=lambda item: (item.total_bytes, item.path.casefold(), item.path),
     )
     for item in largest:
-        marker = f" [{_md(item.development_marker)}]" if item.development_marker else ""
+        marker = f" [{_md(_marker_label(item))}]" if item.development_marker else ""
         pruned = " [pruned]" if item.pruned else ""
         line(
             f"- {_md(item.path)} — {item.total_bytes:,} bytes, "

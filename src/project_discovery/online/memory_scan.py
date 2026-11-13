@@ -35,8 +35,9 @@ from ..engine.executor import FileOutcome, _run_analyzers
 from ..intelligence.facts import collecting_facts
 from ..intelligence.python_graph import MAX_GRAPH_AST_FILE_BYTES, parse_python_imports
 from ..inventory.scanner import (
-    _exclusion_match, _size_bucket, development_marker, normalize_exclusions,
+    _exclusion_match, _size_bucket, normalize_exclusions,
 )
+from ..inventory.markers import apply_marker, count_marker, detect_marker
 from ..inventory.signatures import apply_classification, classify, classify_content
 from ..inventory.links import Flavor, classify_links, store_lookup, stored_links
 from ..inventory.store import InventoryStore, StoredFileRecords, StoredRecordSequence
@@ -214,7 +215,8 @@ class NoDownloadSource:
 
     # ------------------------------------------------------------------
     def build_inventory(self, store: InventoryStore, *, ignores: set[str] | None = None,
-                        max_file_bytes: int, skip_oversized: bool):
+                        max_file_bytes: int, skip_oversized: bool,
+                        exclude_profiles: frozenset[str] = frozenset()):
         """Persist the commit tree as PDT inventory records (no content is read)."""
         assert self.revision is not None, "open() must be called first"
         # A file whose size the listing lacks (GitLab) is checked against --skip when read.
@@ -225,7 +227,7 @@ class NoDownloadSource:
             self._listing_cause = self._stop_for(listing_error)
         # The same spellings and matching as a local walk; an absolute path is a usage error.
         excluded_names, excluded_paths = normalize_exclusions(ignores)
-        # Corroborates generic development-tree names (go/pkg/mod, env/pyvenv.cfg).
+        # Confirms development-tree markers (go/pkg/mod, env/pyvenv.cfg, Cargo.toml beside target).
         listed = {entry.path for entry in entries}
         stats: Counter[str] = Counter()
         store.clear()
@@ -245,22 +247,24 @@ class NoDownloadSource:
             parent = PurePosixPath(path).parent.as_posix()
             ensure_directory(parent if parent != "." else "")
             name = PurePosixPath(path).name
-            match = _exclusion_match(path, name, excluded_names, excluded_paths)
+            base = "" if parent in {"", "."} else f"{parent}/"
+            marker = detect_marker(
+                name, lambda relative: f"{path}/{relative}" in listed, lambda relative: f"{base}{relative}" in listed,
+            )
+            match = _exclusion_match(path, name, excluded_names, excluded_paths, marker, exclude_profiles)
             exclusion = match[1] if match else None
-            marker = development_marker(name, lambda relative: f"{path}/{relative}" in listed)
             record = DirectoryRecord(
                 path, path.count("/") + 1, is_hidden=name.startswith("."),
-                development_marker=marker, pruned=exclusion is not None, prune_reason=exclusion,
+                pruned=exclusion is not None, prune_reason=exclusion,
             )
+            apply_marker(record, marker)
             directories[path] = record
             store.append("directory", record)
             store.adjust_directory(parent if parent not in {"", "."} else ".", direct_child_delta=1)
             stats["entry_count"] += 1
             if record.is_hidden:
                 stats["hidden_entry_count"] += 1
-            if marker:
-                stats["development_directory_count"] += 1
-                stats[f"development_dir:{marker}"] += 1
+            count_marker(stats, marker)
             if match:
                 stats["pruned_directory_count"] += 1
                 stats[f"pruned_dir:{name.casefold()}"] += 1

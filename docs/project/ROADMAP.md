@@ -94,11 +94,11 @@ The baseline is not production-ready:
 - [x] Remove implicit default pruning of dependency/build/cache trees.
 - [x] Traverse all recognized trees by default unless the operator explicitly opts out or a documented safety policy marks an entry unknown.
 - [x] Add `--exclude-dir NAME` (a directory name, or a path relative to the root or absolute inside it); every pruned subtree keeps its directory record with `pruned` set and the exact `prune_reason`, and pruned counts appear in every report (terminal, Markdown, JSON and the HTML inventory summary).
-- [ ] Add optional exclusion profile presets.
+- [x] Add optional exclusion profile presets. `--exclude-profile` prunes the marked trees of `vcs`, `dependencies`, `build`, `caches`, `ide`, `test-output`, `fuzzing`, `models` or `all`: only confirmed and distinctively named markers, never a possible one; each pruned directory keeps its record and a reason naming the preset and the marker, `metrics.pruned_by_profile` counts them, and `--resume` requires the same presets.
 - [x] Add `--inventory-only`: inventory files, directories and links without reading file contents (no hashing or content analyzers), recorded as `metrics.execution.analysis_mode`.
 - [ ] Add directory-only and deep-analysis controls with explicit semantics.
-- [ ] Extend markers for pnpm/npm/yarn/bun, pip/uv/poetry/conda, Maven/Gradle, Cargo, Go modules, NuGet, Composer, Ruby/Bundler, SwiftPM/CocoaPods, Dart/Flutter, .NET, Bazel/Buck/Pants, SCons, CMake, IDE, compiler, fuzzing, model caches and language server caches.
-- [ ] Add marker confidence and distinguish known dependency stores from arbitrary directories with similar names.
+- [x] Extend markers for pnpm/npm/yarn/bun, pip/uv/poetry/conda, Maven/Gradle, Cargo, Go modules, NuGet, Composer, Ruby/Bundler, SwiftPM/CocoaPods, Dart/Flutter, .NET, Bazel/Buck/Pants, SCons, CMake, IDE, compiler, fuzzing, model caches and language server caches. `inventory/markers.py` catalogs them by category and ecosystem, with the entries that confirm each, in local and no-download scans alike.
+- [x] Add marker confidence and distinguish known dependency stores from arbitrary directories with similar names. `marker_confidence` is `confirmed` (an entry inside or beside the directory, recorded in `marker_evidence`), `name` (a distinctive name) or `possible` (a common name such as `build` or `vendor` that nothing confirmed); names that are mostly source (`packages`, `bin`, `env`, `deps`) are marked only with evidence.
 
 ### Oversized files
 - [x] Global oversized-file content skipping is opt-in through `pdt scan PATH --skip`.

@@ -62,7 +62,7 @@ if(truncated.length){
  notice.classList.remove("hidden");
 }
 fillBars("file-types",metrics.file_types);fillBars("size-buckets",metrics.size_buckets);
-fillBars("development-dirs",metrics.development_directories);
+fillBars("development-dirs",metrics.development_directories);fillBars("development-categories",metrics.development_categories);
 fillBars("entry-attributes",metrics.entry_attributes);
 const aggregates=metrics.inventory_aggregates||{};
 fillBars("fan-out",(aggregates.fan_out||{}).buckets);
@@ -282,7 +282,8 @@ for(const item of REPORT.directories){
 }
 for(const item of topDirectories){
  const tr=document.createElement("tr");
- const marker=entryFlags([item.development_marker,item.pruned?"pruned":null,item.is_hidden?"hidden":null],item.attributes);
+ const markerText=item.development_marker?item.development_marker+(item.marker_confidence?" ("+item.marker_confidence+")":""):null;
+ const marker=entryFlags([markerText,item.pruned?"pruned":null,item.is_hidden?"hidden":null],item.attributes);
  for(const pair of [[item.path,"path"],[item.depth,""],[number(item.file_count),""],[formatBytes(item.total_bytes),""],[marker,""]]){
   const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
  }
