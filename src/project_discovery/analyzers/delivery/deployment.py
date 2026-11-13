@@ -10,6 +10,7 @@ from typing import Any
 from ...core.limits import AnalyzerLimits
 from ...core.safe_parsers import safe_yaml_load_all
 from ...core.source_utils import LineIndex, describe_error, read_text_bounded
+from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -24,7 +25,9 @@ class _SafeDeploymentLoader:
         except ImportError as exc:
             raise RuntimeError("PyYAML is not installed; install the infrastructure extra") from exc
         # Alias expansion is bounded before Kubernetes/Compose walkers traverse the data.
-        return safe_yaml_load_all(text, allow_unknown_tags=True)
+        # Compose, Kubernetes and CI services read YAML 1.2, which has no base-60 numbers:
+        # an unquoted 8080:22 port mapping stays text.
+        return safe_yaml_load_all(text, allow_unknown_tags=True, base60=False)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -162,6 +165,302 @@ def _public_ingress(source: str):
 
 _MAX_DEPLOYMENT_BYTES = 16 * 1024 * 1024
 
+# ----------------------------------------------------------------------------- port facts
+# The ports deployment files declare are recorded as code facts (``net_declared``), and the
+# services they name as ``net_service``; the code index joins them with the ports code
+# listens on into the network service map (intelligence/index.py, "network_services"). A
+# declaration's scope says what it is: "workload" ports are the ones the program inside
+# should listen on, "edge" ports a load balancer's own, "firewall" ports what an allow rule
+# opens.
+
+_MAX_FACT_ITEMS = 20
+
+
+def _labels(value: Any) -> dict[str, str]:
+    """Up to 20 entries of a mapping (Kubernetes labels, a selector), as text."""
+    return {str(key)[:100]: str(item)[:200] for key, item in itertools.islice(_mapping(value).items(), _MAX_FACT_ITEMS)}
+
+
+def _plain(value: Any) -> Any:
+    """A fact detail value: numbers, flags and short text as they are, anything else as text."""
+    if value is None or isinstance(value, bool | int):
+        return value
+    if isinstance(value, dict):
+        return _labels(value)
+    if isinstance(value, list):
+        return [str(item)[:200] for item in value[:_MAX_FACT_ITEMS]]
+    return str(value)[:200]
+
+
+def _transport(protocol: Any) -> str | None:
+    """The transport a declared protocol stands for (tcp, udp, sctp or "any"), or None for
+    protocols without ports (ICMP, ESP, AH, GRE)."""
+    value = "tcp" if protocol is None else str(protocol).strip().lower()
+    if value in {"udp", "17"}:
+        return "udp"
+    if value in {"sctp", "132"}:
+        return "sctp"
+    if value in {"-1", "all", "*", "any", "asterisk", "tcp_udp"}:
+        return "any"
+    if value in {"icmp", "icmpv6", "ipv6-icmp", "1", "58", "esp", "ah", "gre", "50", "51", "47"}:
+        return None
+    return "tcp"  # tcp, 6, and the protocols carried over TCP (HTTP, HTTPS, TLS)
+
+
+def _number(text: str) -> int | None:
+    return int(text) if text.isascii() and text.isdigit() and len(text) <= 5 else None
+
+
+def _port_span(value: Any) -> str | None:
+    """A port ("8080") or range ("8000-8010"; "0-65535" is every port) as text, or None for
+    variables, names and other text."""
+    if value is None or isinstance(value, bool):
+        return None
+    low, separator, high = str(value).strip().partition("-")
+    first, last = _number(low), _number(high) if separator else _number(low)
+    if first is None or last is None:
+        return None
+    if separator and first == 0:
+        first = 1  # port 0 is no port: 0-65535 is every port
+    if not 0 < first <= last < 65536:
+        return None
+    return str(first) if first == last else f"{first}-{last}"
+
+
+def _emit_port(value: Any, source: str, /, protocol: Any = None, scope: str = "workload", named: bool = False,
+               **detail: Any) -> None:
+    """Record one declared port or port range; with ``named``, a port name (a Kubernetes
+    targetPort) is recorded as "?" with the name."""
+    span = _port_span(value)
+    transport = _transport(protocol)
+    if span is None and named and isinstance(value, str) and value.strip():
+        span, detail["target_name"] = "?", value.strip()
+    if span is None or transport is None:
+        return
+    code_facts.emit_fact("net_declared", span, source=source, protocol=transport, scope=scope, **{
+        key: _plain(item) for key, item in detail.items() if item is not None and item is not False and item != ""})
+
+
+def _compose_ports(value: Any):
+    """(target, protocol, published, host IP) of each entry of a Compose service's ``ports``,
+    in the short ("127.0.0.1:8080:80/tcp", "[::1]:8080:80") or long syntax."""
+    for item in _items(value):
+        if isinstance(item, dict):
+            yield item.get("target"), item.get("protocol"), item.get("published"), item.get("host_ip")
+            continue
+        text, _, protocol = str(item).strip().partition("/")
+        host_ip = None
+        if text.startswith("["):
+            close = text.find("]")
+            if close < 0:
+                continue
+            host_ip, text = text[1:close], text[close + 1:].removeprefix(":")
+        parts = text.rsplit(":", 2)
+        if len(parts) == 3:
+            host_ip = parts[0]
+        yield parts[-1], protocol or None, (parts[-2] or None) if len(parts) > 1 else None, host_ip
+
+
+def _pod_labels(kind: str, root: dict[str, Any], spec: dict[str, Any]) -> dict[str, str]:
+    """The labels a workload's pods carry: a Pod's own, else its pod template's."""
+    if kind == "Pod":
+        return _labels(_mapping(root.get("metadata")).get("labels"))
+    if kind == "CronJob":
+        spec = _mapping(_mapping(spec.get("jobTemplate")).get("spec"))
+    return _labels(_mapping(_mapping(spec.get("template")).get("metadata")).get("labels"))
+
+
+# Terraform resources that open, serve or front ports, by the nested block path that holds
+# each rule (an empty path: the resource's own attributes).
+_TF_PORT_RESOURCES = {
+    "aws_security_group": ("ingress",), "aws_security_group_rule": (),
+    "aws_vpc_security_group_ingress_rule": (), "google_compute_firewall": ("allow",),
+    "azurerm_network_security_group": ("security_rule",), "azurerm_network_security_rule": (),
+    "aws_lb_listener": (), "aws_alb_listener": (), "aws_lb_target_group": (), "aws_alb_target_group": (),
+    "kubernetes_service": ("spec", "port"), "kubernetes_service_v1": ("spec", "port"),
+}
+_TF_PUBLIC_SOURCES = frozenset({"0.0.0.0/0", "::/0", "*", "internet", "any"})
+_TF_SOURCE_FIELDS = ("cidr_blocks", "ipv6_cidr_blocks", "cidr_ipv4", "cidr_ipv6", "source_ranges",
+                     "source_address_prefix", "source_address_prefixes")
+_TF_RESOURCE = re.compile(r'(?m)^[ \t]*resource[ \t]+"([\w-]{1,128})"[ \t]+"([\w-]{1,128})"[ \t]*\{')
+_TF_NESTED = re.compile(r'(?m)^[ \t]*([A-Za-z_][\w-]{0,63})(?:[ \t]+"[^"\n]{0,128}"){0,2}[ \t]*\{')
+_TF_FIELD = re.compile(
+    r"(?m)^[ \t]*(from_port|to_port|port|target_port|node_port|destination_port_ranges?|ports|protocol|"
+    r"ip_protocol|type|direction|access|cidr_blocks|ipv6_cidr_blocks|cidr_ipv4|cidr_ipv6|source_ranges|"
+    r"source_address_prefix(?:es)?)[ \t]*=[ \t]*"
+)
+_HCL_SPECIAL = re.compile(r'["#/<{}]')
+_HCL_STRING_REST = re.compile(r'(?:[^"\\\n]|\\.)*"?')
+_HCL_HEREDOC = re.compile(r"<<-?([A-Za-z_][\w-]{0,63})[ \t]*\r?\n")
+
+
+def _block_end(source: str, opening: int) -> int:
+    """The offset of the brace that closes the HCL block opening at ``opening``, skipping
+    strings, comments and heredocs; the end of the text when it never closes."""
+    depth, position, length = 0, opening, len(source)
+    while (special := _HCL_SPECIAL.search(source, position)) is not None:
+        position = special.start()
+        char = source[position]
+        if char == '"':
+            position = _HCL_STRING_REST.match(source, position + 1).end()
+            continue
+        if char == "#" or source.startswith("//", position):
+            newline = source.find("\n", position)
+            if newline < 0:
+                return length
+            position = newline + 1
+            continue
+        if source.startswith("/*", position):
+            close = source.find("*/", position + 2)
+            if close < 0:
+                return length
+            position = close + 2
+            continue
+        if char == "<" and (heredoc := _HCL_HEREDOC.match(source, position)) is not None:
+            terminator = re.compile(rf"^[ \t]*{re.escape(heredoc.group(1))}[ \t]*\r?$", re.MULTILINE)
+            close = terminator.search(source, heredoc.end())
+            if close is None:
+                return length
+            position = close.end()
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return position
+        position += 1
+    return length
+
+
+def _tf_values(text: str) -> list[str]:
+    """The strings and numbers of an HCL value (one value, or a list's inside), skipping
+    comments and references such as ``var.ports``."""
+    values: list[str] = []
+    position, length = 0, len(text)
+    while position < length and len(values) < 256:
+        char = text[position]
+        if char == '"':
+            close = text.find('"', position + 1)
+            if close < 0:
+                break
+            values.append(text[position + 1:close])
+            position = close + 1
+        elif char == "#" or text.startswith("//", position):
+            newline = text.find("\n", position)
+            if newline < 0:
+                break
+            position = newline + 1
+        elif char.isascii() and (char.isalnum() or char in "_-."):
+            end = position + 1
+            while end < length and text[end].isascii() and (text[end].isalnum() or text[end] in "_-."):
+                end += 1
+            if char.isdigit() or char == "-":
+                values.append(text[position:end])
+            position = end
+        else:
+            position += 1
+    return values
+
+
+def _tf_value(text: str, start: int) -> tuple[list[str], int]:
+    """The items of the value assigned at ``start`` (a list may span lines) and its end."""
+    if text.startswith("[", start):
+        close = text.find("]", start, start + 8192)
+        if close < 0:
+            return [], min(len(text), start + 8192)
+        return _tf_values(text[start + 1:close]), close + 1
+    newline = text.find("\n", start, start + 512)
+    end = newline if newline >= 0 else min(len(text), start + 512)
+    return _tf_values(text[start:end])[:1], end
+
+
+def _tf_fields(text: str) -> dict[str, list[str]]:
+    """The port, protocol, direction and source attributes of an HCL block's own text."""
+    fields: dict[str, list[str]] = {}
+    position = 0
+    while (match := _TF_FIELD.search(text, position)) is not None:
+        values, end = _tf_value(text, match.end())
+        fields.setdefault(match.group(1), values)
+        position = max(end, match.end())
+    return fields
+
+
+def _tf_children(body: str) -> tuple[list[tuple[str, str]], str]:
+    """A block body's nested blocks, as (type, body) pairs, and its own text without them."""
+    children, own, position = [], [], 0
+    while (match := _TF_NESTED.search(body, position)) is not None:
+        end = _block_end(body, match.end() - 1)
+        own.append(body[position:match.start()])
+        children.append((match.group(1), body[match.end():end]))
+        position = end + 1
+    own.append(body[position:])
+    return children, "".join(own)
+
+
+def _tf_rules(body: str, path: tuple[str, ...]) -> tuple[list[dict[str, list[str]]], dict[str, list[str]]]:
+    """The attributes of each rule block along ``path``, and the resource's own attributes."""
+    children, own = _tf_children(body)
+    outer = _tf_fields(own)
+    if not path:
+        return [outer], outer
+    level = [child for kind, child in children if kind == path[0]]
+    for name in path[1:]:
+        level = [child for block in level for kind, child in _tf_children(block)[0] if kind == name]
+    return [_tf_fields(_tf_children(block)[1]) for block in level], outer
+
+
+def _tf_emit(kind: str, resource: str, line: int, fields: dict[str, list[str]], outer: dict[str, list[str]]) -> None:
+    def first(key: str) -> str:
+        values = fields.get(key) or outer.get(key) or [""]
+        return values[0].strip()
+
+    if kind == "aws_security_group_rule" and first("type").lower() != "ingress":
+        return
+    if first("direction").lower() in {"egress", "outbound"} or first("access").lower() == "deny":
+        return
+    protocol = first("protocol") or first("ip_protocol") or None
+    detail = {"resource": resource, "line": line}
+    if kind.endswith(("_listener", "_target_group")):
+        _emit_port(first("port"), "terraform", protocol=protocol,
+                   scope="edge" if kind.endswith("_listener") else "workload", **detail)
+        return
+    if kind.startswith("kubernetes_service"):
+        _emit_port(first("target_port") or first("port"), "terraform", protocol=protocol,
+                   port=_number(first("port")), node_port=_number(first("node_port")), **detail)
+        return
+    public = any(value.strip().lower() in _TF_PUBLIC_SOURCES for key in _TF_SOURCE_FIELDS
+                 for value in fields.get(key, []) + outer.get(key, []))
+    spans = []
+    if kind.startswith("aws_") and _transport(protocol) == "any":
+        spans.append("1-65535")  # protocol -1: every port, whatever from_port and to_port say
+    elif first("from_port"):
+        spans.append(f"{first('from_port')}-{first('to_port') or first('from_port')}")
+    for key in ("destination_port_range", "destination_port_ranges", "ports"):
+        spans.extend(fields.get(key, []))
+    if kind == "google_compute_firewall" and not fields.get("ports"):
+        spans.append("1-65535")  # an allow block without ports allows every port of its protocol
+    for span in spans:
+        _emit_port("1-65535" if span.strip() == "*" else span, "terraform", protocol=protocol, scope="firewall",
+                   public=public, **detail)
+
+
+def _terraform_ports(source: str, lines: LineIndex) -> None:
+    """Record the ports Terraform resources open (security groups, firewall rules), serve
+    (target groups, Kubernetes services) or front (load balancer listeners)."""
+    position = 0
+    while (match := _TF_RESOURCE.search(source, position)) is not None:
+        kind, name = match.groups()
+        position = match.end()
+        path = _TF_PORT_RESOURCES.get(kind)
+        if path is None:
+            continue
+        end = _block_end(source, match.end() - 1)
+        position = end + 1
+        rules, outer = _tf_rules(source[match.end():end], path)
+        for fields in rules:
+            _tf_emit(kind, f"{kind}.{name}", lines.line(match.start()), fields, outer)
+
 
 class DeploymentIntelligenceAnalyzer(Analyzer):
     """Inspect deployment manifests without executing commands or contacting services."""
@@ -251,6 +550,10 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             instructions.setdefault(key.upper(), []).append((number, value.strip()))
         bases = instructions.get("FROM", [])
         ports = [value for _, value in instructions.get("EXPOSE", [])]
+        for line, value in instructions.get("EXPOSE", []):
+            for token in value.split():
+                port, _, protocol = token.partition("/")
+                _emit_port(port, "dockerfile", protocol=protocol or None, line=line)
         users = instructions.get("USER", [])
         evidence = [
             f"{record.path}:{line} ({key})"
@@ -320,6 +623,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         )
         findings = []
         lines = LineIndex(source)
+        _terraform_ports(source, lines)
         if blocks:
             counts: dict[str, int] = {}
             for kind, _, _ in blocks:
@@ -463,6 +767,18 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             for key in ("ports", "depends_on", "volumes", "networks"):
                 if service.get(key):
                     evidence.append(f"service {service_name}: {key} declared")
+            aliases = [service.get("container_name"), service.get("hostname")]
+            for network in _items(service.get("networks")):
+                aliases.extend(_items(_mapping(network).get("aliases")))
+            aliases = [alias[:200] for alias in aliases if isinstance(alias, str) and alias][:_MAX_FACT_ITEMS]
+            code_facts.emit_fact("net_service", str(service_name)[:200], source="compose",
+                                 **({"aliases": aliases} if aliases else {}))
+            for target, protocol, published, host_ip in _compose_ports(service.get("ports")):
+                _emit_port(target, "compose", protocol=protocol, service=str(service_name),
+                           published=None if published is None else str(published), host_ip=host_ip)
+            for exposed in _items(service.get("expose")):
+                port, _, protocol = str(exposed).partition("/")
+                _emit_port(port, "compose", protocol=protocol or None, service=str(service_name), internal=True)
             if service.get("privileged") is True:
                 risks.append((str(service_name), "privileged container"))
             if service.get("network_mode") == "host":
@@ -494,6 +810,8 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         containers = _containers(pod_spec)
         name = str(metadata.get("name", "unnamed"))
         evidence = [record.path, f"document: {index + 1}"]
+        namespace = metadata.get("namespace")
+        labels = _pod_labels(kind, root, spec) if containers else {}
         for container in containers:
             if container.get("image"):
                 evidence.append(f"image: {container['image']}")
@@ -501,6 +819,12 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
                 port = _mapping(port)
                 if port.get("containerPort"):
                     evidence.append(f"containerPort: {port['containerPort']}")
+                    _emit_port(port["containerPort"], "kubernetes", protocol=port.get("protocol"),
+                               workload=f"{kind}/{name}", container=container.get("name"),
+                               port_name=port.get("name"), host_port=port.get("hostPort"), namespace=namespace,
+                               labels=labels or None)
+        if kind == "Service":
+            self._service_ports(spec, name, namespace)
         findings = [Finding(
             "orchestration",
             f"Kubernetes {kind}: {name}",
@@ -535,6 +859,21 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             analyzer=self.name,
         ) for risk in risky)
         return findings
+
+    @staticmethod
+    def _service_ports(spec: dict[str, Any], name: str, namespace: Any) -> None:
+        """A Kubernetes Service as a ``net_service`` fact, and each of its ports by the target
+        port the selected pods listen on (a named targetPort as "?" with its name)."""
+        selector = _labels(spec.get("selector"))
+        code_facts.emit_fact("net_service", name[:200], source="kubernetes", **{
+            key: _plain(value) for key, value in (("namespace", namespace), ("external_name", spec.get("externalName")))
+            if value})
+        for port in _items(spec.get("ports")):
+            port = _mapping(port)
+            _emit_port(port.get("targetPort", port.get("port")), "kubernetes-service", protocol=port.get("protocol"),
+                       named=True, service=name, namespace=namespace, port=port.get("port"),
+                       node_port=port.get("nodePort"), type=spec.get("type") or "ClusterIP",
+                       port_name=port.get("name"), selector=selector or None)
 
     def _helm_chart(self, path: Path, record: FileRecord) -> list[Finding]:
         documents, error = self._read_yaml(path, record)

@@ -41,7 +41,34 @@ A port in a YAML file or a `PORT = 8080` constant is a declaration; `net.Listen(
 | Ruby (from the text) | `TCPServer`, `UNIXServer`, `Socket.tcp_server_loop` | `TCPSocket`, `UNIXSocket`, `Socket.tcp` | `UDPSocket` |
 | Swift, Dart | `NWListener`; `ServerSocket.bind`, `HttpServer.bind` | `NWConnection`; `Socket.connect`, `WebSocket.connect` | `RawDatagramSocket.bind` |
 
-Python call sites are CONFIRMED (the syntax tree, with imports followed); the others come from the shared structural lexer and are INFERRED. A listener that binds every interface explicitly (`0.0.0.0`, `::`, or Python's `''` in a bind tuple) is a MEDIUM "Listeners bound to every network interface" finding: it accepts connections from every network the host is on. An implicit all-interface bind (Go's `":8080"`, Node's `listen(port)`) is listed, not flagged. Socket-level `listen` and `accept` carry a backlog, not an address. At most 1,000 call sites are kept per file.
+Python call sites are CONFIRMED (the syntax tree, with imports followed); the others come from the shared structural lexer and are INFERRED. A listener that binds every interface explicitly (`0.0.0.0`, `::`, or Python's `''` in a bind tuple) is a MEDIUM "Listeners bound to every network interface" finding: it accepts connections from every network the host is on. An implicit all-interface bind (Go's `":8080"`, Node's `listen(port)`) is listed, not flagged. Socket-level `listen` and `accept` carry a backlog, not an address. A URL argument (`tcp://db:5432`, `wss://stream.example.com/feed`) gives its host and port, and a single-label name next to a port (`("db", 5432)`) is a service name, as Compose and Kubernetes DNS resolve it. At most 1,000 call sites are kept per file.
+
+## Service map
+
+The code index joins what deployment files declare with what code does, across every file of the scan, into `metrics.code_index.network_services`:
+
+| Source | What is read |
+|---|---|
+| Dockerfile | `EXPOSE` ports and ranges (`8080/tcp`, `9000-9010`); variables such as `$PORT` are not resolved |
+| Compose | each service's `ports` in the short (`127.0.0.1:8080:80/udp`, `[::1]:6001:6001`, `9090-9091:8080-8081`) and long syntax, with the published port and host address, and its `expose` ports; each service by name, `container_name`, `hostname` and network aliases |
+| Kubernetes | container ports (`containerPort` with its name and `hostPort`, and the pod labels), and Services: each port by its `targetPort`, with the Service's own `port`, `nodePort`, type, namespace and selector |
+| Terraform | ingress rules: `aws_security_group` ingress blocks, `aws_security_group_rule` (type `ingress`), `aws_vpc_security_group_ingress_rule`, `google_compute_firewall` allow blocks (direction `INGRESS`; an allow without ports allows every port of its protocol), `azurerm_network_security_group` security rules and `azurerm_network_security_rule` (`Inbound`, `Allow`), each with whether its sources include every address (`0.0.0.0/0`, `::/0`, `*`, `Internet`); AWS protocol `-1` is every port. Also `aws_lb_target_group` and `aws_lb_listener` ports (and their `aws_alb_` forms) and `kubernetes_service(_v1)` target ports |
+| Code | the listeners with a literal port and the connections with a literal address that `network-sockets` finds (above), and HTTP calls whose host is a service the deployment files name |
+
+Each declared port has a scope: **workload** (the program in the container, pod or target group should listen on it), **edge** (a load balancer listener's own port) or **firewall** (what an allow rule opens). Ports are joined by number; each declaration keeps its protocol (tcp, udp, sctp, or any). A Kubernetes Service selects the pods whose labels hold its selector in its namespace, and a named `targetPort` resolves through those pods' container port names. Code reaches a service by its Compose name or alias, or by a Kubernetes Service's `name`, `name.namespace` or `name.namespace.svc[.cluster.local]`.
+
+| Finding | When |
+|---|---|
+| Network service map | always, when anything is declared or listened on: the ports declared, by source, the ports code listens on, those both declared and listened on, and the connections that reach a declared service |
+| Declared ports no code listener uses | workload ports no listener in code uses, when code listens on literal ports and on none without one (a listener whose port comes from a variable could be using any of them) |
+| Listeners no deployment file declares | ports code listens on beyond loopback that no declaration or range names, when the scan has declarations |
+| Ports open to every address that code listens on (MEDIUM) | a Terraform rule opens to every address a port that code listens on beyond loopback |
+| Kubernetes Services targeting ports their pods do not declare (LOW) | a Service's `targetPort`, number or name, is no container port of the pods it selects |
+| Connections to ports a service does not declare (LOW) | code connects to a Compose or Kubernetes service by name on a port that service does not declare |
+
+Listeners in test files are listed (`"test": true`) and take no part in the findings. Socket-level `listen(backlog)` and `accept()`, and Node's `createServer(handler)`, name no port: the `bind` or the `.listen(port)` call does. The map holds at most 1,000 ports with 20 declarations and 20 listeners each, and 1,000 entries in each other list; a list cut at its cap is an UNKNOWN "Network service map truncated" finding.
+
+**Not resolved:** values from variables, locals and modules (`from_port = var.port`), Terraform `dynamic` blocks and the `ingress = [...]` attribute form, Helm templates (`{{ .Values.port }}` is no YAML until rendered), Kustomize overlays, CloudFormation and Kubernetes Ingress routes. Deployment YAML is read with YAML 1.2 numbers, as Compose and Kubernetes read it: an unquoted `9000:22` is a port mapping, not YAML 1.1's base-60 number 540022.
 
 ## The bundled Public Suffix List
 

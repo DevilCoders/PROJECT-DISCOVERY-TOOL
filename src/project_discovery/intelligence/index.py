@@ -18,6 +18,7 @@ does not grow with repository size:
 """
 from __future__ import annotations
 
+import itertools
 import json
 import posixpath
 import re
@@ -1194,9 +1195,11 @@ def _dataflow(context: _Context) -> tuple[dict, list[Finding]]:
 
 # --------------------------------------------------------------------------- domain summaries
 
-def _fact_rows(db: sqlite3.Connection, kind: str):
-    """(name, path, detail dict) rows of one fact kind."""
-    for name, path, detail in db.execute("SELECT name, path, detail FROM code_facts WHERE kind = ?", (kind,)):
+def _fact_rows(db: sqlite3.Connection, kind: str, ordered: bool = False):
+    """(name, path, detail dict) rows of one fact kind; ``ordered`` by path and name, so lists
+    cut at a cap keep the same items from scan to scan."""
+    query = "SELECT name, path, detail FROM code_facts WHERE kind = ?"
+    for name, path, detail in db.execute(query + (" ORDER BY path, name, detail" if ordered else ""), (kind,)):
         try:
             values = json.loads(detail)
         except ValueError:
@@ -1666,6 +1669,349 @@ def _integration(context: _Context) -> tuple[dict, list[Finding]]:
     ), *coverage]
 
 
+# --------------------------------------------------------------------------- network services
+
+MAX_SERVICE_PORTS = 1000
+MAX_NETWORK_ITEMS = 1000
+MAX_PER_PORT = 20
+_DECLARATION_SOURCES = {"dockerfile": "Dockerfile", "compose": "Compose", "kubernetes": "Kubernetes",
+                        "kubernetes-service": "Kubernetes Service", "terraform": "Terraform"}
+# Caps that only shorten one port's evidence; the others leave items out of the map.
+_PER_PORT_CAPS = frozenset({"declarations", "listeners"})
+
+
+def _address_parts(address: str) -> tuple[str, int | None]:
+    """(host, port) of "host:port", "[v6]:port", ":port" or a bare host, the host lower-cased."""
+    if address.startswith("["):
+        close = address.find("]")
+        if close < 0:
+            return address.lower(), None
+        host, rest = address[1:close], address[close + 1:].removeprefix(":")
+    else:
+        head, separator, rest = address.rpartition(":")
+        if not separator or ":" in head:  # a bare host, or an IPv6 address without a port
+            return address.lower(), None
+        host = head
+    port = int(rest) if rest.isascii() and rest.isdigit() and len(rest) <= 5 and 0 < int(rest) < 65536 else None
+    return host.lower(), port
+
+
+def _loopback(address: str) -> bool:
+    host = _address_parts(address)[0]
+    return host in {"localhost", "::1"} or host.startswith("127.")
+
+
+def _where(item: dict) -> str:
+    return f"{item['file']}:{item['line']}" if item.get("line") else str(item["file"])
+
+
+def _declaration_label(item: dict) -> str:
+    """Where a port is declared and by what, for evidence."""
+    source = item.get("source")
+    if source == "dockerfile":
+        what = "EXPOSE"
+    elif source == "compose":
+        what = f"Compose service {item.get('service')}" + (
+            " expose" if item.get("internal") else f" published on {item['published']}" if item.get("published") else "")
+    elif source == "kubernetes":
+        what = f"{item.get('workload')} containerPort"
+    elif source == "kubernetes-service":
+        what = f"Service {item.get('service')} targetPort" + (f", port {item['port']}" if item.get("port") else "")
+    else:
+        what = str(item.get("resource") or source) + (" open to every address" if item.get("public") else "")
+    return f"{_where(item)} ({what})"
+
+
+def _listener_label(item: dict) -> str:
+    return f"{_where(item)} ({item.get('api')}{' ' + item['address'] if item.get('address') else ''})"
+
+
+def _k8s_service_host(host: str, name: str, namespace: str) -> bool:
+    """Whether a host name reaches a Kubernetes Service: its name, ``name.namespace`` and the
+    ``name.namespace.svc[.cluster.local]`` forms (any namespace when the manifest names none)."""
+    if host == name:
+        return True
+    if not host.startswith(name + "."):
+        return False
+    labels = host[len(name) + 1:].split(".")
+    if namespace and labels[0] != namespace:
+        return False
+    return (len(labels) == 1 and bool(namespace)) or (len(labels) > 1 and labels[1] == "svc")
+
+
+def _network_services(context: _Context) -> tuple[dict, list[Finding]]:
+    """The network service map: the ports Dockerfiles, Compose, Kubernetes and Terraform
+    declare, joined by number with the ports code listens on, and the services code connects
+    to by name. Declarations and call sites from every file of the scan are joined."""
+    db = context.db
+    truncated: Counter = Counter()
+    ports: dict[int, dict] = {}
+    ranges: list[tuple[int, int, dict]] = []
+    named: list[dict] = []
+
+    def keep(items: list, value, key: str, limit: int = MAX_PER_PORT) -> None:
+        if len(items) < limit:
+            items.append(value)
+        else:
+            truncated[key] += 1
+
+    def slot(port: int) -> dict | None:
+        if port not in ports:
+            if len(ports) >= MAX_SERVICE_PORTS:
+                truncated["ports"] += 1
+                return None
+            ports[port] = {"declared": [], "listeners": []}
+        return ports[port]
+
+    for name, path, values in _fact_rows(db, "net_declared", ordered=True):
+        item = {"file": path, **values}
+        low, _, high = name.partition("-")
+        if name == "?":
+            keep(named, item, "named_target_ports", MAX_NETWORK_ITEMS)
+        elif low.isdigit() and high.isdigit():
+            keep(ranges, (int(low), int(high), item), "ranges", MAX_NETWORK_ITEMS)
+        elif low.isdigit() and not high and (entry := slot(int(low))) is not None:
+            keep(entry["declared"], item, "declarations")
+    unknown: list[dict] = []
+    unknown_live = 0
+    for name, path, values in _fact_rows(db, "net_listen", ordered=True):
+        item = {"file": path, "line": values.get("line"), "api": str(values.get("api", "")),
+                "address": str(values.get("address", ""))}
+        if is_test_path(path.replace("\\", "/")):
+            item["test"] = True
+        if name.isdigit() and len(name) <= 5 and 0 < int(name) < 65536:
+            if (entry := slot(int(name))) is not None:
+                keep(entry["listeners"], item, "listeners")
+        else:
+            unknown_live += not item.get("test")
+            keep(unknown, item, "listeners_without_literal_port", MAX_NETWORK_ITEMS)
+    services: list[dict] = []
+    for name, path, values in _fact_rows(db, "net_service", ordered=True):
+        keep(services, {"name": name, "file": path, **values}, "services", MAX_NETWORK_ITEMS)
+
+    # A Service selects the pods whose labels hold its selector, in its namespace; its named
+    # targetPorts resolve through those pods' container port names. Pods are indexed by label.
+    pods_by_label: dict[tuple[str, str, str], list[tuple[int, dict]]] = defaultdict(list)
+    for port, entry in ports.items():
+        for item in entry["declared"]:
+            if item.get("source") == "kubernetes" and isinstance(item.get("labels"), dict):
+                for key, label in item["labels"].items():
+                    pods_by_label[(str(item.get("namespace") or ""), key, label)].append((port, item))
+    selections: dict[tuple, list[tuple[int, dict]]] = {}
+
+    def selected(item: dict) -> list[tuple[int, dict]]:
+        selector = item.get("selector")
+        if not isinstance(selector, dict) or not selector:
+            return []
+        namespace = str(item.get("namespace") or "")
+        key = (namespace, *sorted(selector.items()))
+        if key not in selections:
+            first = next(iter(selector.items()))
+            selections[key] = [(port, pod) for port, pod in pods_by_label.get((namespace, *first), ())
+                               if all(pod["labels"].get(name) == label for name, label in selector.items())]
+        return selections[key]
+
+    def mismatch(item: dict, target: str, pods: list[tuple[int, dict]]) -> str:
+        workloads = ", ".join(sorted({str(pod.get("workload")) for _, pod in pods}))
+        declared_there = ", ".join(sorted({str(pod.get("port_name") or port) if target.startswith("name ") else str(port)
+                                           for port, pod in pods}))
+        return (f"{_where(item)}: Service {item.get('service')} port {item.get('port')} targets {target}; "
+                f"{workloads} declare(s) {declared_there}")
+
+    mismatched: list[str] = []
+    unresolved: list[dict] = []
+    for item in named:
+        pods = selected(item)
+        target = [port for port, pod in pods if pod.get("port_name") == item.get("target_name")]
+        if target and (entry := slot(target[0])) is not None:
+            keep(entry["declared"], item, "declarations")
+            continue
+        unresolved.append(item)
+        if pods:
+            mismatched.append(mismatch(item, f"name {item.get('target_name')!r}", pods))
+    for port, entry in sorted(ports.items()):
+        for item in entry["declared"]:
+            pods = selected(item) if item.get("source") == "kubernetes-service" and "target_name" not in item else []
+            if pods and all(pod_port != port for pod_port, _ in pods):
+                mismatched.append(mismatch(item, str(port), pods))
+
+    # The ports clients use to reach a service by name: a Compose service's container ports,
+    # a Kubernetes Service's own ports.
+    spans: dict[tuple[str, str, str], list[tuple[int, int]]] = defaultdict(list)
+    for first, last, item in [*((port, port, item) for port, entry in ports.items() for item in entry["declared"]),
+                              *ranges, *((0, 0, item) for item in named)]:
+        if item.get("source") == "compose":
+            spans[("compose", str(item.get("service")), "")].append((first, last))
+        elif item.get("source") == "kubernetes-service" and isinstance(item.get("port"), int):
+            key = ("kubernetes", str(item.get("service")).lower(), str(item.get("namespace") or "").lower())
+            spans[key].append((item["port"], item["port"]))
+    compose_hosts: dict[str, str] = {}
+    k8s_names: dict[str, list[str]] = defaultdict(list)
+    for service in services:
+        if service.get("source") == "compose":
+            for alias in [service["name"], *service.get("aliases", [])]:
+                compose_hosts.setdefault(str(alias).lower(), service["name"])
+        elif service.get("source") == "kubernetes":
+            k8s_names[service["name"].lower()].append(str(service.get("namespace") or "").lower())
+
+    def reached(host: str) -> tuple[str, str, str] | None:
+        if host in compose_hosts:
+            return "compose", compose_hosts[host], ""
+        name = host.split(".", 1)[0]
+        for namespace in k8s_names.get(name, ()):
+            if _k8s_service_host(host, name, namespace):
+                return "kubernetes", name, namespace
+        return None
+
+    connections: list[dict] = []
+    wrong_port: list[str] = []
+    for name, path, values in _fact_rows(db, "net_connect", ordered=True):
+        host, port = _address_parts(name)
+        item = {"address": name, "file": path, "line": values.get("line"), "api": str(values.get("api", ""))}
+        service = reached(host)
+        if service is not None:
+            item["service"] = f"{service[0]} {service[1]}"
+            known = spans.get(service)
+            if port is not None and known and not any(first <= port <= last for first, last in known) \
+                    and not is_test_path(path.replace("\\", "/")):
+                wrong_port.append(f"{_where(item)} connects to {name}; {service[0]} service {service[1]} declares "
+                                  + ", ".join(sorted({str(first) if first == last else f"{first}-{last}"
+                                                      for first, last in known})))
+        keep(connections, item, "connections", MAX_NETWORK_ITEMS)
+    seen: set[tuple[str, str]] = set()
+    for name, path, values in _fact_rows(db, "http_call", ordered=True):
+        host = str(values.get("host", "")).lower()
+        service = reached(host) if host and (host, path) not in seen else None
+        if service is not None:
+            seen.add((host, path))
+            keep(connections, {"address": host, "file": path, "api": f"HTTP {name}"[:200],
+                               "service": f"{service[0]} {service[1]}"}, "connections", MAX_NETWORK_ITEMS)
+
+    def live(entry: dict, reachable: bool = False) -> list[dict]:
+        """Listeners outside tests (bound beyond loopback, with ``reachable``)."""
+        return [item for item in entry["listeners"]
+                if not item.get("test") and not (reachable and _loopback(item["address"]))]
+
+    served = {port for port, entry in ports.items() if live(entry)}
+    reachable = {port for port, entry in ports.items() if live(entry, reachable=True)}
+    workload = sorted(port for port, entry in ports.items()
+                      if any(item.get("scope") == "workload" for item in entry["declared"]))
+    declared = sorted(port for port, entry in ports.items() if entry["declared"])
+    listened = sorted(port for port, entry in ports.items() if entry["listeners"])
+
+    def shown(item: dict) -> dict:
+        return {key: value for key, value in item.items() if key not in {"labels", "selector"}}
+
+    value = {
+        "ports": [{"port": port, "protocols": sorted({str(item.get("protocol")) for item in entry["declared"]}),
+                   "declared": [shown(item) for item in entry["declared"]], "listeners": entry["listeners"]}
+                  for port, entry in sorted(ports.items())],
+        "ranges": [{"ports": f"{first}-{last}", **shown(item),
+                    "served_ports": sorted(port for port in served if first <= port <= last)[:MAX_PER_PORT]}
+                   for first, last, item in ranges],
+        "unresolved_target_ports": [shown(item) for item in unresolved],
+        "listeners_without_literal_port": unknown,
+        "services": services,
+        "connections": connections,
+        "truncated": dict(truncated),
+    }
+    left_out = {key: count for key, count in truncated.items() if key not in _PER_PORT_CAPS}
+    findings = [Finding(
+        "analysis_coverage", "Network service map truncated",
+        "Lists at their cap, with the items left out: "
+        + ", ".join(f"{key} ({count:,})" for key, count in sorted(left_out.items()))
+        + ". The service map and the findings built from it can miss ports and services.",
+        confidence="UNKNOWN", analyzer="code-index", severity="LOW",
+    )] if left_out else []
+    if not (declared or ranges or listened or unknown or services):
+        return value, findings
+
+    parts = []
+    if declared or ranges:
+        sources = Counter(str(item.get("source")) for entry in ports.values() for item in entry["declared"])
+        sources.update(str(item.get("source")) for _, _, item in ranges)
+        parts.append(f"{len(declared):,} port(s)" + (f" and {len(ranges):,} port range(s)" if ranges else "")
+                     + " declared (" + ", ".join(f"{_DECLARATION_SOURCES.get(source, source)} {count:,}"
+                                                 for source, count in sorted(sources.items())) + ")")
+    if listened or unknown:
+        parts.append(f"{len(listened):,} port(s) code listens on"
+                     + (f", and {len(unknown):,} listener(s) whose port is not a literal" if unknown else ""))
+    both = sorted(set(declared) & set(listened))
+    if both:
+        parts.append(f"declared and listened on: {', '.join(map(str, both[:20]))}")
+    resolved = [item for item in connections if item.get("service")]
+    if resolved:
+        parts.append(f"{len(resolved):,} connection(s) in code reach services the deployment files name")
+    evidence = [
+        f"port {port}: " + "; ".join([_declaration_label(item) for item in entry["declared"][:5]]
+                                     + [_listener_label(item) for item in entry["listeners"][:5]])
+        for port, entry in itertools.islice(sorted(ports.items()), MAX_LISTED)
+    ]
+    findings.append(Finding(
+        "network", "Network service map",
+        "; ".join(parts) + ". Ports are joined by number across every scanned file; nothing was connected to.",
+        confidence="INFERRED", evidence=evidence, analyzer="code-index",
+    ))
+    unserved = [port for port in workload if port not in served]
+    if unserved and served and not unknown_live:
+        findings.append(Finding(
+            "network", "Declared ports no code listener uses",
+            f"{len(unserved):,} port(s) deployment files declare for a workload are used by no listener in code "
+            f"({', '.join(map(str, unserved[:20]))}), while code listens on "
+            f"{', '.join(map(str, sorted(served)[:20]))}. The program may take the port from configuration, an "
+            "environment variable or a framework default, or the declaration is stale.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"port {port}: " + "; ".join(_declaration_label(item) for item in ports[port]["declared"][:5])
+                      for port in unserved[:MAX_LISTED]],
+        ))
+    undeclared = [port for port in sorted(reachable)
+                  if not ports[port]["declared"] and not any(first <= port <= last for first, last, _ in ranges)]
+    if undeclared and (declared or ranges):
+        findings.append(Finding(
+            "network", "Listeners no deployment file declares",
+            f"{len(undeclared):,} port(s) code listens on beyond loopback are declared by no Dockerfile, Compose file, "
+            f"Kubernetes manifest or Terraform rule ({', '.join(map(str, undeclared[:20]))}). A listener the "
+            "deployment files do not name (a debug or admin port, for example) is easy to miss in reviews, "
+            "firewall rules and network policies.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"port {port}: " + "; ".join(_listener_label(item) for item in live(ports[port], True)[:5])
+                      for port in undeclared[:MAX_LISTED]],
+        ))
+    public_ranges = [(first, last, item) for first, last, item in ranges if item.get("public")]
+    exposed = []
+    for port in sorted(reachable):
+        rules = [item for item in ports[port]["declared"] if item.get("public")]
+        rules += [item for first, last, item in public_ranges if first <= port <= last]
+        if rules:
+            exposed.append(f"port {port}: " + "; ".join([_declaration_label(item) for item in rules[:3]]
+                                                         + [_listener_label(item) for item in live(ports[port], True)[:3]]))
+    if exposed:
+        findings.append(Finding(
+            "security", "Ports open to every address that code listens on",
+            f"{len(exposed):,} port(s) that code listens on are opened to every address (0.0.0.0/0, ::/0, * or "
+            "Internet) by a Terraform firewall or security group rule, so the service is reachable from the "
+            "internet wherever the rule applies.",
+            confidence="INFERRED", severity="MEDIUM", analyzer="code-index", evidence=exposed[:MAX_LISTED],
+            recommendation="Limit the rule's sources to the networks that need the service, or serve it through "
+                           "a load balancer.",
+        ))
+    if mismatched:
+        findings.append(Finding(
+            "orchestration", "Kubernetes Services targeting ports their pods do not declare",
+            f"{len(mismatched):,} Service port(s) send traffic to a targetPort that no container of the pods they "
+            "select declares. Connections to them fail unless a container listens there without declaring it.",
+            confidence="INFERRED", severity="LOW", analyzer="code-index", evidence=mismatched[:MAX_LISTED],
+        ))
+    if wrong_port:
+        findings.append(Finding(
+            "network", "Connections to ports a service does not declare",
+            f"{len(wrong_port):,} connection(s) in code reach a Compose or Kubernetes service by name on a port that "
+            "service does not declare; the code or the deployment file has the wrong port.",
+            confidence="INFERRED", severity="LOW", analyzer="code-index", evidence=wrong_port[:MAX_LISTED],
+        ))
+    return value, findings
+
+
 QUERY_KINDS = ("symbol", "callers", "callees", "references")
 
 
@@ -1823,4 +2169,5 @@ _PASSES = (
     ("shaders", _shader_inventory),
     ("frontend", _component_graph),
     ("integration", _integration),
+    ("network_services", _network_services),
 )

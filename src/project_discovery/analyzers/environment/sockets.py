@@ -12,11 +12,13 @@ bind to every interface (0.0.0.0, ::) is a finding of its own.
 from __future__ import annotations
 
 import ast
+import ipaddress
 import re
 from pathlib import Path
 
 from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
+from ...intelligence import facts as code_facts
 from ...intelligence.model import MAX_MODEL_BYTES, FileModel, model_for, supports_language
 from ...intelligence.model.lexical import LEXICAL_LANGUAGES
 from ...models import FileRecord, Finding
@@ -107,7 +109,17 @@ _PORT = re.compile(r"(?<![\w.])\d{1,5}(?![\w.])")
 # Socket-level listen and accept take a backlog or nothing, never an address.
 _NO_ADDRESS = frozenset({"listen", "accept", "accept4", "WSAAccept", "socket_listen", "socket_accept", "Listen",
                          "Accept", "AcceptAsync", "AcceptTcpClient", "AcceptSocket"})
+# Server factories whose port the .listen(...) called on the server names (Node).
+_FACTORY_LISTENERS = frozenset({"createServer", "createSecureServer"})
 _HOST_PORT = re.compile(r"^(?:\[([0-9A-Fa-f:.]+)\]|([\w.-]*)):(\d{1,5})$")
+# tcp://db:5432, wss://stream.example.com/feed: the host and the port, if the URL gives one.
+_URL_ADDRESS = re.compile(r"(?i)(?:tcp|udp|tls|ssl|wss?|https?)://(?:\[([0-9a-f:.]{2,45})\]|([\w.-]{1,253}))"
+                          r"(?::(\d{1,5}))?(?=[/?#]|$)")
+_LABEL = re.compile(r"[\w-]{1,63}")
+_SERVICE_NAME = re.compile(r"[A-Za-z][\w-]{0,62}")
+# Network names Go and others pass before the address: never a host.
+_NETWORK_WORDS = frozenset({"tcp", "tcp4", "tcp6", "udp", "udp4", "udp6", "unix", "unixgram", "unixpacket",
+                            "ip", "ip4", "ip6"})
 
 # Ruby is no brace language: its socket classes are matched in the text.
 _RUBY = re.compile(r"(?<![\w:])(TCPServer|TCPSocket|UDPSocket|UNIXServer|UNIXSocket)\.(?:new|open)\b|"
@@ -116,19 +128,45 @@ _RUBY_ROLES = {"TCPServer": "listen", "UNIXServer": "listen", "tcp_server_loop":
                "UNIXSocket": "connect", "tcp": "connect", "UDPSocket": "socket"}
 
 
+def _host_port(host: str, port: str | int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _plausible_host(value: str) -> bool:
+    """An IP address, an every-interface address, localhost or a dotted host name."""
+    if value in _ALL_INTERFACES or value == "localhost":
+        return True
+    if ":" in value:
+        try:
+            ipaddress.IPv6Address(value.strip("[]").split("%", 1)[0])
+        except ValueError:
+            return False
+        return True
+    labels = value.removesuffix(".").split(".")
+    return len(labels) > 1 and len(value) <= 253 and all(_LABEL.fullmatch(label) for label in labels)
+
+
 def _address(strings: list[str], numbers: list[int]) -> str | None:
-    """A literal address among a call's arguments: "host:port", "host" or ":port"."""
+    """A literal address among a call's arguments: "host:port", "host" or ":port". A URL
+    (``tcp://db:5432``) gives its host and port; a single-label name next to a port
+    (``("db", 5432)``) is a service name, as Compose and Kubernetes DNS resolve them."""
     for value in strings:
         match = _HOST_PORT.match(value.strip())
         if match and 0 < int(match.group(3)) < 65536:
             host = match.group(1) if match.group(1) is not None else match.group(2)
-            return f"[{host}]:{match.group(3)}" if host and ":" in host else f"{host}:{match.group(3)}"
-    hosts = [value for value in strings if value and (value in _ALL_INTERFACES or re.fullmatch(r"[\w.:-]{1,253}", value))
-             and ("." in value or ":" in value or value == "localhost")]
+            return _host_port(host, match.group(3)) if host else f":{match.group(3)}"
+        url = _URL_ADDRESS.match(value.strip())
+        if url:
+            host = url.group(1) or url.group(2)
+            port = url.group(3)
+            return _host_port(host, port) if port and 0 < int(port) < 65536 else host
+    hosts = [value for value in strings if value and _plausible_host(value)]
     ports = [number for number in numbers if 0 < number < 65536]
+    if ports and not hosts:
+        hosts = [value for value in strings
+                 if _SERVICE_NAME.fullmatch(value) and value.lower() not in _NETWORK_WORDS]
     if hosts and ports:
-        host = hosts[0].strip("[]")
-        return f"[{host}]:{ports[0]}" if ":" in host else f"{host}:{ports[0]}"
+        return _host_port(hosts[0].strip("[]"), ports[0])
     if ports:
         return f":{ports[0]}"
     return hosts[0] if hosts else None
@@ -286,6 +324,21 @@ def _ruby_sites(text: str) -> list[tuple[int, str, str, str | None]]:
     return sites
 
 
+def _record_facts(sites: list[tuple[int, str, str, str | None]], language: str | None) -> None:
+    """Facts for the network service map the code index builds: the port each listener uses
+    ("?" when its call names none) and the address each connection goes to."""
+    for line, role, api, address in sites:
+        if role == "listen":
+            method = api.rsplit(".", 1)[-1]
+            if address is None and (method in _FACTORY_LISTENERS or (language != "Go" and method in _NO_ADDRESS)):
+                continue  # listen(backlog), accept(), createServer(handler): another call names the address
+            port = address.rsplit(":", 1)[-1] if address and ":" in address else ""
+            code_facts.emit_fact("net_listen", port if port.isdigit() else "?", api=api, line=line,
+                                 address=address or "")
+        elif role == "connect" and address:
+            code_facts.emit_fact("net_connect", address, api=api, line=line)
+
+
 class SocketCallSiteAnalyzer(Analyzer):
     """The sockets, servers and connections code opens, with literal addresses."""
 
@@ -325,6 +378,7 @@ class SocketCallSiteAnalyzer(Analyzer):
                 sites, confidence = visitor.sites, "CONFIRMED"
             else:
                 sites, confidence = _lexical_sites(model, LEXICAL_LANGUAGES.get(model.language, "")), "INFERRED"
+        _record_facts(sites, record.language)
         findings = []
         for role, (title, verb) in _ROLE_TITLES.items():
             matched = [site for site in sites if site[1] == role]

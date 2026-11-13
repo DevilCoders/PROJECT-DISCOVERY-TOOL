@@ -61,7 +61,7 @@ def test_python_sockets_servers_and_clients_are_resolved_through_imports(tmp_pat
      'const app = express();\napp.listen(PORT);\nnet.createServer(handler).listen(4000, "0.0.0.0");\n'
      'const socket = new WebSocket("wss://stream.example.com/feed");\nemitter.on("x", () => {});\n',
      ["server.js:4 (app.listen)", "server.js:5 (net.createServer)", "server.js:5 (<expression>.listen 0.0.0.0:4000)"],
-     ["server.js:6 (new WebSocket)"]),
+     ["server.js:6 (new WebSocket stream.example.com)"]),
     ("Server.java", "Java", 'import java.net.*;\nclass Server {\n  void run() throws Exception {\n'
      '    ServerSocket server = new ServerSocket(8443);\n    Socket client = new Socket("db.example.com", 5432);\n'
      '  }\n}\n',
@@ -82,7 +82,7 @@ def test_python_sockets_servers_and_clients_are_resolved_through_imports(tmp_pat
      ["Server.cs:7 (new TcpClient mail.example.com:25)", "Server.cs:8 (socket.Connect)"]),
     ("server.php", "PHP", '<?php\n$s = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);\nsocket_bind($s, "0.0.0.0", 1337);\n'
      '$c = stream_socket_client("tcp://example.com:80");\n',
-     ["server.php:3 (socket_bind 0.0.0.0:1337)"], ["server.php:4 (stream_socket_client)"]),
+     ["server.php:3 (socket_bind 0.0.0.0:1337)"], ["server.php:4 (stream_socket_client example.com:80)"]),
     ("server.rb", "Ruby", 'require "socket"\nserver = TCPServer.new("0.0.0.0", 2000)\nclient = TCPSocket.new("example.com", 80)\n',
      ["server.rb:2 (TCPServer.new 0.0.0.0:2000)"], ["server.rb:3 (TCPSocket.new example.com:80)"]),
 ])

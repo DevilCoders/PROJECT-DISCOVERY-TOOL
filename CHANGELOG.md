@@ -228,6 +228,20 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: network service map
+- The code index joins the ports Dockerfiles (`EXPOSE`), Compose files (`ports`, `expose`), Kubernetes
+  manifests (container ports, Services) and Terraform (security groups and firewall rules, load
+  balancer listeners and target groups, Kubernetes services) declare with the ports code listens on,
+  and code's connections with the Compose and Kubernetes services they name, into
+  `metrics.code_index.network_services`. Kubernetes selectors and named target ports are resolved.
+- Findings: declared ports no listener uses, listeners no deployment file declares, MEDIUM ports that
+  code listens on and a Terraform rule opens to every address, Services targeting ports their pods do
+  not declare, and connections to ports a service does not declare.
+- Deployment YAML is read with YAML 1.2 numbers: an unquoted Compose `9000:22` is a port mapping, not
+  YAML 1.1's base-60 540022 (`safe_yaml_load_all(base60=False)`).
+- `network-sockets` reads URL arguments (`tcp://db:5432`) and a single-label host next to a port
+  (`("db", 5432)`), and no longer takes a string such as `"app:app"` for an IPv6 host.
+
 ### Added: socket call sites in code
 - `network-sockets`: the listeners (bind, listen, accept, server constructors), outbound connections
   and sockets code opens, by each language's API: Python from its syntax tree with imports resolved;

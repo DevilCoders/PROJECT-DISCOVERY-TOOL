@@ -63,16 +63,22 @@ def _check_expansion(root: Any, budget: int) -> int:
     return sizes[id(root)]
 
 
+_BASE60_TAGS = frozenset({"tag:yaml.org,2002:int", "tag:yaml.org,2002:float"})
+
+
 def safe_yaml_load_all(
     text: str,
     *,
     allow_unknown_tags: bool = False,
     max_expanded_nodes: int = MAX_YAML_EXPANDED_NODES,
+    base60: bool = True,
 ) -> list[Any]:
     """Load every YAML document with SafeLoader semantics under an expansion budget.
 
     allow_unknown_tags constructs plain scalars/lists/maps for custom tags such as
     CloudFormation's ``!Ref``; otherwise unknown tags raise like ``yaml.safe_load``.
+    base60=False reads numbers as YAML 1.2 does: YAML 1.1's base-60 forms (``8080:22``,
+    ``1:30.5``) stay strings instead of becoming 484822 and 90.5.
     Raises UnsafeDocumentError, or ValueError wrapping a yaml.YAMLError.
     """
     import yaml
@@ -83,7 +89,13 @@ def safe_yaml_load_all(
     base = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
     class Loader(base):
-        pass
+        if not base60:
+            def resolve(self, kind, value, implicit):
+                tag = super().resolve(kind, value, implicit)
+                # Only YAML 1.1's base-60 numbers hold a colon among the int and float forms.
+                if kind is ScalarNode and tag in _BASE60_TAGS and ":" in value:
+                    return "tag:yaml.org,2002:str"
+                return tag
 
     if allow_unknown_tags:
         def unknown_tag(loader, _suffix, node):

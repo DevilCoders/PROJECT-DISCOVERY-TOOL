@@ -79,6 +79,7 @@ connection using temporary tables (memory does not grow with repository size):
 | Data flow | Totals of taint flows and Python flows that cross module boundaries (see §4). |
 | Embedded, firmware, HDL, shaders, frontend | Domain summaries (targets, binary hardening, design hierarchy, shader inventory, component graph and routes). |
 | Integration | What the project serves and calls (endpoints, HTTP calls, topics, gRPC, package names), used by `pdt compare` (see §6). |
+| Network services | The ports Dockerfiles, Compose, Kubernetes and Terraform declare, joined by number with the ports code listens on, and the services code connects to by name; findings for declared ports nothing listens on, undeclared listeners, ports code serves that a rule opens to every address, Services whose target ports their pods do not declare and connections to ports a service does not declare ([Service map](../analyzers/NETWORK_ANALYZER.md#service-map)). |
 
 Each pass that fails is isolated: it produces an `UNKNOWN` finding and the other passes
 still run. Results are in the report under `metrics.code_index`.
