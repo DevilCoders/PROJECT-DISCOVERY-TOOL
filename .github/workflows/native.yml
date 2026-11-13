@@ -143,7 +143,9 @@ jobs:
         env:
           CIBW_BUILD: cp313-*
           CIBW_ARCHS: ${{ matrix.arch }}
-          CIBW_ENVIRONMENT_WINDOWS: CARGO_BUILD_TARGET=${{ matrix.rust-target }}
+          # PyO3 cannot ask an ARM64 interpreter it cannot run for its version; with the
+          # generate-import-lib feature it links the Python DLL without the target's libraries.
+          CIBW_ENVIRONMENT_WINDOWS: CARGO_BUILD_TARGET=${{ matrix.rust-target }} PYO3_CROSS_PYTHON_VERSION=3.13
           CIBW_TEST_REQUIRES: pytest
           # macOS runs the x86_64 wheel's tests under Rosetta 2; an x64 Windows runner cannot
           # run ARM64 code, so cibuildwheel skips them there (the arm64 job tests it natively).

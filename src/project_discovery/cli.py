@@ -827,7 +827,7 @@ def run_scan(
         # The coordinator's own counters are per process: the scan reports what it added.
         gpu_baseline = _gpu_counters()
         budget_usage = _BudgetUsage()
-        cache_failures: list[str] = []
+        cache_failures = 0  # fingerprint cache writes that failed (the first is reported)
         cache_damage_reported = False
         counts = Counter()
         cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
@@ -942,6 +942,7 @@ def run_scan(
                             collect_one()
 
                     def apply_outcome(item: FileTask, outcome: FileOutcome):
+                        nonlocal cache_failures
                         record, file_stat = item.record, item.expected_stat
                         if outcome.gpu_counts:
                             worker_gpu[0] += outcome.gpu_counts[0]
@@ -987,7 +988,7 @@ def run_scan(
                                                 f"fingerprint cache write failed ({type(exc).__name__}: {exc}); "
                                                 "later scans rehash these files"
                                             )
-                                        cache_failures.append(record.path)
+                                        cache_failures += 1
                                 else:
                                     message = f"{record.path}: file changed while scan was in progress"
                                     record.error = message
@@ -1132,20 +1133,23 @@ def run_scan(
                 if grammar_gap is not None:
                     finding_store.append_finding(grammar_gap)
                 if vulnerability_db is not None and not inventory_only:
-                    skipped_lockfiles = [
-                        record.path for record in records
-                        if record.content_skipped_reason and Path(record.path).name.lower() in LOCKFILE_NAMES
-                    ]
-                    if skipped_lockfiles:
+                    # A count and the first paths as evidence: a tree can hold any number.
+                    skipped_lockfiles, skipped_lockfile_count = [], 0
+                    for record in records:
+                        if record.content_skipped_reason and Path(record.path).name.lower() in LOCKFILE_NAMES:
+                            skipped_lockfile_count += 1
+                            if len(skipped_lockfiles) < 20:
+                                skipped_lockfiles.append(record.path)
+                    if skipped_lockfile_count:
                         # The offline matcher never sees these: say so, as the online lookup does.
-                        vulnerability_db_status["lockfiles_content_skipped"] = len(skipped_lockfiles)
+                        vulnerability_db_status["lockfiles_content_skipped"] = skipped_lockfile_count
                         finding_store.append_finding(Finding(
                             "vulnerabilities",
-                            f"Lockfile(s) not checked against the local advisory database: {len(skipped_lockfiles):,}",
-                            f"{len(skipped_lockfiles):,} lockfile(s) were not read (--skip/--max-file-mb, or "
+                            f"Lockfile(s) not checked against the local advisory database: {skipped_lockfile_count:,}",
+                            f"{skipped_lockfile_count:,} lockfile(s) were not read (--skip/--max-file-mb, or "
                             "--development-trees inventory), so their packages were not matched. This is not "
                             "evidence that they are free of known vulnerabilities.",
-                            confidence="UNKNOWN", evidence=skipped_lockfiles[:20],
+                            confidence="UNKNOWN", evidence=skipped_lockfiles,
                             analyzer="local-vulnerability-intelligence", severity="LOW",
                         ))
                 if online_vulnerabilities is not None:

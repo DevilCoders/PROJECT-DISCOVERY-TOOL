@@ -228,6 +228,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Fixed: memory that grew with the corpus
+- The coordinator kept the path of every file whose fingerprint cache write failed (a full disk
+  fails them all) and of every lockfile it could not read, to report one diagnostic and twenty
+  paths; it now keeps a count and the twenty paths.
+- `tests/reporting/test_bounded_results.py` scans one tree at four times the size and fails when
+  a report metric other than the store-backed lists grows, or when an analyzer's findings or
+  evidence for one file grow with the matches it holds (the secret scanner's 10,000-finding cap
+  is tested on its own).
+
 ### Added: native verification
 - `tests/engine/test_native_fuzz.py` fuzzes the native FFI boundaries against their Python
   references with seeded random input: the C byte counter against `bytes.count` over every
@@ -243,6 +252,9 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
 - `setup.py` compiles the x86-64 Assembly only when the build targets Linux x86-64, from
   `sysconfig.get_platform()`: it went by the build host, so a cross-build to aarch64 on an x86-64
   host compiled x86-64 Assembly, failed, and silently left the C backend out.
+- The Rust walker builds with PyO3's `generate-import-lib` feature, so a Windows cross-build
+  (ARM64 on x64) links against the Python DLL without the target interpreter's libraries; the
+  first cross-compile run had produced an ARM64 wheel without the walker.
 
 ### Added: scan progress by phase
 - The terminal shows one live row per scan phase in place of the single analysis progress bar:
