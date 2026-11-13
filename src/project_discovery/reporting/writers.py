@@ -85,6 +85,15 @@ def attribute_summary(counts: dict[str, int], limit: int = 8) -> str:
     return text or "none recorded"
 
 
+def _link_outcome(item) -> str:
+    """A link's resolution, such as "resolved: file src/a.py" or "broken: gone does not exist"."""
+    state = getattr(item, "target_state", None) or "unverified"
+    if state == "resolved":
+        return f"resolved: {item.resolved_type} {item.resolved_path}"
+    detail = getattr(item, "target_detail", None)
+    return f"{state}: {detail}" if detail else state
+
+
 def security_metadata_summary(metrics: dict[str, Any]) -> str:
     """One line on the --security-metadata block of the scan metrics."""
     security = metrics.get("security_metadata") or {}
@@ -612,7 +621,9 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- Completed: {result.finished_at}",
         f"- Files: {len(result.files):,}",
         f"- Directories: {max(0, len(result.directories) - 1):,}",
-        f"- Symbolic links: {len(result.symlinks):,}",
+        f"- Symbolic links: {len(result.symlinks):,}" + (
+            f" ({_md(attribute_summary(metrics['symlink_states']))})" if metrics.get("symlink_states") else ""
+        ),
         f"- Special filesystem entries: {len(result.special_entries):,}",
         f"- Explicitly pruned directories: {metrics.get('pruned_directory_count', 0):,}",
         f"- Findings: {len(result.findings):,}",
@@ -676,7 +687,7 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
             tag = f", {_md(item.reparse_tag)}" if item.reparse_tag else ""
             line(
                 f"- {_md(item.path)} -> {_md(item.target)} "
-                f"(scope: {_md(item.target_scope)}, hidden: {item.is_hidden}{tag})"
+                f"({_md(_link_outcome(item))}; scope: {_md(item.target_scope)}, hidden: {item.is_hidden}{tag})"
             )
     line()
     line("## Special Filesystem Entries")

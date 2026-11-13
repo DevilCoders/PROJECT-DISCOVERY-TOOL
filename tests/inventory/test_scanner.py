@@ -169,7 +169,8 @@ def test_symlink_scope_is_lexical_and_does_not_resolve_chained_links(tmp_path: P
     _, _, symlinks, _, _ = discover_inventory(tmp_path)
     alias_record = next(item for item in symlinks if item.path == "alias")
     assert alias_record.target_scope == "internal"
-    assert alias_record.target_state == "unverified"
+    # alias -> chained -> outside: the chain leaves the root, so it is not examined further.
+    assert alias_record.target_state == "external"
 
 def test_discover_inventory_rejects_symlink_root_without_following_it(tmp_path: Path):
     import pytest
@@ -430,7 +431,10 @@ def test_discover_inventory_persists_records_and_final_directory_aggregates(tmp_
         assert persisted_src["total_bytes"] == len("print('stored')\n".encode())
         if link is not None:
             assert any(item.path == "source-link" for item in symlinks)
-            assert symlinks[0].target_state == "unverified"
+            # Resolved against the stored inventory: an absolute target inside the root.
+            assert (symlinks[0].target_state, symlinks[0].resolved_type, symlinks[0].resolved_path) == (
+                "resolved", "file", "src/main.py",
+            )
         assert len(special) == 0
         assert stats["entry_count"] >= 2
 
@@ -661,7 +665,8 @@ def test_native_walker_link_read_errors_are_not_reported_as_internal(tmp_path: P
     _, _, links, _, stats = scanner.discover_inventory(tmp_path)
     by_path = {link.path: link for link in links}
     assert (by_path["broken"].target_scope, by_path["broken"].target_state) == ("unknown", "unreadable")
-    assert (by_path["good"].target_scope, by_path["good"].target_state) == ("internal", "unverified")
+    # "a.txt" is not in the inventory (the walker reported only the two links).
+    assert (by_path["good"].target_scope, by_path["good"].target_state) == ("internal", "broken")
     assert stats["entry_errors"] == 1
 
 

@@ -23,6 +23,12 @@ function fillBars(targetId,values){
   row.append(name,track,count);target.append(row);
  }
 }
+// A link's resolution against the inventory: "resolved: file src/a.py", "broken: ...".
+function linkOutcome(item){
+ const state=item.target_state||"unverified";
+ if(state==="resolved")return "resolved: "+(item.resolved_type||"entry")+" "+(item.resolved_path||"");
+ return item.target_detail?state+": "+item.target_detail:state;
+}
 // State flags, then platform attributes (Windows FILE_ATTRIBUTE_* or macOS file flags), once each.
 function entryFlags(flags,attributes){
  const seen=new Set(),names=[];
@@ -284,7 +290,8 @@ function renderSymlinks(reset){
   const item=symlinks[symlinkOffset++],tr=document.createElement("tr");
   const mode=item.permissions===null||item.permissions===undefined?"unknown":Number(item.permissions).toString(8);
   const scope=item.reparse_tag?item.target_scope+" ("+item.reparse_tag+")":item.target_scope;
-  for(const pair of [[item.path,"path"],[item.target,"path"],[scope,""],[item.target_state||"unverified",""],[mode,"mono"],[item.is_hidden?"yes":"no",""]]){
+  const outcome=linkOutcome(item);
+  for(const pair of [[item.path,"path"],[item.target,"path"],[scope,""],[outcome,""],[mode,"mono"],[item.is_hidden?"yes":"no",""]]){
    const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
   }
   symlinkRows.append(tr);

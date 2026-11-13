@@ -37,6 +37,7 @@ from ..intelligence.python_graph import MAX_GRAPH_AST_FILE_BYTES, parse_python_i
 from ..inventory.scanner import (
     _classify_head, _exclusion_match, _size_bucket, development_marker, normalize_exclusions,
 )
+from ..inventory.links import Flavor, classify_links, store_lookup, stored_links
 from ..inventory.store import InventoryStore, StoredFileRecords, StoredRecordSequence
 from ..models import DirectoryRecord, FileRecord, SpecialEntryRecord, SymlinkRecord
 from .credentials import ApiCredential, resolve_credential
@@ -290,8 +291,8 @@ class NoDownloadSource:
                 target = self._symlink_target(entry)
                 scope = symlink_scope(entry.path, target) if target else "unknown"
                 store.append("symlink", SymlinkRecord(
-                    entry.path, target or "", scope, target_state="unverified", is_hidden=hidden,
-                    permissions=0o777,
+                    entry.path, target or "", scope, target_state="unverified" if target else "unreadable",
+                    is_hidden=hidden, permissions=0o777,
                 ))
                 stats["symlink_count"] += 1
                 stats[f"symlink_scope:{scope}"] += 1
@@ -322,6 +323,12 @@ class NoDownloadSource:
             stats["total_bytes"] += size
             stats[f"size_bucket:{record.size_bucket}"] += 1
             stats[f"language:{record.language}"] += 1
+        store.flush()
+        # Links resolve against the tree listing, as a local walk's do (POSIX rules, no outside).
+        classify_links(
+            stored_links(store), store_lookup(store, None), Flavor(windows=False), None, stats,
+            save=lambda record: store.append("symlink", record),
+        )
         store.flush()
         store.checkpoint({
             "inventory_status": "partial" if truncated or invalid else "complete",

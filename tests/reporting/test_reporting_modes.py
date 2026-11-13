@@ -139,7 +139,7 @@ def test_json_reports_carry_the_scan_summary(tmp_path: Path):
         "remote": _result(remote=_remote_metadata(), online=_online_status()),
     }.items():
         payload = json.loads(write_reports(result, tmp_path / name, {"json"})[0].read_text(encoding="utf-8"))
-        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.9"
+        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.10"
         assert payload["scan"] == scan_summary(result.metrics)
     assert payload["scan"]["remote"]["url"] == "https://github.com/acme/widgets"
     assert payload["metrics"]["vulnerability_intelligence"]["online"]["cache"]["hits"] == 2
@@ -384,13 +384,13 @@ def test_reports_show_device_numbers_and_reparse_tags(tmp_path: Path):
     ]
     result.metrics["reparse_tags"] = {"af_unix": 1, "mount_point": 1}
     markdown = write_reports(result, tmp_path, {"markdown"})[0].read_text(encoding="utf-8")
-    assert "- junction -> target (scope: internal, hidden: False, mount_point)" in markdown
+    assert "- junction -> target (unverified; scope: internal, hidden: False, mount_point)" in markdown
     assert "- whiteout — character_device, device 0:0, permissions 0o600, owner 0:0, hidden: False" in markdown
     assert "- s.sock — socket, reparse tag af_unix, permissions unknown, owner unknown, hidden: False" in markdown
     assert "- Windows reparse points: af_unix 1, mount_point 1" in markdown
     dump = _render_html_client(result, tmp_path)
     assert [row[1] for row in dump["special-rows"]["rows"]] == ["character_device 0:0", "socket (af_unix)"]
-    assert dump["symlink-rows"]["rows"][0][2] == "internal (mount_point)"
+    assert dump["symlink-rows"]["rows"][0][2:4] == ["internal (mount_point)", "unverified"]
     # Without reparse points the Markdown summary has no line for them.
     plain = write_reports(_result(), tmp_path / "plain", {"markdown"})[0].read_text(encoding="utf-8")
     assert "Windows reparse points" not in plain

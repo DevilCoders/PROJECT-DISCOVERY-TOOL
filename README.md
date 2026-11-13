@@ -11,7 +11,7 @@ PDT scans a local directory or a remote repository, inventories every file, dire
 - **Read-only, local or remote.** Target code is never imported, executed, compiled or installed, and remote repositories are never modified. A local scan makes no network request: the network is used only for a repository URL and for `--vuln-online`, and every report records which access the scan used. PDT has no telemetry.
 - **No silent gaps.** Budgets, parse failures and missing parsers are reported as `UNKNOWN` coverage findings, never as clean results; `--strict` turns them into a failing exit code.
 - **Redacted evidence.** Secrets and personal data are reported by category, path and line. Their values are removed from every report format.
-- **Safe traversal.** Symlinks are recorded, never followed. Archives are inspected in memory, never extracted. File reads are verified against the identity recorded at inventory time.
+- **Safe traversal.** Symlinks are recorded, never followed, and their targets are resolved against the inventory itself. Archives are inspected in memory, never extracted. File reads are verified against the identity recorded at inventory time.
 - **Isolated plugins.** Third-party analyzers run in sandboxed host processes on Linux, macOS and Windows: no file writes, network access or process creation.
 
 ## Features
@@ -81,7 +81,7 @@ Details: [Online Mode guide](docs/guides/ONLINE_MODE.md).
 
 ## Reports
 
-- **JSON** (schema 1.9): every finding, file record and metric, streamed for large scans.
+- **JSON** (schema 1.10): every finding, file record and metric, streamed for large scans.
 - **Markdown:** summaries, the scan source and findings with evidence, impact and remediation.
 - **HTML:** a standalone offline report with search, filters, pagination and collapsible findings; it loads no remote assets.
 

@@ -150,6 +150,16 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
 - Link fixtures: broken, self, cyclic, dangling-relative, chained, absolute-internal and external
   symbolic links, and broken and external Windows junctions, are each recorded once with their
   target text and lexical scope by both walkers, and nothing behind them is read.
+- Every link's target is resolved against the finished inventory, never the filesystem, in local
+  and no-download scans alike: `target_state` is `resolved` (with `resolved_path` and
+  `resolved_type`), `broken`, `loop` (a cycle, or more links than the platform follows: 40 on
+  POSIX, 63 on Windows), `external` (not examined), `unknown` (behind a pruned or unreadable
+  directory or an unreadable link) or `unreadable`, and `target_detail` says why. POSIX `..` is
+  resolved physically and Windows `..` lexically; Windows and case-insensitive macOS volumes match
+  names without regard to case. `metrics.symlink_states` counts the states, shown in the terminal,
+  Markdown and HTML reports.
+- Report schema 1.10: the `target_state` values above, and `resolved_path`, `resolved_type` and
+  `target_detail` on symlink records, and `metrics.symlink_states`.
 - Report schema 1.9: `mtime_ns` and `reparse_tag` on directory, symlink and special-entry
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.

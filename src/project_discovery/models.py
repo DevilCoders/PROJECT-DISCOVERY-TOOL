@@ -11,8 +11,10 @@ from typing import Any, Literal, Sequence
 # file, directory, symlink and special-entry record, and metrics.entry_attributes and
 # metrics.security_metadata. 1.9 added mtime_ns and reparse_tag to directory, symlink and
 # special-entry records (reparse_tag to file records), device_major and device_minor to
-# special entries, and metrics.reparse_tags.
-REPORT_SCHEMA_VERSION = "1.9"
+# special entries, and metrics.reparse_tags. 1.10 resolves every symlink against the
+# inventory: target_state is resolved, broken, loop, external, unknown or unreadable, with
+# resolved_path, resolved_type and target_detail, and metrics.symlink_states.
+REPORT_SCHEMA_VERSION = "1.10"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -173,6 +175,8 @@ class SymlinkRecord:
     path: str
     target: str
     target_scope: str
+    # resolved, broken, loop, external, unknown or unreadable: the target resolved against
+    # the inventory (inventory.links), never the filesystem; "unverified" until it is.
     target_state: str = "unverified"
     is_hidden: bool = False
     permissions: int | None = None
@@ -183,6 +187,11 @@ class SymlinkRecord:
     mtime_ns: int | None = None
     # Windows: "symlink", "mount_point" (a junction or volume mount point), "lx_symlink", ...
     reparse_tag: str | None = None
+    # The root-relative path the chain reaches (resolved) or names (broken), the type of the
+    # entry it reaches, and why it is broken, a loop, external or unknown.
+    resolved_path: str | None = None
+    resolved_type: str | None = None
+    target_detail: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

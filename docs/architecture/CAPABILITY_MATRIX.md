@@ -74,7 +74,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | INI | configuration | inventory | — | — | secret-patterns | 7 |
 | Intel HEX | firmware | inventory | — | — | — | 1 |
 | Java | source | structure | structural lexer, refined by Tree-sitter `java` | java | code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 10 |
-| JavaScript | source | structure | structural lexer, refined by Tree-sitter `javascript` | javascript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 24 |
+| JavaScript | source | structure | structural lexer, refined by Tree-sitter `javascript` | javascript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 25 |
 | JSON | data | optional parser | — | json | ai-ml-intelligence, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 33 |
 | Julia | source | optional parser | — | julia | tree-sitter-polyglot | 4 |
 | Jupyter Notebook | notebook | inventory | — | — | ai-ml-intelligence, secret-patterns | 1 |
@@ -127,7 +127,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Svelte | source | structure | structural lexer | — | accessibility-markup, code-index, concurrency, dataflow, frontend, performance-hotspots, resource-management, type-systems | 1 |
 | Swift | source | structure | structural lexer, refined by Tree-sitter `swift` | swift | code-index, concurrency, mobile-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 4 |
 | SystemVerilog | source | optional parser | — | systemverilog | hdl, tree-sitter-polyglot | 2 |
-| Text | documentation | inventory | — | — | secret-patterns | 26 |
+| Text | documentation | inventory | — | — | secret-patterns | 27 |
 | Thrift | schema | inventory | — | — | — | 0 |
 | TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 5 |
 | TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 17 |

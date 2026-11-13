@@ -516,6 +516,43 @@ class InventoryStore:
         )
         return {str(kind): int(count) for kind, count in rows}
 
+    def lookup(self, path: str, *, folded: bool = False) -> tuple[str, str, dict[str, Any]] | None:
+        """(kind, stored path, record) of the entry at a root-relative path, or None.
+
+        An indexed lookup by exact path, or with ``folded`` by case-folded path (for
+        case-insensitive filesystems). Directory records carry their recorded read error.
+        """
+        if self._closed:
+            raise RuntimeError("inventory store is closed")
+        key = sqlite_text(path)
+        if folded:
+            folded_key = key.casefold()
+            depth = 0 if key == "." else key.count("/") + 1
+            row = self.db.execute(
+                """SELECT kind, path, payload FROM inventory_records
+                   WHERE (kind='directory' AND sort_key=?)
+                      OR (kind IN ('file', 'symlink', 'special') AND sort_key=?)
+                   ORDER BY path LIMIT 1""",
+                (f"{depth:012d}|{folded_key}", folded_key),
+            ).fetchone()
+        else:
+            row = self.db.execute(
+                """SELECT kind, path, payload FROM inventory_records
+                   WHERE kind IN ('directory', 'file', 'symlink', 'special') AND path=? LIMIT 1""",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        kind, stored, payload = row
+        value = json.loads(payload)
+        if kind == "directory":
+            state = self.db.execute(
+                "SELECT error FROM inventory_directory_state WHERE path=?", (stored,),
+            ).fetchone()
+            if state is not None and state[0] is not None:
+                value["error"] = str(state[0])
+        return str(kind), str(value.get("path", stored)), value
+
     def iter_records(self, kind: str, *, fetch_size: int = 256) -> Iterator[dict[str, Any]]:
         """Yield decoded records in case-folded path order using bounded fetches."""
         if self._closed:

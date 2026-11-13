@@ -127,6 +127,30 @@ placeholder, `dedup`, `wof`, `appexeclink`, ...), and an unnamed tag is its hexa
 AF_UNIX sockets (`af_unix`) and the FIFOs and device nodes WSL creates on NTFS (`lx_fifo`,
 `lx_chr`, `lx_blk`) are special entries. `metrics.reparse_tags` counts the tags.
 
+## Symbolic link targets
+
+The walk records each link's target text and never follows it. When the walk is complete, every
+target is resolved against the inventory itself, component by component, without opening,
+stat-ing or following anything, so the outcome cannot race with changes on disk: it describes
+the tree as inventoried. `target_state` is one of:
+
+| State | Meaning |
+|---|---|
+| `resolved` | The chain reaches an inventoried entry: `resolved_path` (relative to the root, `.` for the root) and `resolved_type` (`file`, `directory` or a special type such as `fifo`). |
+| `broken` | A component does not exist, or a file is used as a directory. `resolved_path` is the path the chain names. |
+| `loop` | The chain returns to a link with the same remaining path, or uses more links than the platform follows (40 on POSIX, 63 on Windows). |
+| `external` | The chain leaves the scanned tree; nothing outside it is examined. In a no-download scan an absolute target or a `..` above the repository is external. |
+| `unknown` | The chain passes through a pruned (`--exclude-dir`) or unreadable directory, or through a link whose target could not be read. |
+| `unreadable` | The link's own target could not be read. |
+
+`target_detail` says why a link is broken, a loop, external or unknown. Resolution follows the
+platform: POSIX resolves `..` physically, after the links before it have been replaced by their
+targets; Windows resolves a relative target's `..` lexically against the link's directory, and
+matches names without regard to case, as macOS does on case-insensitive volumes. An absolute
+target is inside the tree only along the root's real path (`/var` is not `/private/var` on
+macOS). `target_scope` stays the lexical classification of the target text.
+`metrics.symlink_states` counts the states.
+
 ## Code index and `pdt query`
 
 During analysis, PDT stores code facts (symbols, call sites, referenced names, imports and

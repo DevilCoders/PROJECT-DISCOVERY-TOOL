@@ -1036,6 +1036,11 @@ def run_scan(
                 key.split(":", 1)[1]: value
                 for key, value in walk_stats.items() if key.startswith("special_type:")
             },
+            # Each link's target resolved against the inventory: resolved, broken, loop, ...
+            "symlink_states": dict(sorted(
+                (key.split(":", 1)[1], value)
+                for key, value in walk_stats.items() if key.startswith("symlink_state:") and value
+            )),
             # Windows reparse points by tag: links ("symlink", "mount_point") and others ("cloud").
             "reparse_tags": dict(sorted(
                 (key.split(":", 1)[1], value)
@@ -1157,7 +1162,9 @@ def run_scan(
             )
         summary.add_row("Files inventoried", str(len(records)))
         summary.add_row("Directories inventoried", str(metrics["directory_count"]))
-        summary.add_row("Symbolic links", str(metrics["symlink_count"]))
+        summary.add_row("Symbolic links", str(metrics["symlink_count"]) + (
+            f" ({escape(attribute_summary(metrics['symlink_states']))})" if metrics["symlink_states"] else ""
+        ))
         summary.add_row("Special filesystem entries", str(metrics["special_entry_count"]))
         summary.add_row("Explicitly pruned directories", str(metrics["pruned_directory_count"]))
         summary.add_row("Hidden entries", str(metrics["hidden_entry_count"]))

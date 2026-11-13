@@ -285,7 +285,8 @@ def test_a_long_secondary_rate_limit_stops_content_requests(tmp_path: Path, monk
     assert reasons == {"no-download: provider API rate limit exhausted; resets in about 3,600 s"}
     # The first refused request (the symlink target, read while listing) stopped all others.
     assert content_requests == 1
-    assert {item["target_state"] for item in report["symlinks"]} == {"unverified"}
+    # The link's target could not be fetched, so it cannot be resolved either.
+    assert {item["target_state"] for item in report["symlinks"]} == {"unreadable"}
 
 
 def test_request_budget_exhaustion_is_reported(tmp_path: Path, monkeypatch):

@@ -171,7 +171,7 @@ def test_markdown_writer_streams_without_compatibility_string_builder(tmp_path: 
 def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
     path = write_reports(_result(), tmp_path, {"json"})[0]
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.9"
+    assert payload["schema_version"] == "1.10"
     assert payload["directories"][1]["path"] == "src"
     assert payload["symlinks"][0]["target_scope"] == "internal"
     assert payload["special_entries"][0]["entry_type"] == "fifo"
@@ -186,7 +186,7 @@ def test_html_report_exposes_symlink_scope_verification_and_permissions(tmp_path
     content = path.read_text(encoding="utf-8")
     assert "<th>Verification</th>" in content
     assert "<th>Permissions</th>" in content
-    assert 'item.target_state||"unverified"' in content
+    assert "linkOutcome(item)" in content
     assert "const REPORT =" in content
 
 def test_html_report_uses_bounded_page_rendering_without_full_match_copies(tmp_path: Path):
@@ -214,7 +214,7 @@ def test_json_and_html_report_writers_do_not_materialize_scanresult_dict(
     paths = write_reports(result, tmp_path, {"json", "html"})
     assert {path.suffix for path in paths} == {".json", ".html"}
     payload = json.loads((tmp_path / "discovery-report.json").read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.9"
+    assert payload["schema_version"] == "1.10"
     assert "const REPORT =" in (tmp_path / "discovery-report.html").read_text(encoding="utf-8")
 
 

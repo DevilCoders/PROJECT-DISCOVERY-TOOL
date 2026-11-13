@@ -25,6 +25,7 @@ from .entry_metadata import (
     security_supported,
     stat_ownership,
 )
+from .links import classify_links, local_flavor, memory_lookup, root_components, store_lookup, stored_links
 from .store import InventoryStore, StoredFileRecords, StoredRecordSequence
 
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
@@ -1028,6 +1029,24 @@ def discover_inventory(
             else:
                 store.append("file", error_record)
                 _update_file_ancestor_totals(relative, 0, store)
+
+    # Every link's target is resolved against the finished inventory, never the filesystem.
+    flavor = local_flavor(str(root))
+    root_parts = root_components(str(root), flavor)
+    if store is None:
+        lookup = memory_lookup(
+            [("directory", record) for record in directories_by_path.values()]
+            + [("file", record) for record in files] + [("symlink", record) for record in symlinks]
+            + [("special", record) for record in special_entries],
+            flavor.fold,
+        )
+        classify_links(symlinks, lookup, flavor, root_parts, stats)
+    else:
+        store.flush()
+        classify_links(
+            stored_links(store), store_lookup(store, flavor.fold), flavor, root_parts, stats,
+            save=lambda record: store.append("symlink", record),
+        )
 
     # The no-store compatibility path still aggregates from its in-memory file list.
     if store is None:
