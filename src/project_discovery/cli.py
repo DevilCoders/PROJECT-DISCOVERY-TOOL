@@ -1093,7 +1093,7 @@ def run_scan(
                         ),
                     )
                 timer.lap("python_graph")
-                architecture_layout, architecture_findings = analyze_project_architecture(records)
+                architecture_layout, architecture_findings = analyze_project_architecture(records, store=finding_store)
                 finding_store.extend_findings(graph_findings)
                 finding_store.extend_findings(architecture_findings)
                 timer.lap("architecture")

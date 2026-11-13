@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from itertools import islice
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
 from ..models import FileRecord, Finding
 
-MAX_ARCHITECTURE_COMPONENTS = 10_000
+MAX_ARCHITECTURE_COMPONENTS = 10_000  # without a scan store (library callers)
+_COUNT_BATCH = 10_000  # distinct components counted in memory before a store batch
 
 
 _LAYER_ALIASES = {
@@ -47,9 +49,14 @@ _LAYER_ALIASES = {
 
 
 def analyze_project_architecture(
-    records: Iterable[FileRecord],
+    records: Iterable[FileRecord], *, store=None,
 ) -> tuple[dict[str, Any], list[Finding]]:
-    """Infer likely architectural layers from repository paths without reading source."""
+    """Infer likely architectural layers from repository paths without reading source.
+
+    With the scan's InventoryStore the top-level component counts are store counters,
+    added in bounded batches and read back as lazy StoredRows, so there is no component
+    cap; without one they are held in memory up to MAX_ARCHITECTURE_COMPONENTS.
+    """
     top_level: Counter[str] = Counter()
     layer_counts: Counter[str] = Counter()
     layer_examples: dict[str, list[str]] = defaultdict(list)
@@ -65,7 +72,12 @@ def analyze_project_architecture(
         file_count += 1
         if len(parts) > 1 and not parts[0].startswith("."):
             component = parts[0]
-            if component in top_level:
+            if store is not None:
+                top_level[component] += 1
+                if len(top_level) >= _COUNT_BATCH:
+                    store.add_counts("layout_component", top_level)
+                    top_level.clear()
+            elif component in top_level:
                 top_level[component] += 1
             elif len(top_level) < MAX_ARCHITECTURE_COMPONENTS:
                 top_level[component] = 1
@@ -91,26 +103,36 @@ def analyze_project_architecture(
         }
         for name in sorted(layer_counts)
     ]
-    components = [
-        {"name": name, "file_count": count}
-        for name, count in sorted(top_level.items(), key=lambda item: (-item[1], item[0]))
-    ]
+    if store is not None:
+        from ..inventory.store import StoredRows
+
+        if top_level:
+            store.add_counts("layout_component", top_level)
+        component_count = store.counts_to_rows("layout_component", "file_count")
+        components = StoredRows(store.path, "layout_component")
+        leading = list(islice(components, 30))
+    else:
+        components = [
+            {"name": name, "file_count": count}
+            for name, count in sorted(top_level.items(), key=lambda item: (-item[1], item[0]))
+        ]
+        component_count, leading = len(components), components[:30]
     metrics = {
         "file_count": file_count,
         "top_level_components": components,
-        "top_level_component_detail_count": len(components),
+        "top_level_component_detail_count": component_count,
         "omitted_top_level_path_count": omitted_top_level_path_count,
         "top_level_component_limit_reached": omitted_top_level_path_count > 0,
         "layout_complete": omitted_top_level_path_count == 0,
         "layers": layers,
         "classification_basis": "directory naming conventions only",
     }
-    if not layers and not components:
+    if not layers and not component_count:
         return metrics, []
 
     evidence = [
         f"top-level component: {item['name']} ({item['file_count']} files)"
-        for item in components[:30]
+        for item in leading
     ]
     evidence.extend(
         f"layer: {item['name']} ({item['file_count']} files)"
@@ -121,7 +143,7 @@ def analyze_project_architecture(
     finding = Finding(
         "architecture",
         "Project architecture layout inventory",
-        f"Inventoried {file_count} readable path(s), {len(components)} top-level "
+        f"Inventoried {file_count} readable path(s), {component_count} top-level "
         f"component(s), and {len(layers)} directory-convention layer(s). Layer labels "
         "are INFERRED from names only; this does not establish dependency direction, "
         "runtime boundaries, deployment topology or architectural compliance.",
@@ -140,7 +162,7 @@ def analyze_project_architecture(
             "Additional top-level path observations were not retained.",
             confidence="UNKNOWN",
             evidence=[
-                f"retained_component_details: {len(components):,}",
+                f"retained_component_details: {component_count:,}",
                 f"omitted_top_level_path_observations: {omitted_top_level_path_count:,}",
             ],
             analyzer="architecture-layout",

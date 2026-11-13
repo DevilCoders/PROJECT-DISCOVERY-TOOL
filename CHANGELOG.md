@@ -298,6 +298,9 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   are found on integer adjacency arrays, so only the module indexes stay in memory. The ceilings
   rose from 25,000 modules and 100,000 edges to 250,000 modules, 10,000,000 edges, 5,000,000
   unresolved imports and 1,000,000 skipped modules; the report's graph is unchanged.
+- The architecture layout of `pdt scan` counts top-level components in the scan's SQLite inventory
+  (in batches of 10,000 names) and the reports stream them, largest first, so a root holding more
+  than 10,000 projects gets a complete layout instead of a component-cap `UNKNOWN` finding.
 
 ### Fixed: found during the filesystem inventory work
 - A budget stop that reached an analyzer call just as it returned was cleared with

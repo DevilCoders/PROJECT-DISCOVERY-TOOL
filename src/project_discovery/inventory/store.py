@@ -21,6 +21,8 @@ if TYPE_CHECKING:  # string annotations only; models imports this module lazily
 _RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding", "diagnostic"} | {
     # The Python dependency graph's lists (intelligence.python_graph), read back lazily.
     "graph_module", "graph_edge", "graph_unresolved", "graph_skipped",
+    # The architecture layout's top-level components with their file counts.
+    "layout_component",
 })
 # Cross-file code facts (see code_facts). Rows are idempotent, so re-analysing a file
 # after --resume cannot duplicate them. Each table stops growing at its ceiling.
@@ -255,6 +257,15 @@ class InventoryStore:
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS code_index_truncated_files (
                 path TEXT PRIMARY KEY
+            ) WITHOUT ROWID"""
+        )
+        # Per-name counters a scan aggregates in bounded batches (add_counts).
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS result_counts (
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                PRIMARY KEY(kind, name)
             ) WITHOUT ROWID"""
         )
         for create_table, _insert, create_index, _ceiling in _CODE_TABLES.values():
@@ -760,6 +771,40 @@ class InventoryStore:
         with self.db:
             self.db.execute("DELETE FROM inventory_records WHERE kind=?", (kind,))
 
+    def add_counts(self, kind: str, counts: Mapping[str, int]) -> None:
+        """Add one batch of per-name counts to the counters of ``kind``."""
+        kind = self._kind(kind)
+        with self.db:
+            self.db.executemany(
+                """INSERT INTO result_counts(kind, name, count) VALUES (?, ?, ?)
+                   ON CONFLICT(kind, name) DO UPDATE SET count = count + excluded.count""",
+                [(kind, sqlite_text(str(name)), int(count)) for name, count in counts.items()],
+            )
+
+    def counts_to_rows(self, kind: str, count_field: str = "count") -> int:
+        """Replace the records of ``kind`` with its counters, largest first, and drop them.
+
+        Each record's row is ``{"name": name, count_field: count}``; StoredRows reads them
+        back in count order, names ascending among equal counts.
+        """
+        kind = self._kind(kind)
+        self.discard(kind)
+        written = 0
+        cursor = self.db.execute("SELECT name, count FROM result_counts WHERE kind=?", (kind,))
+        try:
+            while rows := cursor.fetchmany(self.batch_size):
+                for name, count in rows:
+                    # Ascending sort keys: the complement of the count, then the name.
+                    self.append(kind, {"path": name, "row": {"name": name, count_field: int(count)}},
+                                sort_key=f"{(1 << 62) - int(count):020d}\x1f{name}")
+                    written += 1
+        finally:
+            cursor.close()
+        self.flush()
+        with self.db:
+            self.db.execute("DELETE FROM result_counts WHERE kind=?", (kind,))
+        return written
+
     def clear(self) -> None:
         if self._closed:
             raise RuntimeError("inventory store is closed")
@@ -777,6 +822,7 @@ class InventoryStore:
             for table in _CODE_TABLES:
                 self.db.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed table names
             self.db.execute("DELETE FROM code_index_truncated_files")
+            self.db.execute("DELETE FROM result_counts")
 
     def checkpoint(self, metadata: Mapping[str, Any]) -> None:
         """Flush inventory rows, then atomically persist a resumable scan checkpoint.
