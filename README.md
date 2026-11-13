@@ -61,7 +61,7 @@ pdt compare a/discovery-report.json b/discovery-report.json   # compare two proj
 | `3` | `--strict`: the scan is incomplete, or a repository in a URL batch could not be fetched |
 | `130` | Interrupted |
 
-The report directory must be outside the scanned project. Large-scan practice, resume, performance data and every option are described in the [Operations Guide](docs/guides/OPERATIONS.md).
+The report directory must be outside the scanned project. Every command and option is explained, with examples, in the [CLI Reference](docs/guides/CLI_REFERENCE.md); large-scan practice, resume and performance data are in the [Operations Guide](docs/guides/OPERATIONS.md).
 
 ## Remote repositories
 

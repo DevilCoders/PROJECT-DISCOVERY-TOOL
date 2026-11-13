@@ -1282,7 +1282,8 @@ def capabilities_report() -> dict:
             "PyYAML": version_of("PyYAML"),
         },
         "analyzers": [
-            {"name": analyzer.name, "version": analyzer.version, "domains": list(analyzer.domains)}
+            {"name": analyzer.name, "version": analyzer.version, "domains": list(analyzer.domains),
+             "languages": list(analyzer.languages)}
             for analyzer in loaded.analyzers
         ],
         "plugin_diagnostics": loaded.diagnostics,
@@ -1535,8 +1536,8 @@ def _stdout_is_utf8() -> bool:
     return (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "") == "utf8"
 
 
-def main() -> None:
-    _tolerant_console_streams()
+def build_parser() -> argparse.ArgumentParser:
+    """The ``pdt`` command line: every command and option (docs/guides/CLI_REFERENCE.md)."""
     parser = argparse.ArgumentParser(
         prog="pdt", description="Read-only project intelligence for local directories and remote repositories"
     )
@@ -1545,7 +1546,10 @@ def main() -> None:
     scan = sub.add_parser(
         "scan", help="Analyze a local project or scan a remote VCS repository",
     )
-    scan.add_argument("path", nargs="?", type=str, metavar="PATH_OR_URL")
+    scan.add_argument(
+        "path", nargs="?", type=str, metavar="PATH_OR_URL",
+        help="A local project directory, or a remote repository URL (online mode)",
+    )
     scan.add_argument(
         "--url", type=Path, default=None, metavar="FILE",
         help="Read one repository per line from a UTF-8 text file (URL [ref=NAME] [vcs=BACKEND]); "
@@ -1577,8 +1581,8 @@ def main() -> None:
     )
     scan.add_argument(
         "--no-download", action="store_true",
-        help="Analyze a remote GitHub, GitLab, Bitbucket Cloud or Gitea/Forgejo repository "
-             "through its provider API in memory, without cloning or writing it to disk",
+        help="Analyze a remote GitHub, GitLab, Bitbucket (Cloud or Data Center/Server) or Gitea/Forgejo "
+             "repository through its provider API in memory, without cloning or writing it to disk",
     )
     scan.add_argument(
         "--api-provider", choices=API_PROVIDERS, default="auto",
@@ -1587,7 +1591,7 @@ def main() -> None:
     scan.add_argument(
         "--api-url", default=None, metavar="URL",
         help="With --no-download and one URL: API base URL (GitHub Enterprise, self-managed "
-             "GitLab, Gitea); PDT_API_URL_<HOST> sets it per host for batches",
+             "GitLab, Bitbucket Data Center, Gitea); PDT_API_URL_<HOST> sets it per host for batches",
     )
     scan.add_argument(
         "--api-max-files", type=int, default=None, metavar="N",
@@ -1619,10 +1623,17 @@ def main() -> None:
         help="Allow plain-text transports (git://, http://, svn://, bzr://, CVS pserver, Perforce "
              "tcp); refused by default because fetched source could be altered in transit",
     )
-    scan.add_argument("--output", type=Path, default=None)
-    scan.add_argument("--format", default="json,markdown,html")
     scan.add_argument(
-        "--jobs", type=int, default=0,
+        "--output", type=Path, default=None, metavar="DIR",
+        help="Report directory, outside the scanned project (default: NAME-pdt-report beside a local "
+             "project, ./NAME-pdt-report for a URL, ./pdt-remote-reports for a batch)",
+    )
+    scan.add_argument(
+        "--format", default="json,markdown,html", metavar="FORMATS",
+        help="Comma-separated report formats: json, markdown, html (default: all three)",
+    )
+    scan.add_argument(
+        "--jobs", type=int, default=0, metavar="N",
         help="Concurrent analysis workers; 0 auto-detects a bounded worker count (default: 0)",
     )
     scan.add_argument(
@@ -1630,7 +1641,7 @@ def main() -> None:
         help="Opt in to skipping content analysis for files above --max-file-mb",
     )
     scan.add_argument(
-        "--max-file-mb", type=int, default=None,
+        "--max-file-mb", type=int, default=None, metavar="MB",
         help=f"Size threshold for --skip, which it requires (default: {DEFAULT_MAX_FILE_MB} MiB)",
     )
     scan.add_argument(
@@ -1640,7 +1651,7 @@ def main() -> None:
              "to the scan root (web/src, ./web) or absolute path inside it; the directory remains inventoried",
     )
     scan.add_argument(
-        "--vuln-db", type=Path, default=None,
+        "--vuln-db", type=Path, default=None, metavar="FILE",
         help="Use a local OSV advisory SQLite database; scanning performs no network access",
     )
     scan.add_argument(
@@ -1734,7 +1745,8 @@ def main() -> None:
     plugin_check.add_argument(
         "plugin", help="module:attribute of the analyzer, or the name of an installed pdt.analyzers entry point",
     )
-    plugin_check.add_argument("samples", type=Path, nargs="*", help="Sample files or directories to analyze")
+    plugin_check.add_argument("samples", type=Path, nargs="*", metavar="SAMPLE",
+                              help="Sample files or directories to analyze")
     plugin_check.add_argument(
         "--isolation", choices=("sandbox", "process"), default="sandbox",
         help="Run the plugin under the OS sandbox (default) or out of process without restrictions",
@@ -1754,21 +1766,29 @@ def main() -> None:
     query.add_argument("--limit", type=int, default=200, help="Maximum rows (default: 200)")
     query.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     compare = sub.add_parser("compare", help="Compare two or more independent PDT JSON reports")
-    compare.add_argument("reports", type=Path, nargs="+")
-    compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"))
-    compare.add_argument("--format", default="json,markdown")
+    compare.add_argument("reports", type=Path, nargs="+", metavar="REPORT",
+                         help="Two or more discovery-report.json files")
+    compare.add_argument("--output", type=Path, default=Path("./pdt-comparison"),
+                         help="Comparison directory, outside every compared project (default: ./pdt-comparison)")
+    compare.add_argument("--format", default="json,markdown", help="json and/or markdown (default: json,markdown)")
     catalog_add = sub.add_parser("catalog-add", help="Register a local PDT JSON report")
-    catalog_add.add_argument("report", type=Path)
-    catalog_add.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
+    catalog_add.add_argument("report", type=Path, help="A discovery-report.json to register or update")
+    catalog_add.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3",
+                             help="Project catalog database (default: ~/.pdt/catalog.sqlite3)")
     catalog_list = sub.add_parser("catalog-list", help="List locally registered projects")
-    catalog_list.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
+    catalog_list.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3",
+                              help="Project catalog database (default: ~/.pdt/catalog.sqlite3)")
     catalog_remove = sub.add_parser("catalog-remove", help="Remove a project from the local catalog")
     catalog_remove.add_argument("root", help="A local project path, a remote URL (every ref) or URL#ref")
-    catalog_remove.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
+    catalog_remove.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3",
+                                help="Project catalog database (default: ~/.pdt/catalog.sqlite3)")
     catalog_compare = sub.add_parser("catalog-compare", help="Compare every registered project report")
-    catalog_compare.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3")
-    catalog_compare.add_argument("--output", type=Path, default=Path("./pdt-catalog-comparison"))
-    catalog_compare.add_argument("--format", default="json,markdown")
+    catalog_compare.add_argument("--db", type=Path, default=Path.home() / ".pdt" / "catalog.sqlite3",
+                                 help="Project catalog database (default: ~/.pdt/catalog.sqlite3)")
+    catalog_compare.add_argument("--output", type=Path, default=Path("./pdt-catalog-comparison"),
+                                 help="Comparison directory (default: ./pdt-catalog-comparison)")
+    catalog_compare.add_argument("--format", default="json,markdown",
+                                 help="json and/or markdown (default: json,markdown)")
     vuln_db = sub.add_parser(
         "vuln-db", help="Manage the local offline vulnerability advisory database"
     )
@@ -1777,11 +1797,17 @@ def main() -> None:
         "import", help="Import local OSV JSON records without network access"
     )
     vuln_import.add_argument("source", type=Path, help="Local OSV JSON file or directory tree")
-    vuln_import.add_argument("--db", type=Path, default=default_database_path())
+    vuln_import.add_argument("--db", type=Path, default=default_database_path(), help="Advisory database (default: ~/.pdt/vulnerability-advisories.sqlite3)")
     vuln_status = vuln_actions.add_parser(
         "status", help="Show local advisory database coverage"
     )
-    vuln_status.add_argument("--db", type=Path, default=default_database_path())
+    vuln_status.add_argument("--db", type=Path, default=default_database_path(), help="Advisory database (default: ~/.pdt/vulnerability-advisories.sqlite3)")
+    return parser
+
+
+def main() -> None:
+    _tolerant_console_streams()
+    parser = build_parser()
     args = parser.parse_args()
     formats = (
         {item.strip().lower() for item in args.format.split(",") if item.strip()}

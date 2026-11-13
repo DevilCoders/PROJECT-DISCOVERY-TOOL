@@ -26,6 +26,7 @@
 - [Secret scanning](analyzers/SECURITY_ANALYZER.md): credential formats, redaction and budgets.
 
 ## Guides
+- [CLI reference](guides/CLI_REFERENCE.md): every command and option, with examples.
 - [Operations](guides/OPERATIONS.md): running large scans, exit codes, resume and performance data.
 - [Plugin SDK](guides/PLUGIN_SDK.md): writing analyzer plugins and how PDT isolates them.
 - [Benchmarks](guides/BENCHMARKS.md): the benchmark tool and measured results.

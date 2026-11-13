@@ -114,6 +114,10 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   domain's status and analyzers. A test fails when it is stale.
 - `tests/test_documentation.py` checks the README figures, documented `pdt` options, links and
   anchors, and plugin API version 1 against the code.
+- [docs/guides/CLI_REFERENCE.md](docs/guides/CLI_REFERENCE.md) explains every command and option,
+  with defaults, limits, exit codes, environment variables and examples; a test fails when an option
+  is missing from it. Every argument now has `--help` text, and the parser is built by
+  `cli.build_parser()`.
 - [CONTRIBUTING.md](CONTRIBUTING.md) sets the changelog, report-schema and plugin-API rules, and the
   `changelog` workflow fails a pull request that changes `src/` or `native/` without an entry.
 - The `python-ast`, `dataflow`, `embedded`, `hdl`, `shaders`, `frontend`, `markdown`, `sql-schema`

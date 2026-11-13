@@ -5,6 +5,7 @@ away from the implementation (ROADMAP Phase 0).
 """
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import importlib.util
 import inspect
@@ -74,7 +75,7 @@ def test_changelog_records_the_report_schema_version():
 def test_documented_pdt_options_exist():
     # Options in `pdt ...` commands and bare `--option` references must be real; the
     # roadmap (plans) and the audit (history) are not checked.
-    defined = set(re.findall(r'"(--[a-z][a-z0-9-]*)"', _text(ROOT / "src/project_discovery/cli.py")))
+    defined = set(re.findall(r'"(--[a-z][a-z0-9-]*)"', _text(ROOT / "src/project_discovery/cli.py"))) | {"--help"}
     option = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]+)")
     unknown: dict[str, set[str]] = {}
     for path in DOCUMENTS:
@@ -134,6 +135,63 @@ def test_relative_links_and_anchors_resolve():
             elif anchor and resolved.suffix == ".md" and anchor not in _anchors(_text(resolved)):
                 broken.append(f"{path.relative_to(ROOT)}: {target} (no such heading)")
     assert not broken, "broken documentation links:\n" + "\n".join(broken)
+
+
+def _reference_sections(text: str) -> dict[str, str]:
+    """The text of each ``## `pdt X``` / ``### `pdt X Y``` section of the CLI reference."""
+    sections: dict[str, str] = {}
+    current, lines = None, []
+    for line in text.splitlines():
+        heading = re.match(r"#{2,3} `pdt ([a-z-]+(?: [a-z-]+)?)`$", line)
+        if heading or (line.startswith("## ") and current):
+            if current:
+                sections[current] = "\n".join(lines)
+            current, lines = (heading.group(1) if heading else None), []
+        elif current:
+            lines.append(line)
+    if current:
+        sections[current] = "\n".join(lines)
+    return sections
+
+
+def test_cli_reference_documents_every_command_and_option():
+    # docs/guides/CLI_REFERENCE.md must keep up with the parser: every command has a
+    # section, and every option and positional argument appears in it.
+    from project_discovery.cli import build_parser
+
+    reference = _text(ROOT / "docs/guides/CLI_REFERENCE.md")
+    sections = _reference_sections(reference)
+    missing: list[str] = []
+
+    def walk(parser: argparse.ArgumentParser, command: str) -> None:
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, child in action.choices.items():
+                    child_command = f"{command} {name}".strip()
+                    if child_command not in sections:
+                        missing.append(f"pdt {child_command}: no section")
+                        continue
+                    walk(child, child_command)
+            elif not isinstance(action, argparse._HelpAction) and command:
+                names = action.option_strings or [action.metavar or action.dest.upper()]
+                if not any(f"`{name}" in sections[command] for name in names):
+                    missing.append(f"pdt {command}: {names[0]}")
+                if not action.help:
+                    missing.append(f"pdt {command}: {names[0]} has no --help text")
+
+    walk(build_parser(), "")
+    assert "`pdt --version`" in reference
+    assert not missing, "CLI_REFERENCE.md is incomplete:\n" + "\n".join(missing)
+
+
+def test_capabilities_json_lists_each_analyzers_languages():
+    # The CLI reference and the changelog say so; the scan report's analyzer list has them too.
+    from project_discovery.analyzers import builtin_analyzers
+    from project_discovery.cli import capabilities_report
+
+    listed = {item["name"]: item["languages"] for item in capabilities_report()["analyzers"]}
+    for analyzer in builtin_analyzers():
+        assert listed[analyzer.name] == list(analyzer.languages)
 
 
 def _matrix_tool():
