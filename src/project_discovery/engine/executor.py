@@ -82,6 +82,8 @@ class FileTask:
     path: str
     digest_hint: str | None
     expected_stat: os.stat_result
+    # The change time the fingerprint cache records (Windows: NTFS ChangeTime).
+    change_time_ns: int | None = None
 
 
 def verified_regular_file_stat(path: Path, expected=None) -> os.stat_result:

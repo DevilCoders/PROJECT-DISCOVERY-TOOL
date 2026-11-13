@@ -57,7 +57,7 @@ from .intelligence.index import QUERY_KINDS, analyze_code_index, code_index_stat
 from .intelligence.python_graph import analyze_python_dependencies
 from .inventory.aggregates import inventory_aggregates
 from .inventory.cache import ScanCache
-from .inventory.entry_metadata import security_supported
+from .inventory.entry_metadata import change_time_ns, security_supported
 from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
 from .engine.budgets import DEFAULT_MEMORY_MB as DEFAULT_ANALYZER_MEMORY_MB
 from .engine.budgets import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ANALYZER_TIMEOUT
@@ -418,6 +418,8 @@ class _EphemeralScanCache:
     be reused; recording them would only grow the output's cache with dead roots.
     """
 
+    damaged = None  # never a database to damage
+
     def __enter__(self) -> "_EphemeralScanCache":
         return self
 
@@ -762,6 +764,7 @@ def run_scan(
         gpu_baseline = _gpu_counters()
         budget_usage = _BudgetUsage()
         cache_failures: list[str] = []
+        cache_damage_reported = False
         counts = Counter()
         cache_path = output / ".pdt-cache" / "fingerprints.sqlite3"
         hardware_threads = max(1, int(native_capabilities().get("hardware_threads", os.cpu_count() or 1)))
@@ -911,7 +914,9 @@ def run_scan(
                                     try:
                                         cache.put(
                                             str(root), record.path, file_stat.st_size,
-                                            file_stat.st_mtime_ns, file_stat.st_ctime_ns,
+                                            file_stat.st_mtime_ns,
+                                            item.change_time_ns if item.change_time_ns is not None
+                                            else change_time_ns(root / record.path, file_stat),
                                             file_stat.st_ino, digest,
                                         )
                                     except (sqlite3.Error, OverflowError, ValueError) as exc:
@@ -1009,11 +1014,19 @@ def run_scan(
                                 ):
                                     raise OSError(f"file changed after inventory; refusing analysis: {record.path}")
                                 cached = cache.get(str(root), record.path)
+                                if cache.damaged is not None and not cache_damage_reported:
+                                    cache_damage_reported = True
+                                    finding_store.append_diagnostic(
+                                        f"fingerprint cache unreadable ({type(cache.damaged).__name__}: "
+                                        f"{cache.damaged}); this scan hashes every file, and the cache is "
+                                        "moved aside and rebuilt"
+                                    )
+                                change_ns = change_time_ns(path, file_stat) if cached else None
                                 cache_hit = bool(
                                     cached
                                     and cached[0] == file_stat.st_size
                                     and cached[1] == file_stat.st_mtime_ns
-                                    and cached[2] == file_stat.st_ctime_ns
+                                    and cached[2] == change_ns
                                     and cached[3] == file_stat.st_ino
                                 )
                                 digest_hint = cached[4] if cache_hit else None
@@ -1023,7 +1036,7 @@ def run_scan(
                                 persist_record(record)
                                 progress.advance(task)
                                 continue
-                            batch.append(FileTask(record, str(path), digest_hint, file_stat))
+                            batch.append(FileTask(record, str(path), digest_hint, file_stat, change_ns))
                             batch_bytes += record.size_bytes
                             if len(batch) >= BATCH_MAX_FILES or batch_bytes >= BATCH_MAX_BYTES:
                                 flush_batch()

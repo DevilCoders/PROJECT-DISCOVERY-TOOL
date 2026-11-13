@@ -101,7 +101,7 @@ def _payload_json(value: Any) -> str:
     return text
 
 
-def set_aside_unreadable_database(path: Path) -> Path | None:
+def set_aside_unreadable_database(path: Path, *, damaged: bool = False) -> Path | None:
     """Move an unreadable SQLite database (and its WAL files) aside; return where it went.
 
     The per-output inventory and fingerprint databases are rebuilt by a fresh scan, so a
@@ -111,6 +111,8 @@ def set_aside_unreadable_database(path: Path) -> Path | None:
     if not path.is_file() or path.is_symlink():
         return None
     try:
+        if damaged:  # a read failed mid-scan: the header can still look fine
+            raise sqlite3.DatabaseError("damaged")
         connection = sqlite3.connect(path, timeout=5.0)
         try:
             connection.execute("PRAGMA schema_version").fetchone()

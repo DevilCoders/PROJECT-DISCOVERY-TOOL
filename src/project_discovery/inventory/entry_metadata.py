@@ -236,8 +236,18 @@ def _windows_api():
     class AclSizeInformation(ctypes.Structure):
         _fields_ = (("AceCount", wintypes.DWORD), ("AclBytesInUse", wintypes.DWORD), ("AclBytesFree", wintypes.DWORD))
 
+    class FileBasicInfo(ctypes.Structure):  # FILE_BASIC_INFO: times in 100 ns since 1601
+        _fields_ = (("CreationTime", ctypes.c_longlong), ("LastAccessTime", ctypes.c_longlong),
+                    ("LastWriteTime", ctypes.c_longlong), ("ChangeTime", ctypes.c_longlong),
+                    ("FileAttributes", wintypes.DWORD))
+
     return {
         "ctypes": ctypes,
+        "FileBasicInfo": FileBasicInfo,
+        "GetFileInformationByHandleEx": bind(
+            kernel32, "GetFileInformationByHandleEx", wintypes.BOOL, wintypes.HANDLE, ctypes.c_int,
+            ctypes.c_void_p, wintypes.DWORD,
+        ),
         "AceHeader": AceHeader,
         "AclSizeInformation": AclSizeInformation,
         "invalid_handle": ctypes.c_void_p(-1).value,
@@ -264,6 +274,40 @@ def _windows_api():
         "GetLengthSid": bind(advapi32, "GetLengthSid", wintypes.DWORD, ctypes.c_void_p),
         "ConvertSidToStringSidW": bind(advapi32, "ConvertSidToStringSidW", wintypes.BOOL, ctypes.c_void_p, pointer),
     }
+
+
+_FILE_READ_ATTRIBUTES = 0x80
+_FILE_BASIC_INFO_CLASS = 0
+_FILETIME_EPOCH = 116_444_736_000_000_000  # 1970-01-01 in 100 ns intervals since 1601
+
+
+def change_time_ns(path: str | os.PathLike, info: os.stat_result) -> int:
+    """When the entry's content or metadata last changed, in nanoseconds since the epoch.
+
+    POSIX: st_ctime_ns. On Windows st_ctime is the creation time, so the NTFS ChangeTime is
+    read through a no-follow handle; st_ctime_ns when the file system cannot report it.
+    """
+    if os.name != "nt":
+        return info.st_ctime_ns
+    try:
+        api = _windows_api()
+        ctypes = api["ctypes"]
+        handle = api["CreateFileW"](
+            _extended_path(os.path.abspath(os.fspath(path))), _FILE_READ_ATTRIBUTES, _FILE_SHARE_ALL, None,
+            _OPEN_EXISTING, _OPEN_FLAGS, None,
+        )
+        if handle is None or handle == api["invalid_handle"]:
+            return info.st_ctime_ns
+        try:
+            basic = api["FileBasicInfo"]()
+            if not api["GetFileInformationByHandleEx"](
+                    handle, _FILE_BASIC_INFO_CLASS, ctypes.byref(basic), ctypes.sizeof(basic)) or basic.ChangeTime <= 0:
+                return info.st_ctime_ns
+            return (basic.ChangeTime - _FILETIME_EPOCH) * 100
+        finally:
+            api["CloseHandle"](handle)
+    except OSError:
+        return info.st_ctime_ns
 
 
 def _extended_path(path: str) -> str:

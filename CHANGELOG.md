@@ -312,6 +312,12 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   asynchronous-exception flag set for good: a traced process (coverage) hung, and an untraced
   one took the interpreter's slow path from then on. Such a stop is now delivered inside the
   guarded call (PDT-422).
+- On Windows the fingerprint cache compared `st_ctime`, which is the creation time there, so a
+  same-size rewrite with its old modification time restored reused the stale digest. It now
+  compares the NTFS ChangeTime, read through an attributes-only handle (PDT-424).
+- A fingerprint cache that opened but failed a read mid-scan ("database disk image is
+  malformed") aborted the scan. The scan now continues without it, hashing every file, and the
+  damaged database is moved aside when the scan ends (PDT-425).
 - A file replaced by a FIFO between its check and its open blocked the scan for good: hashing,
   the signature sample and analyzer reads opened it without `O_NONBLOCK`, and an open of a FIFO
   waits for a writer (no budget can interrupt it). The verified open now never waits, and
