@@ -71,11 +71,17 @@ const budgets=metrics.analysis_budgets||{};
 {const seconds={};for(const [name,entry] of Object.entries(budgets.analyzers||{}))seconds[name]=Math.round(entry.seconds*100)/100;
  fillBars("analyzer-time",seconds);
  const stops=budgets.stops||{},stopped=(stops.time||0)+(stops.memory||0)+(stops.read||0)+(stops.cpu||0);
+ const scan=budgets.scan_memory||{};
  $("analyzer-budgets").textContent=budgets.timeout_seconds===undefined?"Budgets not recorded":
   (metrics.execution||{}).analysis_mode==="inventory-only"?"No analyzer ran (inventory only)":
   (budgets.timeout_seconds?budgets.timeout_seconds+" s":"no time limit")+" and "+
-  (budgets.memory_mb?number(budgets.memory_mb)+" MiB":"no memory limit")+" per analyzer and file • "+
-  (stopped?number(stopped)+" call(s) stopped by a budget":"no call stopped");
+  (budgets.memory_mb?number(budgets.memory_mb)+" MiB":"no memory limit")+
+  (budgets.read_mb?" and "+number(budgets.read_mb)+" MiB read":"")+
+  (budgets.cpu_seconds?" and "+budgets.cpu_seconds+" s CPU":"")+" per analyzer and file • "+
+  (stopped?number(stopped)+" call(s) stopped by a budget":"no call stopped")+
+  (scan.limit_mb?" • scan memory budget "+number(scan.limit_mb)+" MiB"+
+   (scan.peak_mb!=null?", sampled peak "+number(Math.round(scan.peak_mb))+" MiB":"")+", "+number(scan.waits||0)+" wait(s)"+
+   (scan.over_budget_submissions?", "+number(scan.over_budget_submissions)+" batch(es) queued over it":""):"");
  const mib={};for(const [name,entry] of Object.entries(budgets.analyzers||{}))if(entry.bytes_read)mib[name]=Math.round(entry.bytes_read/10485.76)/100;
  fillBars("analyzer-bytes",mib);
  const reached=Object.entries(budgets.limits_reached||{});

@@ -183,13 +183,35 @@ def budget_summary(budgets: dict[str, Any] | None) -> str:
     if reached:
         text += f"; {sum(reached.values()):,} content limit(s) reached (" + ", ".join(
             f"{kind} {count:,}" for kind, count in reached.items()) + ")"
-    return text
+    scan = scan_memory_text(budgets.get("scan_memory"))
+    return text + (f"; {scan}" if scan else "")
+
+
+def scan_memory_text(scan: dict[str, Any] | None) -> str:
+    """"scan memory budget 2,048 MiB, sampled peak 1,310 MiB, 12 wait(s)"; "" without a budget."""
+    scan = scan or {}
+    limit = scan.get("limit_mb")
+    if not limit:
+        return ""
+    text = f"scan memory budget {limit:,} MiB"
+    if not scan.get("enforced"):
+        return text + " (memory is not measured on this platform)"
+    if scan.get("peak_mb") is not None:
+        text += f", sampled peak {scan['peak_mb']:,.0f} MiB"
+    text += f", {scan.get('waits', 0):,} wait(s)"
+    over = scan.get("over_budget_submissions", 0)
+    return text + (f", {over:,} batch(es) queued over it" if over else "")
 
 
 def _write_markdown_budgets(line, budgets: dict[str, Any]) -> None:
     line("## Analyzer Budgets")
     line()
     line(f"- Budget: {_md(budget_summary(budgets))}")
+    scan = budgets.get("scan_memory") or {}
+    if scan.get("limit_mb") and scan.get("enforced"):
+        line(f"- Scan memory: {scan.get('processes_measured', 0):,} process(es) measured, shared pages "
+             f"{'split (proportional set size)' if scan.get('shared_pages') == 'proportional' else 'counted per process'}"
+             f"; {scan.get('samples', 0):,} sample(s); {scan.get('held_seconds', 0):,.1f} s collecting queued work early")
     for domain, values in (budgets.get("domain_overrides") or {}).items():
         line(f"- Domain {_md(domain)}: " + _md(_limit_text(
             values.get("timeout_seconds", budgets.get("timeout_seconds")),

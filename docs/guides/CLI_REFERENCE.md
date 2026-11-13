@@ -190,11 +190,13 @@ pdt scan --url repositories.txt --no-download --vuln-online --output ./api-repor
 | `--analyzer-cpu-seconds SECONDS` | `0` | CPU time each analyzer call may use on one file: the analyzing thread's own CPU time, so waiting for the GIL or I/O does not count (Linux and Windows; macOS has no per-thread CPU clock). A call past it is stopped the same way. `0`, the default, sets no limit. |
 | `--analyzer-read-mb MB` | `0` | How many bytes each analyzer call may read from one file through the verified readers (an I/O budget). A call that reads more is stopped the same way. `0`, the default, sets no limit. |
 | `--domain-budget DOMAIN:timeout=S,memory=MB,read=MB,cpu=S` | none | Override any of the budgets for the analyzers of one domain (`archives`, `secrets`, `firmware`, ...; `pdt capabilities --json` lists each analyzer's domains); `0` means no limit. An analyzer in several domains gets the most permissive override. Repeatable. |
+| `--max-memory-mb MB` | `0` | Memory budget for the whole scan: the resident memory of PDT and its analysis worker processes, with shared pages counted once on Linux. While the scan is over it, new work waits for queued work; over it with nothing in flight, the scan continues one batch at a time and says so. No analyzer call's own memory budget exceeds it. `0`, the default, sets none; otherwise at least 256. |
 
-Isolated plugins keep `--plugin-timeout` and `--plugin-memory-mb` instead. `metrics.analysis_budgets` records the budgets, the overrides, every stop, the content limits each analyzer declares and every one a call reached, and, per analyzer, its calls, total and longest time, bytes read and largest sampled memory growth; the terminal summary and the Markdown and HTML reports show them.
+Isolated plugins keep `--plugin-timeout` and `--plugin-memory-mb` instead. `metrics.analysis_budgets` records the budgets, the overrides, every stop, the content limits each analyzer declares and every one a call reached, and, per analyzer, its calls, total and longest time, bytes read and largest sampled memory growth, and the scan memory budget (`scan_memory`: its sampled peak, waits and batches queued over it); the terminal summary and the Markdown and HTML reports show them.
 
 ```bash
 pdt scan ./monorepo --analyzer-timeout 30 --analyzer-memory-mb 1024
+pdt scan ./monorepo --max-memory-mb 4096 --jobs 4     # a host with little memory to spare
 pdt scan ./firmware --domain-budget firmware:timeout=600,memory=4096 --domain-budget archives:timeout=0
 ```
 

@@ -45,6 +45,7 @@ read its exit codes and performance data.
 | Prune dependency and cache trees by preset | `--exclude-profile dependencies,caches` |
 | Inventory dependency trees without reading them | `--development-trees inventory` (or `directory-only`) |
 | Bound slow or memory-hungry analyzers | `--analyzer-timeout 60 --analyzer-memory-mb 1024`; per domain `--domain-budget archives:timeout=300` |
+| Keep a scan under a memory budget | `--max-memory-mb 4096` (with fewer `--jobs` on a small host) |
 | CI gate | `pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color` |
 | Remote repository, downloaded | `pdt scan https://github.com/org/repo --output /reports/repo` |
 | Remote repository, not downloaded | `pdt scan https://github.com/org/repo --no-download --output /reports/repo` |
@@ -313,7 +314,11 @@ analyzers still run on the file. `0` disables a budget.
 it, at the read that passes the limit, with an `Analyzer read budget exceeded` finding. It is off by
 default; the analyzers' own per-file byte limits already bound their reads.
 
-`--domain-budget DOMAIN:timeout=S,memory=MB,read=MB` overrides any budget for the analyzers of one
+`--analyzer-cpu-seconds SECONDS` adds a CPU budget: the watchdog reads the analyzing thread's own CPU
+clock, so a call waiting for the GIL, a lock or I/O uses none of it, and the wall-clock
+`--analyzer-timeout` still applies. It is off by default, and Linux and Windows only (`cpu_enforced`).
+
+`--domain-budget DOMAIN:timeout=S,memory=MB,read=MB,cpu=S` overrides any budget for the analyzers of one
 domain, for example `--domain-budget archives:timeout=300 --domain-budget secrets:memory=0`.
 An analyzer in several domains gets the most permissive override of its domains.
 
@@ -323,6 +328,15 @@ for each analyzer, its calls, total and longest time and largest sampled memory 
 the files they came from. The terminal summary has an `Analyzer budgets` row, the Markdown
 report an `Analyzer Budgets` section with the ten slowest analyzers, and the HTML report an
 `Analyzer time` card.
+
+`--max-memory-mb MB` budgets the whole scan: the resident memory of PDT and its analysis worker
+processes, with the pages they share counted once on Linux. While the scan is over it, the coordinator
+waits for queued work before it queues more, so fewer files are analyzed at once; no analyzer call's
+memory budget exceeds it. When the coordinator and idle workers alone are over it, the scan continues
+one batch at a time and warns: raise the budget, or lower `--jobs`, since every worker process
+costs memory of its own. `metrics.analysis_budgets.scan_memory` has the sampled peak, the waits and the
+batches queued over it; [ANALYZER_RESOURCE_BUDGETS.md](../architecture/ANALYZER_RESOURCE_BUDGETS.md#scan-memory-budget)
+describes how it is measured.
 
 Each analyzer also applies fixed per-file content limits (the most of a file it reads, and caps on
 lines, entries or findings), declared in its `limits` attribute and listed in

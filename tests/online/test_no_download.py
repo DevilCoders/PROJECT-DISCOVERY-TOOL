@@ -209,6 +209,28 @@ def test_budgets_leave_unfetched_files_in_the_inventory_as_coverage_gaps(options
     assert any(item["title"] == "Remote source coverage gap: content not fetched" for item in report["findings"])
 
 
+def test_no_download_scans_keep_to_the_scan_memory_budget(tmp_path: Path, monkeypatch):
+    from project_discovery.engine import budgets
+
+    if not budgets.memory_supported():
+        pytest.skip("the resident set cannot be read here")
+    with RunningProviders(ProviderService()) as running:
+        arguments = ("scan", PROVIDERS["github"][0], "--no-download", "--api-url", running.url + "/github",
+                     "--quiet", "--format", "json")
+        assert _main(monkeypatch, *arguments, "--output", str(tmp_path / "baseline")) == cli.EXIT_OK
+        # The scan now reads as 10 GiB: each file is fetched and analyzed after the one before it.
+        monkeypatch.setattr(budgets, "resident_bytes", lambda: 10 * 1024 ** 3)
+        monkeypatch.setattr(budgets, "_PSS", None)
+        assert _main(monkeypatch, *arguments, "--output", str(tmp_path / "out"), "--max-memory-mb", "512") == cli.EXIT_OK
+    report, expected = _report(tmp_path / "out"), _report(tmp_path / "baseline")
+    scan = report["metrics"]["analysis_budgets"]["scan_memory"]
+    assert scan["limit_mb"] == 512 and scan["waits"] >= 5 and scan["over_budget_submissions"] == scan["waits"] + 1
+    assert scan["processes_measured"] == 1  # no-download scans analyze in this process's threads
+    assert [(item["path"], item["sha256"]) for item in report["files"]] == [
+        (item["path"], item["sha256"]) for item in expected["files"]]
+    assert sorted(item["title"] for item in report["findings"]) == sorted(item["title"] for item in expected["findings"])
+
+
 @pytest.mark.parametrize(
     ("options", "reason", "gap"),
     [

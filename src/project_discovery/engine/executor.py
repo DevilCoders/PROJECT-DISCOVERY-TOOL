@@ -361,6 +361,7 @@ class AnalysisExecutor:
         vulnerability_db: Path | None = None,
         plugin_setup: tuple | None = None,
         budget_policy: budgets.BudgetPolicy | None = None,
+        max_memory_mb: int | None = None,
     ) -> None:
         if mode not in EXECUTOR_MODES:
             raise ValueError(f"--executor must be one of: {', '.join(EXECUTOR_MODES)}")
@@ -381,6 +382,8 @@ class AnalysisExecutor:
         from .native import gpu_settings
 
         self._gpu = gpu_settings()  # thread workers share it; process workers receive it
+        # --max-memory-mb: callers ask it for room before they queue work (make_room).
+        self.scan_memory = budgets.ScanMemoryBudget(max_memory_mb, self.worker_pids)
         self._locks = {
             id(analyzer): threading.Lock()
             for analyzer in self._analyzers
@@ -440,9 +443,21 @@ class AnalysisExecutor:
             return self._submit(_analyze_batch_in_worker, tasks)
         return self._submit(analyze_tasks, self._analyzers, self._locks, tasks)
 
+    def worker_pids(self) -> tuple[int, ...]:
+        """The process pool's live worker processes (none for the thread executor)."""
+        processes = getattr(self._pool, "_processes", None) if self.mode == "process" else None
+        for _attempt in range(3):
+            try:
+                # pid -> Process; the pool's own table, read without changing it.
+                return tuple(processes or ())
+            except RuntimeError:  # the pool's manager thread changed it during the copy
+                continue
+        return ()
+
     def map_python_imports(self, root: Path, records: list[FileRecord]) -> Iterator[tuple]:
         """Parse Python imports in the pool; yield results in input order, bounded in flight."""
         pending: deque = deque()
+        ready: list = []
 
         def drain_one():
             future, batch = pending.popleft()
@@ -454,6 +469,9 @@ class AnalysisExecutor:
 
         for start in range(0, len(records), BATCH_MAX_FILES):
             batch = records[start:start + BATCH_MAX_FILES]
+            self.scan_memory.make_room(lambda: len(pending), lambda: ready.extend(drain_one()))
+            yield from ready
+            ready.clear()
             pending.append((self._submit(_parse_imports_batch, str(root), batch), batch))
             while len(pending) >= self.workers * 2:
                 yield from drain_one()

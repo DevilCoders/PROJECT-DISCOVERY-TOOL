@@ -508,12 +508,14 @@ class NoDownloadSource:
     def analyze_records(
         self, records, analyzers, locks, *,
         record_callback: Callable[[FileRecord, FileOutcome | None, str | None, int], None],
+        memory_budget=None,
     ) -> None:
         """Fetch and analyze each eligible record with bounded parallelism.
 
         Results are handed to ``record_callback(record, outcome, skip_reason, fetched_size)``
         in the calling thread and in submission order, so the caller alone writes to the
-        scan databases. At most ``2 * workers`` file contents are held in memory at once.
+        scan databases. At most ``2 * workers`` file contents are held in memory at once,
+        fewer while the scan is over its ``memory_budget`` (a ``ScanMemoryBudget``).
         """
         workers = self.limits.workers
 
@@ -539,6 +541,9 @@ class NoDownloadSource:
         pending: deque = deque()
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pdt-no-download") as pool:
             for record in records:
+                if memory_budget is not None:
+                    memory_budget.make_room(lambda: len(pending),
+                                            lambda: record_callback(*pending.popleft().result()))
                 pending.append(pool.submit(work, record))
                 while len(pending) >= workers * 2:
                     record_callback(*pending.popleft().result())

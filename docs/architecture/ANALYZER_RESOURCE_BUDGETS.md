@@ -1,6 +1,6 @@
 # Analyzer resource budgets
 
-These are per-analyzer safety limits, not a global scan-size policy. Every analyzer call on a file has a time and a memory budget, configurable per scan and per analyzer domain; the byte, line and entry limits each analyzer declares are fixed in code.
+These are per-analyzer safety limits and one scan-wide memory budget, not a scan-size policy. Every analyzer call on a file has time, memory, CPU and read budgets, configurable per scan and per analyzer domain; `--max-memory-mb` budgets the whole scan's memory; the byte, line and entry limits each analyzer declares are fixed in code.
 
 ## Time and memory budgets
 
@@ -11,11 +11,27 @@ These are per-analyzer safety limits, not a global scan-size policy. Every analy
 | CPU time per analyzer and file | none | `--analyzer-cpu-seconds SECONDS` (`0`: none) | The same calls: the analyzing thread's CPU clock, sampled every 50 ms (Linux and Windows) |
 | Bytes read per analyzer and file | none | `--analyzer-read-mb MB` (`0`: none) | The same calls: the bytes they read through the verified readers, counted as they are read |
 | Per-domain override | none | `--domain-budget DOMAIN:timeout=S,memory=MB,read=MB,cpu=S` | The analyzers of that domain; the most permissive override of an analyzer's domains applies |
+| Resident memory of the whole scan | none | `--max-memory-mb MB` (`0`: none; at least 256) | The coordinator and its analysis worker processes: back-pressure on new work, and a cap on every call's memory budget ([below](#scan-memory-budget)) |
 | Isolated plugin hosts | 60 s per request, 4096 MiB per host (Linux and Windows) | `--plugin-timeout`, `--plugin-memory-mb` | Sandboxed and process-isolated plugins |
 
 A watchdog thread samples the running calls every 50 ms (`engine/budgets.py`). A call past a budget receives `AnalyzerBudgetExceeded`, a `BaseException`, at its next Python bytecode, so an analyzer's `except Exception` cannot swallow it. The engine discards the call's findings and code facts for the file and records an `UNKNOWN` `analysis_coverage` finding naming the analyzer, the file, the budget and what was used; the other analyzers still run. Memory is the growth of the process's resident set (Linux `/proc/self/statm`, Windows working set, macOS `task_info`) since the call started. `metrics.analysis_budgets` records the configuration, every stop and each analyzer's time and sampled memory; the terminal, Markdown and HTML reports show them.
 
 A single long C call (one regular-expression search, a blocking read) finishes before the stop takes effect, and a memory spike between two samples is not seen. With the thread executor the analyzers share one process, so memory growth includes concurrent calls.
+
+## Scan memory budget
+
+`--max-memory-mb MB` budgets the whole scan (`ScanMemoryBudget` in `engine/budgets.py`). The scan's memory is the coordinator's resident set plus each analysis worker process's, read when the coordinator is about to queue work, at most every 50 ms: Linux `/proc/PID/statm`, Windows `GetProcessMemoryInfo`, macOS `proc_pidinfo`, about 5 to 13 µs a process. On Linux, pages several of these processes share (what a forked worker inherited copy-on-write, shared libraries) count once: the proportional set size (`/proc/PID/smaps_rollup`) calibrates those reads whenever workers start and every 10 s. It walks page tables, about 13 ms per GiB resident, so it is read for at most about 1% of the coordinator's time. On Windows and macOS every process's resident set counts in full, so the total errs high by the shared library pages.
+
+- While the scan is at or over the budget, the coordinator collects queued batches, oldest first, before it queues another, so fewer calls run at once. Results keep their order.
+- Over the budget with nothing in flight, it queues the batch anyway and counts it: the scan runs one batch at a time and never stalls, and the terminal warns that the budget was not met.
+- A running call is not stopped by the scan budget, but no call's own memory budget (`--analyzer-memory-mb`, a domain's `memory=`, `0` included) exceeds it, since one call growing past it takes the whole scan over.
+- It applies to local scans and remote checkouts (file analysis and Python import parsing) and to `--no-download` scans (fetching and analysis).
+
+`metrics.analysis_budgets.scan_memory` reports the limit, `enforced`, `processes_measured`, `shared_pages` (`proportional` or `per_process`), the largest sampled total (`peak_mb`), the `samples`, the `waits` (batches collected early), `held_seconds` and `over_budget_submissions`; the terminal summary, the Markdown report and the HTML report show them.
+
+Outside the budget: memory between two samples; the coordinator's passes after the analysis (the dependency graph, the code index and the reports, which read store-backed records); and sandboxed plugin hosts, which `--plugin-memory-mb` limits one by one. Idle workers are not replaced to give memory back: measured on 2026-11-13, a process keeps 2 to 32 MiB after analyzing an 11 to 33 MiB file (Windows and Linux), so a replacement would release little.
+
+Measured on Linux (2026-11-13, Python 3.14, 6 workers, 1,200 files): the plain sum of the resident sets was 298 MiB with the fork start method (the default before Python 3.14) and 290 MiB with forkserver; the calibrated totals were 106 MiB and 146 MiB.
 
 ## Per-analyzer content limits
 

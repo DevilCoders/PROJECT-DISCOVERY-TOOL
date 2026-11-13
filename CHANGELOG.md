@@ -241,6 +241,16 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   the analyzing thread's CPU clock (`pthread_getcpuclockid` on Linux, `GetThreadTimes` on
   Windows), so time spent waiting for the GIL or for I/O does not count (`cpu=S` in
   `--domain-budget`; off by default; not on macOS, which has no per-thread CPU clock).
+- `--max-memory-mb MB` budgets the whole scan's memory: the resident memory of the coordinator and
+  its analysis worker processes, with the pages they share counted once on Linux (proportional set
+  size, measured when workers start and every 10 s). While the scan is over it, the coordinator
+  collects queued work before it queues more (file analysis and Python import parsing in local
+  and remote scans, fetching and analysis in `--no-download` scans); over it with nothing in flight,
+  the scan continues one batch at a time and the terminal warns. No analyzer call's own memory
+  budget exceeds it. `metrics.analysis_budgets.scan_memory` records the budget, the sampled peak,
+  the waits and the batches queued over it, shown in the terminal, Markdown and HTML reports (off
+  by default; at least 256 MiB).
+- The HTML report's budget card shows the read, CPU and scan memory budgets.
 - `--analyzer-read-mb MB` adds an I/O budget per analyzer and file: the verified readers count
   the bytes each call reads and stop it, at the read past the limit, with an `UNKNOWN`
   `Analyzer read budget exceeded` finding (`read=MB` in `--domain-budget`; off by default).
@@ -275,6 +285,8 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   `Analyzer failed`.
 - Report schema 1.16: `analyzer_limits`, `limits_reached`, `limited` and the per-analyzer byte
   counts in `metrics.analysis_budgets`.
+- Report schema 1.19: `read_mb`, `cpu_seconds`, `cpu_enforced`, `scan_memory_mb`, `scan_memory` and
+  the `read` and `cpu` stop counts in `metrics.analysis_budgets`.
 
 ### Added: native engine
 - Every GPU fallback has a reason. `metrics.native_backend.gpu_unavailable_reason` names the first

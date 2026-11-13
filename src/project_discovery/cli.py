@@ -61,7 +61,7 @@ from .inventory.entry_metadata import change_time_ns, security_supported
 from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
 from .engine.budgets import DEFAULT_MEMORY_MB as DEFAULT_ANALYZER_MEMORY_MB
 from .engine.budgets import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ANALYZER_TIMEOUT
-from .engine.budgets import BudgetPolicy, parse_domain_budgets
+from .engine.budgets import SCAN_MIN_MEMORY_MB, BudgetPolicy, parse_domain_budgets
 from .inventory.markers import TREE_MODES, describe_profiles, normalize_profiles, validate_tree_mode
 from .inventory.signatures import count_classification
 from .inventory.store import (
@@ -251,9 +251,9 @@ def _print_security_findings(console: Console, findings, *, limit: int = 25) -> 
 
 
 def _budget_policy(timeout: float, memory_mb: int, domain_budgets: Sequence[str], read_mb: int = 0,
-                   cpu_seconds: float = 0) -> BudgetPolicy:
-    """The analyzer budget policy from --analyzer-timeout, --analyzer-memory-mb, --analyzer-read-mb
-    and --domain-budget."""
+                   cpu_seconds: float = 0, max_memory_mb: int = 0) -> BudgetPolicy:
+    """The analyzer budget policy from --analyzer-timeout, --analyzer-memory-mb, --analyzer-read-mb,
+    --analyzer-cpu-seconds and --domain-budget, with --max-memory-mb capping each call's memory."""
     # NaN would never trip a deadline, and infinity is spelled 0 (no limit).
     if not math.isfinite(timeout) or timeout < 0:
         raise ValueError("--analyzer-timeout must be 0 (no limit) or a positive number of seconds")
@@ -263,11 +263,14 @@ def _budget_policy(timeout: float, memory_mb: int, domain_budgets: Sequence[str]
         raise ValueError("--analyzer-read-mb must be 0 (no limit) or a positive number of MiB")
     if not math.isfinite(cpu_seconds) or cpu_seconds < 0:
         raise ValueError("--analyzer-cpu-seconds must be 0 (no limit) or a positive number of seconds")
+    if max_memory_mb < 0 or 0 < max_memory_mb < SCAN_MIN_MEMORY_MB:
+        raise ValueError(f"--max-memory-mb must be 0 (no limit) or at least {SCAN_MIN_MEMORY_MB} MiB")
     from .catalog.domains import analyzer_domain_catalog
 
     domains = {item["id"] for item in analyzer_domain_catalog()}
     return BudgetPolicy(timeout or None, memory_mb or None, parse_domain_budgets(domain_budgets, domains),
-                        read_mb=read_mb or None, cpu_seconds=cpu_seconds or None)
+                        read_mb=read_mb or None, cpu_seconds=cpu_seconds or None,
+                        scan_memory_mb=max_memory_mb or None)
 
 
 class _BudgetUsage:
@@ -597,6 +600,7 @@ def run_scan(
     domain_budgets: Sequence[str] = (),
     analyzer_read_mb: int = 0,
     analyzer_cpu_seconds: float = 0,
+    max_memory_mb: int = 0,
     source_metadata: dict | None = None,
     display_root: str | None = None,
     online_vulnerabilities: OnlineVulnerabilityOptions | None = None,
@@ -616,7 +620,7 @@ def run_scan(
     # Validates the plugin options before the (potentially long) inventory walk.
     PluginPolicy(plugin_isolation, plugin_timeout, plugin_memory_mb)
     budget_policy = _budget_policy(analyzer_timeout, analyzer_memory_mb, domain_budgets, analyzer_read_mb,
-                                   analyzer_cpu_seconds)
+                                   analyzer_cpu_seconds, max_memory_mb)
     if gpu_min_mb < 1:
         raise ValueError("--gpu-min-mb must be at least 1")
     if memory_source is not None:
@@ -828,6 +832,7 @@ def run_scan(
                 executor, worker_count, analyzers,
                 file_count=len(records), vulnerability_db=vulnerability_db,
                 plugin_setup=(plugin_policy, analyzer_load.plugin_specs), budget_policy=budget_policy,
+                max_memory_mb=max_memory_mb or None,
             )
         except BaseException:
             analyzer_load.close()
@@ -888,6 +893,8 @@ def run_scan(
                     def flush_batch():
                         nonlocal batch, batch_bytes
                         if batch:
+                            # --max-memory-mb: over the budget, queued batches are collected first.
+                            engine.scan_memory.make_room(lambda: len(pending), collect_one)
                             pending.append((engine.submit(batch), batch))
                             batch, batch_bytes = [], 0
                         while len(pending) >= max_pending:
@@ -1000,6 +1007,7 @@ def run_scan(
                         if memory_source is not None:
                             memory_source.analyze_records(
                                 eligible_memory_records(), analyzers, {}, record_callback=apply_memory_result,
+                                memory_budget=engine.scan_memory,
                             )
                         for record in (records if memory_source is None else ()):
                             counts[record.language] += 1
@@ -1157,6 +1165,7 @@ def run_scan(
             "analysis_budgets": {
                 **budget_policy.describe(), **budget_usage.metrics(),
                 "analyzer_limits": _declared_limits(analyzers),
+                "scan_memory": engine.scan_memory.describe(),
             },
             "execution": {
                 "mode": f"bounded-{engine.mode}-pool",
@@ -1427,6 +1436,16 @@ def run_scan(
         summary.add_row("VCS / hosting / delivery signals", str(metrics["vcs_provider_signal_count"]))
         console.print(summary)
         _print_security_findings(console, findings)
+        scan_memory = metrics["analysis_budgets"]["scan_memory"]
+        if scan_memory["over_budget_submissions"]:
+            _status(
+                console, "WARNING",
+                f"The scan's memory stayed over --max-memory-mb {scan_memory['limit_mb']:,} with no batch in "
+                f"flight (sampled peak {scan_memory['peak_mb']:,.0f} MiB), so "
+                f"{scan_memory['over_budget_submissions']:,} batch(es) ran one at a time. The coordinator and "
+                "its workers need more than the budget: raise it, or lower --jobs.",
+                "yellow",
+            )
         _status(
             console,
             "SUCCESS",
@@ -2042,10 +2061,16 @@ def build_parser() -> argparse.ArgumentParser:
              "a call that reads more is stopped and reported as UNKNOWN. 0 disables it (default)",
     )
     scan.add_argument(
-        "--domain-budget", action="append", default=[], metavar="DOMAIN:timeout=S,memory=MB,read=MB",
+        "--domain-budget", action="append", default=[], metavar="DOMAIN:timeout=S,memory=MB,read=MB,cpu=S",
         help="Override the analyzer budgets for the analyzers of one domain (archives, secrets, "
              "firmware, ...; pdt capabilities --json lists each analyzer's domains); 0 means no limit; "
              "repeatable",
+    )
+    scan.add_argument(
+        "--max-memory-mb", type=int, default=0, metavar="MB",
+        help="Memory budget for the whole scan: the resident memory of PDT and its worker processes. "
+             "Over it, new work waits for queued work, and no analyzer call may grow by more. "
+             f"0 disables it (default); otherwise at least {SCAN_MIN_MEMORY_MB}",
     )
     scan.add_argument(
         "--gpu", action="store_true",
@@ -2465,6 +2490,7 @@ def main() -> None:
                 "analyzer_memory_mb": args.analyzer_memory_mb,
                 "analyzer_read_mb": args.analyzer_read_mb,
                 "analyzer_cpu_seconds": args.analyzer_cpu_seconds,
+                "max_memory_mb": args.max_memory_mb,
                 "domain_budgets": list(args.domain_budget),
                 "online_vulnerabilities": online_vulnerabilities,
             }
@@ -2505,6 +2531,7 @@ def main() -> None:
                 gpu=args.gpu, gpu_min_mb=args.gpu_min_mb,
                 analyzer_timeout=args.analyzer_timeout, analyzer_memory_mb=args.analyzer_memory_mb,
                 analyzer_read_mb=args.analyzer_read_mb, analyzer_cpu_seconds=args.analyzer_cpu_seconds,
+                max_memory_mb=args.max_memory_mb,
                 domain_budgets=list(args.domain_budget),
                 online_vulnerabilities=online_vulnerabilities,
             ))
