@@ -237,6 +237,10 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   code facts for the file are discarded and an `UNKNOWN` `analysis_coverage` finding names the
   analyzer, the file and the budget. `0` disables a budget. Isolated plugins keep
   `--plugin-timeout` and `--plugin-memory-mb`.
+- `--analyzer-cpu-seconds SECONDS` adds a CPU budget per analyzer and file: the watchdog samples
+  the analyzing thread's CPU clock (`pthread_getcpuclockid` on Linux, `GetThreadTimes` on
+  Windows), so time spent waiting for the GIL or for I/O does not count (`cpu=S` in
+  `--domain-budget`; off by default; not on macOS, which has no per-thread CPU clock).
 - `--analyzer-read-mb MB` adds an I/O budget per analyzer and file: the verified readers count
   the bytes each call reads and stop it, at the read past the limit, with an `UNKNOWN`
   `Analyzer read budget exceeded` finding (`read=MB` in `--domain-budget`; off by default).

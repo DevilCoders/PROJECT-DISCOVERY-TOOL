@@ -99,6 +99,8 @@ def verified_regular_file_stat(path: Path, expected=None) -> os.stat_result:
 def _budget_stop_finding(analyzer, record: FileRecord, stop: BudgetStop) -> Finding:
     if stop.kind == "time":
         what, limit = f"after {stop.used:.1f} s", f"{stop.limit:g}-second time budget"
+    elif stop.kind == "cpu":
+        what, limit = f"after {stop.used:.1f} s of CPU time", f"{stop.limit:g}-second CPU budget"
     elif stop.kind == "read":
         what, limit = f"after reading {stop.used:,.1f} MiB", f"{stop.limit:,.0f} MiB read budget"
     else:
@@ -107,7 +109,8 @@ def _budget_stop_finding(analyzer, record: FileRecord, stop: BudgetStop) -> Find
         "analysis_coverage",
         f"Analyzer {stop.kind} budget exceeded: {analyzer.name}: {record.path}",
         f"The analyzer was stopped {what}: its {limit} per file (--analyzer-timeout, "
-        "--analyzer-memory-mb, --analyzer-read-mb, --domain-budget). Its findings for the file were discarded, so "
+        "--analyzer-cpu-seconds, --analyzer-memory-mb, --analyzer-read-mb, --domain-budget). Its findings for "
+        "the file were discarded, so "
         "absence of its findings is not evidence of absence.",
         confidence="UNKNOWN", evidence=[record.path], analyzer=analyzer.name, severity="LOW",
     )

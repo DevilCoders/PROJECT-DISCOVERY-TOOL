@@ -44,6 +44,18 @@ def test_a_call_past_its_memory_budget_is_stopped():
     assert run.stop.kind == "memory" and run.stop.limit == 64 and run.stop.used > 64
 
 
+@pytest.mark.skipif(not budgets.cpu_supported(), reason="no per-thread CPU clock here (macOS)")
+def test_the_cpu_budget_counts_the_threads_cpu_time_not_wall_time():
+    run = run_with_budget(AnalyzerBudget(None, None, None, 0.3), _spin_swallowing_exceptions)
+    assert run.result is None and (run.stop.kind, run.stop.limit) == ("cpu", 0.3) and 0.3 < run.stop.used < 2
+    # Sleeping costs no CPU: a call that waits longer than its CPU budget completes.
+    slept = run_with_budget(AnalyzerBudget(None, None, None, 0.1), lambda: time.sleep(0.4) or "done")
+    assert (slept.result, slept.stop) == ("done", None)
+    policy = BudgetPolicy(None, None, parse_domain_budgets(["archives:cpu=5"], {"archives"}), cpu_seconds=1)
+    assert policy.for_analyzer(_Analyzer("a", ("archives",), None)).cpu_seconds == 5
+    assert policy.describe()["cpu_enforced"] is True
+
+
 def test_a_call_past_its_read_budget_is_stopped_by_the_readers(tmp_path: Path):
     from project_discovery.core.limits import accounting
     from project_discovery.core.source_utils import open_verified_binary
@@ -148,7 +160,8 @@ def test_domain_overrides_take_the_most_permissive_limit():
     for value, message in (
         ("archives", "expected DOMAIN:timeout=SECONDS,memory=MB"),
         ("archive:timeout=3", "unknown analyzer domain 'archive'; did you mean archives"),
-        ("archives:speed=3", "settings are timeout=SECONDS, memory=MB and read=MB"),
+        ("archives:speed=3", "settings are timeout=SECONDS, memory=MB, read=MB and cpu=SECONDS"),
+        ("archives:cpu=-2", "cpu must be 0 (no limit) or a positive number"),
         ("archives:read=1.5", "read must be 0 (no limit) or a positive integer"),
         ("archives:memory=1.5", "memory must be 0 (no limit) or a positive integer"),
         ("archives:timeout=-1", "timeout must be 0 (no limit) or a positive number"),

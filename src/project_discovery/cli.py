@@ -250,7 +250,8 @@ def _print_security_findings(console: Console, findings, *, limit: int = 25) -> 
         )
 
 
-def _budget_policy(timeout: float, memory_mb: int, domain_budgets: Sequence[str], read_mb: int = 0) -> BudgetPolicy:
+def _budget_policy(timeout: float, memory_mb: int, domain_budgets: Sequence[str], read_mb: int = 0,
+                   cpu_seconds: float = 0) -> BudgetPolicy:
     """The analyzer budget policy from --analyzer-timeout, --analyzer-memory-mb, --analyzer-read-mb
     and --domain-budget."""
     # NaN would never trip a deadline, and infinity is spelled 0 (no limit).
@@ -260,11 +261,13 @@ def _budget_policy(timeout: float, memory_mb: int, domain_budgets: Sequence[str]
         raise ValueError("--analyzer-memory-mb must be 0 (no limit) or a positive number of MiB")
     if read_mb < 0:
         raise ValueError("--analyzer-read-mb must be 0 (no limit) or a positive number of MiB")
+    if not math.isfinite(cpu_seconds) or cpu_seconds < 0:
+        raise ValueError("--analyzer-cpu-seconds must be 0 (no limit) or a positive number of seconds")
     from .catalog.domains import analyzer_domain_catalog
 
     domains = {item["id"] for item in analyzer_domain_catalog()}
     return BudgetPolicy(timeout or None, memory_mb or None, parse_domain_budgets(domain_budgets, domains),
-                        read_mb=read_mb or None)
+                        read_mb=read_mb or None, cpu_seconds=cpu_seconds or None)
 
 
 class _BudgetUsage:
@@ -320,7 +323,7 @@ class _BudgetUsage:
         }
         return {
             "stops": {"time": self.stops.get("time", 0), "memory": self.stops.get("memory", 0),
-                      "read": self.stops.get("read", 0)},
+                      "read": self.stops.get("read", 0), "cpu": self.stops.get("cpu", 0)},
             "stopped": self.stopped,
             "limits_reached": dict(sorted(self.limit_kinds.items())),
             "limited": self.limited,
@@ -593,6 +596,7 @@ def run_scan(
     analyzer_memory_mb: int = DEFAULT_ANALYZER_MEMORY_MB,
     domain_budgets: Sequence[str] = (),
     analyzer_read_mb: int = 0,
+    analyzer_cpu_seconds: float = 0,
     source_metadata: dict | None = None,
     display_root: str | None = None,
     online_vulnerabilities: OnlineVulnerabilityOptions | None = None,
@@ -611,7 +615,8 @@ def run_scan(
         raise ValueError(f"--fail-on must be one of: {', '.join(SEVERITY_RANK)}")
     # Validates the plugin options before the (potentially long) inventory walk.
     PluginPolicy(plugin_isolation, plugin_timeout, plugin_memory_mb)
-    budget_policy = _budget_policy(analyzer_timeout, analyzer_memory_mb, domain_budgets, analyzer_read_mb)
+    budget_policy = _budget_policy(analyzer_timeout, analyzer_memory_mb, domain_budgets, analyzer_read_mb,
+                                   analyzer_cpu_seconds)
     if gpu_min_mb < 1:
         raise ValueError("--gpu-min-mb must be at least 1")
     if memory_source is not None:
@@ -2027,6 +2032,11 @@ def build_parser() -> argparse.ArgumentParser:
              f"0 disables it (default: {DEFAULT_ANALYZER_MEMORY_MB})",
     )
     scan.add_argument(
+        "--analyzer-cpu-seconds", type=float, default=0, metavar="SECONDS",
+        help="CPU-time budget per analyzer and file (the analyzing thread's CPU time, not wall time); "
+             "Linux and Windows. 0 disables it (default)",
+    )
+    scan.add_argument(
         "--analyzer-read-mb", type=int, default=0, metavar="MB",
         help="Read budget per analyzer and file: the bytes it may read through the verified readers; "
              "a call that reads more is stopped and reported as UNKNOWN. 0 disables it (default)",
@@ -2454,6 +2464,7 @@ def main() -> None:
                 "analyzer_timeout": args.analyzer_timeout,
                 "analyzer_memory_mb": args.analyzer_memory_mb,
                 "analyzer_read_mb": args.analyzer_read_mb,
+                "analyzer_cpu_seconds": args.analyzer_cpu_seconds,
                 "domain_budgets": list(args.domain_budget),
                 "online_vulnerabilities": online_vulnerabilities,
             }
@@ -2493,7 +2504,7 @@ def main() -> None:
                 plugin_memory_mb=args.plugin_memory_mb,
                 gpu=args.gpu, gpu_min_mb=args.gpu_min_mb,
                 analyzer_timeout=args.analyzer_timeout, analyzer_memory_mb=args.analyzer_memory_mb,
-                analyzer_read_mb=args.analyzer_read_mb,
+                analyzer_read_mb=args.analyzer_read_mb, analyzer_cpu_seconds=args.analyzer_cpu_seconds,
                 domain_budgets=list(args.domain_budget),
                 online_vulnerabilities=online_vulnerabilities,
             ))

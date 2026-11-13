@@ -47,15 +47,17 @@ class AnalyzerBudget:
     timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS
     memory_mb: int | None = DEFAULT_MEMORY_MB
     read_mb: int | None = None  # bytes read through the verified readers, in MiB
+    cpu_seconds: float | None = None  # CPU time of the analyzing thread
 
     @property
     def limited(self) -> bool:
-        return bool(self.timeout_seconds) or bool(self.memory_mb and memory_supported()) or bool(self.read_mb)
+        return (bool(self.timeout_seconds) or bool(self.memory_mb and memory_supported()) or bool(self.read_mb)
+                or bool(self.cpu_seconds and cpu_supported()))
 
 
 @dataclass(frozen=True, slots=True)
 class BudgetStop:
-    kind: str  # "time" or "memory"
+    kind: str  # "time", "memory", "read" or "cpu"
     limit: float  # seconds or MiB
     used: float  # seconds or MiB when the watchdog stopped the call
 
@@ -82,6 +84,7 @@ class BudgetPolicy:
     memory_mb: int | None = DEFAULT_MEMORY_MB
     overrides: dict[str, dict[str, float | None]] = field(default_factory=dict)
     read_mb: int | None = None
+    cpu_seconds: float | None = None
     _cache: dict[tuple[str, tuple[str, ...]], AnalyzerBudget] = field(default_factory=dict, repr=False)
 
     def for_analyzer(self, analyzer) -> AnalyzerBudget:
@@ -98,6 +101,8 @@ class BudgetPolicy:
                         if "timeout_seconds" in self.overrides.get(d, {})]
             memories = [self.overrides[d]["memory_mb"] for d in domains if "memory_mb" in self.overrides.get(d, {})]
             reads = [self.overrides[d]["read_mb"] for d in domains if "read_mb" in self.overrides.get(d, {})]
+            cpus = [self.overrides[d]["cpu_seconds"] for d in domains if "cpu_seconds" in self.overrides.get(d, {})]
+            cpu = _most_permissive(cpus) if cpus else self.cpu_seconds
             if timeouts:
                 timeout = _most_permissive(timeouts)
             if memories:
@@ -105,7 +110,7 @@ class BudgetPolicy:
             if reads:
                 read = _most_permissive(reads)
             budget = self._cache[key] = AnalyzerBudget(timeout or None, int(memory) if memory else None,
-                                                       int(read) if read else None)
+                                                       int(read) if read else None, cpu or None)
         return budget
 
     def describe(self) -> dict[str, Any]:
@@ -115,19 +120,21 @@ class BudgetPolicy:
             "memory_mb": self.memory_mb or None,
             "memory_enforced": bool(self.memory_mb) and memory_supported(),
             "read_mb": self.read_mb or None,
+            "cpu_seconds": self.cpu_seconds or None,
+            "cpu_enforced": bool(self.cpu_seconds) and cpu_supported(),
             "domain_overrides": {domain: dict(values) for domain, values in sorted(self.overrides.items())},
         }
 
 
 def parse_domain_budgets(values: Iterable[str], known_domains: Iterable[str]) -> dict[str, dict[str, float | None]]:
-    """--domain-budget DOMAIN:timeout=SECONDS,memory=MB,read=MB values (0 means no limit)."""
+    """--domain-budget DOMAIN:timeout=SECONDS,memory=MB,read=MB,cpu=SECONDS values (0: no limit)."""
     known = set(known_domains)
     overrides: dict[str, dict[str, float | None]] = {}
     for raw in values or ():
         domain, separator, settings = str(raw).partition(":")
         domain = domain.strip()
         if not separator or not settings.strip():
-            raise ValueError(f"--domain-budget {raw}: expected DOMAIN:timeout=SECONDS,memory=MB,read=MB")
+            raise ValueError(f"--domain-budget {raw}: expected DOMAIN:timeout=SECONDS,memory=MB,read=MB,cpu=SECONDS")
         if domain not in known:
             import difflib
 
@@ -138,8 +145,9 @@ def parse_domain_budgets(values: Iterable[str], known_domains: Iterable[str]) ->
         for setting in settings.split(","):
             name, equals, value = setting.partition("=")
             name = name.strip().lower()
-            if not equals or name not in {"timeout", "memory", "read"}:
-                raise ValueError(f"--domain-budget {raw}: settings are timeout=SECONDS, memory=MB and read=MB")
+            if not equals or name not in {"timeout", "memory", "read", "cpu"}:
+                raise ValueError(f"--domain-budget {raw}: settings are timeout=SECONDS, memory=MB, read=MB "
+                                 "and cpu=SECONDS")
             try:
                 number = float(value)
             except ValueError:
@@ -151,6 +159,8 @@ def parse_domain_budgets(values: Iterable[str], known_domains: Iterable[str]) ->
                                  f"{'integer' if whole else 'number'}")
             if name == "timeout":
                 entry["timeout_seconds"] = number or None
+            elif name == "cpu":
+                entry["cpu_seconds"] = number or None
             elif name == "memory":
                 entry["memory_mb"] = int(number) or None
             else:
@@ -237,6 +247,65 @@ def _rss_reader() -> Callable[[], int | None] | None:
 _RSS = _rss_reader()
 
 
+def _thread_cpu_reader():
+    """(open, read, close) for one thread's CPU time in seconds, or None where unsupported.
+
+    open() runs in the analyzing thread and returns a clock the watchdog thread can read:
+    the thread's CPU clock id (POSIX), or a thread handle (Windows, GetThreadTimes).
+    """
+    try:
+        if hasattr(time, "pthread_getcpuclockid") and hasattr(time, "clock_gettime"):
+            def open_posix():
+                return time.pthread_getcpuclockid(threading.get_ident())
+
+            reader = (open_posix, time.clock_gettime, lambda clock: None)
+        elif os.name == "nt":
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_thread = kernel32.OpenThread
+            open_thread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            open_thread.restype = wintypes.HANDLE
+            thread_times = kernel32.GetThreadTimes
+            thread_times.argtypes = (wintypes.HANDLE, *([ctypes.POINTER(wintypes.FILETIME)] * 4))
+            thread_times.restype = wintypes.BOOL
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = (wintypes.HANDLE,)
+
+            def open_windows():
+                handle = open_thread(0x0800, False, threading.get_native_id())  # QUERY_LIMITED_INFORMATION
+                if not handle:
+                    raise OSError("OpenThread failed")
+                return handle
+
+            def read_windows(handle) -> float:
+                times = [wintypes.FILETIME() for _ in range(4)]
+                if not thread_times(handle, *(ctypes.byref(item) for item in times)):
+                    raise OSError("GetThreadTimes failed")
+                kernel, user = ((item.dwHighDateTime << 32 | item.dwLowDateTime) for item in times[2:])
+                return (kernel + user) / 10_000_000
+
+            reader = (open_windows, read_windows, close_handle)
+        else:
+            return None
+        clock = reader[0]()
+        try:
+            reader[1](clock)
+        finally:
+            reader[2](clock)
+        return reader
+    except (OSError, ValueError, OverflowError, AttributeError):
+        return None
+
+
+_CPU = _thread_cpu_reader()
+
+
+def cpu_supported() -> bool:
+    """Whether a thread's CPU time can be read here, so CPU budgets apply (not on macOS)."""
+    return _CPU is not None
+
+
 def memory_supported() -> bool:
     """Whether this platform's resident set can be read, so memory budgets apply."""
     return _RSS is not None
@@ -268,7 +337,7 @@ def _raise_in(thread: int, exception: type[BaseException]) -> None:
 
 class _Call:
     __slots__ = ("thread", "budget", "started", "deadline", "memory_limit", "baseline", "peak", "samples", "running",
-                 "stop")
+                 "stop", "cpu_clock", "cpu_start", "cpu_limit")
 
     def __init__(self, budget: AnalyzerBudget, baseline: int | None) -> None:
         self.thread = threading.get_ident()
@@ -281,6 +350,15 @@ class _Call:
         self.samples = 0  # resident-memory samples taken while the call ran
         self.running = True
         self.stop: BudgetStop | None = None
+        self.cpu_clock = None
+        self.cpu_start = 0.0
+        self.cpu_limit = budget.cpu_seconds if budget.cpu_seconds and _CPU is not None else None
+        if self.cpu_limit is not None:
+            try:  # in the analyzing thread: its own clock
+                self.cpu_clock = _CPU[0]()
+                self.cpu_start = _CPU[1](self.cpu_clock)
+            except (OSError, ValueError, OverflowError):
+                self.cpu_clock = self.cpu_limit = None
 
 
 class _Watchdog:
@@ -318,6 +396,9 @@ class _Watchdog:
         with self._lock:
             if call.running:
                 call.running = False
+                if call.cpu_clock is not None:  # under the lock the watchdog reads it with
+                    _CPU[2](call.cpu_clock)
+                    call.cpu_clock = None
                 self._calls.pop(id(call), None)
             return call.stop
 
@@ -343,6 +424,13 @@ class _Watchdog:
                         call.samples += 1
                         if growth > call.memory_limit:
                             call.stop = BudgetStop("memory", float(call.budget.memory_mb), growth / _MIB)
+                    if call.stop is None and call.cpu_clock is not None:
+                        try:
+                            used = _CPU[1](call.cpu_clock) - call.cpu_start
+                        except (OSError, ValueError, OverflowError):
+                            used = 0.0
+                        if used > call.cpu_limit:
+                            call.stop = BudgetStop("cpu", float(call.cpu_limit), used)
                     if call.stop is None and call.deadline is not None and now >= call.deadline:
                         call.stop = BudgetStop("time", float(call.budget.timeout_seconds), now - call.started)
                     if call.stop is not None:

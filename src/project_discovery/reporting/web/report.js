@@ -70,7 +70,7 @@ fillBars("mime-types",metrics.mime_types);
 const budgets=metrics.analysis_budgets||{};
 {const seconds={};for(const [name,entry] of Object.entries(budgets.analyzers||{}))seconds[name]=Math.round(entry.seconds*100)/100;
  fillBars("analyzer-time",seconds);
- const stops=budgets.stops||{},stopped=(stops.time||0)+(stops.memory||0)+(stops.read||0);
+ const stops=budgets.stops||{},stopped=(stops.time||0)+(stops.memory||0)+(stops.read||0)+(stops.cpu||0);
  $("analyzer-budgets").textContent=budgets.timeout_seconds===undefined?"Budgets not recorded":
   (metrics.execution||{}).analysis_mode==="inventory-only"?"No analyzer ran (inventory only)":
   (budgets.timeout_seconds?budgets.timeout_seconds+" s":"no time limit")+" and "+
