@@ -141,6 +141,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   refused on macOS and with `--no-download`.
 - Report schema 1.8: `uid`, `gid`, `attributes` and `security` on every inventory record, and
   `metrics.entry_attributes` and `metrics.security_metadata`.
+- Special entries record their modification time and, for block and character devices, the major
+  and minor device numbers; directories and links record their modification time. On Windows each
+  reparse point names its tag (`reparse_tag`: `symlink`, `mount_point` for a junction, `cloud`,
+  `dedup`, `af_unix`, ...), counted in `metrics.reparse_tags`. AF_UNIX sockets and WSL FIFOs and
+  device nodes, which both walkers reported as regular files, are special entries. The Rust
+  walker reports device numbers as a 16th field.
+- Report schema 1.9: `mtime_ns` and `reparse_tag` on directory, symlink and special-entry
+  records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
+  and `metrics.reparse_tags`.
 
 ### Fixed: found during the filesystem inventory work
 - `python setup.py build_ext --inplace` and editable installs built the Rust walker unoptimized

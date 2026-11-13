@@ -9,8 +9,10 @@ from typing import Any, Literal, Sequence
 # vulnerability sources) and the online advisory provenance under
 # metrics.vulnerability_intelligence. 1.8 added uid, gid, attributes and security to every
 # file, directory, symlink and special-entry record, and metrics.entry_attributes and
-# metrics.security_metadata.
-REPORT_SCHEMA_VERSION = "1.8"
+# metrics.security_metadata. 1.9 added mtime_ns and reparse_tag to directory, symlink and
+# special-entry records (reparse_tag to file records), device_major and device_minor to
+# special entries, and metrics.reparse_tags.
+REPORT_SCHEMA_VERSION = "1.9"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -101,6 +103,8 @@ class FileRecord:
     gid: int | None = None
     attributes: list[str] = field(default_factory=list)
     security: dict[str, Any] | None = None
+    # The Windows reparse tag name of a reparse point that is not a link ("cloud", "dedup").
+    reparse_tag: str | None = None
     # Private scan-time identity used to pin analyzer reads. It is excluded from
     # public reports but retained by the private SQLite inventory store.
     analysis_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = field(
@@ -157,6 +161,8 @@ class DirectoryRecord:
     gid: int | None = None
     attributes: list[str] = field(default_factory=list)
     security: dict[str, Any] | None = None
+    mtime_ns: int | None = None
+    reparse_tag: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -174,6 +180,9 @@ class SymlinkRecord:
     gid: int | None = None
     attributes: list[str] = field(default_factory=list)
     security: dict[str, Any] | None = None
+    mtime_ns: int | None = None
+    # Windows: "symlink", "mount_point" (a junction or volume mount point), "lx_symlink", ...
+    reparse_tag: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -190,6 +199,12 @@ class SpecialEntryRecord:
     gid: int | None = None
     attributes: list[str] = field(default_factory=list)
     security: dict[str, Any] | None = None
+    mtime_ns: int | None = None
+    # Block and character devices: the device's major and minor numbers (POSIX).
+    device_major: int | None = None
+    device_minor: int | None = None
+    # Windows: "af_unix", "lx_fifo", "lx_chr" or "lx_blk" for the reparse points recorded here.
+    reparse_tag: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

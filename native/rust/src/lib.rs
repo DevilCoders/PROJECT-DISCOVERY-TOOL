@@ -102,6 +102,25 @@ fn ownership(metadata: &fs::Metadata) -> (Option<u32>, Option<u32>, Option<u32>)
     }
 }
 
+/// The device number (st_rdev) of a block or character device; Python splits it into
+/// major and minor numbers with the platform's own encoding.
+fn device_number(metadata: &fs::Metadata) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let file_type = metadata.file_type();
+        if file_type.is_block_device() || file_type.is_char_device() {
+            return Some(metadata.rdev());
+        }
+        return None;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
 fn identity_ns(metadata: &fs::Metadata) -> (Option<u64>, Option<u64>, Option<u64>) {
     #[cfg(unix)]
     {
@@ -120,7 +139,8 @@ fn identity_ns(metadata: &fs::Metadata) -> (Option<u64>, Option<u64>, Option<u64
 
 /// One walked entry. PyO3 converts Rust tuples of at most 12 items, so the entry is handed
 /// to Python as a flat tuple built here: (relative path, kind, size, mode, mtime_ns, hidden,
-/// link target, error, depth, device, inode, ctime_ns, owner uid, group gid, attribute bits).
+/// link target, error, depth, device, inode, ctime_ns, owner uid, group gid, attribute bits,
+/// device number of a block or character device).
 struct Entry {
     rel: OsString,
     kind: &'static str,
@@ -133,6 +153,7 @@ struct Entry {
     depth: usize,
     identity: (Option<u64>, Option<u64>, Option<u64>),
     ownership: (Option<u32>, Option<u32>, Option<u32>),
+    rdev: Option<u64>,
 }
 
 impl Entry {
@@ -141,6 +162,7 @@ impl Entry {
         Self {
             rel, kind, size: 0, mode: None, mtime: 0, hidden: false, target: OsString::new(),
             error: Some(error), depth, identity: (None, None, None), ownership: (None, None, None),
+            rdev: None,
         }
     }
 
@@ -163,6 +185,7 @@ impl Entry {
             owner.into_bound_py_any(py)?,
             group.into_bound_py_any(py)?,
             attributes.into_bound_py_any(py)?,
+            self.rdev.into_bound_py_any(py)?,
         ])
     }
 }
@@ -253,6 +276,7 @@ impl Walker {
             let mtime = modified_ns(&metadata);
             let (device, inode, changed) = identity_ns(&metadata);
             let (owner, group, attributes) = ownership(&metadata);
+            let rdev = device_number(&metadata);
             let mut target = OsString::new();
             let mut error = None;
             let kind = if file_type.is_symlink() {
@@ -295,7 +319,7 @@ impl Walker {
 
             return Some(Entry {
                 rel, kind, size, mode, mtime, hidden, target, error, depth,
-                identity: (device, inode, changed), ownership: (owner, group, attributes),
+                identity: (device, inode, changed), ownership: (owner, group, attributes), rdev,
             });
         }
     }
@@ -305,6 +329,6 @@ impl Walker {
 fn _walker(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Walker>()?;
     // Python uses a build only when it yields every field it records (see Entry).
-    module.add("ENTRY_FIELDS", 15usize)?;
+    module.add("ENTRY_FIELDS", 16usize)?;
     Ok(())
 }

@@ -15,7 +15,16 @@ from ..engine.native import count_byte as native_count_byte
 from ..engine.native import create_walker as native_create_walker
 from ..engine.native import detect_signature as native_detect_signature
 from ..models import DirectoryRecord, FileRecord, SpecialEntryRecord, SymlinkRecord
-from .entry_metadata import attribute_names, has_explicit_acl, read_security, security_supported, stat_ownership
+from .entry_metadata import (
+    WINDOWS_SPECIAL_TAGS,
+    attribute_names,
+    device_numbers,
+    has_explicit_acl,
+    read_security,
+    reparse_tag_name,
+    security_supported,
+    stat_ownership,
+)
 from .store import InventoryStore, StoredFileRecords, StoredRecordSequence
 
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
@@ -134,10 +143,32 @@ def _is_hidden(name: str, info: os.stat_result) -> bool:
     return bool(attributes & 0x2)
 
 
+def _lstat_reparse_tag(path: str) -> int | None:
+    """The reparse tag of a Windows reparse point, read without following it."""
+    try:
+        return getattr(os.lstat(path), "st_reparse_tag", None) or None
+    except OSError:
+        return None
+
+
+def _special_kind(mode: int) -> str:
+    if stat.S_ISFIFO(mode):
+        return "fifo"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    if stat.S_ISBLK(mode):
+        return "block_device"
+    if stat.S_ISCHR(mode):
+        return "character_device"
+    return "unknown_special"
+
+
 def _record_metadata(record, path: str, kind: str, stats: Counter[str], security: bool) -> None:
     """Count a record's attributes; with --security-metadata, read its security metadata."""
     for name in record.attributes:
         stats[f"attribute:{name}"] += 1
+    if record.reparse_tag:
+        stats[f"reparse_tag:{record.reparse_tag}"] += 1
     if security:
         record.security = read_security(path, kind)
         stats["security_metadata_entries"] += 1
@@ -549,6 +580,7 @@ def _discover_with_rust(
         relative, kind, size, mode, mtime_ns, hidden, target, error, depth, device_id, inode_id, ctime_ns = item[:12]
         # Owner uid, group gid and the Windows attribute or macOS flag bits.
         uid, gid, attribute_bits = item[12:15] if len(item) >= 15 else (None, None, None)
+        device_number = item[15] if len(item) >= 16 else None
         # The walker returns lossless OS strings with native separators. A backslash is
         # a legal POSIX file-name character, so only Windows separators are rewritten.
         if os.sep == "\\":
@@ -556,6 +588,12 @@ def _discover_with_rust(
         # The Rust walker reports hidden=false for entries it could not stat; a dot name is
         # hidden either way, as in the fallback walker.
         hidden = bool(hidden) or relative.rsplit("/", 1)[-1].startswith(".")
+        reparse_tag = None
+        if os.name == "nt" and attribute_bits and attribute_bits & _FILE_ATTRIBUTE_REPARSE_POINT:
+            # The walker cannot read the tag itself; reparse points are rare.
+            reparse_tag = _lstat_reparse_tag(os.path.join(root, relative))
+            if kind == "file":
+                kind = WINDOWS_SPECIAL_TAGS.get(reparse_tag, kind)
         if kind == "directory_error":
             message = error or "Directory read failed"
             if store is None:
@@ -599,6 +637,7 @@ def _discover_with_rust(
                 relative, target, scope, target_state=state,
                 is_hidden=hidden, permissions=mode,
                 uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
+                mtime_ns=mtime_ns, reparse_tag=reparse_tag_name(reparse_tag),
             )
             _record_metadata(link_record, os.path.join(root, relative), kind, stats, security_metadata)
             if store is None:
@@ -618,6 +657,7 @@ def _discover_with_rust(
                 development_marker=marker, pruned=exclusion is not None,
                 prune_reason=exclusion, error=error,
                 uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
+                mtime_ns=mtime_ns, reparse_tag=reparse_tag_name(reparse_tag),
             )
             _record_metadata(record, os.path.join(root, relative), kind, stats, security_metadata)
             if store is None:
@@ -650,6 +690,7 @@ def _discover_with_rust(
                 file_type=file_type, size_bucket=_size_bucket(size),
                 is_hidden=hidden, permissions=mode, mtime_ns=mtime_ns,
                 uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
+                reparse_tag=reparse_tag_name(reparse_tag),
                 # Prefer the descriptor-verified identity; the Windows walker
                 # cannot report a file ID itself.
                 analysis_identity=opened_identity or file_identity,
@@ -670,9 +711,12 @@ def _discover_with_rust(
             stats[f"size_bucket:{record.size_bucket}"] += 1
             stats[f"language:{language}"] += 1
             continue
+        major, minor = device_numbers(device_number)
         special_record = SpecialEntryRecord(
             relative, kind, is_hidden=hidden, permissions=mode, size_bytes=size,
             uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
+            mtime_ns=mtime_ns, device_major=major, device_minor=minor,
+            reparse_tag=reparse_tag_name(reparse_tag),
         )
         _record_metadata(special_record, os.path.join(root, relative), kind, stats, security_metadata)
         if store is None:
@@ -746,9 +790,11 @@ def discover_inventory(
         root_mode = _mode(root_info)
         root_hidden = _is_hidden(root.name, root_info) if root.name else False
         root_uid, root_gid, root_attributes = stat_ownership(root_info)
+        root_mtime, root_tag = root_info.st_mtime_ns, getattr(root_info, "st_reparse_tag", None)
     except OSError:
         root_mode, root_hidden = None, False
         root_uid, root_gid, root_attributes = None, None, []
+        root_mtime = root_tag = None
     if store is not None:
         store.clear()
         stats["inventory_store_enabled"] = 1
@@ -765,6 +811,7 @@ def discover_inventory(
     root_directory = DirectoryRecord(
         ".", 0, permissions=root_mode, is_hidden=root_hidden,
         uid=root_uid, gid=root_gid, attributes=root_attributes,
+        mtime_ns=root_mtime, reparse_tag=reparse_tag_name(root_tag),
     )
     _record_metadata(root_directory, str(root), "directory", stats, security_metadata)
     directories_by_path: dict[str, DirectoryRecord] = {}
@@ -826,6 +873,8 @@ def discover_inventory(
             info = entry.stat(follow_symlinks=False)
             hidden = _is_hidden(entry.name, info)
             uid, gid, attributes = stat_ownership(info)
+            reparse_tag = getattr(info, "st_reparse_tag", None) or None  # Windows only
+            tag_name = reparse_tag_name(reparse_tag)
             if hidden:
                 stats["hidden_entry_count"] += 1
 
@@ -844,6 +893,7 @@ def discover_inventory(
                 link_record = SymlinkRecord(
                     relative, target, scope, target_state=state, is_hidden=hidden,
                     permissions=_mode(info), uid=uid, gid=gid, attributes=attributes,
+                    mtime_ns=info.st_mtime_ns, reparse_tag=tag_name,
                 )
                 _record_metadata(link_record, entry.path, "symlink", stats, security_metadata)
                 if store is None:
@@ -854,7 +904,9 @@ def discover_inventory(
                 stats[f"symlink_scope:{scope}"] += 1
                 continue
 
-            if stat.S_ISDIR(info.st_mode):
+            # A Windows AF_UNIX socket or WSL FIFO or device node reads as a regular file.
+            windows_special = WINDOWS_SPECIAL_TAGS.get(reparse_tag) if reparse_tag else None
+            if stat.S_ISDIR(info.st_mode) and windows_special is None:
                 marker = development_marker(entry.name, _on_disk(entry.path))
                 match = _exclusion_match(
                     relative, entry.name, excluded_names, excluded_paths,
@@ -871,6 +923,8 @@ def discover_inventory(
                     uid=uid,
                     gid=gid,
                     attributes=attributes,
+                    mtime_ns=info.st_mtime_ns,
+                    reparse_tag=tag_name,
                 )
                 _record_metadata(record, entry.path, "directory", stats, security_metadata)
                 if store is None:
@@ -900,7 +954,7 @@ def discover_inventory(
                         ))
                 continue
 
-            if stat.S_ISREG(info.st_mode):
+            if stat.S_ISREG(info.st_mode) and windows_special is None:
                 size = info.st_size
                 file_type, opened_identity = classify(Path(entry.path), relative, info)
                 language = detect_language(relative)
@@ -917,6 +971,7 @@ def discover_inventory(
                     uid=uid,
                     gid=gid,
                     attributes=attributes,
+                    reparse_tag=tag_name,
                     analysis_identity=opened_identity or stat_identity(info),
                 )
                 _record_metadata(file_record, entry.path, "file", stats, security_metadata)
@@ -936,16 +991,10 @@ def discover_inventory(
                 stats[f"language:{language}"] += 1
                 continue
 
-            if stat.S_ISFIFO(info.st_mode):
-                kind = "fifo"
-            elif stat.S_ISSOCK(info.st_mode):
-                kind = "socket"
-            elif stat.S_ISBLK(info.st_mode):
-                kind = "block_device"
-            elif stat.S_ISCHR(info.st_mode):
-                kind = "character_device"
-            else:
-                kind = "unknown_special"
+            kind = windows_special or _special_kind(info.st_mode)
+            major, minor = (None, None) if windows_special else device_numbers(
+                getattr(info, "st_rdev", None) if kind in {"block_device", "character_device"} else None
+            )
             special_record = SpecialEntryRecord(
                 relative,
                 kind,
@@ -955,6 +1004,10 @@ def discover_inventory(
                 uid=uid,
                 gid=gid,
                 attributes=attributes,
+                mtime_ns=info.st_mtime_ns,
+                device_major=major,
+                device_minor=minor,
+                reparse_tag=tag_name,
             )
             _record_metadata(special_record, entry.path, kind, stats, security_metadata)
             if store is None:

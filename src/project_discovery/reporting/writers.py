@@ -623,6 +623,8 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         f"- Hidden entries: {metrics.get('hidden_entry_count', 0):,}",
         f"- Entry attributes: {_md(attribute_summary(metrics.get('entry_attributes') or {}))}",
         f"- Security metadata: {_md(security_metadata_summary(metrics))}",
+        *([f"- Windows reparse points: {_md(attribute_summary(metrics['reparse_tags']))}"]
+          if metrics.get("reparse_tags") else []),
         f"- Development/cache trees: {metrics.get('development_directory_count', 0):,}",
         f"- Analysis workers: {execution.get('worker_count', 'not reported')}",
         f"- Analysis queue limit: {execution.get('max_pending_tasks', 'not reported')} pending batches",
@@ -671,9 +673,10 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         line("No symbolic links were detected.")
     else:
         for item in result.symlinks:
+            tag = f", {_md(item.reparse_tag)}" if item.reparse_tag else ""
             line(
                 f"- {_md(item.path)} -> {_md(item.target)} "
-                f"(scope: {_md(item.target_scope)}, hidden: {item.is_hidden})"
+                f"(scope: {_md(item.target_scope)}, hidden: {item.is_hidden}{tag})"
             )
     line()
     line("## Special Filesystem Entries")
@@ -684,9 +687,11 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
         for item in result.special_entries:
             mode = "unknown" if item.permissions is None else oct(item.permissions)
             owner = "unknown" if item.uid is None else f"{item.uid}:{item.gid}"
+            device = f", device {item.device_major}:{item.device_minor}" if item.device_major is not None else ""
+            tag = f", reparse tag {_md(item.reparse_tag)}" if item.reparse_tag else ""
             line(
-                f"- {_md(item.path)} — {_md(item.entry_type)}, permissions {mode}, owner {owner}, "
-                f"hidden: {item.is_hidden}, size: {item.size_bytes:,} bytes"
+                f"- {_md(item.path)} — {_md(item.entry_type)}{device}{tag}, permissions {mode}, "
+                f"owner {owner}, hidden: {item.is_hidden}, size: {item.size_bytes:,} bytes"
             )
     _write_markdown_vulnerabilities(line, result, metrics.get("vulnerability_intelligence") or {})
     line()

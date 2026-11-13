@@ -115,6 +115,18 @@ whose metadata cannot be read gets `{"error": "..."}`, and `--strict` exits 3.
 `metrics.security_metadata` counts the entries read, those with ACL entries of their own and the
 read errors.
 
+## Special entries and reparse points
+
+FIFOs, sockets, block and character devices and entries of unknown type are recorded in
+`special_entries` with their type, mode, owner and group, attributes, size and modification time,
+and devices with their major and minor numbers; none of them is opened. Links are recorded, never
+followed. On Windows, `reparse_tag` names each reparse point by its `IO_REPARSE_TAG_*` constant in
+lower case: a junction or volume mount point is a link with `mount_point`, a symbolic link has
+`symlink`; other reparse points keep their record type (`cloud` for a OneDrive or other Cloud Files
+placeholder, `dedup`, `wof`, `appexeclink`, ...), and an unnamed tag is its hexadecimal value.
+AF_UNIX sockets (`af_unix`) and the FIFOs and device nodes WSL creates on NTFS (`lx_fifo`,
+`lx_chr`, `lx_blk`) are special entries. `metrics.reparse_tags` counts the tags.
+
 ## Code index and `pdt query`
 
 During analysis, PDT stores code facts (symbols, call sites, referenced names, imports and

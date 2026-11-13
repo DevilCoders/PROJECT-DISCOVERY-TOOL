@@ -1036,6 +1036,11 @@ def run_scan(
                 key.split(":", 1)[1]: value
                 for key, value in walk_stats.items() if key.startswith("special_type:")
             },
+            # Windows reparse points by tag: links ("symlink", "mount_point") and others ("cloud").
+            "reparse_tags": dict(sorted(
+                (key.split(":", 1)[1], value)
+                for key, value in walk_stats.items() if key.startswith("reparse_tag:") and value
+            )),
             "pruned_directory_count": walk_stats.get("pruned_directory_count", 0),
             "entry_count": walk_stats.get("entry_count", 0) + 1,
             "hidden_entry_count": walk_stats.get("hidden_entry_count", 0),

@@ -63,6 +63,43 @@ def _names(bits: int, platform: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+# Windows reparse tags (IO_REPARSE_TAG_*), named as the constant without its prefix.
+_REPARSE_TAGS = {
+    0xA0000003: "mount_point", 0xC0000004: "hsm", 0x80000006: "hsm2", 0x80000007: "sis",
+    0x80000008: "wim", 0x80000009: "csv", 0x8000000A: "dfs", 0xA000000C: "symlink",
+    0x80000012: "dfsr", 0x80000013: "dedup", 0x80000014: "nfs", 0x80000015: "file_placeholder",
+    0x80000017: "wof", 0x80000018: "wci", 0x90001018: "wci_1", 0xA0000019: "global_reparse",
+    0x8000001B: "appexeclink", 0x9000001C: "projfs", 0xA000001D: "lx_symlink",
+    0x8000001E: "storage_sync", 0xA000001F: "wci_tombstone", 0x80000020: "unhandled",
+    0x80000021: "onedrive", 0xA0000022: "projfs_tombstone", 0x80000023: "af_unix",
+    0x80000024: "lx_fifo", 0x80000025: "lx_chr", 0x80000026: "lx_blk", 0xA0000027: "wci_link",
+    0xA0001027: "wci_link_1", 0xA0000028: "dataless_cim",
+}
+# Cloud Files placeholders: IO_REPARSE_TAG_CLOUD with a provider variant in bits 12-15.
+_CLOUD_TAG, _CLOUD_VARIANTS = 0x9000001A, 0x0000F000
+# Reparse points that are special files, not regular ones: AF_UNIX sockets, and the FIFOs
+# and device nodes WSL creates on NTFS. Both walkers would otherwise report regular files.
+WINDOWS_SPECIAL_TAGS = {
+    0x80000023: "socket", 0x80000024: "fifo", 0x80000025: "character_device", 0x80000026: "block_device",
+}
+
+
+def reparse_tag_name(tag: int | None) -> str | None:
+    """The name of a Windows reparse tag ("mount_point" for a junction), or its hexadecimal value."""
+    if not tag:
+        return None
+    if tag & ~_CLOUD_VARIANTS == _CLOUD_TAG:
+        return "cloud"
+    return _REPARSE_TAGS.get(tag, f"0x{tag:08x}")
+
+
+def device_numbers(rdev: int | None) -> tuple[int | None, int | None]:
+    """(major, minor) of a block or character device number, in the platform's encoding."""
+    if rdev is None or not hasattr(os, "major"):
+        return None, None
+    return os.major(rdev), os.minor(rdev)
+
+
 def stat_ownership(info: os.stat_result) -> tuple[int | None, int | None, list[str]]:
     """(uid, gid, attribute names) of a no-follow stat result, as the Rust walker reports them."""
     if os.name == "nt":

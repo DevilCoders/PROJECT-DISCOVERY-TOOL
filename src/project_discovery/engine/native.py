@@ -20,7 +20,7 @@ except ImportError:
 
 # A walker build that yields fewer fields than the scanner records (an extension built from
 # older sources) is not used: the Python fallback reports every field.
-WALKER_ENTRY_FIELDS = 15
+WALKER_ENTRY_FIELDS = 16
 
 
 def _walker_current() -> bool:

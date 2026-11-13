@@ -283,7 +283,8 @@ function renderSymlinks(reset){
  while(symlinkOffset<end){
   const item=symlinks[symlinkOffset++],tr=document.createElement("tr");
   const mode=item.permissions===null||item.permissions===undefined?"unknown":Number(item.permissions).toString(8);
-  for(const pair of [[item.path,"path"],[item.target,"path"],[item.target_scope,""],[item.target_state||"unverified",""],[mode,"mono"],[item.is_hidden?"yes":"no",""]]){
+  const scope=item.reparse_tag?item.target_scope+" ("+item.reparse_tag+")":item.target_scope;
+  for(const pair of [[item.path,"path"],[item.target,"path"],[scope,""],[item.target_state||"unverified",""],[mode,"mono"],[item.is_hidden?"yes":"no",""]]){
    const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
   }
   symlinkRows.append(tr);
@@ -305,7 +306,9 @@ function renderSpecialEntries(reset){
  while(specialOffset<end){
   const item=specialEntries[specialOffset++],tr=document.createElement("tr");
   const mode=item.permissions===null||item.permissions===undefined?"unknown":Number(item.permissions).toString(8);
-  for(const pair of [[item.path,"path"],[item.entry_type,""],[mode,"mono"],[item.is_hidden?"yes":"no",""],[formatBytes(item.size_bytes||0),""]]){
+  const device=item.device_major===null||item.device_major===undefined?"":" "+item.device_major+":"+item.device_minor;
+  const kind=item.entry_type+device+(item.reparse_tag?" ("+item.reparse_tag+")":"");
+  for(const pair of [[item.path,"path"],[kind,""],[mode,"mono"],[item.is_hidden?"yes":"no",""],[formatBytes(item.size_bytes||0),""]]){
    const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
   }
   specialRows.append(tr);
