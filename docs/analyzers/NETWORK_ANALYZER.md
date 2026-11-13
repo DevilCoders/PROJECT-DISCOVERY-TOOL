@@ -1,6 +1,6 @@
 # Network indicators
 
-The `network-indicators` analyzer reads text, source and configuration files for static network references: addresses, networks, ports, URLs, host names and protocol markers. It is passive by construction: it resolves no name, opens no connection and sends nothing. A reference is evidence that a file names something, not that it is reachable or in use.
+The `network-indicators` analyzer reads text, source and configuration files for static network references: addresses, networks, ports, URLs, host names and protocol markers. It is passive by construction: it resolves no name, opens no connection and sends nothing, and a regression test holds the whole scan to that ([Passive by construction](#passive-by-construction)). A reference is evidence that a file names something, not that it is reachable or in use.
 
 ## What it reports
 
@@ -75,6 +75,10 @@ Listeners in test files are listed (`"test": true`) and take no part in the find
 `src/project_discovery/data/public_suffix_list.dat` is a copy of the [Public Suffix List](https://publicsuffix.org/list/), bundled unmodified and read at scan time; PDT never fetches it. The list is subject to the Mozilla Public License, v. 2.0 (its header says so). The current snapshot is the list as Debian's `publicsuffix` package 20260129.1928-1 ships it (SHA-256 `f3604fee29f4a2234547ca068da1e4c6a1c480418f1c418d4b4040633be501b4`). To refresh it, replace the file with a newer copy of `https://publicsuffix.org/list/public_suffix_list.dat`, unmodified, and run the network tests.
 
 The IANA TLD list (`data/tlds.txt`) is a separate bundled snapshot used to tell real TLDs from other dotted words.
+
+## Passive by construction
+
+No part of a local scan resolves a name, opens, accepts or binds a connection, or starts a process: network references are read as text. `tests/test_passive_network.py` enforces it two ways. Statically, no module of the package imports a network client (`socket`, `ssl`, `http.client`, `urllib.request`, `requests`, `httpx`, the mail and FTP clients and others), names a resolver (`getaddrinfo`, `gethostbyname`, `create_connection`, `urlopen`) or imports `subprocess`, except Online Mode (`online/`: the fetch of a repository URL and the advisory lookups of `--vuln-online`, only when a scan asks for them) and the plugin isolation modules (they start the sandboxed plugin host, and check that the sandbox denies network access against a loopback listener PDT holds and the unrouted RFC 5737 address 192.0.2.1). At run time, an audit hook watches a whole scan, with every report format, of a project full of URLs, host names, addresses, ports, deployment files, socket code, remote schema references, an external DTD and an archive, and fails on any socket connect, bind or send, name lookup, HTTP, FTP or mail connection, or process start.
 
 ## Budgets
 

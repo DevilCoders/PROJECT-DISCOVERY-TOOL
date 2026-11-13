@@ -228,6 +228,12 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: passive network discovery, enforced
+- `tests/test_passive_network.py`: no module outside Online Mode (`online/`) and the plugin sandbox imports a
+  network client, a resolver or `subprocess` (each exception named with its reason), and an audit hook
+  watching a whole scan of a project full of URLs, hosts, ports, deployment files, socket code, remote
+  schema references and an external DTD fails on any socket, name lookup, HTTP, FTP, mail or process event.
+
 ### Added: network service map
 - The code index joins the ports Dockerfiles (`EXPOSE`), Compose files (`ports`, `expose`), Kubernetes
   manifests (container ports, Services) and Terraform (security groups and firewall rules, load
