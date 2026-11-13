@@ -28,8 +28,10 @@ from typing import Any, Literal, Sequence
 # 1.16 added to metrics.analysis_budgets the content limits each analyzer declares
 # (analyzer_limits), the bytes each analyzer read and the content limits its calls reached
 # (limits_reached, limited). 1.17 added metrics.native_backend.gpu_unavailable_reason and
-# gpu_fallback_reasons (the GPU fallbacks counted by reason).
-REPORT_SCHEMA_VERSION = "1.17"
+# gpu_fallback_reasons (the GPU fallbacks counted by reason). 1.18 added
+# metrics.native_backend.gpu_enabled (GPU counting is opt-in, --gpu) and the gpu_status "disabled",
+# and the GPU counters count the scan's own dispatches and fallbacks.
+REPORT_SCHEMA_VERSION = "1.18"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

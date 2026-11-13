@@ -149,6 +149,11 @@ static int pdt_gpu_unavailable_reason = -1; /* -1: available or not yet initiali
 static unsigned long long pdt_gpu_fallback_reasons[PDT_GPU_REASON_COUNT];
 /* Tests force a fallback reason for every eligible buffer (_set_gpu_test_fault); -1: none. */
 static int pdt_gpu_test_fault = -1;
+/* GPU byte counting is opt-in (configure_gpu, pdt scan --gpu): for buffers in host memory the
+   copy to the device costs more than counting on the CPU (an RTX 3060 counted at 1.9 GiB/s
+   against 4 GiB/s for portable C, from 8 MiB to 512 MiB). Until enabled, OpenCL is not loaded. */
+static int pdt_gpu_enabled = 0;
+static size_t pdt_gpu_min_bytes = PDT_GPU_MIN_BYTES;
 
 static void *pdt_load_library_symbol(pdt_library_handle library, const char *name) {
 #if defined(_WIN32)
@@ -566,7 +571,7 @@ static PyObject *pdt_native_count_byte(PyObject *self, PyObject *args) {
     /* The OpenCL path releases the GIL while the device reads the host buffer.
        Use it only for immutable bytes; mutable exporters stay on the GIL-held CPU
        path so another Python thread cannot mutate their contents concurrently. */
-    if (PyBytes_Check(object) && (size_t)view.len >= PDT_GPU_MIN_BYTES) {
+    if (pdt_gpu_enabled && PyBytes_Check(object) && (size_t)view.len >= pdt_gpu_min_bytes) {
         int reason = PDT_GPU_REASON_DISPATCH;
         int dispatched = 0;
         if (pdt_gpu_test_fault >= 0) {
@@ -623,6 +628,23 @@ static PyObject *pdt_native_set_gpu_test_fault(PyObject *self, PyObject *args) {
     return NULL;
 }
 
+static PyObject *pdt_native_configure_gpu(PyObject *self, PyObject *args) {
+    int enabled;
+    unsigned long long threshold;
+
+    (void)self;
+    if (!PyArg_ParseTuple(args, "pK:configure_gpu", &enabled, &threshold)) {
+        return NULL;
+    }
+    if (threshold < (unsigned long long)1024 * 1024) {
+        PyErr_SetString(PyExc_ValueError, "the GPU threshold must be at least 1 MiB");
+        return NULL;
+    }
+    pdt_gpu_enabled = enabled;
+    pdt_gpu_min_bytes = (size_t)threshold;
+    Py_RETURN_NONE;
+}
+
 static PyObject *pdt_gpu_reason_counts(void) {
     PyObject *counts = PyDict_New();
     int index;
@@ -646,6 +668,7 @@ static PyObject *pdt_native_capabilities(PyObject *self, PyObject *Py_UNUSED(arg
     const char *architecture = "unknown";
     long hardware_threads = 1;
     int gpu_available;
+    const char *unavailable = "";
     PyObject *reasons;
 
     (void)self;
@@ -676,13 +699,20 @@ static PyObject *pdt_native_capabilities(PyObject *self, PyObject *Py_UNUSED(arg
     }
 #endif
 
-    gpu_available = pdt_opencl_initialize();
+    /* A disabled GPU path is not probed: the OpenCL loader and vendor drivers stay unloaded. */
+    gpu_available = pdt_gpu_enabled ? pdt_opencl_initialize()
+                                    : (pdt_opencl.initialized && pdt_opencl.available);
+    if (!pdt_gpu_enabled) {
+        unavailable = "disabled";
+    } else if (!gpu_available && pdt_gpu_unavailable_reason >= 0) {
+        unavailable = pdt_gpu_reason_names[pdt_gpu_unavailable_reason];
+    }
     reasons = pdt_gpu_reason_counts();
     if (reasons == NULL) {
         return NULL;
     }
     return Py_BuildValue(
-        "{s:s,s:s,s:l,s:O,s:O,s:O,s:s,s:s,s:I,s:s,s:K,s:K,s:K,s:K,s:K,s:s,s:N}",
+        "{s:s,s:s,s:l,s:O,s:O,s:O,s:s,s:s,s:I,s:s,s:K,s:K,s:K,s:K,s:K,s:s,s:N,s:O}",
         "architecture", architecture,
         "backend", pdt_backend_name(),
         "hardware_threads", hardware_threads,
@@ -697,12 +727,12 @@ static PyObject *pdt_native_capabilities(PyObject *self, PyObject *Py_UNUSED(arg
             (unsigned long long)(gpu_available ? pdt_opencl.global_memory_bytes : 0),
         "gpu_max_allocation_bytes",
             (unsigned long long)(gpu_available ? pdt_opencl.max_allocation_bytes : 0),
-        "gpu_threshold_bytes", (unsigned long long)PDT_GPU_MIN_BYTES,
+        "gpu_threshold_bytes", (unsigned long long)pdt_gpu_min_bytes,
         "gpu_dispatches", pdt_gpu_dispatches,
         "gpu_fallbacks", pdt_gpu_fallbacks,
-        "gpu_unavailable_reason",
-            gpu_available || pdt_gpu_unavailable_reason < 0 ? "" : pdt_gpu_reason_names[pdt_gpu_unavailable_reason],
-        "gpu_fallback_reasons", reasons
+        "gpu_unavailable_reason", unavailable,
+        "gpu_fallback_reasons", reasons,
+        "gpu_enabled", pdt_gpu_enabled ? Py_True : Py_False
     );
 }
 
@@ -711,6 +741,8 @@ static PyMethodDef pdt_native_methods[] = {
      "Count a byte using automatic OpenCL GPU or runtime-selected CPU acceleration."},
     {"capabilities", pdt_native_capabilities, METH_NOARGS,
      "Return CPU, OpenCL GPU and native backend capability information."},
+    {"configure_gpu", pdt_native_configure_gpu, METH_VARARGS,
+     "Enable or disable GPU byte counting, and set the smallest buffer sent to the GPU."},
     {"_set_gpu_test_fault", pdt_native_set_gpu_test_fault, METH_VARARGS,
      "Tests only: force every eligible buffer onto the CPU with this fallback reason (None clears)."},
     {NULL, NULL, 0, NULL}

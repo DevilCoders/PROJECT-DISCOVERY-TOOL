@@ -1,3 +1,5 @@
+import json
+
 from project_discovery.engine import native as native_backend
 
 
@@ -100,12 +102,14 @@ def test_an_outdated_walker_build_falls_back_to_python(monkeypatch):
 
 def test_gpu_capability_fields_are_available_with_or_without_hardware():
     info = native_backend.capabilities()
-    assert isinstance(info["gpu_available"], bool)
-    assert info["gpu_status"] in {"online", "cpu-fallback"}
+    assert isinstance(info["gpu_available"], bool) and isinstance(info["gpu_enabled"], bool)
+    assert info["gpu_status"] in {"online", "cpu-fallback", "disabled"}
     assert isinstance(info["gpu_threshold_bytes"], int)
     assert info["gpu_threshold_bytes"] >= 1024 * 1024
     assert isinstance(info["gpu_dispatches"], int)
     assert isinstance(info["gpu_fallbacks"], int)
+    with native_backend.gpu_configuration(True):
+        info = native_backend.capabilities()
     if info["gpu_available"]:
         assert info["gpu_backend"] == "opencl"
         assert info["gpu_name"]
@@ -114,41 +118,103 @@ def test_gpu_capability_fields_are_available_with_or_without_hardware():
         assert info["gpu_backend"] == "none"
 
 
+def test_gpu_counting_is_off_by_default_and_never_loads_opencl():
+    # Measured slower than the CPU, so scans leave it off; and a disabled path loads no driver.
+    import subprocess
+    import sys
+
+    probe = (
+        "import ctypes, json, os, sys\n"
+        "from project_discovery.engine import native\n"
+        "payload = bytes(range(256)) * 32768 + b'\\n'\n"
+        "assert native.count_byte(payload, 10) == payload.count(b'\\n')\n"
+        "info = native.capabilities()\n"
+        "if os.name == 'nt':\n"
+        "    ctypes.windll.kernel32.GetModuleHandleW.restype = ctypes.c_void_p\n"
+        "    loaded = bool(ctypes.windll.kernel32.GetModuleHandleW('OpenCL.dll'))\n"
+        "elif sys.platform.startswith('linux'):\n"
+        "    loaded = 'libOpenCL' in open('/proc/self/maps').read()\n"
+        "else:\n"
+        "    loaded = False\n"
+        "print(json.dumps({'loaded': loaded, **{key: info[key] for key in (\n"
+        "    'gpu_status', 'gpu_enabled', 'gpu_unavailable_reason', 'gpu_dispatches', 'gpu_fallbacks')}}))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, check=True)
+    info = json.loads(result.stdout)
+    assert info["loaded"] is False
+    assert (info["gpu_dispatches"], info["gpu_fallbacks"], info["gpu_enabled"]) == (0, 0, False)
+    if native_backend.native_available():
+        assert (info["gpu_status"], info["gpu_unavailable_reason"]) == ("disabled", "disabled")
+
+
+def test_gpu_settings_are_scoped_and_validated():
+    import pytest
+
+    assert native_backend.gpu_settings() == (False, native_backend.GPU_DEFAULT_THRESHOLD_BYTES)
+    with native_backend.gpu_configuration(True, 16 * 1024 * 1024):
+        expected = (True, 16 * 1024 * 1024) if native_backend.native_available() else (False, 8 * 1024 * 1024)
+        assert native_backend.gpu_settings() == expected
+    assert native_backend.gpu_settings() == (False, native_backend.GPU_DEFAULT_THRESHOLD_BYTES)
+    with pytest.raises(ValueError, match="at least 1 MiB"):
+        native_backend.configure_gpu(True, 1000)
+    probed = native_backend.probe_gpu()
+    assert probed["gpu_enabled"] is False and native_backend.gpu_settings()[0] is False
+    assert probed["gpu_status"] in {"available", "cpu-fallback"}  # a usable device scans leave off, or none
+
+
 def test_gpu_fallback_reasons_are_reported_with_or_without_hardware():
-    info = native_backend.capabilities()
+    with native_backend.gpu_configuration(True):
+        info = native_backend.capabilities()
     reasons = info["gpu_fallback_reasons"]
+    if not native_backend.native_available():
+        assert (info["gpu_unavailable_reason"], reasons) == ("native_extension", {})
+        return
     if info["gpu_available"]:
         assert info["gpu_unavailable_reason"] == ""
     else:
-        assert info["gpu_unavailable_reason"] in {*native_backend.GPU_FALLBACK_REASONS, "native_extension"}
-    if native_backend.native_available():
-        assert set(reasons) == set(native_backend.GPU_FALLBACK_REASONS)
-        assert sum(reasons.values()) == info["gpu_fallbacks"]
-    else:
-        assert reasons == {}
+        assert info["gpu_unavailable_reason"] in native_backend.GPU_FALLBACK_REASONS
+    assert set(reasons) == set(native_backend.GPU_FALLBACK_REASONS)
+    assert sum(reasons.values()) == info["gpu_fallbacks"]
 
 
 def test_every_gpu_fallback_is_counted_under_its_reason():
     import pytest
 
+    if not native_backend.native_available():
+        pytest.skip("the C extension is not built")
     payload = bytes(range(256)) * 32768 + b"\n"  # past the 8 MiB GPU threshold
     expected = payload.count(b"\n")
-    for reason in native_backend.GPU_FALLBACK_REASONS:
-        if not native_backend.set_gpu_test_fault(reason):
-            pytest.skip("the C extension with the fault hook is not built")
+    with native_backend.gpu_configuration(True):
+        for reason in native_backend.GPU_FALLBACK_REASONS:
+            assert native_backend.set_gpu_test_fault(reason)
+            try:
+                before = native_backend.capabilities()
+                assert native_backend.count_byte(payload, 10) == expected
+                after = native_backend.capabilities()
+            finally:
+                native_backend.set_gpu_test_fault(None)
+            assert after["gpu_fallbacks"] == before["gpu_fallbacks"] + 1
+            assert after["gpu_dispatches"] == before["gpu_dispatches"]
+            assert after["gpu_fallback_reasons"][reason] == before["gpu_fallback_reasons"][reason] + 1
+        # Small and mutable buffers never reach the GPU path, so they are no fallback.
+        before = native_backend.capabilities()["gpu_fallbacks"]
+        native_backend.count_byte(b"\n" * 1024, 10)
+        native_backend.count_byte(bytearray(payload), 10)
+        assert native_backend.capabilities()["gpu_fallbacks"] == before
+    # Below a raised threshold the buffer stays on the CPU without counting as a fallback.
+    with native_backend.gpu_configuration(True, 16 * 1024 * 1024):
+        native_backend.set_gpu_test_fault("dispatch")
         try:
-            before = native_backend.capabilities()
-            assert native_backend.count_byte(payload, 10) == expected
-            after = native_backend.capabilities()
+            before = native_backend.capabilities()["gpu_fallbacks"]
+            native_backend.count_byte(payload, 10)  # 8 MiB: under 16 MiB
+            assert native_backend.capabilities()["gpu_fallbacks"] == before
+            native_backend.count_byte(payload * 2, 10)  # 16 MiB and two bytes
+            assert native_backend.capabilities()["gpu_fallbacks"] == before + 1
         finally:
             native_backend.set_gpu_test_fault(None)
-        assert after["gpu_fallbacks"] == before["gpu_fallbacks"] + 1
-        assert after["gpu_dispatches"] == before["gpu_dispatches"]
-        assert after["gpu_fallback_reasons"][reason] == before["gpu_fallback_reasons"][reason] + 1
-    # Small and mutable buffers never reach the GPU path, so they are no fallback.
+    # GPU counting off (the default): no buffer is a GPU candidate, so none falls back.
     before = native_backend.capabilities()["gpu_fallbacks"]
-    native_backend.count_byte(b"\n" * 1024, 10)
-    native_backend.count_byte(bytearray(payload), 10)
+    native_backend.count_byte(payload, 10)
     assert native_backend.capabilities()["gpu_fallbacks"] == before
     with pytest.raises(ValueError, match="unknown GPU fallback reason"):
         native_backend.set_gpu_test_fault("everything")
@@ -157,15 +223,38 @@ def test_every_gpu_fallback_is_counted_under_its_reason():
 def test_without_a_usable_gpu_large_buffers_fall_back_under_the_unavailable_reason():
     import pytest
 
-    info = native_backend.capabilities()
-    if info["gpu_available"] or not native_backend.native_available():
-        pytest.skip("this machine has a usable OpenCL GPU, or no C extension")
-    reason = info["gpu_unavailable_reason"]
-    payload = bytes(range(256)) * 32768 + b"\n"
-    native_backend.count_byte(payload, 0)
-    after = native_backend.capabilities()
+    with native_backend.gpu_configuration(True):
+        info = native_backend.capabilities()
+        if info["gpu_available"] or not native_backend.native_available():
+            pytest.skip("this machine has a usable OpenCL GPU, or no C extension")
+        reason = info["gpu_unavailable_reason"]
+        payload = bytes(range(256)) * 32768 + b"\n"
+        native_backend.count_byte(payload, 0)
+        after = native_backend.capabilities()
     assert after["gpu_fallback_reasons"][reason] == info["gpu_fallback_reasons"][reason] + 1
     assert after["gpu_fallbacks"] == info["gpu_fallbacks"] + 1
+
+
+def test_scans_use_the_gpu_only_with_the_option_also_in_worker_processes(tmp_path):
+    import pytest
+
+    from project_discovery.cli import run_scan
+
+    if not native_backend.native_available():
+        pytest.skip("the C extension is not built")
+    project = tmp_path / "project"
+    project.mkdir()
+    # The secret scanner counts the newlines of 8 MiB chunks with count_byte.
+    (project / "notes.txt").write_bytes(b"x" * 1023 + b"\n" + b"y" * (9 * 1024 * 1024))
+    counted = {}
+    for gpu in (False, True):
+        output = tmp_path / f"out-{gpu}"
+        assert run_scan(project, output, {"json"}, 128, quiet=True, executor="process", jobs=2, gpu=gpu) == 0
+        native = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))["metrics"]["native_backend"]
+        counted[gpu] = (native["gpu_enabled"], native["gpu_dispatches"] + native["gpu_fallbacks"])
+    # The worker processes received --gpu: their large buffers went to the GPU path, or fell back.
+    assert counted[False] == (False, 0) and counted[True][0] is True and counted[True][1] >= 1
+    assert native_backend.gpu_settings()[0] is False  # the scan's setting does not outlive it
 
 
 def test_large_buffer_automatic_backend_matches_python_reference():
@@ -210,11 +299,14 @@ def test_opencl_loader_never_resolves_libraries_from_the_working_directory():
 def test_gpu_and_cpu_byte_counts_agree_when_a_gpu_is_present():
     import pytest
 
-    capabilities = native_backend.capabilities()
-    if not capabilities.get("gpu_available"):
-        pytest.skip("no OpenCL GPU on this machine")
-    payload = (bytes(range(256)) * (48 * 1024 * 1024 // 256)) + b"\n" * 4093
-    before = native_backend.capabilities()["gpu_dispatches"]
-    for needle in (0, 10, 255):
-        assert native_backend.count_byte(payload, needle) == payload.count(bytes((needle,)))
-    assert native_backend.capabilities()["gpu_dispatches"] > before
+    with native_backend.gpu_configuration(True):
+        capabilities = native_backend.capabilities()
+        if not capabilities.get("gpu_available"):
+            pytest.skip("no OpenCL GPU on this machine")
+        payload = (bytes(range(256)) * (48 * 1024 * 1024 // 256)) + b"\n" * 4093
+        before = native_backend.capabilities()
+        for needle in (0, 10, 255):
+            assert native_backend.count_byte(payload, needle) == payload.count(bytes((needle,)))
+        after = native_backend.capabilities()
+    assert after["gpu_dispatches"] == before["gpu_dispatches"] + 3
+    assert after["gpu_fallbacks"] == before["gpu_fallbacks"]

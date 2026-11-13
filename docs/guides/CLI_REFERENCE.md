@@ -84,6 +84,8 @@ pdt scan ./monorepo --output ../reports/mono --resume         # after Ctrl-C or 
 |---|---|---|
 | `--jobs N` | `0` | Analysis workers: `0` picks a bounded number from the hardware (at most 8), or 1 to 64. |
 | `--executor {auto,process,thread}` | `auto` | `process` runs analyzers in worker processes (real parallelism), `thread` in threads; `auto` uses processes for inventories of 1,000 files or more. |
+| `--gpu` | off | Count the bytes of large in-memory buffers on an OpenCL GPU. Off by default, and the OpenCL runtime is then not loaded: on the hardware measured so far, copying a buffer to the device took longer than counting it on the CPU. `python tools/gpu_benchmark.py` measures this machine. |
+| `--gpu-min-mb MB` | `8` | With `--gpu`, the smallest buffer counted on the GPU (at least 1). |
 
 ```bash
 pdt scan ./service --jobs 16 --executor process

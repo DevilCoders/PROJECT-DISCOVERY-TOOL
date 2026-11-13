@@ -271,9 +271,14 @@ def _watch_coordinator() -> None:
     threading.Thread(target=watch, name="pdt-coordinator-watch", daemon=True).start()
 
 
-def _initialize_worker(vulnerability_db: str | None, plugin_setup=None, budget_policy=None) -> None:
+def _initialize_worker(vulnerability_db: str | None, plugin_setup=None, budget_policy=None, gpu=None) -> None:
     """Load this worker process's own analyzer instances (built-ins and plugins)."""
     budgets.set_policy(budget_policy)
+    if gpu is not None:
+        # The coordinator's --gpu setting; a spawned worker starts with GPU counting off.
+        from .native import configure_gpu
+
+        configure_gpu(*gpu)
     # Ctrl-C reaches the whole process group. Only the coordinator handles it and stops
     # the workers itself, so workers do not die mid-queue printing KeyboardInterrupt
     # tracebacks or hand interrupts back as task results.
@@ -365,6 +370,9 @@ class AnalysisExecutor:
         self._budget_policy = budget_policy or budgets.BudgetPolicy()
         self._replaced_policy = budgets.current_policy()
         budgets.set_policy(self._budget_policy)
+        from .native import gpu_settings
+
+        self._gpu = gpu_settings()  # thread workers share it; process workers receive it
         self._locks = {
             id(analyzer): threading.Lock()
             for analyzer in self._analyzers
@@ -385,7 +393,7 @@ class AnalysisExecutor:
             return ProcessPoolExecutor(
                 max_workers=self.workers,
                 initializer=_initialize_worker,
-                initargs=(self._vulnerability_db, self._plugin_setup, self._budget_policy),
+                initargs=(self._vulnerability_db, self._plugin_setup, self._budget_policy, self._gpu),
             )
         return ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="pdt-analyzer")
 

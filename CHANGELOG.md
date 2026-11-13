@@ -277,6 +277,18 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   terminal summary, the Markdown and HTML reports and `pdt capabilities` show them.
 - Report schema 1.17: `gpu_unavailable_reason` and `gpu_fallback_reasons` in
   `metrics.native_backend`.
+- GPU byte counting is opt-in: `pdt scan --gpu`, with `--gpu-min-mb` for the smallest buffer
+  sent to the GPU (8 MiB). Without it the OpenCL runtime is never loaded. `tools/gpu_benchmark.py`
+  measured the GPU path 2.0-2.8 times slower than portable C on an RTX 3060 from 1 MiB to
+  512 MiB, because copying a buffer to the device costs more than counting it on the CPU.
+  `pdt capabilities` probes the GPU and reports a usable device that scans leave off as
+  `available`.
+- Tests drive the OpenCL paths against a fake OpenCL loader on Linux (missing symbol, no
+  platform or device, unknown limits, context, kernel-build, dispatch and buffer failures, a
+  memory limit and a working fake device), and check that worker processes receive `--gpu`.
+- A scan's GPU counters are its own: they counted every dispatch and fallback since the process
+  started, so a library caller's second scan reported the first one's too.
+- Report schema 1.18: `gpu_enabled` and the `gpu_status` `disabled` in `metrics.native_backend`.
 
 ### Fixed: found during the filesystem inventory work
 - A budget stop that reached an analyzer call just as it returned was cleared with

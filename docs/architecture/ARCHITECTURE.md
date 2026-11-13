@@ -9,7 +9,7 @@ PDT is not a Python-only scanner. Python is the control plane; native engines an
 | Control plane | Python | CLI, plugin lifecycle, policy, orchestration, cache, findings and report schema |
 | Native low-level core | C | Bounded byte counting, host capability reporting and stable extension boundary |
 | CPU acceleration | x86-64 Assembly + C dispatch | Linux x86-64 SIMD byte counting with runtime SSE2/POPCNT checks; scalar C fallback |
-| GPU byte reduction | OpenCL C loaded dynamically by native C | Optional large immutable-buffer byte counting; runtime device discovery, 8MiB dispatch threshold and CPU fallback; analyzer semantics remain CPU-side |
+| GPU byte reduction | OpenCL C loaded dynamically by native C | Opt-in (`--gpu`) large immutable-buffer byte counting, off by default because it measured slower than the CPU; runtime device discovery, 8 MiB dispatch threshold (`--gpu-min-mb`) and CPU fallback; analyzer semantics remain CPU-side |
 | Filesystem traversal | Rust + PyO3 | Integrated no-follow directory iterator with native OS metadata and bounded depth state; a persistent index reused across scans remains planned |
 | File-signature classification | C++17 | Integrated native magic-byte classifier with Python fallback |
 | Report application | JavaScript + HTML/CSS | Separate packaged offline client bundled into the standalone report; filtering, pagination and disclosure controls |
@@ -35,7 +35,7 @@ Each language component must serve a production execution path. Merely listing a
 - x86-64 Assembly uses the System V ABI and is compiled only on Linux x86-64. C dispatch checks SSE2 and POPCNT before calling it.
 - Other CPUs/platforms use portable C. If the extension cannot be built, the Python fallback remains available.
 - The C byte counter and Linux x86-64 Assembly backend are used by scanner/security code.
-- The C module dynamically loads the OpenCL runtime without SDK headers at build time. It selects a GPU only when device discovery and kernel compilation succeed. A byte-count/reduction kernel is eligible for immutable bytes buffers at or above 8MiB; mutable buffers and other buffer exporters use the GIL-held CPU path to prevent concurrent mutation while the device reads host memory.
+- The C module dynamically loads the OpenCL runtime without SDK headers at build time. It selects a GPU only when device discovery and kernel compilation succeed. With `--gpu`, a byte-count/reduction kernel is eligible for immutable bytes buffers at or above the threshold (8 MiB by default); without it the OpenCL runtime is never loaded; mutable buffers and other buffer exporters use the GIL-held CPU path to prevent concurrent mutation while the device reads host memory.
 - Every GPU dispatch uses per-call command queue, kernel and buffer objects; unavailable devices, allocation limits and kernel/dispatch failures fall back to CPU. GPU metrics count actual dispatches and CPU fallbacks. No analyzer logic is moved to the GPU.
 - The C++17 classifier matches the signature catalog's rules (a table generated from the Python catalog) and Python validates each candidate; the Python matcher is the fallback. `file_type` comes from the content, and `name_type` records what the name suggests, apart from it.
 - `FileRecord` carries a private scan-time identity tuple used by analysis but excluded from public JSON/Markdown/HTML output. The private SQLite inventory serializer retains this tuple so typed records can be restored for later analysis.

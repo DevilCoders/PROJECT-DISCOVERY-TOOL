@@ -46,11 +46,12 @@ from .engine.executor import (
     AnalysisExecutor,
     FileOutcome,
     FileTask,
+    _gpu_counters,
     verified_regular_file_stat,
 )
 from .engine.metrics import PhaseTimer, peak_rss_bytes
 from .engine.native import capabilities as native_capabilities
-from .engine.native import native_available
+from .engine.native import GPU_DEFAULT_THRESHOLD_BYTES, gpu_configuration, native_available, probe_gpu
 from .intelligence.architecture import analyze_project_architecture
 from .intelligence.index import QUERY_KINDS, analyze_code_index, code_index_state, query_code_index
 from .intelligence.python_graph import analyze_python_dependencies
@@ -157,11 +158,12 @@ def _render_banner(console: Console) -> None:
         padding=(1, 2),
     ))
     capabilities = native_capabilities()
-    gpu_status = (
-        f"GPU: {capabilities.get('gpu_vendor', '')} {capabilities.get('gpu_name', '')}".strip()
-        if capabilities.get("gpu_available")
-        else "GPU: CPU fallback (no usable OpenCL GPU)"
-    )
+    if capabilities.get("gpu_status") == "online":
+        gpu_status = f"GPU: {capabilities.get('gpu_vendor', '')} {capabilities.get('gpu_name', '')}".strip()
+    elif capabilities.get("gpu_status") == "disabled":
+        gpu_status = "GPU: off (--gpu)"
+    else:
+        gpu_status = f"GPU: CPU fallback ({capabilities.get('gpu_unavailable_reason') or 'no usable OpenCL GPU'})"
     native_status = (
         f"C/ASM: {capabilities.get('backend', 'unknown')}  //  "
         f"{gpu_status}  //  "
@@ -590,6 +592,8 @@ def run_scan(
     security_metadata: bool = False,
     exclude_profiles: set[str] | frozenset[str] = frozenset(),
     development_trees: str = "deep",
+    gpu: bool = False,
+    gpu_min_mb: int = GPU_DEFAULT_THRESHOLD_BYTES // (1024 * 1024),
 ) -> int:
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -600,6 +604,8 @@ def run_scan(
     # Validates the plugin options before the (potentially long) inventory walk.
     PluginPolicy(plugin_isolation, plugin_timeout, plugin_memory_mb)
     budget_policy = _budget_policy(analyzer_timeout, analyzer_memory_mb, domain_budgets)
+    if gpu_min_mb < 1:
+        raise ValueError("--gpu-min-mb must be at least 1")
     if memory_source is not None:
         # No-download mode: the root is a namespace for in-memory files, never a directory.
         if resume:
@@ -641,7 +647,7 @@ def run_scan(
 
     # One scan per output directory: a second scan cleared the shared inventory under the
     # first, and both reports mixed two roots.
-    with output_lock(output):
+    with output_lock(output), gpu_configuration(gpu, gpu_min_mb * 1024 * 1024):
         # Validate the advisory database before the (potentially long) inventory walk.
         vulnerability_db_status = {"enabled": False, "advisory_count": 0}
         if vulnerability_db is not None:
@@ -752,6 +758,8 @@ def run_scan(
         inventory_error_count = 0
         # GPU dispatches, fallbacks and fallbacks by reason reported by worker processes
         worker_gpu: list = [0, 0, Counter()]
+        # The coordinator's own counters are per process: the scan reports what it added.
+        gpu_baseline = _gpu_counters()
         budget_usage = _BudgetUsage()
         cache_failures: list[str] = []
         counts = Counter()
@@ -1119,7 +1127,7 @@ def run_scan(
             },
             "vcs_provider_signal_count": vcs_provider_signal_count,
             "vcs_provider_categories": dict(sorted(vcs_provider_categories.items())),
-            "native_backend": _with_worker_gpu(native_capabilities(), worker_gpu),
+            "native_backend": _scan_gpu_counters(native_capabilities(), gpu_baseline, worker_gpu),
             "native_extension_available": native_available(),
             # Per-analyzer time and memory budgets, what each analyzer used, and the stops.
             "analysis_budgets": {
@@ -1448,6 +1456,20 @@ def run_scan(
         return exit_code
 
 
+def _scan_gpu_counters(native: dict, baseline: tuple, worker_gpu: list) -> dict:
+    """This scan's GPU counters: the coordinator's since the scan started, plus the workers'.
+
+    The native counters live as long as the process, so a library caller's second scan (or a
+    test run) would otherwise report the earlier scans' dispatches and fallbacks too.
+    """
+    reasons = {str(name): int(count) - int(baseline[2].get(name, 0))
+               for name, count in (native.get("gpu_fallback_reasons") or {}).items()}
+    native = {**native, "gpu_dispatches": int(native.get("gpu_dispatches", 0)) - baseline[0],
+              "gpu_fallbacks": int(native.get("gpu_fallbacks", 0)) - baseline[1],
+              "gpu_fallback_reasons": reasons}
+    return _with_worker_gpu(native, worker_gpu)
+
+
 def _with_worker_gpu(native: dict, worker_gpu: list) -> dict:
     """The coordinator's native counters plus those of the analysis worker processes."""
     dispatches, fallbacks, *rest = worker_gpu
@@ -1498,7 +1520,7 @@ def capabilities_report() -> dict:
         "pdt_version": __version__,
         "python": platform.python_version(),
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
-        "native_backend": native_capabilities(),
+        "native_backend": probe_gpu(),
         "remote_vcs_clients": remote_vcs_capabilities(),
         "optional_integrations": {
             "tree-sitter-language-pack": version_of("tree-sitter-language-pack"),
@@ -1991,6 +2013,15 @@ def build_parser() -> argparse.ArgumentParser:
              "firmware, ...; pdt capabilities --json lists each analyzer's domains); 0 means no limit; "
              "repeatable",
     )
+    scan.add_argument(
+        "--gpu", action="store_true",
+        help="Count bytes of large in-memory buffers on an OpenCL GPU. Off by default: copying the "
+             "data to the device was slower than counting it on the CPU on measured hardware",
+    )
+    scan.add_argument(
+        "--gpu-min-mb", type=int, default=GPU_DEFAULT_THRESHOLD_BYTES // (1024 * 1024), metavar="MB",
+        help="With --gpu, the smallest buffer counted on the GPU (default: 8)",
+    )
     scan.add_argument("--quiet", action="store_true", help="Suppress console output except errors")
     scan.add_argument(
         "--no-color", action="store_true",
@@ -2394,6 +2425,8 @@ def main() -> None:
                 "plugin_isolation": args.plugin_isolation,
                 "plugin_timeout": args.plugin_timeout,
                 "plugin_memory_mb": args.plugin_memory_mb,
+                "gpu": args.gpu,
+                "gpu_min_mb": args.gpu_min_mb,
                 "analyzer_timeout": args.analyzer_timeout,
                 "analyzer_memory_mb": args.analyzer_memory_mb,
                 "domain_budgets": list(args.domain_budget),
@@ -2433,6 +2466,7 @@ def main() -> None:
                 exclude_profiles=set(args.exclude_profile), development_trees=args.development_trees,
                 plugin_isolation=args.plugin_isolation, plugin_timeout=args.plugin_timeout,
                 plugin_memory_mb=args.plugin_memory_mb,
+                gpu=args.gpu, gpu_min_mb=args.gpu_min_mb,
                 analyzer_timeout=args.analyzer_timeout, analyzer_memory_mb=args.analyzer_memory_mb,
                 domain_budgets=list(args.domain_budget),
                 online_vulnerabilities=online_vulnerabilities,

@@ -116,6 +116,10 @@ def gpu_status_text(native: dict[str, Any]) -> str:
     """"online", or "cpu-fallback (loader)" with the reason the GPU path is unavailable."""
     status = native.get("gpu_status", "cpu-fallback")
     reason = native.get("gpu_unavailable_reason")
+    if status == "disabled":
+        return "off (--gpu enables it)"
+    if status == "available":
+        return "available, off unless --gpu"
     return f"{status} ({reason})" if reason and status != "online" else status
 
 

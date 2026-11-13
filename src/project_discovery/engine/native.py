@@ -1,6 +1,8 @@
 """Portable Python interface to PDT's optional C, Assembly, C++, Rust and GPU backends."""
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 try:
@@ -41,6 +43,8 @@ def count_byte(data: bytes | bytearray | memoryview, needle: int) -> int:
 # device memory limit, host allocation, or a failed dispatch.
 GPU_FALLBACK_REASONS = ("loader", "device", "context", "kernel_build", "memory_limit", "host_memory",
                         "dispatch")
+# The smallest immutable buffer counted on the GPU when GPU counting is enabled (--gpu).
+GPU_DEFAULT_THRESHOLD_BYTES = 8 * 1024 * 1024
 
 
 def capabilities() -> dict[str, Any]:
@@ -69,17 +73,70 @@ def capabilities() -> dict[str, Any]:
             # Without the C extension nothing is dispatched or falls back: Python counts.
             "gpu_unavailable_reason": "native_extension",
             "gpu_fallback_reasons": {},
+            "gpu_enabled": False,
         }
     info["cpp_signature_classifier"] = signature_backend_available()
     # Loaded, but compiled from another signature catalog: the Python matcher is used.
     info["cpp_signature_classifier_outdated"] = _native_cpp is not None and not signature_backend_available()
     info["rust_filesystem_walker"] = _walker_current()
     info["rust_filesystem_walker_outdated"] = _walker is not None and not _walker_current()
-    info["gpu_status"] = "online" if info.get("gpu_available") else "cpu-fallback"
+    # online: enabled with a usable device; disabled: GPU counting is off (the default), and
+    # OpenCL was not loaded; cpu-fallback: enabled, but no usable device (or no extension).
+    if info.get("gpu_available") and info.get("gpu_enabled", True):
+        info["gpu_status"] = "online"
+    elif info.get("gpu_unavailable_reason") == "disabled":
+        info["gpu_status"] = "disabled"
+    else:
+        info["gpu_status"] = "cpu-fallback"
     # An extension built from older sources reports no reasons.
     info.setdefault("gpu_unavailable_reason", "" if info.get("gpu_available") else "not_reported")
     info["gpu_fallback_reasons"] = {str(name): int(count) for name, count in
                                     (info.get("gpu_fallback_reasons") or {}).items()}
+    return info
+
+
+def configure_gpu(enabled: bool, threshold_bytes: int = GPU_DEFAULT_THRESHOLD_BYTES) -> None:
+    """Enable GPU byte counting (off by default) for immutable buffers of threshold_bytes or more.
+
+    Off by default because, for buffers in host memory, the copy to the device costs more than
+    counting on the CPU (docs/architecture/NATIVE_ENGINE.md has the measurements).
+    """
+    if threshold_bytes < 1024 * 1024:
+        raise ValueError("the GPU threshold must be at least 1 MiB")
+    setter = getattr(_native, "configure_gpu", None)
+    if setter is not None:
+        setter(bool(enabled), int(threshold_bytes))
+
+
+def gpu_settings() -> tuple[bool, int]:
+    """(enabled, threshold bytes) of GPU byte counting in this process."""
+    info = capabilities()
+    return bool(info.get("gpu_enabled")), int(info.get("gpu_threshold_bytes") or GPU_DEFAULT_THRESHOLD_BYTES)
+
+
+@contextmanager
+def gpu_configuration(enabled: bool, threshold_bytes: int = GPU_DEFAULT_THRESHOLD_BYTES) -> Iterator[None]:
+    """GPU byte counting set for a block (one scan), restored afterwards."""
+    previous = gpu_settings()
+    configure_gpu(enabled, threshold_bytes)
+    try:
+        yield
+    finally:
+        configure_gpu(*previous)
+
+
+def probe_gpu() -> dict[str, Any]:
+    """capabilities() with the GPU probed, for `pdt capabilities`: whether this host has a usable
+    device. A usable device that scans leave off (no --gpu) has the status "available"."""
+    previous = gpu_settings()
+    configure_gpu(True, previous[1])
+    try:
+        info = capabilities()
+    finally:
+        configure_gpu(*previous)
+    info["gpu_enabled"] = previous[0]
+    if info.get("gpu_available") and not previous[0]:
+        info["gpu_status"] = "available"
     return info
 
 
