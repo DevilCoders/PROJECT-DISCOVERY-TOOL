@@ -228,6 +228,20 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: the malicious archive fixture set and the checks it needed
+- `tests/analyzers/content/test_archive_malicious.py`: archive bombs, high-ratio entries, nested bombs,
+  malformed headers in every format, encrypted members and indexes, traversal, absolute paths, hard
+  links, symlink loops, sparse TAR, huge entry counts and corrupt checksums, each built in the test.
+- Fixed: a TAR header that fails its checksum, or a lone zero block, ended the listing silently
+  (Python's tarfile stops there, as 7-Zip does), so the members after it went unlisted while the
+  archive read `metadata-complete`; GNU tar skips to the next header and extracts them. PDT now reads
+  on as GNU tar does, flags those members `past-corrupt-header`, marks the archive `malformed` and
+  reports each corrupt header and lone zero block (MEDIUM), and data after the end-of-archive blocks.
+- Links are resolved by name through the archive's own symlinks: a member written through a
+  symlinked directory that leaves the archive is traversal, and links that resolve in a circle are
+  `symlink-loop` with an "Archive symlink loops" finding. Sparse TAR members are flagged (a HIGH
+  finding when they expand past the ratio), and a ZIP member that fails its CRC is `crc-mismatch`.
+
 ### Added: language packages in archives
 - A ZIP or TAR archive that is a language package names it from its manifest (read in memory up to
   1 MiB, parsed and never evaluated): wheels, eggs and sdists, npm tarballs, gems, crates, NuGet

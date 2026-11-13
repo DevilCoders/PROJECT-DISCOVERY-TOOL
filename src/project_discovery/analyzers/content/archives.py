@@ -13,7 +13,7 @@ import tarfile
 import time
 import unicodedata
 import zipfile
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -304,6 +304,145 @@ def _data_size(data: bytes | _Slice) -> int:
     return data.length if isinstance(data, _Slice) else len(data)
 
 
+class _Recorder(io.RawIOBase):
+    """Passes reads through and keeps the last bytes read, so the block tarfile stopped at can be
+    looked at in a stream that cannot seek back."""
+
+    _KEEP = 64 * 1024
+
+    def __init__(self, inner) -> None:
+        self._inner, self._tail, self._tail_start = inner, bytearray(), 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        data = self._inner.read(len(buffer))
+        memoryview(buffer)[:len(data)] = data
+        self._tail += data
+        if len(self._tail) > 2 * self._KEEP:
+            drop = len(self._tail) - self._KEEP
+            del self._tail[:drop]
+            self._tail_start += drop
+        return len(data)
+
+    def block(self, offset: int) -> bytes | None:
+        start = offset - self._tail_start
+        if start < 0 or start + 512 > len(self._tail):
+            return None
+        return bytes(self._tail[start:start + 512])
+
+
+class _Chain(io.RawIOBase):
+    """``first``, then the rest of a stream."""
+
+    def __init__(self, first: bytes, rest) -> None:
+        self._first, self._rest = memoryview(first), rest
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        if self._first:
+            count = min(len(buffer), len(self._first))
+            memoryview(buffer)[:count] = self._first[:count]
+            self._first = self._first[count:]
+            return count
+        data = self._rest.read(len(buffer))
+        memoryview(buffer)[:len(data)] = data
+        return len(data)
+
+
+def _read_block(stream) -> bytes:
+    """Up to 512 bytes, read until the stream ends."""
+    data = b""
+    while len(data) < 512:
+        chunk = stream.read(512 - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+_TRAILING_SCAN = 1 << 20  # bytes after the end-of-archive blocks looked at for data
+
+
+class _TarSegments:
+    """A TAR stream's members, read on where Python's tarfile stops but GNU tar does not.
+
+    tarfile ends a listing at the first header that fails its checksum and at the first zero
+    block; GNU tar skips a bad header to the next valid one ("Skipping to next header") and
+    reads on past a lone zero block, extracting what follows. A crafted checksum can so hide
+    members from tools built on tarfile (or 7-Zip) but not from extraction: this listing
+    resumes where GNU tar would, and records each corrupt header, lone zero block and the
+    data after the end-of-archive blocks.
+    """
+
+    def __init__(self, archive, stream, size: int | None, recorder: _Recorder | None, deadline: float) -> None:
+        self.first, self.stream, self.size, self.recorder, self.deadline = archive, stream, size, recorder, deadline
+        self.corrupt: list[int] = []  # offsets of headers that fail their checksum
+        self.lone_zero: list[int] = []
+        self.trailing = 0  # non-zero bytes after the end-of-archive blocks (in the first MiB)
+        self.resumed = 0  # members listed after a corrupt header or a lone zero block
+        self.opened: list = []
+
+    def __iter__(self):
+        segment, base, recorder = self.first, 0, self.recorder
+        while segment is not None:
+            for member in segment:
+                if base:
+                    self.resumed += 1
+                yield segment, member
+            segment, base, recorder = self._resume(segment, base, recorder)
+
+    def close(self) -> None:
+        for segment in self.opened:
+            segment.close()
+
+    def _resume(self, segment, base: int, recorder: _Recorder | None):
+        try:
+            return self._next_segment(segment, base, recorder)
+        except (OSError, EOFError, lzma.LZMAError, tarfile.TarError, *ZSTD_ERRORS):
+            # What follows the stop does not decompress or parse (a compressed stream's
+            # trailing bytes): the listing ends there, as it would have.
+            return None, 0, None
+
+    def _next_segment(self, segment, base: int, recorder: _Recorder | None):
+        stop = base + segment.offset  # where tarfile stopped: a zero block, a bad header or the end
+        if recorder is None:  # the first segment of a plain TAR, on a seekable stream
+            rest = io.BufferedReader(_Window(_Slice(self.stream, stop, max(0, self.size - stop))))
+            block = _read_block(rest)
+        else:  # a stream: tarfile has read the block; the recorder kept it
+            block = recorder.block(segment.offset)
+            rest = segment.fileobj
+            if block is None:
+                return None, 0, None
+        if len(block) < 512:
+            return None, 0, None  # the end of the data (a short tail is tarfile's to report)
+        position = stop + 512
+        if not block.strip(b"\x00"):
+            candidate = _read_block(rest)
+            if not candidate.strip(b"\x00"):  # two zero blocks: the end of the archive
+                tail = rest.read(_TRAILING_SCAN)
+                self.trailing = len(tail) - tail.count(0)
+                return None, 0, None
+            self.lone_zero.append(stop)
+        else:
+            self.corrupt.append(stop)
+            candidate = _read_block(rest)
+        while len(candidate) == 512 and not _tar_header(candidate):  # GNU tar: skip to the next header
+            if position % (1 << 20) == 0 and time.monotonic() >= self.deadline:
+                raise _ArchiveBudgetExceeded("wall-time budget reached")
+            position += 512
+            candidate = _read_block(rest)
+        if len(candidate) < 512:
+            return None, 0, None
+        recorder = _Recorder(_Chain(candidate, rest))
+        following = tarfile.open(fileobj=recorder, mode="r|")
+        self.opened.append(following)
+        return following, position, recorder
+
+
 def _colliding_names(names) -> list[str]:
     """Member names that collide on case-insensitive or Unicode-normalizing filesystems."""
     seen: dict[str, set[str]] = {}
@@ -452,6 +591,89 @@ def _unsafe_member_path(name: str) -> bool:
         or _PATH_DRIVE.match(normalized) is not None
         or ".." in path.parts
     )
+
+
+_MAX_LINK_HOPS = 40  # links followed in one resolution, as Linux allows before ELOOP
+
+
+def _archive_path(name: str) -> str:
+    """A member name as a path inside the archive: forward slashes, no "./" or trailing "/"."""
+    parts = [part for part in name.replace("\\", "/").split("/") if part not in ("", ".")]
+    return "/".join(parts)
+
+
+def _resolve(path: str, links: dict[str, str]) -> str | None:
+    """Where an archive path leads through the archive's own symlinks: None, "escape" (out of
+    the archive's root, or to an absolute path) or "loop" (more links than Linux follows)."""
+    pending = deque(part for part in path.split("/") if part not in ("", "."))
+    resolved: list[str] = []
+    hops = 0
+    while pending:
+        part = pending.popleft()
+        if part == "..":
+            if not resolved:
+                return "escape"
+            resolved.pop()
+            continue
+        target = links.get("/".join(resolved + [part]))
+        if target is None:
+            resolved.append(part)
+            continue
+        hops += 1
+        if hops > _MAX_LINK_HOPS:
+            return "loop"
+        normalized = target.replace("\\", "/")
+        if normalized.startswith("/") or _PATH_DRIVE.match(normalized):
+            return "escape"
+        pending.extendleft(reversed([item for item in normalized.split("/") if item not in ("", ".")]))
+    return None
+
+
+def _link_issues(members, links: dict[str, str], hardlinks: dict[str, str] | None = None,
+                 check_escapes: bool = True) -> dict[str, str]:
+    """Members whose resolution through the archive's symlinks loops ("symlink-loop") or, for
+    a member written through a symlinked directory or a link resolving through one, leaves the
+    archive ("unsafe-path"): what an extractor following the links would do.
+
+    ``members`` are member names, ``links`` {symlink: target} and ``hardlinks``
+    {hard link: target member}; a package payload's links point anywhere by design, so
+    ``check_escapes`` False looks for loops only."""
+    if not links:
+        return {}
+    table = {_archive_path(name): target for name, target in links.items()}
+    issues: dict[str, str] = {}
+    for name, target in links.items():
+        key = _archive_path(name)
+        parent = key.rpartition("/")[0]
+        normalized = target.replace("\\", "/")
+        if normalized.startswith("/") or _PATH_DRIVE.match(normalized):
+            outcome = "escape"  # an absolute target, wherever the link sits
+        else:
+            outcome = _resolve(f"{parent}/{normalized}" if parent else normalized, table)
+        if outcome == "loop":
+            issues[name] = "symlink-loop"
+        elif outcome == "escape" and check_escapes:
+            issues[name] = "unsafe-path"
+    for name, target in (hardlinks or {}).items():
+        outcome = _resolve(_archive_path(target), table)
+        if outcome == "loop" or (outcome == "escape" and check_escapes):
+            issues[name] = "symlink-loop" if outcome == "loop" else "unsafe-path"
+    for name in members:
+        key = _archive_path(name)
+        if name in issues or key in table or "/" not in key:
+            continue
+        prefix, through = "", False
+        for part in key.split("/")[:-1]:
+            prefix = f"{prefix}/{part}" if prefix else part
+            if prefix in table:
+                through = True
+                break
+        if not through:
+            continue
+        outcome = _resolve(key.rpartition("/")[0], table)
+        if outcome == "loop" or (outcome == "escape" and check_escapes):
+            issues[name] = "symlink-loop" if outcome == "loop" else "unsafe-path"
+    return issues
 
 
 def _unsafe_package_path(name: str) -> bool:
@@ -731,6 +953,18 @@ class _Inspection:
             if item[0] == self.path and item[2] in repeated:
                 records[index] = (*item[:8], ",".join(filter(None, (item[8], "duplicate"))), *item[9:])
 
+    def add_flags(self, flags: dict[str, str]) -> None:
+        """Add one flag to each named member's recorded entries (a finding made after the listing)."""
+        facts = current_facts()
+        if not flags or facts is None:
+            return
+        records = facts.archive_members
+        for index in range(self._first_record, len(records)):
+            item = records[index]
+            flag = flags.get(item[2]) if item[0] == self.path else None
+            if flag and flag not in (item[8] or "").split(","):
+                records[index] = (*item[:8], ",".join(filter(None, (item[8], flag))), *item[9:])
+
     def limit(self, name: str, value, used=None, members: int | None = None) -> None:
         entry = self.limits.setdefault(name, {"limit": name, "value": value})
         if used is not None:
@@ -917,6 +1151,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         content_findings: list[Finding] = []
         content_bytes = 0
         content_truncated = 0
+        zip_links: dict[str, str] = {}
+        crc_mismatches: list[str] = []
         try:
             source = open_verified_binary(path, record.analysis_identity) if data is None else _open_data(data)
             with source as archive_stream, zipfile.ZipFile(archive_stream, "r") as archive:
@@ -1037,6 +1273,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                 if kind == "symlink":
                                     target = sample.decode("utf-8", errors="replace").strip("\x00")
                                     link_target = target or None
+                                    if target:
+                                        zip_links[info.filename] = target
                                     if target and _unsafe_member_path(target):
                                         unsafe_paths.append(f"{info.filename} -> {target}")
                                         if "unsafe-path" not in flags:
@@ -1048,10 +1286,13 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                     content_findings.extend(member_findings)
                                     if member_timed_out:
                                         time_budget_reached = True
-                            except (
-                                OSError, RuntimeError, NotImplementedError,
-                                zipfile.BadZipFile, EOFError,
-                            ):
+                            except zipfile.BadZipFile as exc:
+                                content_truncated += 1
+                                inspection.truncated += 1
+                                if "CRC" in str(exc):  # read to its end, the data is not what was written
+                                    crc_mismatches.append(info.filename)
+                                    flags.append("crc-mismatch")
+                            except (OSError, RuntimeError, NotImplementedError, EOFError):
                                 content_truncated += 1
                                 inspection.truncated += 1
                     inspection.member(ordinal, info.filename, record_kind, info.file_size, info.compress_size,
@@ -1073,12 +1314,14 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             )]
 
         inspection.encrypted = encrypted
+        link_issues = _link_issues([info.filename for info in infos[:limits.entries]], zip_links)
+        link_loops = self._apply_link_issues(inspection, link_issues, unsafe_paths)
         structure_counts = Counter(issue for found in structure.values() for issue in found)
-        if structure_counts:
+        if structure_counts or crc_mismatches or link_loops:
             inspection.extra["structure_issues"] = {
                 name.replace("-", "_"): structure_counts[name]
                 for name in ("header-mismatch", "descriptor-mismatch", "out-of-bounds", "overlapping")
-            }
+            } | {"crc_mismatches": len(crc_mismatches), "symlink_loops": len(link_loops)}
         if structure_counts["out-of-bounds"]:
             inspection.malformed = (f"{structure_counts['out-of-bounds']:,} member(s) extend past the central "
                                     "directory or the end of the file")
@@ -1096,9 +1339,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             inspection.limit("wall_seconds", limits.wall_seconds)
         if total > limits.entries:
             inspection.limit("entries", limits.entries, total)
-        package = packages.result() if own_packages else None
-        if package:
-            inspection.extra["package"] = package
+        found_package = packages.result() if own_packages else None
+        if found_package:
+            inspection.extra["package"] = found_package
         inspection.emit()
         evidence = [
             f"{counts['file']} regular file(s)",
@@ -1116,10 +1359,10 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             f"compressed file size {record.size_bytes:,} bytes. Member bytes were inspected "
             "only through bounded in-memory streams; no member was written to disk.",
             confidence="CONFIRMED",
-            evidence=([f"package: {_package_text(package)}"] if package else []) + evidence,
+            evidence=([f"package: {_package_text(found_package)}"] if found_package else []) + evidence,
             analyzer=self.name,
         )]
-        findings.extend(self._package_findings(record, package))
+        findings.extend(self._package_findings(record, found_package))
         if over_limit(total, limits.entries, "entries"):
             findings.append(Finding(
                 "archive",
@@ -1137,6 +1380,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         if declared_bytes > limits.uncompressed_bytes:
             findings.append(self._bomb_finding(record, declared_bytes, limits))
         findings.extend(self._structure_findings(record, infos, structure, structure_counts, entry_count, total))
+        findings.extend(self._integrity_findings(record, link_loops, crc_mismatches))
         if collisions:
             findings.append(self._collision_finding(record, collisions))
         findings.extend(content_findings)
@@ -1177,25 +1421,30 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         total = 0
         declared_bytes = 0
         compressed = False
+        tar_links: dict[str, str] = {}
+        tar_hardlinks: dict[str, str] = {}
+        sparse_members: list[tuple[str, int, int]] = []  # (name, declared size, stored bytes)
         try:
             source = (open_verified_binary(path, record.analysis_identity) if data is None
                       else _open_data(data, buffered=True))  # buffered: the decompressor peeks
             with source as archive_stream:
                 codec, decompressor = _decompressor(archive_stream, codec)
+                recorder, stream_size = None, None
                 if decompressor is None:
                     # Plain TAR on a seekable descriptor: headers are reached by seeking.
+                    stream_size = archive_stream.seek(0, io.SEEK_END)
+                    archive_stream.seek(0)
                     archive = tarfile.open(fileobj=archive_stream, mode="r:")
                 else:
                     compressed = True
                     inspection.format = f"tar+{codec}"
-                    archive = tarfile.open(
-                        fileobj=_BudgetedReader(decompressor, deadline, limits.tar_decompressed_bytes),
-                        mode="r|",
-                    )
+                    recorder = _Recorder(_BudgetedReader(decompressor, deadline, limits.tar_decompressed_bytes))
+                    archive = tarfile.open(fileobj=recorder, mode="r|")
+                segments = _TarSegments(archive, archive_stream, stream_size, recorder, deadline)
                 with archive:
                     inspection.index_read = True
                     try:
-                        for member in archive:
+                        for segment, member in segments:
                             if time.monotonic() >= deadline:
                                 time_budget_reached = True
                                 break
@@ -1209,9 +1458,11 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             elif member.issym():
                                 kind = "symlink"
                                 symlinks.append(member.name)
+                                tar_links[member.name] = member.linkname
                             elif member.islnk():
                                 kind = "hardlink"
                                 hardlinks.append(member.name)
+                                tar_hardlinks[member.name] = member.linkname
                             elif member.isreg():
                                 kind = "file"
                             else:
@@ -1229,6 +1480,13 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             for risk in _mode_risks(member.mode) if kind != "symlink" else ():  # unused bits
                                 risky_modes.append(f"{member.name} ({risk})")
                                 flags.append(risk)
+                            if segment is not archive:
+                                flags.append("past-corrupt-header")  # tools that stop there miss it
+                            if member.issparse():
+                                # Extracting it without sparse-file support writes its full size.
+                                flags.append("sparse")
+                                sparse_members.append((member.name, member.size,
+                                                       sum(size for _, size in member.sparse or ())))
                             nested_kind = _nested_kind(member.name) if kind == "file" else None
                             if nested_kind is not None:
                                 flags.append("nested-archive")
@@ -1244,7 +1502,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                             manifest_data = None
                             manifest = packages.wants(member.name, member.size)
                             if manifest is not None:
-                                handle = archive.extractfile(member)
+                                handle = segment.extractfile(member)
                                 if handle is not None:
                                     with handle:
                                         manifest_data = handle.read(MANIFEST_BYTES + 1)
@@ -1256,7 +1514,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                     inspection.limit("nested_bytes", limits.nested_bytes, members=1)
                                 else:
                                     member_stream = (io.BytesIO(manifest_data) if manifest_data is not None
-                                                     else archive.extractfile(member))
+                                                     else segment.extractfile(member))
                                     if member_stream is not None:
                                         with member_stream:
                                             inner = member_stream.read(member.size + 1)
@@ -1275,7 +1533,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                 inspection.skipped_sample()
                                 continue
                             member_stream = (io.BytesIO(manifest_data) if manifest_data is not None
-                                             else archive.extractfile(member))
+                                             else segment.extractfile(member))
                             if member_stream is None:
                                 continue
                             with member_stream:
@@ -1296,6 +1554,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     except _ArchiveBudgetExceeded as exc:
                         stop_reason = str(exc)
                         time_budget_reached = "wall-time" in stop_reason
+                    finally:
+                        segments.close()
         except _Unsupported as exc:
             inspection.format = "tar+zstd"
             return self._unsupported(inspection, str(exc))
@@ -1326,9 +1586,19 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             inspection.limit("entries", limits.entries)
         if declared_bytes > limits.uncompressed_bytes:
             inspection.limit("uncompressed_bytes", limits.uncompressed_bytes, declared_bytes)
-        package = packages.result() if own_packages else None
-        if package:
-            inspection.extra["package"] = package
+        found_package = packages.result() if own_packages else None
+        if found_package:
+            inspection.extra["package"] = found_package
+        link_issues = _link_issues(names, tar_links, tar_hardlinks, check_escapes=not package)
+        link_loops = self._apply_link_issues(inspection, link_issues, unsafe_paths)
+        issues = {"corrupt_headers": len(segments.corrupt), "lone_zero_blocks": len(segments.lone_zero),
+                  "trailing_bytes": segments.trailing, "symlink_loops": len(link_loops),
+                  "sparse_members": len(sparse_members)}
+        if any(issues.values()):
+            inspection.extra["structure_issues"] = {name: value for name, value in issues.items() if value}
+        if segments.corrupt:
+            inspection.malformed = f"{len(segments.corrupt):,} TAR header(s) fail their checksum"
+            inspection.extra["corrupt_header_offsets"] = segments.corrupt[:20]
         inspection.emit()
         findings = [Finding(
             "archive",
@@ -1341,10 +1611,14 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             f"{content_bytes:,} member bytes were inspected through bounded in-memory streams; "
             "no member was written to disk.",
             confidence="CONFIRMED",
-            evidence=[record.path] + ([f"package: {_package_text(package)}"] if package else []),
+            evidence=[record.path] + ([f"package: {_package_text(found_package)}"] if found_package else []),
             analyzer=self.name,
         )]
-        findings.extend(self._package_findings(record, package))
+        findings.extend(self._package_findings(record, found_package))
+        findings.extend(self._tar_structure_findings(record, segments))
+        findings.extend(self._integrity_findings(record, link_loops, []))
+        if sparse_members:
+            findings.append(self._sparse_finding(record, sparse_members, limits))
         if stop_reason and not time_budget_reached:
             limit_reached("bytes", limits.tar_decompressed_bytes)
             findings.append(Finding(
@@ -1577,6 +1851,16 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
         if duplicates:
             inspection.flag_duplicates(names)
+        listed = listing.entries[:inspection.indexed]
+        link_issues = _link_issues(
+            [entry.name for entry in listed],
+            {entry.name: entry.link_target for entry in listed if entry.kind == "symlink" and entry.link_target},
+            {entry.name: entry.link_target for entry in listed if entry.kind == "hardlink" and entry.link_target},
+            check_escapes=reader in ("iso", "rar"),  # an RPM installs its links as links
+        )
+        link_loops = self._apply_link_issues(inspection, link_issues, unsafe_paths)
+        if link_loops:
+            inspection.extra.setdefault("structure_issues", {})["symlink_loops"] = len(link_loops)
         inspection.emit()
 
         indexed = f"{inspection.indexed:,}" + ("" if declared is None else f" of {declared:,}")
@@ -1656,6 +1940,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         if reader == "iso":
             findings.extend(self._iso_findings(record, listing.metadata["iso"], out_of_bounds))
         findings.extend(self._link_findings(record, hardlinks, special_entries))
+        findings.extend(self._integrity_findings(record, link_loops, []))
         collisions = _colliding_names(names)
         if collisions:
             findings.append(self._collision_finding(record, collisions))
@@ -1891,6 +2176,84 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         except (_ArchiveBudgetExceeded, _Unsupported, OSError, EOFError, lzma.LZMAError, *ZSTD_ERRORS):
             return None
         return None if more else content
+
+    def _apply_link_issues(self, inspection: _Inspection, issues: dict[str, str], unsafe_paths: list[str]) -> list[str]:
+        """Flag the members a link resolution found; returns the looping ones. A member that
+        leaves the archive through a link joins the traversal evidence."""
+        inspection.add_flags(issues)
+        reported = {item.split(" ", 1)[0] for item in unsafe_paths}
+        for name, issue in issues.items():
+            if issue == "unsafe-path" and name not in reported:
+                unsafe_paths.append(f"{name} (through a symlink)")
+        return sorted(name for name, issue in issues.items() if issue == "symlink-loop")
+
+    def _integrity_findings(self, record: FileRecord, loops: list[str], crc_mismatches: list[str]) -> list[Finding]:
+        findings = []
+        if loops:
+            findings.append(Finding(
+                "security", f"Archive symlink loops: {record.path}",
+                f"{len(loops):,} member(s) resolve through the archive's own symlinks in a circle (more than "
+                f"{_MAX_LINK_HOPS} links): extractors and scanners that follow them loop or fail. Links were "
+                "resolved by name only; nothing was followed on disk.",
+                confidence="CONFIRMED", evidence=[f"{record.path}::{name}" for name in loops[:_MAX_EVIDENCE]],
+                analyzer=self.name, severity="MEDIUM",
+            ))
+        if crc_mismatches:
+            findings.append(Finding(
+                "security", f"ZIP members fail their CRC: {record.path}",
+                f"{len(crc_mismatches):,} member(s) read to their end do not match their CRC-32: the data "
+                "was altered or corrupted after the archive was written. Tools that check CRCs refuse them; "
+                "others extract the altered data.",
+                confidence="CONFIRMED", evidence=[f"{record.path}::{name}" for name in crc_mismatches[:_MAX_EVIDENCE]],
+                analyzer=self.name, severity="MEDIUM",
+            ))
+        return findings
+
+    def _sparse_finding(self, record: FileRecord, members: list[tuple[str, int, int]], limits: _Limits) -> Finding:
+        declared, stored = sum(item[1] for item in members), sum(item[2] for item in members)
+        expanding = [item for item in members if item[1] > max(item[2], 1) * limits.compression_ratio]
+        return Finding(
+            "security" if expanding else "archive", f"Sparse TAR members: {record.path}",
+            f"{len(members):,} sparse member(s) declare {declared:,} bytes from {stored:,} stored bytes"
+            + (f"; {len(expanding):,} expand more than {limits.compression_ratio:g} times. Extracting them on a "
+               "filesystem without sparse files writes their full size (a disk-filling archive)."
+               if expanding else ". Extracting them where sparse files are not supported writes their full size."),
+            confidence="CONFIRMED",
+            evidence=[f"{record.path}::{name} ({size:,} bytes from {data:,} stored)"
+                      for name, size, data in (expanding or members)[:_MAX_EVIDENCE]],
+            analyzer=self.name, severity="HIGH" if expanding else "LOW",
+        )
+
+    def _tar_structure_findings(self, record: FileRecord, segments: _TarSegments) -> list[Finding]:
+        """Headers that fail their checksum and lone zero blocks, where Python's tarfile and 7-Zip
+        stop listing but GNU tar reads on, and data after the end-of-archive blocks."""
+        findings = []
+        resumed = f" PDT read on as GNU tar does and listed {segments.resumed:,} member(s) after them."
+        if segments.corrupt:
+            findings.append(Finding(
+                "security", f"TAR headers fail their checksum: {record.path}",
+                f"{len(segments.corrupt):,} header(s) fail their checksum. Python's tarfile and 7-Zip stop listing "
+                "at the first one; GNU tar skips to the next valid header and extracts what follows, so members "
+                "can hide from tools that stop." + resumed,
+                confidence="CONFIRMED", analyzer=self.name, severity="MEDIUM",
+                evidence=[f"{record.path} (header at offset {offset:,})" for offset in segments.corrupt[:20]],
+            ))
+        if segments.lone_zero:
+            findings.append(Finding(
+                "security", f"Lone zero blocks inside a TAR archive: {record.path}",
+                f"{len(segments.lone_zero):,} single zero block(s) sit between members. Python's tarfile ends a "
+                "listing at one; GNU tar reads on and extracts the members after it." + resumed,
+                confidence="CONFIRMED", analyzer=self.name, severity="MEDIUM",
+                evidence=[f"{record.path} (zero block at offset {offset:,})" for offset in segments.lone_zero[:20]],
+            ))
+        if segments.trailing:
+            findings.append(Finding(
+                "archive", f"Data after the end of a TAR archive: {record.path}",
+                f"{segments.trailing:,} non-zero byte(s) follow the end-of-archive blocks (within the first MiB "
+                "after them). GNU tar ignores them unless run with --ignore-zeros; they may hold a further archive.",
+                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name, severity="LOW",
+            ))
+        return findings
 
     def _package_findings(self, record: FileRecord, package: dict | None) -> list[Finding]:
         """A package that runs code when it is installed: npm install scripts, Python startup

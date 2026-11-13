@@ -65,7 +65,8 @@ def test_a_wheel_names_its_package_and_a_startup_hook_is_install_code(tmp_path: 
 def test_a_zip_package_is_named_even_when_the_wall_time_ends_its_sampling(tmp_path: Path, monkeypatch):
     from project_discovery.analyzers.content import archives
 
-    monkeypatch.setattr(archives, "_MAX_ARCHIVE_WALL_SECONDS", 1e-9)
+    # Already spent when the inspection starts (Windows' monotonic clock ticks every ~15 ms).
+    monkeypatch.setattr(archives, "_MAX_ARCHIVE_WALL_SECONDS", -1.0)
     members = {f"demo/module{index}.py": "x = 1\n" * 100 for index in range(50)}
     members["demo-1.0.dist-info/METADATA"] = _METADATA  # last, as in a wheel
     path = _zip(tmp_path / "demo-1.0-py3-none-any.whl", members)
