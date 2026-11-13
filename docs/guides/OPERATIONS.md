@@ -164,6 +164,50 @@ fresh or resumed:
 | `owners`, `groups`, `owner_sids` | Entries per uid and gid (POSIX), and per owner SID with `--security-metadata` (Windows); the 50 most common by name, the rest as `other`. |
 | `file_timestamps` | The oldest and newest file modification time with its path, files per year (UTC), and the number modified more than a day after the scan started or before 1980, which often marks clock problems, extracted archives or rewritten timestamps. |
 
+## File types and signatures
+
+`file_type` says what a file's content is, read from its first 4 KiB through the same verified
+descriptor as every later read:
+
+- a format label such as `library/elf`, `document/docx` or `ml-model/safetensors` when the leading
+  bytes match a catalogued signature and its header checks out (`type_source: signature`;
+  `signature` repeats the label and `type_detail` says what the header states, such as
+  "PE32+ DLL, x86-64, .NET assembly");
+- otherwise `text`, `binary/unknown` or `empty` (`type_source: content`). Text is UTF-8 without
+  NUL bytes, UTF-16 or UTF-32, or a legacy 8-bit encoding with no NUL and almost no control
+  bytes. Text formats keep `text` and are named in `signature`: scripts by their `#!` line
+  (`script/shell`, `script/python`, ...), PEM blocks, PostScript, RTF, SVG, Intel HEX,
+  S-records and Git LFS pointers. For `binary/unknown`, `type_detail` gives the sample's
+  entropy; 7.5 bits per byte or more suggests compressed or encrypted data.
+
+The type comes from the name only when the content was not read (`type_source: name`):
+`--inventory-only` scans, files that could not be opened, and no-download files that were not
+fetched.
+
+`name_type` is what the name suggests, from a separate catalog of extensions and compound
+suffixes (`.tar.gz`, versioned `.so.1.2`); `source` and `text` come from the language catalog.
+`mime_type` is the content's, a registered or commonly used type (`application/octet-stream`
+for formats without one, `inode/x-empty` for empty files). `type_mismatch` is set when the name
+and the content disagree: a signature the name does not admit (an executable named `.png`),
+text under a binary format's name (an HTML error page saved as `.zip`), binary content under a
+text name, or no signature where the format always has one (a `.png` without the PNG header).
+A Git LFS pointer stands for its file and is counted in `metrics.git_lfs_pointer_count`
+instead. `metrics.type_sources`, `metrics.mime_types` and `metrics.type_mismatches` (pairs such
+as `image/png → executable/elf`) summarize the scan, and the Markdown report lists the first 20
+mismatched files.
+
+Two kinds of file need one further read, from the same descriptor: ISO 9660 and UDF images
+(the volume descriptor at 32 KiB, read when the first 4 KiB are zeros or a boot sector) and OLE
+compound files whose directory lies past the sample (the Word, Excel, PowerPoint, Outlook and
+Windows Installer subtypes). Nothing is decompressed: a `.tar.gz` is `archive/gzip` with
+`name_type` `archive/tar+gzip`, and an Office Open XML package whose part names lie past the
+sample is `document/ooxml`. Formats without a magic number (ONNX and other protocol buffers, raw
+disk images, DMG) are `binary/unknown`.
+
+The C++ classifier matches the same rule table, compiled from the generated
+`native/cpp/pdt_signature_rules.h`, and Python validates each candidate; a build from another
+catalog is not used. An inventory classified with another catalog version is not resumed.
+
 ## Code index and `pdt query`
 
 During analysis, PDT stores code facts (symbols, call sites, referenced names, imports and

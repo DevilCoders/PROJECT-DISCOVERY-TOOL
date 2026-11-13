@@ -1,6 +1,6 @@
 # Security Analyzer Coverage
 
-The built-in secret scanner (`secret-patterns`) streams every textual source, configuration and documentation file, every file whose content is text whatever its name (no NUL bytes in the first 512 bytes, or a UTF-16/32 byte-order mark), `.env` variants, key files (`.pem`, `.key`, `id_rsa`, …), key containers (`.p12`, `.pfx`, `.jks`, `.keystore`, `.bks`) and credential stores (`.git-credentials`, `.pgpass`, `.htpasswd`, `.s3cfg`, kubeconfig, `*.tfstate`, `*.tfvars`, shell histories, `*.log`, `*.conf`), in 8 MiB chunks up to 64 MiB per file. It reports:
+The built-in secret scanner (`secret-patterns`) streams every textual source, configuration and documentation file, every file whose content is text whatever its name (judged from the first 4 KiB: UTF-8 without NUL bytes, UTF-16 or UTF-32, or a legacy 8-bit encoding with almost no control bytes), `.env` variants, key files (`.pem`, `.key`, `id_rsa`, …), key containers (`.p12`, `.pfx`, `.jks`, `.keystore`, `.bks`) and credential stores (`.git-credentials`, `.pgpass`, `.htpasswd`, `.s3cfg`, kubeconfig, `*.tfstate`, `*.tfvars`, shell histories, `*.log`, `*.conf`), in 8 MiB chunks up to 64 MiB per file. It reports:
 
 - **Private-key blocks**: PEM, OpenSSH and PGP `PRIVATE KEY` markers.
 - **Private-key containers**: PKCS#12 (`.p12`, `.pfx`), Java (`.jks`, `.keystore`) and Bouncy Castle (`.bks`) keystores are reported by name as `Private-key container: PATH` (HIGH). Their content is binary and usually encrypted, so it is not decoded.

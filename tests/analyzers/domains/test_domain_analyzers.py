@@ -107,6 +107,33 @@ def test_firmware_image_formats(tmp_path: Path):
     del facts
 
 
+def test_firmware_binaries_are_chosen_by_signature_family(tmp_path: Path):
+    # The inventory labels shared objects library/elf, DLLs library/pe and EFI images
+    # firmware/efi; every ELF and MZ file is still firmware-analyzed, models named .bin are not.
+    from project_discovery.analyzers.domains.firmware import _kind
+
+    def kind(name: str, file_type: str, signature: str | None = None) -> str | None:
+        return _kind(FileRecord(name, 10, Path(name).suffix, "Other", file_type=file_type, signature=signature))
+
+    assert kind("libcrypto.so.3", "library/elf") == "binary"
+    assert kind("module.ko", "object/elf") == "binary"
+    assert kind("helper.dll", "library/pe") == "binary"
+    assert kind("BOOTX64.EFI", "firmware/efi") == "binary"
+    assert kind("uImage", "firmware/uimage") == "binary"
+    assert kind("rootfs.img", "filesystem/squashfs") == "binary"
+    assert kind("pytorch_model.bin", "ml-model/pytorch") is None
+    assert kind("tensors.bin", "dataset/npy") is None
+    assert kind("weights.bin", "binary/unknown") == "binary"
+    # Intel HEX records found by their content are parsed whatever the file is called.
+    content = _ihex([(0, 0, b"\x00\x01\x02\x03"), (0, 1, b"")])
+    assert kind("image.txt", "text", "firmware/intel-hex") == "binary"
+    path = tmp_path / "image.txt"
+    path.write_text(content, encoding="ascii")
+    record = FileRecord("image.txt", path.stat().st_size, ".txt", "Text", file_type="text", signature="firmware/intel-hex")
+    titles = {item.title.split(": ")[0] for item in FirmwareAnalyzer().analyze(path, record)}
+    assert "Intel HEX firmware image" in titles
+
+
 def test_firmware_build_system_risks(tmp_path: Path):
     yocto, _ = run(FirmwareAnalyzer(), tmp_path, "conf/local.conf",
                    "MACHINE ??= \"raspberrypi4\"\nEXTRA_IMAGE_FEATURES ?= \"debug-tweaks\"\n")

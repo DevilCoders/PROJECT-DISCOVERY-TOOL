@@ -90,7 +90,8 @@ class Fields(Analyzer):
     def supports(self, record):
         return (record.size_bucket != "unknown" and record.permissions is not None
                 and record.mtime_ns is not None and record.is_hidden == record.path.startswith(".")
-                and record.file_type == ("source" if record.extension == ".py" else "text"))
+                and record.file_type == "text" and record.type_source == "content"
+                and record.name_type == ("source" if record.extension == ".py" else "text"))
 
     def analyze(self, path, record):
         return []

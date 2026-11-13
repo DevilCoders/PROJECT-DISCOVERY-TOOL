@@ -32,6 +32,23 @@ def test_zip_metadata_path_traversal_symlink_and_encryption_indicators(tmp_path:
     assert path.read_bytes() == before
 
 
+def test_zip_based_documents_and_packages_are_inspected_as_zip_archives(tmp_path: Path):
+    # Signature detection labels a .docx document/docx and a JAR archive/jar, not archive/zip;
+    # both are still ZIP archives (the zip family), so their index is read.
+    path = tmp_path / "report.docx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("../escape.xml", "payload")
+    analyzer = ArchiveIntelligenceAnalyzer()
+    for name, file_type in (("report.docx", "document/docx"), ("plugin.bin", "archive/jar"), ("model.pt", "ml-model/pytorch")):
+        record = FileRecord(name, path.stat().st_size, Path(name).suffix, "Other", file_type=file_type)
+        assert analyzer.supports(record)
+        findings = analyzer.analyze(path, record)
+        assert any("ZIP archive inventory" in item.title for item in findings), name
+        assert any("path traversal" in item.title for item in findings), name
+    assert not analyzer.supports(FileRecord("photo.png", 10, ".png", "Other", file_type="image/png"))
+
+
 def test_tar_symlink_hardlink_and_parent_traversal_metadata(tmp_path: Path):
     path = tmp_path / "bundle.tar"
     with tarfile.open(path, "w") as archive:

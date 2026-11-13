@@ -29,14 +29,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from ..analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
-from ..catalog.languages import detect_language, is_source_path, is_textual_path
+from ..catalog.languages import detect_language
 from ..core.source_utils import prefetched_content
 from ..engine.executor import FileOutcome, _run_analyzers
 from ..intelligence.facts import collecting_facts
 from ..intelligence.python_graph import MAX_GRAPH_AST_FILE_BYTES, parse_python_imports
 from ..inventory.scanner import (
-    _classify_head, _exclusion_match, _size_bucket, development_marker, normalize_exclusions,
+    _exclusion_match, _size_bucket, development_marker, normalize_exclusions,
 )
+from ..inventory.signatures import apply_classification, classify, classify_content
 from ..inventory.links import Flavor, classify_links, store_lookup, stored_links
 from ..inventory.store import InventoryStore, StoredFileRecords, StoredRecordSequence
 from ..models import DirectoryRecord, FileRecord, SpecialEntryRecord, SymlinkRecord
@@ -300,13 +301,13 @@ class NoDownloadSource:
             # GitLab's tree listing has no sizes. Such a file keeps size 0 in the unknown
             # bucket, out of the totals, until its content arrives (see listed_size).
             size = entry.size if entry.size is not None else 0
-            file_type = "source" if is_source_path(entry.path) else "text" if is_textual_path(entry.path) else "binary/unclassified"
             record = FileRecord(
                 entry.path, size, PurePosixPath(name).suffix.lower(), detect_language(entry.path),
-                file_type=file_type,
                 size_bucket=_size_bucket(size) if entry.size is not None else "unknown",
                 is_hidden=hidden, permissions=0o755 if entry.executable else 0o644,
             )
+            # From the name until the content arrives; files never fetched keep it.
+            apply_classification(record, classify(None, entry.path))
             if entry.size is None:
                 stats["size_unknown_count"] += 1
             if size > max_file_bytes and skip_oversized:
@@ -488,9 +489,7 @@ class NoDownloadSource:
             if content is None:
                 return record, None, reason, 0
             path = self.virtual_root / record.path
-            signature = _classify_head(content[:512], record.path)
-            if signature:
-                record.file_type = signature
+            apply_classification(record, classify_content(content, record.path))
             outcome = FileOutcome(digest=hashlib.sha256(content).hexdigest())
             with prefetched_content(path, content, None), collecting_facts() as facts:
                 _run_analyzers(analyzers, locks, record, path, outcome)

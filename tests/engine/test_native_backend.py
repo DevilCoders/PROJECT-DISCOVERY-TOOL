@@ -48,6 +48,35 @@ def test_cpp_signature_classifier_is_compiled_and_recognizes_binary_formats():
     assert native_backend.detect_signature(b"\xfd7zXZ\x00") == "archive/xz"
     assert native_backend.detect_signature(b"SQLite format 3\x00") == "database/sqlite"
     assert native_backend.detect_signature(b"not a recognized signature") is None
+    assert native_backend.capabilities()["cpp_signature_classifier_outdated"] is False
+
+
+def test_the_cpp_rule_table_is_generated_from_the_python_catalog():
+    from pathlib import Path
+
+    from project_discovery.inventory.signatures import RULES, RULES_DIGEST, render_cpp_rules
+
+    header = Path(__file__).resolve().parents[2] / "native" / "cpp" / "pdt_signature_rules.h"
+    assert header.read_bytes().decode("utf-8") == render_cpp_rules(), (
+        "native/cpp/pdt_signature_rules.h is stale: run python tools/signature_rules.py --write"
+    )
+    from project_discovery import _native_cpp
+
+    assert (_native_cpp.RULES_DIGEST, _native_cpp.RULE_COUNT) == (RULES_DIGEST, len(RULES))
+
+
+def test_a_cpp_build_from_another_catalog_falls_back_to_python(monkeypatch):
+    # A C++ classifier compiled from an older table would return other rule indexes; the
+    # Python matcher is used instead, and capabilities say why.
+    from types import SimpleNamespace
+
+    from project_discovery.inventory import signatures
+
+    monkeypatch.setattr(native_backend, "_native_cpp", SimpleNamespace(RULES_DIGEST="stale", match_rule=None))
+    monkeypatch.setattr(signatures, "_CPP_CURRENT", False)
+    info = native_backend.capabilities()
+    assert info["cpp_signature_classifier"] is False and info["cpp_signature_classifier_outdated"] is True
+    assert signatures.detect(b"\x7fELF\x02\x01\x01" + b"\0" * 60).label == "executable/elf"
 
 def test_rust_filesystem_walker_is_built_and_available():
     assert native_backend.rust_walker_available()

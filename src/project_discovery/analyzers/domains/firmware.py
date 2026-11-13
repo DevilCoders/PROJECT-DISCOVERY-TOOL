@@ -28,6 +28,7 @@ from pathlib import Path, PurePosixPath
 
 from ...core.source_utils import SourceBudgetExceeded, open_verified_binary, read_text_bounded
 from ...intelligence import facts as code_facts
+from ...inventory.signatures import family_of
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -75,8 +76,13 @@ _COMPONENT_STRINGS = (
 _COMPONENT_HINT = re.compile(rb"U-Boot |Linux version |BusyBox v|OpenSSL \d|FreeRTOS|Zephyr OS|ESP-IDF|IDF_VER|"
                              rb"dropbear_|bed ?TLS |lwIP/")
 _ENTROPY_SAMPLE = 64 * 1024
-# Containers handled elsewhere (archives, media, documents): not firmware even as .bin.
-_NOT_FIRMWARE_TYPES = ("archive/", "image/", "audio/", "video/", "document/", "font/", "database/")
+# Containers handled elsewhere (archives, media, documents, models, datasets): not firmware
+# even as .bin, such as a pytorch_model.bin.
+_NOT_FIRMWARE_TYPES = (
+    "archive/", "image/", "audio/", "video/", "document/", "font/", "database/", "dataset/", "ml-model/",
+    "data/", "vcs/", "crypto/", "3d-model/", "game-asset/", "bytecode/", "package/", "email/", "core-dump/",
+    "library/static",
+)
 _BINARY_EXTENSIONS = frozenset({
     ".elf", ".axf", ".bin", ".img", ".fw", ".rom", ".dtb", ".dtbo", ".itb", ".uimage", ".ub", ".trx", ".chk",
     ".ota", ".squashfs", ".sqsh", ".ubi", ".jffs2", ".cramfs", ".ext4", ".ext2", ".uf2", ".hex", ".ihex", ".ihx",
@@ -115,7 +121,10 @@ def _kind(record: FileRecord) -> str | None:
     name = PurePosixPath(posix).name
     lower = name.lower()
     suffix = PurePosixPath(lower).suffix
-    if record.file_type in {"executable/elf", "executable/pe"} or suffix == ".efi":
+    # Every ELF and MZ (PE, DOS, EFI) file, and firmware and filesystem images by signature.
+    if family_of(record.file_type) in ("elf", "mz") or suffix == ".efi":
+        return "binary"
+    if record.file_type.startswith(("firmware/", "filesystem/")) or (record.signature or "").startswith("firmware/"):
         return "binary"
     if suffix in _BINARY_EXTENSIONS and not record.file_type.startswith(_NOT_FIRMWARE_TYPES):
         return "binary"
@@ -172,9 +181,12 @@ class FirmwareAnalyzer(Analyzer):
             head = stream.read(4096)
             if head.startswith(b"\x7fELF"):
                 return self._elf(stream, record, head)
-            if lower.endswith((".hex", ".ihex", ".ihx")) and head.lstrip()[:1] == b":":
+            # By name, or by the content signature the inventory verified (any name).
+            hex_records = lower.endswith((".hex", ".ihex", ".ihx")) or record.signature == "firmware/intel-hex"
+            if hex_records and head.lstrip()[:1] == b":":
                 return self._intel_hex(stream, record, head)
-            if lower.endswith((".srec", ".s19", ".s28", ".s37", ".mot")) and head.lstrip()[:1] == b"S":
+            s_records = lower.endswith((".srec", ".s19", ".s28", ".s37", ".mot")) or record.signature == "firmware/srec"
+            if s_records and head.lstrip()[:1] == b"S":
                 return self._srecord(stream, record, head)
             if len(head) >= 512 and struct.unpack_from("<II", head, 0) == (0x0A324655, 0x9E5D5157):
                 return self._uf2(stream, record, head)

@@ -115,6 +115,11 @@ def test_no_download_scan_end_to_end_for_each_provider(provider, tmp_path: Path,
     assert files["assets/big.bin"]["size_bytes"] == 1536 * 1024
     assert files["src/app.py"]["sha256"]
     assert files["tools/run.sh"]["permissions"] == 0o755
+    # File types come from the fetched content, as in a local scan.
+    script = files["tools/run.sh"]
+    assert (script["file_type"], script["type_source"], script["mime_type"]) == ("text", "content", "text/x-shellscript")
+    assert (files["pkg/__init__.py"]["file_type"], files["pkg/__init__.py"]["name_type"]) == ("empty", "source")
+    assert report["metrics"]["type_sources"].get("content", 0) >= 7
     links = {item["path"]: item for item in report["symlinks"]}
     assert links["docs/readme-link"]["target"] == "../README.md"
     assert links["docs/readme-link"]["target_scope"] == "internal"

@@ -94,6 +94,30 @@ def _link_outcome(item) -> str:
     return f"{state}: {detail}" if detail else state
 
 
+_TYPE_SOURCES = ("signature", "content", "name")
+_MISMATCH_EXAMPLES = 20
+
+
+def type_summary(metrics: dict[str, Any]) -> list[tuple[str, str]]:
+    """(label, text) lines on how file types were determined, shared by the terminal and Markdown."""
+    sources = metrics.get("type_sources") or {}
+    if not sources:
+        return []
+    lines = [("File types determined by", ", ".join(
+        f"{name} {sources.get(name, 0):,}" for name in _TYPE_SOURCES if name in sources or name != "name"
+    ))]
+    if metrics.get("mime_types"):
+        lines.append(("MIME types", attribute_summary(metrics["mime_types"], limit=6)))
+    mismatches = metrics.get("type_mismatches") or {}
+    if mismatches.get("count"):
+        lines.append(("Name/content mismatches", (
+            f"{mismatches['count']:,} ({attribute_summary(mismatches.get('pairs') or {}, limit=4)})"
+        )))
+    if metrics.get("git_lfs_pointer_count"):
+        lines.append(("Git LFS pointers", f"{metrics['git_lfs_pointer_count']:,} (content not in the tree)"))
+    return lines
+
+
 def _utc_date(mtime_ns: int) -> str:
     from datetime import datetime, timezone
 
@@ -374,6 +398,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>Development dependency trees</h3><div id="development-dirs"></div></div>
      <div class="profile-card"><h3>Entry attributes</h3><div id="entry-attributes"></div></div>
      <div class="profile-card"><h3>Directory fan-out</h3><div id="fan-out"></div></div>
+     <div class="profile-card"><h3>MIME types</h3><div id="mime-types"></div></div>
      <div class="profile-card"><h3>Host & native engine</h3><div id="host-os" class="mono muted"></div></div>
      <div class="profile-card"><h3>Vulnerability intelligence</h3><div id="vuln-summary" class="mono muted"></div></div>
      <div class="profile-card"><h3>Source control & delivery</h3><div id="vcs-summary" class="mono muted"></div></div>
@@ -536,6 +561,10 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
             "extension": item.extension,
             "language": item.language,
             "file_type": item.file_type,
+            "type_source": item.type_source,
+            "mime_type": item.mime_type,
+            "name_type": item.name_type,
+            "type_mismatch": item.type_mismatch,
             "size_bucket": item.size_bucket,
             "is_hidden": item.is_hidden,
             "permissions": item.permissions,
@@ -700,6 +729,24 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
     for name, count in sorted(metrics.get("file_types", {}).items()):
         line(f"- {_md(name)}: {count:,}")
     line()
+    summary_lines = type_summary(metrics)
+    for label, text in summary_lines:
+        line(f"- {label}: {_md(text)}")
+    if summary_lines:
+        line()
+    if (metrics.get("type_mismatches") or {}).get("count"):
+        line(f"Files whose name and content disagree (first {_MISMATCH_EXAMPLES}):")
+        line()
+        shown = 0
+        for item in result.files:
+            if not getattr(item, "type_mismatch", False):
+                continue
+            detail = f" ({_md(item.type_detail)})" if item.type_detail else ""
+            line(f"- {_md(item.path)}: the name suggests {_md(item.name_type)}, the content is {_md(item.file_type)}{detail}")
+            shown += 1
+            if shown >= _MISMATCH_EXAMPLES:
+                break
+        line()
     line("## File Size Distribution")
     line()
     for name, count in sorted(metrics.get("size_buckets", {}).items()):

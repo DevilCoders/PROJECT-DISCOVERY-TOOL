@@ -34,19 +34,19 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | C | source | structure | structural lexer, refined by Tree-sitter `c` | c | code-index, concurrency, dataflow, embedded, performance-hotspots, resource-management, tree-sitter-polyglot | 12 |
 | C# | source | structure | structural lexer, refined by Tree-sitter `csharp` | csharp | code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 13 |
 | C++ | source | structure | structural lexer, refined by Tree-sitter `cpp` | cpp | code-index, concurrency, dataflow, embedded, performance-hotspots, resource-management, ros-intelligence, tree-sitter-polyglot | 4 |
-| C/C++ Header | source | structure | structural lexer, refined by Tree-sitter `cpp` | — | code-index, concurrency, dataflow, embedded, performance-hotspots, resource-management | 5 |
+| C/C++ Header | source | structure | structural lexer, refined by Tree-sitter `cpp` | — | code-index, concurrency, dataflow, embedded, performance-hotspots, resource-management | 6 |
 | Clojure | source | optional parser | — | clojure | tree-sitter-polyglot | 2 |
 | CMake | build | optional parser | — | cmake | secret-patterns, tree-sitter-polyglot | 2 |
 | COBOL | source | optional parser | — | cobol | tree-sitter-polyglot | 3 |
 | Crystal | source | optional parser | — | crystal | tree-sitter-polyglot | 0 |
-| CSS | stylesheet | optional parser | — | css | secret-patterns, tree-sitter-polyglot | 0 |
+| CSS | stylesheet | optional parser | — | css | secret-patterns, tree-sitter-polyglot | 1 |
 | CUDA | gpu | structure | structural lexer, refined by Tree-sitter `cuda` | cuda | code-index, concurrency, dataflow, performance-hotspots, resource-management, tree-sitter-polyglot | 5 |
 | D | source | optional parser | — | d | tree-sitter-polyglot | 0 |
 | Dart | source | structure | structural lexer | dart | code-index, concurrency, mobile-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot | 1 |
 | Defold Collection | game_source | inventory | — | — | — | 0 |
 | Defold Script | game_source | inventory | — | — | — | 0 |
 | Device Tree | configuration | inventory | — | — | secret-patterns | 0 |
-| Device Tree Blob | firmware | inventory | — | — | — | 0 |
+| Device Tree Blob | firmware | inventory | — | — | — | 1 |
 | Dockerfile | configuration | optional parser | — | dockerfile | secret-patterns, tree-sitter-polyglot | 3 |
 | ELF Binary | firmware | inventory | — | — | — | 2 |
 | Elixir | source | optional parser | — | elixir | migration-intelligence, tree-sitter-polyglot | 7 |
@@ -72,10 +72,10 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | HLSL | shader | structure | structural lexer | hlsl | code-index, concurrency, dataflow, performance-hotspots, resource-management, shaders, tree-sitter-polyglot | 1 |
 | HTML | markup | optional parser | — | html | accessibility-markup, secret-patterns, tree-sitter-polyglot | 4 |
 | INI | configuration | inventory | — | — | secret-patterns | 7 |
-| Intel HEX | firmware | inventory | — | — | — | 1 |
+| Intel HEX | firmware | inventory | — | — | — | 2 |
 | Java | source | structure | structural lexer, refined by Tree-sitter `java` | java | code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 10 |
 | JavaScript | source | structure | structural lexer, refined by Tree-sitter `javascript` | javascript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 25 |
-| JSON | data | optional parser | — | json | ai-ml-intelligence, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 34 |
+| JSON | data | optional parser | — | json | ai-ml-intelligence, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 35 |
 | Julia | source | optional parser | — | julia | tree-sitter-polyglot | 4 |
 | Jupyter Notebook | notebook | inventory | — | — | ai-ml-intelligence, secret-patterns | 1 |
 | Kconfig | configuration | inventory | — | — | secret-patterns | 1 |
@@ -86,10 +86,10 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Lua | source | optional parser | — | lua | tree-sitter-polyglot | 1 |
 | LÖVE Configuration | build | inventory | — | — | secret-patterns | 0 |
 | Makefile | build | optional parser | — | make | secret-patterns, tree-sitter-polyglot | 1 |
-| Markdown | documentation | optional parser | — | markdown | markdown, secret-patterns, tree-sitter-polyglot | 19 |
+| Markdown | documentation | optional parser | — | markdown | markdown, secret-patterns, tree-sitter-polyglot | 20 |
 | Meson | build | inventory | — | — | secret-patterns | 1 |
 | Metal Shading Language | shader | structure | structural lexer | — | code-index, concurrency, dataflow, performance-hotspots, resource-management, shaders | 0 |
-| Motorola S-record | firmware | inventory | — | — | — | 0 |
+| Motorola S-record | firmware | inventory | — | — | — | 1 |
 | Move | source | inventory | — | — | — | 1 |
 | Nim | source | optional parser | — | nim | tree-sitter-polyglot | 2 |
 | Nix | configuration | optional parser | — | nix | secret-patterns, tree-sitter-polyglot | 1 |
@@ -99,14 +99,14 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Odin | source | optional parser | — | odin | tree-sitter-polyglot | 1 |
 | OpenCL | gpu | structure | structural lexer | — | code-index, concurrency, dataflow, performance-hotspots, resource-management | 0 |
 | Pascal | source | optional parser | — | pascal | tree-sitter-polyglot | 0 |
-| PDF | document | inventory | — | — | — | 3 |
+| PDF | document | inventory | — | — | — | 4 |
 | Perl | source | optional parser | — | perl | tree-sitter-polyglot | 0 |
 | PHP | source | structure | structural lexer, refined by Tree-sitter `php` | php | code-index, concurrency, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot | 6 |
 | PL/SQL | source | inventory | — | — | — | 0 |
 | PowerShell | source | optional parser | — | powershell | tree-sitter-polyglot | 2 |
 | Prisma | schema | inventory | — | — | prisma-schema | 2 |
 | Protocol Buffers | schema | optional parser | — | proto | tree-sitter-polyglot | 2 |
-| Python | source | semantic | syntax tree | — | ai-ml-intelligence, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 46 |
+| Python | source | semantic | syntax tree | — | ai-ml-intelligence, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 47 |
 | R | source | optional parser | — | r | tree-sitter-polyglot | 1 |
 | ReasonML | source | inventory | — | — | — | 0 |
 | Ren'Py | game_source | inventory | — | — | game-engine-intelligence | 1 |
@@ -121,17 +121,17 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | ShaderLab | shader | inventory | — | — | shaders | 0 |
 | Shell | source | optional parser | — | bash | tree-sitter-polyglot | 4 |
 | Solidity | source | structure | structural lexer, refined by Tree-sitter `solidity` | solidity | code-index, concurrency, performance-hotspots, resource-management, tree-sitter-polyglot | 5 |
-| SPIR-V Binary | binary_shader | inventory | — | — | shaders | 1 |
+| SPIR-V Binary | binary_shader | inventory | — | — | shaders | 2 |
 | SQL | source | optional parser | — | sql | migration-intelligence, sql-schema, tree-sitter-polyglot | 5 |
 | STM32CubeMX Project | configuration | inventory | — | — | secret-patterns | 1 |
 | Svelte | source | structure | structural lexer | — | accessibility-markup, code-index, concurrency, dataflow, frontend, performance-hotspots, resource-management, type-systems | 1 |
 | Swift | source | structure | structural lexer, refined by Tree-sitter `swift` | swift | code-index, concurrency, mobile-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 4 |
 | SystemVerilog | source | optional parser | — | systemverilog | hdl, tree-sitter-polyglot | 2 |
-| Text | documentation | inventory | — | — | secret-patterns | 28 |
+| Text | documentation | inventory | — | — | secret-patterns | 30 |
 | Thrift | schema | inventory | — | — | — | 0 |
 | TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 5 |
-| TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 17 |
-| UF2 Firmware | firmware | inventory | — | — | — | 1 |
+| TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 18 |
+| UF2 Firmware | firmware | inventory | — | — | — | 2 |
 | Unity Asset YAML | game_source | inventory | — | — | — | 0 |
 | Unity Prefab | game_source | inventory | — | — | — | 0 |
 | Unity Scene | game_source | inventory | — | — | — | 0 |
@@ -143,10 +143,10 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Visual Basic .NET | source | inventory | — | — | — | 0 |
 | Vue | source | structure | structural lexer | — | accessibility-markup, code-index, concurrency, dataflow, frontend, performance-hotspots, resource-management, type-systems | 4 |
 | WGSL | shader | structure | structural lexer | wgsl | code-index, concurrency, performance-hotspots, resource-management, shaders, tree-sitter-polyglot | 4 |
-| Word Document | document | inventory | — | — | — | 3 |
+| Word Document | document | inventory | — | — | — | 5 |
 | XAML | markup | inventory | — | — | secret-patterns | 0 |
 | XLIFF | localization | inventory | — | — | localization-intelligence, secret-patterns | 1 |
-| XML | markup | optional parser | — | xml | localization-intelligence, migration-intelligence, ros-intelligence, secret-patterns, tree-sitter-polyglot | 12 |
+| XML | markup | optional parser | — | xml | localization-intelligence, migration-intelligence, ros-intelligence, secret-patterns, tree-sitter-polyglot | 13 |
 | YAML | data | optional parser | — | yaml | localization-intelligence, migration-intelligence, secret-patterns, tree-sitter-polyglot | 19 |
 | Zig | source | structure | structural lexer | zig | code-index, concurrency, performance-hotspots, resource-management, tree-sitter-polyglot | 1 |
 

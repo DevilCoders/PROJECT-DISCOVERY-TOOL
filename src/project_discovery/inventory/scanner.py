@@ -9,11 +9,9 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 
-from ..catalog.languages import detect_language, is_source_path, is_textual_path
-from ..core.source_utils import FileIdentity, as_identity, identity_matches, stat_identity, text_encoding
-from ..engine.native import count_byte as native_count_byte
+from ..catalog.languages import detect_language
+from ..core.source_utils import FileIdentity, as_identity, identity_matches, stat_identity
 from ..engine.native import create_walker as native_create_walker
-from ..engine.native import detect_signature as native_detect_signature
 from ..models import DirectoryRecord, FileRecord, SpecialEntryRecord, SymlinkRecord
 from .entry_metadata import (
     WINDOWS_SPECIAL_TAGS,
@@ -26,6 +24,15 @@ from .entry_metadata import (
     stat_ownership,
 )
 from .links import classify_links, local_flavor, memory_lookup, root_components, store_lookup, stored_links
+from .signatures import (
+    CATALOG_VERSION,
+    SAMPLE_BYTES,
+    Classification,
+    apply_classification,
+    count_classification,
+    probe_offsets,
+)
+from .signatures import classify as classify_sample
 from .store import InventoryStore, StoredFileRecords, StoredRecordSequence
 
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
@@ -194,8 +201,13 @@ def _is_link_like(info: os.stat_result) -> bool:
 def _read_verified_sample(
     path: Path,
     expected_info: os.stat_result | FileIdentity | None = None,
+    probes: dict[int, bytes] | None = None,
 ) -> tuple[bytes, FileIdentity]:
-    """Read 512 bytes from a verified descriptor; return them with the opened identity."""
+    """Read the signature sample from a verified descriptor; return it with the opened identity.
+
+    The sample is the first SAMPLE_BYTES; ``probes`` receives the further reads the sample
+    needs (an ISO 9660 volume descriptor, an OLE directory), from the same descriptor.
+    """
     # os.stat_result is itself a tuple subclass; only plain tuples are walker identities.
     walker_stat = isinstance(expected_info, os.stat_result)
     before = expected_info if walker_stat else path.lstat()
@@ -222,7 +234,12 @@ def _read_verified_sample(
         ):
             raise OSError(f"file identity changed during signature read: {path}")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            return stream.read(512), opened_identity
+            sample = stream.read(SAMPLE_BYTES)
+            if probes is not None:
+                for offset, length in probe_offsets(sample, opened.st_size):
+                    stream.seek(offset)
+                    probes[offset] = stream.read(length)
+            return sample, opened_identity
     finally:
         os.close(descriptor)
 
@@ -231,167 +248,39 @@ def _read_signature_sample(
     path: Path,
     expected_info: os.stat_result | FileIdentity | None = None,
 ) -> bytes:
-    """Read 512 bytes from a verified descriptor matching walker metadata."""
+    """Read the signature sample from a verified descriptor matching walker metadata."""
     return _read_verified_sample(path, expected_info)[0]
-
-
-def _is_deb(head: bytes, relative_path: str) -> bool:
-    return head.startswith(b"!<arch>\ndebian-binary") or relative_path.lower().endswith((".deb", ".udeb"))
-
-
-def _classify_head(head: bytes, relative_path: str) -> str | None:
-    """Classify common binary formats from a bounded signature sample."""
-    if not head:
-        return None
-    native_type = native_detect_signature(head)
-    if native_type == "archive/ar" and _is_deb(head, relative_path):
-        return "archive/deb"
-    if native_type:
-        return native_type
-
-    # Portable fallback signature catalog.
-    if head.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
-        return "archive/zip"
-    if head.startswith(b"\x1f\x8b"):
-        return "archive/gzip"
-    if head.startswith(b"BZh"):
-        return "archive/bzip2"
-    if head.startswith(b"\xfd7zXZ\x00"):
-        return "archive/xz"
-    if head.startswith(b"\x28\xb5\x2f\xfd"):
-        return "archive/zstandard"
-    if head.startswith(b"7z\xbc\xaf\x27\x1c"):
-        return "archive/7z"
-    if head.startswith(b"Rar!\x1a\x07"):
-        return "archive/rar"
-    if head.startswith(b"MSCF"):
-        return "archive/cab"
-    if head.startswith(b"!<arch>"):
-        # A Debian package is an ar archive whose first member is debian-binary.
-        return "archive/deb" if _is_deb(head, relative_path) else "archive/ar"
-    if head.startswith(b"\xed\xab\xee\xdb"):
-        return "archive/rpm"
-    if len(head) >= 262 and head[257:262] == b"ustar":
-        return "archive/tar"
-
-    # Documents, executable formats, databases and media.
-    if head.startswith(b"%PDF-"):
-        return "document/pdf"
-    if head.startswith(b"\x7fELF"):
-        return "executable/elf"
-    if head.startswith(b"MZ"):
-        return "executable/pe"
-    if head[:4] in {
-        b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe",
-        b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
-        b"\xca\xfe\xba\xbe",
-    }:
-        return "executable/mach-o-or-fat"
-    if head.startswith(b"SQLite format 3\x00"):
-        return "database/sqlite"
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if head.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if head.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if head.startswith(b"BM"):
-        return "image/bmp"
-    if head.startswith((b"II*\x00", b"MM\x00*")):
-        return "image/tiff"
-    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
-        return "image/webp"
-    if head.startswith(b"RIFF") and head[8:12] == b"WAVE":
-        return "audio/wav"
-    if head.startswith(b"ID3") or head[:2] in {b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"}:
-        return "audio/mpeg"
-    if len(head) >= 12 and head[4:8] == b"ftyp":
-        return "video/mp4"
-    if head.startswith(b"wOFF"):
-        return "font/woff"
-    if head.startswith(b"wOF2"):
-        return "font/woff2"
-    if head.startswith(b"OTTO"):
-        return "font/otf"
-    if head.startswith(b"\x00\x01\x00\x00"):
-        return "font/ttf"
-
-    # TAR and package formats with extension-specific signatures/containers.
-    lower = relative_path.lower()
-    if lower.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")):
-        return "archive/tar-or-compressed-tar"
-    if lower.endswith(".iso"):
-        return "archive/iso-detected-by-extension"
-    if native_count_byte(head, 0) > 0:
-        return "binary/unknown"
-    return None
-
-
-def _signature_type(
-    path: Path,
-    relative_path: str,
-    expected_info: os.stat_result | FileIdentity | None = None,
-) -> str | None:
-    """Classify common binary formats from a bounded, no-follow signature sample."""
-    try:
-        head = _read_signature_sample(path, expected_info)
-    except OSError:
-        return None
-    return _classify_head(head, relative_path)
 
 
 def _classify_file(
     path: Path,
     relative_path: str,
     expected_info: os.stat_result | FileIdentity | None = None,
-) -> tuple[str, FileIdentity | None]:
-    """Return the file type and the descriptor-verified identity observed while sampling."""
-    try:
-        head, opened_identity = _read_verified_sample(path, expected_info)
-    except OSError:
-        head, opened_identity = b"", None
-    signature = _classify_head(head, relative_path)
-    if signature:
-        return signature, opened_identity
-    if is_source_path(relative_path):
-        return "source", opened_identity
-    if is_textual_path(relative_path) or _looks_textual(head):
-        return "text", opened_identity
-    return "binary/unclassified", opened_identity
+) -> tuple[Classification, FileIdentity | None]:
+    """The file's classification and the descriptor-verified identity observed while sampling.
 
-
-def _looks_textual(head: bytes) -> bool:
-    """Whether a sample is text whatever the file is called.
-
-    .git-credentials, .pgpass, kubeconfig and *.tfstate have no catalogued extension; typed
-    binary, they were never secret-scanned and the report read clean. Text is a UTF-16/32
-    mark (or NUL-interleaved ASCII), or a sample without NUL bytes that decodes as UTF-8
-    (a character cut at the sample end is allowed).
+    The type comes from the content: a catalogued signature, text (including text formats
+    such as scripts), binary without a known signature, or empty. A file that cannot be
+    read is classified by its name (type_source "name"); what the name suggests is
+    recorded either way, apart from the content's type.
     """
-    if not head:
-        return False
-    if text_encoding(head) != "utf-8":
-        return True
-    if b"\x00" in head:
-        return False
+    probes: dict[int, bytes] = {}
     try:
-        head.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        return exc.start >= len(head) - 3 and exc.reason == "unexpected end of data"
-    return True
+        sample, opened_identity = _read_verified_sample(path, expected_info, probes)
+    except OSError:
+        return classify_sample(None, relative_path), None
+    # The size of the opened file (identities are device, inode, size, mtime, ctime).
+    size = opened_identity[2] if opened_identity is not None else None
+    return classify_sample(sample, relative_path, size=size, probes=probes), opened_identity
 
 
 def _classify_name_only(
     path: Path,
     relative_path: str,
     expected_info: os.stat_result | FileIdentity | None = None,
-) -> tuple[str, FileIdentity | None]:
+) -> tuple[Classification, FileIdentity | None]:
     """The file type from its name alone; nothing is opened (inventory-only scans)."""
-    if is_source_path(relative_path):
-        return "source", None
-    if is_textual_path(relative_path):
-        return "text", None
-    return "unclassified", None
+    return classify_sample(None, relative_path), None
 
 
 def _file_type(
@@ -399,7 +288,7 @@ def _file_type(
     relative_path: str,
     expected_info: os.stat_result | FileIdentity | None = None,
 ) -> str:
-    return _classify_file(path, relative_path, expected_info)[0]
+    return _classify_file(path, relative_path, expected_info)[0].file_type
 
 
 
@@ -515,6 +404,8 @@ def inventory_options(
         "exclude_names": sorted(excluded_names),
         "exclude_paths": sorted(excluded_paths),
         "security_metadata": bool(security_metadata),
+        # File types from another catalog version would mix with this one's.
+        "signature_catalog": CATALOG_VERSION,
     }
 
 
@@ -684,11 +575,11 @@ def _discover_with_rust(
             file_identity = (
                 device_id, inode_id, size, mtime_ns, ctime_ns,
             ) if device_id is not None and inode_id is not None else None
-            file_type, opened_identity = (classify or _classify_file)(path, relative, file_identity)
+            classification, opened_identity = (classify or _classify_file)(path, relative, file_identity)
             language = detect_language(relative)
             record = FileRecord(
                 relative, size, Path(relative).suffix.lower(), language,
-                file_type=file_type, size_bucket=_size_bucket(size),
+                size_bucket=_size_bucket(size),
                 is_hidden=hidden, permissions=mode, mtime_ns=mtime_ns,
                 uid=uid, gid=gid, attributes=attribute_names(attribute_bits),
                 reparse_tag=reparse_tag_name(reparse_tag),
@@ -696,6 +587,7 @@ def _discover_with_rust(
                 # cannot report a file ID itself.
                 analysis_identity=opened_identity or file_identity,
             )
+            apply_classification(record, classification)
             _record_metadata(record, str(path), kind, stats, security_metadata)
             if size > max_file_bytes and skip_oversized:
                 record.content_skipped_reason = (
@@ -708,7 +600,7 @@ def _discover_with_rust(
                 store.append("file", record)
                 _update_file_ancestor_totals(relative, size, store)
             stats["total_bytes"] += size
-            stats[f"file_type:{file_type}"] += 1
+            count_classification(stats, record)
             stats[f"size_bucket:{record.size_bucket}"] += 1
             stats[f"language:{language}"] += 1
             continue
@@ -824,7 +716,7 @@ def discover_inventory(
     symlinks: list[SymlinkRecord] = []
     special_entries: list[SpecialEntryRecord] = []
     # read_signatures=False (inventory-only): no file is opened, not even for the
-    # 512-byte signature probe, so file types come from names alone.
+    # signature sample, so file types come from names alone.
     classify = _classify_file if read_signatures else _classify_name_only
     used_rust = _discover_with_rust(
         root, excluded_names, excluded_paths, max_file_bytes, skip_oversized,
@@ -957,14 +849,13 @@ def discover_inventory(
 
             if stat.S_ISREG(info.st_mode) and windows_special is None:
                 size = info.st_size
-                file_type, opened_identity = classify(Path(entry.path), relative, info)
+                classification, opened_identity = classify(Path(entry.path), relative, info)
                 language = detect_language(relative)
                 file_record = FileRecord(
                     relative,
                     size,
                     Path(entry.name).suffix.lower(),
                     language,
-                    file_type=file_type,
                     size_bucket=_size_bucket(size),
                     is_hidden=hidden,
                     permissions=_mode(info),
@@ -975,6 +866,7 @@ def discover_inventory(
                     reparse_tag=tag_name,
                     analysis_identity=opened_identity or stat_identity(info),
                 )
+                apply_classification(file_record, classification)
                 _record_metadata(file_record, entry.path, "file", stats, security_metadata)
                 if size > max_file_bytes and skip_oversized:
                     file_record.content_skipped_reason = (
@@ -987,7 +879,7 @@ def discover_inventory(
                     store.append("file", file_record)
                     _update_file_ancestor_totals(relative, size, store)
                 stats["total_bytes"] += size
-                stats[f"file_type:{file_type}"] += 1
+                count_classification(stats, file_record)
                 stats[f"size_bucket:{file_record.size_bucket}"] += 1
                 stats[f"language:{language}"] += 1
                 continue

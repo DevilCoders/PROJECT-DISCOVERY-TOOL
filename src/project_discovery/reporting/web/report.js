@@ -66,6 +66,7 @@ fillBars("development-dirs",metrics.development_directories);
 fillBars("entry-attributes",metrics.entry_attributes);
 const aggregates=metrics.inventory_aggregates||{};
 fillBars("fan-out",(aggregates.fan_out||{}).buckets);
+fillBars("mime-types",metrics.mime_types);
 $("host-os").textContent=JSON.stringify({
  host:metrics.host_os||{},
  native_backend:metrics.native_backend||{backend:"not reported"}
@@ -256,6 +257,8 @@ $("inventory-summary").textContent=number(total("files"))+" files • "+
  " hidden entries • "+number(metrics.development_directory_count||0)+" development/cache trees • "+
  number(metrics.pruned_directory_count||0)+" explicitly pruned directories"+
  (aggregates.empty_directory_count===undefined?"":" • "+number(aggregates.empty_directory_count)+" empty directories")+
+ ((metrics.type_mismatches||{}).count?" • "+number(metrics.type_mismatches.count)+" name/content type mismatches":"")+
+ (metrics.git_lfs_pointer_count?" • "+number(metrics.git_lfs_pointer_count)+" Git LFS pointers":"")+
  ((aggregates.hard_links||{}).supported?" • "+number(aggregates.hard_links.hard_linked_files)+" hard-linked files":"")+
  (function(security){
   if(!security||!security.enabled)return "";
@@ -354,10 +357,13 @@ function renderFiles(reset){
   const item=files[fileScanIndex++];
   if(!fileMatchesFilter(item,query,kind))continue;
   const tr=document.createElement("tr");
-  const flags=entryFlags([item.is_hidden?"hidden":null,item.content_skipped_reason?"content skipped":null,item.error?"error":null],item.attributes);
+  const flags=entryFlags([item.is_hidden?"hidden":null,item.content_skipped_reason?"content skipped":null,item.error?"error":null,
+   item.type_mismatch?"name suggests "+(item.name_type||"another type"):null],item.attributes);
   for(const pair of [[item.path,"path"],[formatBytes(item.size_bytes),""],[item.file_type||"unknown",""],[item.language,""],[flags,""]]){
    const td=document.createElement("td");td.textContent=String(pair[0]);td.className=pair[1];tr.append(td);
   }
+  // The type cell: the MIME type and how the type was determined, on hover.
+  if(item.mime_type)tr.children[2].title=item.mime_type+(item.type_source?" (from the "+item.type_source+")":"");
   fileRows.append(tr);rendered++;fileOffset++;
  }
  $("file-page-info").textContent="Showing "+number(fileOffset)+" of "+number(fileMatchCount)+" matching files";

@@ -139,7 +139,7 @@ def test_json_reports_carry_the_scan_summary(tmp_path: Path):
         "remote": _result(remote=_remote_metadata(), online=_online_status()),
     }.items():
         payload = json.loads(write_reports(result, tmp_path / name, {"json"})[0].read_text(encoding="utf-8"))
-        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.11"
+        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.12"
         assert payload["scan"] == scan_summary(result.metrics)
     assert payload["scan"]["remote"]["url"] == "https://github.com/acme/widgets"
     assert payload["metrics"]["vulnerability_intelligence"]["online"]["cache"]["hits"] == 2
@@ -378,6 +378,39 @@ def test_reports_summarize_entry_attributes_and_security_metadata(tmp_path: Path
     dump = _render_html_client(plain, tmp_path / "plain")
     assert dump["entry-attributes"]["text"] == "No entries"
     assert "security metadata" not in dump["inventory-summary"]["text"]
+
+
+def test_reports_show_type_sources_mime_types_and_mismatches(tmp_path: Path):
+    result = _result()
+    lockfile = result.files[0]
+    lockfile.type_source, lockfile.mime_type, lockfile.name_type = "content", "text/plain", "text"
+    result.files.append(FileRecord(
+        "photo.png", 64, ".png", "Other", file_type="executable/elf", type_source="signature",
+        signature="executable/elf", type_detail="ELF 64-bit LSB executable, x86-64",
+        mime_type="application/x-executable", name_type="image/png", type_mismatch=True,
+    ))
+    result.metrics.update({
+        "type_sources": {"signature": 1, "content": 1},
+        "mime_types": {"text/plain": 3, "application/x-executable": 1},
+        "type_mismatches": {"count": 1, "pairs": {"image/png → executable/elf": 1}},
+        "git_lfs_pointer_count": 2,
+    })
+    markdown = write_reports(result, tmp_path, {"markdown"})[0].read_text(encoding="utf-8")
+    assert "- File types determined by: signature 1, content 1" in markdown
+    assert "- MIME types: text/plain 3, application/x-executable 1" in markdown
+    assert "- Name/content mismatches: 1 (image/png → executable/elf 1)" in markdown
+    assert "- Git LFS pointers: 2 (content not in the tree)" in markdown
+    assert ("- photo.png: the name suggests image/png, the content is executable/elf "
+            "(ELF 64-bit LSB executable, x86-64)") in markdown
+    dump = _render_html_client(result, tmp_path)
+    assert [row[0] for row in dump["mime-types"]["rows"]] == ["text/plain", "application/x-executable"]
+    assert " • 1 name/content type mismatches • 2 Git LFS pointers" in dump["inventory-summary"]["text"]
+    assert dump["file-rows"]["rows"][1][2] == "executable/elf"
+    assert dump["file-rows"]["rows"][1][4] == "name suggests image/png"
+    # A report from before schema 1.12 has none of it, and renders without it.
+    plain = _result()
+    markdown = write_reports(plain, tmp_path / "plain", {"markdown"})[0].read_text(encoding="utf-8")
+    assert "File types determined by" not in markdown and "Name/content mismatches" not in markdown
 
 
 def test_reports_show_device_numbers_and_reparse_tags(tmp_path: Path):

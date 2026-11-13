@@ -60,7 +60,9 @@ def capabilities() -> dict[str, Any]:
             "gpu_dispatches": 0,
             "gpu_fallbacks": 0,
         }
-    info["cpp_signature_classifier"] = _native_cpp is not None
+    info["cpp_signature_classifier"] = signature_backend_available()
+    # Loaded, but compiled from another signature catalog: the Python matcher is used.
+    info["cpp_signature_classifier_outdated"] = _native_cpp is not None and not signature_backend_available()
     info["rust_filesystem_walker"] = _walker_current()
     info["rust_filesystem_walker_outdated"] = _walker is not None and not _walker_current()
     info["gpu_status"] = "online" if info.get("gpu_available") else "cpu-fallback"
@@ -72,16 +74,34 @@ def native_available() -> bool:
 
 
 def detect_signature(data: bytes | bytearray | memoryview) -> str | None:
-    """Classify a bounded byte sample with the optional C++ signature engine."""
+    """The candidate label of the first catalog rule whose magic bytes the sample matches.
+
+    First pass only: inventory.signatures validates the header and reads the subtype.
+    """
     if _native_cpp is None:
         return None
     result = _native_cpp.detect_signature(data)
     return str(result) if result is not None else None
 
 
+def signature_rules_digest() -> str | None:
+    """The digest of the rule table the C++ classifier was compiled from."""
+    return None if _native_cpp is None else getattr(_native_cpp, "RULES_DIGEST", None)
+
+
+def match_signature_rule(data: bytes | bytearray | memoryview, start: int = 0) -> int | None:
+    """The index of the first rule from ``start`` that the sample matches (C++)."""
+    result = _native_cpp.match_rule(data, start)
+    return None if result is None else int(result)
+
+
 def signature_backend_available() -> bool:
-    """Return whether the compiled C++ signature classifier is loaded."""
-    return _native_cpp is not None
+    """Whether the compiled C++ signature classifier is loaded and holds the current catalog."""
+    if _native_cpp is None:
+        return False
+    from ..inventory.signatures import cpp_rules_current
+
+    return cpp_rules_current()
 
 
 def rust_walker_available() -> bool:

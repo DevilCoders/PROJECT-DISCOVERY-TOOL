@@ -25,6 +25,7 @@ from typing import Sequence
 from ..catalog.languages import detect_language
 from ..core.source_utils import neutralize_controls, redact_source_excerpt
 from ..inventory.scanner import _classify_file, _is_hidden, _size_bucket
+from ..inventory.signatures import apply_classification
 from ..models import FileRecord
 from .isolation import (
     MAX_PLUGIN_FILE_BYTES,
@@ -123,13 +124,15 @@ def _record(path: Path, relative: str) -> FileRecord:
     """
     info = path.lstat()
     identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-    file_type, opened_identity = _classify_file(path, relative, identity)
-    return FileRecord(
+    classification, opened_identity = _classify_file(path, relative, identity)
+    record = FileRecord(
         relative, info.st_size, Path(relative).suffix.lower(), detect_language(relative),
-        file_type=file_type, size_bucket=_size_bucket(info.st_size),
+        size_bucket=_size_bucket(info.st_size),
         is_hidden=_is_hidden(path.name, info), permissions=stat.S_IMODE(info.st_mode),
         mtime_ns=info.st_mtime_ns, analysis_identity=opened_identity or identity,
     )
+    apply_classification(record, classification)
+    return record
 
 
 def check_plugin(target: str, samples: Sequence[Path] = (), *, isolation: str = "sandbox",

@@ -163,6 +163,39 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   inventoried file), owners and groups by uid and gid (and owner SIDs with `--security-metadata`),
   and file modification times (oldest, newest, by year, in the future, before 1980), computed in
   SQL over the stored inventory and shown in the terminal, Markdown and HTML reports.
+- File types come from the content: a catalog of magic-byte rules, each candidate checked by
+  a validator for its format family, names executables and libraries (ELF executables, shared
+  objects, objects and core files; PE executables, DLLs, EFI images and .NET assemblies; Mach-O
+  and universal binaries; Java, Dalvik, WebAssembly and Python bytecode), archives and packages
+  (ZIP and the formats built on it, such as Office Open XML, OpenDocument, EPUB, JAR, APK,
+  wheels and MSIX; tar by its header checksum, gzip, xz, zstd, 7z, RAR, Debian packages, static
+  libraries, cpio), OLE documents (Word, Excel, PowerPoint, Outlook, Windows Installer), PDF,
+  images, audio and video (ISO base media brands, Matroska and WebM, Ogg codecs, MPEG audio
+  frames), fonts, databases, datasets and models (HDF5, NumPy, Parquet, Arrow, safetensors,
+  GGUF, PyTorch, pickles, TFLite), firmware, filesystem and disk images (uImage, device trees,
+  UF2, SquashFS, ext2/3/4, FAT, NTFS, MBR, GPT, ISO 9660, UDF, qcow2, VMDK), packet captures,
+  key stores and Git files. Other content is `text`, `binary/unknown` (with its entropy) or
+  `empty`; text formats (scripts by their `#!` line, PEM, PostScript, RTF, SVG, Intel HEX,
+  S-records, Git LFS pointers) stay `text` and are named in `signature`. The sample is the first
+  4 KiB (was 512 bytes), plus one read for ISO 9660/UDF volume descriptors and one for an OLE
+  directory past the sample, from the same verified descriptor.
+- What a name suggests is kept apart from what the content is: `name_type` (a separate catalog
+  of extensions and compound suffixes such as `.tar.gz`), `type_source` (`signature`,
+  `content`, or `name` when the content was not read, as in `--inventory-only` scans),
+  `mime_type`, `type_detail` (such as "ELF 64-bit LSB shared object, x86-64") and
+  `type_mismatch` when the two disagree: an executable named `.png`, an HTML page saved as
+  `.zip`, a `.png` without the PNG header. `metrics.type_sources`, `metrics.mime_types`,
+  `metrics.type_mismatches` and `metrics.git_lfs_pointer_count` appear in every report format;
+  the HTML report adds a MIME types card and Markdown lists the first 20 mismatched files. The
+  firmware analyzer parses Intel HEX and S-records found by their content whatever the name.
+- The C++ classifier compiles its rule table from the Python catalog
+  (`native/cpp/pdt_signature_rules.h`, written by `python tools/signature_rules.py --write`); a
+  build from another catalog is not used, and `pdt capabilities --json` reports it as
+  `cpp_signature_classifier_outdated`. An inventory classified with another catalog version is
+  not resumed.
+- Report schema 1.12: `type_source`, `signature`, `type_detail`, `mime_type`, `name_type` and
+  `type_mismatch` on file records, and `metrics.type_sources`, `metrics.mime_types`,
+  `metrics.type_mismatches` and `metrics.git_lfs_pointer_count`.
 - Report schema 1.11: `metrics.inventory_aggregates`.
 - Report schema 1.10: the `target_state` values above, and `resolved_path`, `resolved_type` and
   `target_detail` on symlink records, and `metrics.symlink_states`.
@@ -177,8 +210,19 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
 - Analysis worker processes outlived a coordinator that was killed outright (not stopped with
   Ctrl-C), waiting on the task queue for good; each worker now exits within about a second of
   losing its coordinator (PDT-418).
+- Text without a catalogued extension was typed binary when it was UTF-16 (its NUL bytes matched
+  the binary check before the text check ran) or in a legacy 8-bit encoding, so a UTF-16
+  kubeconfig or PowerShell output was not secret-scanned as text (PDT-419).
+- Printable magic numbers were taken without a look at the header: a text file starting with
+  `BM` was a bitmap, one starting with `MZ` a PE executable (and firmware-analyzed), any
+  `00 01 00 00` a TrueType font and any `ftyp` box an MP4 video (PDT-420).
 
 ### Changed
+- `file_type` describes the content (report schema 1.12): a source file is `text`, with
+  `name_type` `source`, and the name-based labels `source`, `archive/tar-or-compressed-tar`,
+  `archive/iso-detected-by-extension` and `binary/unclassified` are gone. Executables, shared
+  libraries and objects have their own labels (`executable/elf`, `library/elf`, `object/elf`,
+  `library/pe`, `firmware/efi`, `executable/mach-o-universal` for `executable/mach-o-or-fat`).
 - The README is a concise overview, and the CLI banner, `pdt --help` and the package
   description name both scan modes (local directories and remote repositories) instead of
   "local-first" and "offline", which online scans contradicted.

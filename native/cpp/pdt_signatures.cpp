@@ -1,73 +1,90 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include <cstddef>
 #include <cstring>
-#include <string_view>
 
 namespace {
 
-bool starts_with(std::string_view data, std::string_view signature) {
-    return data.size() >= signature.size() &&
-           std::memcmp(data.data(), signature.data(), signature.size()) == 0;
+// `length` bytes that must appear at `offset`.
+struct Test {
+    std::size_t offset;
+    const unsigned char* bytes;
+    std::size_t length;
+};
+
+// A catalog rule: every test must match. Python validates the header of the matched
+// candidate and reads its subtype; a rejected candidate continues the scan after it.
+struct Rule {
+    const char* label;
+    const Test* tests;
+    std::size_t count;
+};
+
+// kRules, kRuleCount and kRulesDigest, generated from the Python signature catalog.
+#include "pdt_signature_rules.h"
+
+bool matches(const Rule& rule, const unsigned char* data, std::size_t length) {
+    for (std::size_t index = 0; index < rule.count; ++index) {
+        const Test& test = rule.tests[index];
+        if (test.offset > length || test.length > length - test.offset ||
+            std::memcmp(data + test.offset, test.bytes, test.length) != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
-PyObject* classify(std::string_view data) {
-    const auto emit = [](const char* value) { return PyUnicode_FromString(value); };
+// The index of the first rule at or after `start` that the sample matches, or -1.
+Py_ssize_t first_match(const unsigned char* data, std::size_t length, std::size_t start) {
+    for (std::size_t index = start; index < kRuleCount; ++index) {
+        if (matches(kRules[index], data, length)) {
+            return static_cast<Py_ssize_t>(index);
+        }
+    }
+    return -1;
+}
 
-    if (starts_with(data, "PK\x03\x04") || starts_with(data, "PK\x05\x06") ||
-        starts_with(data, "PK\x07\x08")) return emit("archive/zip");
-    if (starts_with(data, "\x1f\x8b")) return emit("archive/gzip");
-    if (starts_with(data, "BZh")) return emit("archive/bzip2");
-    if (starts_with(data, std::string_view("\xfd" "7zXZ\x00", 6))) return emit("archive/xz");
-    if (starts_with(data, "\x28\xb5\x2f\xfd")) return emit("archive/zstandard");
-    if (starts_with(data, "7z\xbc\xaf\x27\x1c")) return emit("archive/7z");
-    if (starts_with(data, "Rar!\x1a\x07")) return emit("archive/rar");
-    if (starts_with(data, "MSCF")) return emit("archive/cab");
-    if (starts_with(data, "!<arch>")) return emit("archive/ar");
-    if (starts_with(data, "\xed\xab\xee\xdb")) return emit("archive/rpm");
-    if (data.size() >= 262 && data.substr(257, 5) == "ustar") return emit("archive/tar");
-    if (starts_with(data, "%PDF-")) return emit("document/pdf");
-    if (starts_with(data, "\x7f" "ELF")) return emit("executable/elf");
-    if (starts_with(data, "MZ")) return emit("executable/pe");
-    if (starts_with(data, "\xfe\xed\xfa\xce") || starts_with(data, "\xce\xfa\xed\xfe") ||
-        starts_with(data, "\xfe\xed\xfa\xcf") || starts_with(data, "\xcf\xfa\xed\xfe") ||
-        starts_with(data, "\xca\xfe\xba\xbe")) return emit("executable/mach-o-or-fat");
-    if (starts_with(data, std::string_view("SQLite format 3\0", 16))) return emit("database/sqlite");
-    if (starts_with(data, "\x89PNG\r\n\x1a\n")) return emit("image/png");
-    if (starts_with(data, "\xff\xd8\xff")) return emit("image/jpeg");
-    if (starts_with(data, "GIF87a") || starts_with(data, "GIF89a")) return emit("image/gif");
-    if (starts_with(data, "BM")) return emit("image/bmp");
-    if (starts_with(data, std::string_view("II*\0", 4)) || starts_with(data, std::string_view("MM\0*", 4))) return emit("image/tiff");
-    if (data.size() >= 12 && data.substr(0, 4) == "RIFF" && data.substr(8, 4) == "WEBP")
-        return emit("image/webp");
-    if (data.size() >= 12 && data.substr(0, 4) == "RIFF" && data.substr(8, 4) == "WAVE")
-        return emit("audio/wav");
-    if (starts_with(data, "ID3") || starts_with(data, "\xff\xfb") ||
-        starts_with(data, "\xff\xf3") || starts_with(data, "\xff\xf2"))
-        return emit("audio/mpeg");
-    if (data.size() >= 12 && data.substr(4, 4) == "ftyp") return emit("video/mp4");
-    if (starts_with(data, "wOF2")) return emit("font/woff2");
-    if (starts_with(data, "wOFF")) return emit("font/woff");
-    if (starts_with(data, "OTTO")) return emit("font/otf");
-    if (starts_with(data, std::string_view("\0\1\0\0", 4))) return emit("font/ttf");
-    Py_RETURN_NONE;
+Py_ssize_t match_buffer(PyObject* object, Py_ssize_t start) {
+    Py_buffer view{};
+    if (PyObject_GetBuffer(object, &view, PyBUF_CONTIG_RO) < 0) {
+        return -2;
+    }
+    const Py_ssize_t index = first_match(
+        static_cast<const unsigned char*>(view.buf), static_cast<std::size_t>(view.len),
+        static_cast<std::size_t>(start));
+    PyBuffer_Release(&view);
+    return index;
+}
+
+PyObject* match_rule(PyObject*, PyObject* args) {
+    PyObject* object = nullptr;
+    Py_ssize_t start = 0;
+    if (!PyArg_ParseTuple(args, "O|n:match_rule", &object, &start)) return nullptr;
+    if (start < 0) {
+        PyErr_SetString(PyExc_ValueError, "start must not be negative");
+        return nullptr;
+    }
+    const Py_ssize_t index = match_buffer(object, start);
+    if (index == -2) return nullptr;
+    if (index < 0) Py_RETURN_NONE;
+    return PyLong_FromSsize_t(index);
 }
 
 PyObject* detect_signature(PyObject*, PyObject* args) {
     PyObject* object = nullptr;
-    Py_buffer view{};
     if (!PyArg_ParseTuple(args, "O:detect_signature", &object)) return nullptr;
-    if (PyObject_GetBuffer(object, &view, PyBUF_CONTIG_RO) < 0) return nullptr;
-    const auto* bytes = static_cast<const char*>(view.buf);
-    const auto length = static_cast<std::size_t>(view.len);
-    PyObject* result = classify(std::string_view(bytes, length));
-    PyBuffer_Release(&view);
-    return result;
+    const Py_ssize_t index = match_buffer(object, 0);
+    if (index == -2) return nullptr;
+    if (index < 0) Py_RETURN_NONE;
+    return PyUnicode_FromString(kRules[index].label);
 }
 
 PyMethodDef methods[] = {
+    {"match_rule", match_rule, METH_VARARGS,
+     "Index of the first catalog rule, from an optional start index, that a sample matches."},
     {"detect_signature", detect_signature, METH_VARARGS,
-     "Classify a bounded byte sample using the C++ signature catalog."},
+     "Candidate label of the first catalog rule that a bounded byte sample matches."},
     {nullptr, nullptr, 0, nullptr}
 };
 
@@ -82,5 +99,12 @@ PyModuleDef module = {
 }  // namespace
 
 PyMODINIT_FUNC PyInit__native_cpp() {
-    return PyModule_Create(&module);
+    PyObject* created = PyModule_Create(&module);
+    if (created == nullptr) return nullptr;
+    if (PyModule_AddStringConstant(created, "RULES_DIGEST", kRulesDigest) < 0 ||
+        PyModule_AddIntConstant(created, "RULE_COUNT", static_cast<long>(kRuleCount)) < 0) {
+        Py_DECREF(created);
+        return nullptr;
+    }
+    return created;
 }

@@ -16,6 +16,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 
 from ...core.source_utils import LineIndex, describe_error, open_verified_binary, redact_source_excerpt
+from ...inventory.signatures import family_of
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
 from ..security.privacy import personal_email_matches
@@ -26,6 +27,9 @@ _ARCHIVE_EXTENSIONS = {
     ".nupkg", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".zst", ".7z", ".rar",
     ".cab", ".iso", ".deb", ".rpm",
 }
+# Signature families that are archives whatever their label: Office Open XML, OpenDocument,
+# EPUB, APK and PyTorch files are ZIP archives, static libraries ar archives.
+_ARCHIVE_FAMILIES = frozenset({"zip", "tar", "gzip", "bzip2", "xz", "zstandard", "7z", "rar", "cab", "ar", "rpm", "cpio"})
 _MAX_ARCHIVE_ENTRIES = 200_000
 _MAX_ARCHIVE_INDEX_BYTES = 64 * 1024 * 1024
 
@@ -296,17 +300,18 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             and record.content_skipped_reason is None
             and (
                 record.file_type.startswith("archive/")
+                or family_of(record.file_type) in _ARCHIVE_FAMILIES
                 or record.extension in _ARCHIVE_EXTENSIONS
             )
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         suffix = record.path.lower()
-        if record.file_type == "archive/zip" or suffix.endswith((
+        if family_of(record.file_type) == "zip" or suffix.endswith((
             ".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg", ".nupkg",
         )):
             return self._zip(path, record)
-        if record.file_type in {"archive/tar", "archive/tar-or-compressed-tar"} or suffix.endswith((
+        if record.file_type == "archive/tar" or suffix.endswith((
             ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
         )):
             return self._tar(path, record)

@@ -56,6 +56,7 @@ from .inventory.aggregates import inventory_aggregates
 from .inventory.cache import ScanCache
 from .inventory.entry_metadata import security_supported
 from .inventory.scanner import discover_inventory, inventory_options, normalize_exclusions, unused_exclusions
+from .inventory.signatures import count_classification
 from .inventory.store import (
     InventoryStore,
     StoredDiagnosticRecords,
@@ -108,7 +109,9 @@ from .plugins.isolation import (
 )
 from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
-from .reporting.writers import aggregate_summary, attribute_summary, write_remote_batch_summary, write_reports
+from .reporting.writers import (
+    aggregate_summary, attribute_summary, type_summary, write_remote_batch_summary, write_reports,
+)
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
 
 
@@ -271,6 +274,8 @@ def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict) -> di
         return None  # an unreadable inventory has nothing to resume; a fresh scan replaces it
     if not isinstance(stored, dict):
         return None  # an earlier PDT version did not record its options: start fresh
+    if stored.get("signature_catalog") != options.get("signature_catalog"):
+        return None  # classified with another file-type catalog: start fresh, do not mix types
     before, now = _describe_inventory_options(stored), _describe_inventory_options(options)
     differences = [f"{name}: stored {before[name]}, now {now[name]}" for name in now if before[name] != now[name]]
     if differences:
@@ -810,7 +815,7 @@ def run_scan(
                             progress.advance(task)
 
                     def apply_memory_result(record, outcome, reason, fetched_size):
-                        walk_stats[f"file_type:{record.file_type}"] += 1
+                        count_classification(walk_stats, record)
                         if outcome is None:
                             if reason.startswith(SKIP_OPTION_REASON):
                                 # --skip, decided from the bytes for a size the listing lacked:
@@ -848,7 +853,7 @@ def run_scan(
                         for record in records:
                             counts[record.language] += 1
                             if record.error or record.content_skipped_reason or inventory_only:
-                                walk_stats[f"file_type:{record.file_type}"] += 1
+                                count_classification(walk_stats, record)
                                 progress.advance(task)
                                 continue
                             yield record
@@ -1072,6 +1077,24 @@ def run_scan(
                 key.split(":", 1)[1]: value
                 for key, value in walk_stats.items() if key.startswith("file_type:")
             },
+            # How each file type was determined, the content's MIME types, and the files
+            # whose name suggests another type than their content has.
+            "type_sources": {
+                key.split(":", 1)[1]: value
+                for key, value in walk_stats.items() if key.startswith("type_source:")
+            },
+            "mime_types": {
+                key.split(":", 1)[1]: value
+                for key, value in walk_stats.items() if key.startswith("mime_type:")
+            },
+            "type_mismatches": {
+                "count": walk_stats.get("type_mismatch_count", 0),
+                "pairs": {
+                    key.split(":", 1)[1]: value
+                    for key, value in walk_stats.items() if key.startswith("type_mismatch:")
+                },
+            },
+            "git_lfs_pointer_count": walk_stats.get("git_lfs_pointer_count", 0),
             "size_buckets": {
                 key.split(":", 1)[1]: value
                 for key, value in walk_stats.items() if key.startswith("size_bucket:") and value
@@ -1186,6 +1209,8 @@ def run_scan(
         for label, value in aggregate_summary(metrics["inventory_aggregates"]):
             # The paths come from the scanned tree: no control sequence may reach the terminal.
             summary.add_row(label, escape(neutralize_controls(value)))
+        for label, value in type_summary(metrics):
+            summary.add_row(label, escape(value))
         summary.add_row("Total size", f"{metrics['total_bytes']:,} bytes")
         summary.add_row("Languages / formats detected", str(len(counts)))
         summary.add_row("Findings", str(len(findings)))

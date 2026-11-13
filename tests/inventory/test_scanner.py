@@ -71,7 +71,9 @@ def test_discover_inventory_returns_directory_and_file_metadata(tmp_path: Path):
     assert marker.development_marker == "node_modules"
     assert marker.pruned is False
     assert by_path[".env"].is_hidden
-    assert by_path["src/main.py"].file_type == "source"
+    # The content is text; that the name says source is recorded apart.
+    main = by_path["src/main.py"]
+    assert (main.file_type, main.type_source, main.name_type, main.mime_type) == ("text", "content", "source", "text/plain")
     assert stats["entry_count"] == 5
     assert stats["development_directory_count"] == 1
     assert symlinks == []
@@ -298,9 +300,11 @@ def test_signature_reader_uses_bounded_descriptor_read(tmp_path: Path):
     path = tmp_path / "large.bin"
     path.write_bytes(b"\x7fELF" + b"x" * (1024 * 1024))
     observed = path.stat()
+    from project_discovery.inventory.signatures import SAMPLE_BYTES
+
     sample = _read_signature_sample(path, observed)
-    assert sample == b"\x7fELF" + b"x" * 508
-    assert len(sample) == 512
+    assert sample == b"\x7fELF" + b"x" * (SAMPLE_BYTES - 4)
+    assert len(sample) == SAMPLE_BYTES
 
 def test_sha256_file_uses_verified_no_follow_descriptor(tmp_path: Path):
     import hashlib
@@ -486,7 +490,7 @@ def test_signature_reader_accepts_rust_walker_identity_tuple(tmp_path: Path):
     path.write_bytes(b"\x7fELF" + b"r" * 600)
     info = path.stat()
     identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-    assert _read_signature_sample(path, identity) == b"\x7fELF" + b"r" * 508
+    assert _read_signature_sample(path, identity) == b"\x7fELF" + b"r" * 600  # smaller than the sample
 
 
 def test_signature_reader_rejects_rust_walker_identity_mismatch(tmp_path: Path):
@@ -680,7 +684,7 @@ def test_windows_names_with_unpaired_surrogates_stay_openable(tmp_path: Path, mo
     for _ in _walkers(monkeypatch):
         files, *_ = discover_inventory(tmp_path)
         assert [record.path for record in files] == [name]
-        assert files[0].file_type == "source" and files[0].analysis_identity is not None
+        assert files[0].file_type == "text" and files[0].analysis_identity is not None
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux allows arbitrary name bytes")
@@ -702,11 +706,13 @@ def test_posix_byte_names_and_backslashes_round_trip(tmp_path: Path, monkeypatch
 
 def test_debian_packages_are_classified_as_debian_packages():
     # Regression: the generic ar signature matched first, so archive/deb was unreachable.
-    from project_discovery.inventory.scanner import _classify_head
+    from project_discovery.inventory.signatures import detect
 
     head = b"!<arch>\ndebian-binary   1342943816  0     0     100644  4         `\n2.0\n"
-    assert _classify_head(head, "pkg_1.0_amd64.deb") == "archive/deb"
-    assert _classify_head(b"!<arch>\nfoo.o/          0           0     0     644     8         `\n", "libx.a") == "archive/ar"
+    assert detect(head).label == "archive/deb"
+    # An ar archive of object files is a static library; any other is a plain ar archive.
+    assert detect(b"!<arch>\nfoo.o/          0           0     0     644     8         `\n").label == "library/static"
+    assert detect(b"!<arch>\nnotes.txt/      0           0     0     644     8         `\n").label == "archive/ar"
 
 
 def test_both_walkers_report_windows_modes_and_dot_names_alike(tmp_path):

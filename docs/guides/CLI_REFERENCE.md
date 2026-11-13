@@ -236,7 +236,7 @@ pdt compare a-report/discovery-report.json b-report/discovery-report.json --outp
 pdt capabilities [--json]
 ```
 
-Shows the Python version and platform, the native backends (C byte counter, OpenCL GPU, C++ signature classifier, Rust walker; a walker built from older sources is reported as outdated and not used), the remote VCS clients found, the optional integrations (Tree-sitter grammars provisioned, PDF, DOCX, YAML), the loaded analyzers and plugins, and what the plugin sandbox verifies on this host.
+Shows the Python version and platform, the native backends (C byte counter, OpenCL GPU, C++ signature classifier, Rust walker; a walker built from older sources, or a classifier built from another signature catalog, is reported as outdated and not used), the remote VCS clients found, the optional integrations (Tree-sitter grammars provisioned, PDF, DOCX, YAML), the loaded analyzers and plugins, and what the plugin sandbox verifies on this host.
 
 | Option | Default | Description |
 |---|---|---|

@@ -15,8 +15,11 @@ from typing import Any, Literal, Sequence
 # inventory: target_state is resolved, broken, loop, external, unknown or unreadable, with
 # resolved_path, resolved_type and target_detail, and metrics.symlink_states. 1.11 added
 # metrics.inventory_aggregates (empty directories, fan-out, hard links, owners, groups and
-# file timestamps).
-REPORT_SCHEMA_VERSION = "1.11"
+# file timestamps). 1.12 added type_source, signature, type_detail, mime_type, name_type and
+# type_mismatch to file records (file_type is the verified signature, text, binary/unknown or
+# empty, from the name only when the content was not read), and metrics.type_sources,
+# metrics.mime_types, metrics.type_mismatches and metrics.git_lfs_pointer_count.
+REPORT_SCHEMA_VERSION = "1.12"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -109,6 +112,18 @@ class FileRecord:
     security: dict[str, Any] | None = None
     # The Windows reparse tag name of a reparse point that is not a link ("cloud", "dedup").
     reparse_tag: str | None = None
+    # How file_type was determined: "signature" (the leading bytes match a catalogued
+    # format), "content" (the sample is text, binary without a known signature, or empty) or
+    # "name" (the content was not read, as in --inventory-only scans). signature is the
+    # verified format (text formats such as scripts too), type_detail what its header says,
+    # mime_type the content's MIME type, and name_type what the name suggests, kept apart;
+    # type_mismatch is set when the name and the content disagree.
+    type_source: str | None = None
+    signature: str | None = None
+    type_detail: str | None = None
+    mime_type: str | None = None
+    name_type: str | None = None
+    type_mismatch: bool = False
     # Private scan-time identity used to pin analyzer reads. It is excluded from
     # public reports but retained by the private SQLite inventory store.
     analysis_identity: tuple[int | None, int | None, int | None, int | None, int | None] | None = field(
