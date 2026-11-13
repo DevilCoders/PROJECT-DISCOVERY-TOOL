@@ -121,12 +121,18 @@ def _deb(data_compress="xz", control_compress="gz", data_members=None) -> bytes:
 @pytest.mark.parametrize(("name", "file_type", "reader"), [
     ("pkg.deb", "archive/deb", "ar"), ("libz.a", "library/static", "ar"), ("x.ar", "archive/ar", "ar"),
     ("setup.cab", "archive/cab", "cab"), ("tool.rpm", "archive/rpm", "rpm"),
+    ("disk.iso", "disk-image/iso9660", "iso"), ("disk.img", "disk-image/iso9660", "iso"), ("dvd.iso", "disk-image/udf", "iso"),
     ("app.tar.zst", "archive/zstandard", "tar"), ("app.tgz", "archive/gzip", "tar"), ("pkg.ipk", "archive/gzip", "tar"),
+    ("app.tlz", "archive/lzma", "tar"),
+    # Compressed content under any other name is a single compressed file (which may hold TAR).
+    ("data.zst", "archive/zstandard", "stream"), ("app.log.gz", "archive/gzip", "stream"),
+    ("pkg.deb", "archive/gzip", "stream"), ("blob", "archive/xz", "stream"), ("notes.lzma", "archive/lzma", "stream"),
     # A name decides when the content is no archive: a launcher script before a JAR, a corrupt .deb.
     ("app.jar", "text", "zip"), ("broken.deb", "binary/unknown", "ar"), ("broken.cab", "unknown", "cab"),
-    # ... but not when the content is another archive format or a compression layer under a non-TAR name.
+    ("broken.gz", "binary/unknown", "stream"), ("broken.iso", "unknown", "iso"),
+    # ... but not when the content is another archive format.
     ("misnamed.zip", "archive/rar", None), ("setup.cab", "archive/installshield-cab", None),
-    ("pkg.deb", "archive/gzip", None), ("data.zst", "archive/zstandard", None), ("disk.iso", "disk-image/iso9660", None),
+    ("backup.gz", "archive/7z", None),
 ])
 def test_archives_are_dispatched_by_content_family_then_by_name(name, file_type, reader):
     assert _reader(FileRecord(name, 10, Path(name).suffix, "Archive", file_type=file_type)) == reader

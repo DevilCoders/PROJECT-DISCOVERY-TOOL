@@ -228,6 +228,22 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: ISO 9660 images and single compressed files
+- ISO 9660 images, whatever their name: the Rock Ridge tree (POSIX names, modes, owners, symlinks,
+  relocated deep directories) or the Joliet or primary tree, multi-extent files, El Torito and UDF
+  detection (a UDF-only image is `unsupported`; a hybrid one gets a finding that its UDF tree was not
+  read). Files are sampled in place and packages on an image inspected in place. Directory loops,
+  both-endian fields that disagree, files sharing data past the image's size and truncated images
+  are findings. Checked against images pycdlib builds.
+- Single gzip, bzip2, xz, LZMA and Zstandard files are one-member archives: the gzip header's
+  original name (an escaping name is a traversal finding) and time, the declared size (xz index,
+  Zstandard frame and block headers, LZMA header, an unambiguous gzip trailer; a Zstandard RLE bomb
+  is a high-ratio and bomb finding without decompressing), and a bounded content sample. Content
+  that is a TAR stream is inspected as TAR, and `app.zip.gz` as a nested ZIP.
+- Archives nested in archives now include DEB, RPM, cabinet and ISO members and single compressed
+  files. A member of unknown size leaves the archive's content coverage unknown (`members_unsized`)
+  rather than reporting 100%.
+
 ### Added: ar, DEB, Cabinet, RPM and Zstandard TAR readers
 - ar archives (common, GNU long names and thin archives, BSD names): member records, members
   sampled in place, and for a DEB its package fields (`deb` in the archive record) and its control

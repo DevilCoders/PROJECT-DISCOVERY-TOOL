@@ -965,8 +965,13 @@ class InventoryStore:
             by_format[item["format"]] += 1
             limits.update(entry["limit"] for entry in item.get("limits", ()))
             for name in ("members_indexed", "member_bytes", "member_bytes_sampled", "member_records",
-                         "encrypted_members", "members_not_fully_sampled"):
+                         "encrypted_members", "members_not_fully_sampled", "members_unsized"):
                 totals[name] += int(item.get(name) or 0)
+            if not item.get("members_unsized"):
+                # The content coverage counts archives whose members all have a size: the
+                # share of an undeclared size (a bzip2 stream's) is not a number.
+                totals["sized_member_bytes"] += int(item.get("member_bytes") or 0)
+                totals["sized_member_bytes_sampled"] += int(item.get("member_bytes_sampled") or 0)
             if item.get("members_declared") is not None:
                 totals["members_declared"] += int(item["members_declared"])
                 totals["members_indexed_of_declared"] += int(item.get("members_indexed") or 0)
@@ -981,9 +986,10 @@ class InventoryStore:
             "member_coverage_pct": round(100 * totals["members_indexed_of_declared"] / totals["members_declared"], 1)
             if totals["members_declared"] else None,
             "member_bytes": totals["member_bytes"], "member_bytes_sampled": totals["member_bytes_sampled"],
-            "content_coverage_pct": round(100 * min(totals["member_bytes_sampled"], totals["member_bytes"])
-                                          / totals["member_bytes"], 1) if totals["member_bytes"] else None,
+            "content_coverage_pct": round(100 * min(totals["sized_member_bytes_sampled"], totals["sized_member_bytes"])
+                                          / totals["sized_member_bytes"], 1) if totals["sized_member_bytes"] else None,
             "members_not_fully_sampled": totals["members_not_fully_sampled"],
+            "members_unsized": totals["members_unsized"],
             "encrypted_members": totals["encrypted_members"],
             "limits_reached": dict(sorted(limits.items())),
             "member_records": stored,

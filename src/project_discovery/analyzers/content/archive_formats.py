@@ -1,13 +1,14 @@
 """Metadata readers for archive formats beyond ZIP and TAR: ar (Debian packages and static
-libraries), Microsoft Cabinet and RPM, and the Zstandard decompressor the TAR reader uses.
+libraries), Microsoft Cabinet, RPM and ISO 9660 images; the metadata of single compressed
+files (gzip, bzip2, xz, LZMA, Zstandard); and the Zstandard decompressor the TAR reader uses.
 
-Each reader parses the format's own headers from a seekable binary stream, returns at most
-``max_entries`` member entries and decompresses no member data; a DEB's control tarball, a
-few KiB, is the one exception, read for its package fields under a decompressed-byte cap.
+Each archive reader parses the format's own headers from a seekable binary stream, returns at
+most ``max_entries`` member entries and decompresses no member data; a DEB's control tarball,
+a few KiB, is the one exception, read for its package fields under a decompressed-byte cap.
 Malformed input raises ``ArchiveFormatError``, an index larger than its budget
-``ArchiveLimitError``. The standard library suffices, except for Zstandard before Python
-3.14, which needs the optional ``zstandard`` package (``pip install
-"project-discovery-tool[archives]"``).
+``ArchiveLimitError`` and a format variant without a reader ``ArchiveUnsupportedError``. The
+standard library suffices, except for Zstandard before Python 3.14, which needs the optional
+``zstandard`` package (``pip install "project-discovery-tool[archives]"``).
 """
 from __future__ import annotations
 
@@ -19,8 +20,9 @@ import stat
 import struct
 import tarfile
 import time
+from collections import Counter, deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, BinaryIO
 
 
@@ -34,6 +36,10 @@ class ArchiveLimitError(Exception):
     def __init__(self, limit: str, used: int, message: str) -> None:
         super().__init__(message)
         self.limit, self.used = limit, used
+
+
+class ArchiveUnsupportedError(Exception):
+    """A variant of the format that has no built-in reader (a UDF-only disc image)."""
 
 
 @dataclass(slots=True)
@@ -50,7 +56,8 @@ class Entry:
     owner: str | None = None
     group: str | None = None
     encrypted: bool = False
-    offset: int | None = None  # where the member's bytes start, in formats that store them as is (ar)
+    offset: int | None = None  # where the member's bytes start, in formats that store them as is (ar, ISO)
+    flags: tuple[str, ...] = ()  # structure flags the reader found ("out-of-bounds")
 
 
 @dataclass(slots=True)
@@ -494,3 +501,579 @@ def read_rpm(stream: BinaryIO, size: int, max_entries: int, max_header_bytes: in
     if declared > len(listing.entries):
         listing.complete, listing.stopped = False, "entries"
     return listing
+
+
+# ---------------------------------------------------------------------------------------
+# ISO 9660, with Rock Ridge and Joliet
+
+_ISO_SECTOR = 2048  # directory records never cross a 2048-byte logical sector
+_ISO_DESCRIPTORS = 16 * _ISO_SECTOR  # the volume descriptor set starts at sector 16
+_ISO_MAX_DESCRIPTORS = 64
+_ISO_RECORD = struct.Struct("<BBL4sL4s7sBBBH2xB")  # a directory record's fixed 33 bytes
+_JOLIET = (b"%/@", b"%/C", b"%/E")  # the UCS-2 escape sequences of a Joliet descriptor
+_UDF_DESCRIPTORS = (b"BEA01", b"NSR02", b"NSR03", b"TEA01", b"BOOT2", b"CDW02")
+_ISO_MAX_CONTINUATIONS = 16  # Rock Ridge continuation areas followed per directory record
+
+
+def _iso_time(raw: bytes) -> str | None:
+    """A directory record's time: years since 1900, month, day, hours, minutes, seconds and
+    the offset from UTC in 15-minute steps."""
+    if len(raw) < 7 or not any(raw[:6]):
+        return None
+    try:
+        moment = datetime(1900 + raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], tzinfo=UTC)
+    except ValueError:
+        return None
+    offset = struct.unpack("b", raw[6:7])[0]
+    return (moment - timedelta(minutes=15 * offset)).isoformat().replace("+00:00", "Z")
+
+
+def _iso_volume_time(raw: bytes) -> str | None:
+    """A volume descriptor's time: 16 ASCII digits (to hundredths) and the UTC offset byte."""
+    digits = raw[:14]
+    if len(raw) < 17 or not digits.isdigit() or not digits.strip(b"0"):
+        return None
+    try:
+        moment = datetime(int(digits[:4]), int(digits[4:6]), int(digits[6:8]), int(digits[8:10]),
+                          int(digits[10:12]), int(digits[12:14]), tzinfo=UTC)
+    except ValueError:
+        return None
+    offset = struct.unpack("b", raw[16:17])[0]
+    return (moment - timedelta(minutes=15 * offset)).isoformat().replace("+00:00", "Z")
+
+
+def _iso_text(raw: bytes) -> str | None:
+    return raw.decode("latin-1").strip(" \x00") or None
+
+
+def _susp(area: bytes) -> list[tuple[bytes, bytes]]:
+    """The System Use Sharing Protocol entries of a system use area, as (signature, data)."""
+    entries, cursor = [], 0
+    while cursor + 4 <= len(area):
+        signature, length = area[cursor:cursor + 2], area[cursor + 2]
+        if length < 4 or cursor + length > len(area):
+            break
+        entries.append((signature, area[cursor + 4:cursor + length]))
+        if signature == b"ST":
+            break
+        cursor += length
+    return entries
+
+
+def _symlink_target(components: list[tuple[int, bytes]]) -> str:
+    """A Rock Ridge symlink's target from its SL component records (flags: 1 the component
+    continues in the next record, 2 ".", 4 "..", 8 the root)."""
+    parts: list[str] = []
+    joined = False
+    for flags, content in components:
+        text = ("." if flags & 0x02 else ".." if flags & 0x04 else "" if flags & 0x08
+                else content.decode("utf-8", "replace"))
+        if joined and parts:
+            parts[-1] += text
+        else:
+            parts.append(text)
+        joined = bool(flags & 0x01)
+    return "/".join(parts) or "/"
+
+
+def _system_use_area(record: bytes, name_length: int) -> bytes:
+    """A directory record's system use area: after the name and its padding byte (present
+    when the name's length is even)."""
+    return record[_ISO_RECORD.size + name_length + (0 if name_length % 2 else 1):]
+
+
+class _IsoTree:
+    """One ISO 9660 directory tree, walked breadth first under the entry, index-byte and
+    time budgets; a directory reached a second time (a loop) is not walked again."""
+
+    def __init__(self, stream: BinaryIO, size: int, block_size: int, joliet: bool, skip: int | None,
+                 max_entries: int, max_index_bytes: int, deadline: float | None, listing: Listing) -> None:
+        self.stream, self.size, self.block_size, self.joliet = stream, size, block_size, joliet
+        self.rock_ridge, self.skip = skip is not None, skip or 0
+        self.max_entries, self.max_index_bytes, self.deadline = max_entries, max_index_bytes, deadline
+        self.listing = listing
+        self.index_bytes = 0
+        self.issues: Counter[str] = Counter()
+
+    def _read(self, offset: int, length: int) -> bytes:
+        self.index_bytes += length
+        if self.index_bytes > self.max_index_bytes:
+            raise ArchiveLimitError("index_bytes", self.index_bytes,
+                                    f"the ISO 9660 directories hold more than {self.max_index_bytes:,} bytes")
+        self.stream.seek(offset)
+        return self.stream.read(length)
+
+    def _system_use(self, area: bytes) -> list[tuple[bytes, bytes]]:
+        entries = _susp(area[self.skip:])
+        for _ in range(_ISO_MAX_CONTINUATIONS):
+            continuation = next((data for signature, data in entries if signature == b"CE" and len(data) >= 20),
+                                None)
+            if continuation is None:
+                break
+            block, offset, length = (struct.unpack_from("<L", continuation, start)[0] for start in (0, 8, 16))
+            if block * self.block_size + offset + length > self.size:
+                self.issues["continuation-out-of-bounds"] += 1
+                break
+            entries = [item for item in entries if item[0] != b"CE"]
+            entries += _susp(self._read(block * self.block_size + offset, length))
+        return entries
+
+    def records(self, extent: int, length: int):
+        """A directory's records: (fixed fields, name bytes, system use area)."""
+        start = extent * self.block_size
+        if start + length > self.size:
+            self.issues["directory-out-of-bounds"] += 1
+            length = max(0, self.size - start)
+        data = self._read(start, length)
+        cursor = 0
+        while cursor < len(data):
+            record_length = data[cursor]
+            if record_length == 0:  # the rest of the sector is padding
+                cursor = (cursor // _ISO_SECTOR + 1) * _ISO_SECTOR
+                continue
+            if record_length < _ISO_RECORD.size or cursor + record_length > len(data):
+                self.issues["corrupt-record"] += 1
+                return
+            record = data[cursor:cursor + record_length]
+            cursor += record_length
+            fields = _ISO_RECORD.unpack_from(record)
+            if _ISO_RECORD.size + fields[-1] > record_length:
+                self.issues["corrupt-record"] += 1
+                return
+            yield fields, record[_ISO_RECORD.size:_ISO_RECORD.size + fields[-1]], _system_use_area(record, fields[-1])
+
+    def walk(self, root_extent: int, root_length: int) -> None:
+        listing = self.listing
+        visited: set[int] = set()
+        queue: deque[tuple[int, int, str]] = deque([(root_extent, root_length, "")])
+        steps = 0
+        while queue:
+            extent, length, prefix = queue.popleft()
+            if extent in visited:
+                self.issues["directory-loop"] += 1
+                continue
+            visited.add(extent)
+            previous: Entry | None = None
+            for fields, raw_name, area in self.records(extent, length):
+                steps += 1
+                if self.deadline is not None and steps % 1024 == 0 and time.monotonic() >= self.deadline:
+                    listing.complete, listing.stopped = False, "wall_seconds"
+                    return
+                _, attribute_blocks, extent_le, extent_be, size_le, size_be, recorded, flags = fields[:8]
+                if struct.unpack(">L", extent_be)[0] != extent_le or struct.unpack(">L", size_be)[0] != size_le:
+                    self.issues["both-endian-mismatch"] += 1
+                if raw_name in (b"\x00", b"\x01"):  # "." and ".."
+                    continue
+                system = self._system_use(area) if self.rock_ridge else []
+                entry, directory, relocated = self._entry(prefix, raw_name, extent_le, attribute_blocks, size_le,
+                                                          recorded, flags, system)
+                if relocated:  # a directory Rock Ridge moved for depth: listed where its CL record is
+                    continue
+                if previous is not None and previous.name == entry.name:
+                    # A multi-extent file: one entry, the sizes of its extents summed.
+                    contiguous = (previous.offset is not None and entry.offset is not None
+                                  and previous.offset + (previous.size or 0) == entry.offset)
+                    previous.size = (previous.size or 0) + (entry.size or 0)
+                    previous.offset = previous.offset if contiguous else None
+                    previous.flags = tuple(dict.fromkeys(previous.flags + entry.flags))
+                    previous = previous if flags & 0x80 else None
+                    continue
+                if listing.full(self.max_entries):
+                    return
+                listing.entries.append(entry)
+                previous = entry if flags & 0x80 and directory is None else None
+                if directory is not None:
+                    queue.append((directory[0], directory[1], entry.name + "/"))
+
+    def _entry(self, prefix: str, raw_name: bytes, extent: int, attribute_blocks: int, size: int, recorded: bytes,
+               flags: int, system: list[tuple[bytes, bytes]]) -> tuple[Entry, tuple[int, int] | None, bool]:
+        name = raw_name.decode("utf-16-be" if self.joliet else "latin-1", "replace")
+        if not flags & 0x02:
+            name = name.split(";", 1)[0]  # the file version
+            if not self.joliet and name.endswith("."):
+                name = name[:-1]  # a name without an extension
+        mode = uid = gid = None
+        mtime = _iso_time(recorded)
+        special = compressed = relocated = False
+        child: int | None = None
+        alternate = b""
+        components: list[tuple[int, bytes]] = []
+        for signature, data in system:
+            if signature == b"NM" and data:
+                if not data[0] & 0x06:  # not "." or ".."
+                    alternate += data[1:]
+            elif signature == b"PX" and len(data) >= 32:
+                mode, uid, gid = (struct.unpack_from("<L", data, start)[0] for start in (0, 16, 24))
+            elif signature == b"SL" and data:
+                cursor = 1
+                while cursor + 2 <= len(data):
+                    length = data[cursor + 1]
+                    components.append((data[cursor], data[cursor + 2:cursor + 2 + length]))
+                    cursor += 2 + length
+            elif signature == b"PN":
+                special = True
+            elif signature == b"TF" and data:
+                mtime = _tf_mtime(data) or mtime
+            elif signature == b"ZF":
+                compressed = True  # zisofs: the data is compressed on the image
+            elif signature == b"CL" and len(data) >= 4:
+                child = struct.unpack_from("<L", data, 0)[0]
+            elif signature == b"RE":
+                relocated = True
+        if alternate:
+            name = alternate.decode("utf-8", "replace")
+        directory: tuple[int, int] | None = None
+        if flags & 0x02:
+            kind, directory = "directory", (extent, size)
+        elif child is not None:
+            kind, directory = "directory", (child, self._directory_length(child))
+        else:
+            kind = "file" if mode is None else _kind(mode)
+        if special and kind == "file":
+            kind = "special"
+        offset: int | None = (extent + attribute_blocks) * self.block_size
+        entry_flags: tuple[str, ...] = ()
+        if kind == "file" and offset + size > self.size:
+            entry_flags, offset = ("out-of-bounds",), None
+        stored = kind == "file" and not compressed
+        target = _symlink_target(components) if kind == "symlink" and components else None
+        return (Entry(prefix + name, kind, None if kind == "directory" else size, mode=mode, mtime=mtime,
+                      link_target=target, uid=uid, gid=gid, offset=offset if stored else None, flags=entry_flags),
+                directory, relocated)
+
+    def _directory_length(self, extent: int) -> int:
+        """A relocated directory's length, from its own "." record."""
+        for fields, name, _ in self.records(extent, _ISO_SECTOR):
+            return fields[4] if name == b"\x00" else _ISO_SECTOR
+        return _ISO_SECTOR
+
+
+def _tf_mtime(data: bytes) -> str | None:
+    """The modification time of a Rock Ridge TF entry (the stamp after the optional creation stamp)."""
+    flags, width = data[0], 17 if data[0] & 0x80 else 7
+    if not flags & 0x02:
+        return None
+    start = 1 + (width if flags & 0x01 else 0)
+    raw = data[start:start + width]
+    return _iso_volume_time(raw) if width == 17 else _iso_time(raw)
+
+
+def _rock_ridge_skip(stream: BinaryIO, size: int, block_size: int, primary: bytes) -> int | None:
+    """The SUSP skip length when the primary tree uses Rock Ridge (its root's "." record holds
+    an SP entry), else None."""
+    root = _ISO_RECORD.unpack_from(primary, 156)
+    start = root[2] * block_size
+    if start + _ISO_RECORD.size + 1 > size:
+        return None
+    stream.seek(start)
+    sector = stream.read(min(max(root[4], _ISO_RECORD.size + 1), _ISO_SECTOR))
+    length = sector[0] if sector else 0
+    if length < _ISO_RECORD.size + 1 or length > len(sector):
+        return None
+    sp = next((data for signature, data in _susp(_system_use_area(sector[:length], sector[32]))
+               if signature == b"SP"), None)
+    if sp is None or sp[:2] != b"\xbe\xef":
+        return None
+    return sp[2] if len(sp) > 2 else 0
+
+
+def read_iso(stream: BinaryIO, size: int, max_entries: int, max_index_bytes: int,
+             deadline: float | None = None) -> Listing:
+    """An ISO 9660 image's files: the Rock Ridge tree (POSIX names, modes, owners, links) when
+    the image has one, else the Joliet tree (Unicode names), else the primary tree. Files are
+    stored as is, so each entry has its data offset. A UDF tree, which hybrid images such as
+    Windows install media carry beside a minimal ISO 9660 one, is detected, not read."""
+    primary = joliet = None
+    boot = udf = False
+    for index in range(_ISO_MAX_DESCRIPTORS):
+        stream.seek(_ISO_DESCRIPTORS + index * _ISO_SECTOR)
+        block = stream.read(_ISO_SECTOR)
+        if len(block) < _ISO_SECTOR:
+            break
+        kind, identifier = block[0], block[1:6]
+        if identifier == b"CD001":
+            if kind == 1 and primary is None:
+                primary = block
+            elif kind == 2 and block[88:91] in _JOLIET and joliet is None:
+                joliet = block
+            elif kind == 0 and block[7:30] == b"EL TORITO SPECIFICATION":
+                boot = True
+        elif identifier in _UDF_DESCRIPTORS:
+            udf = udf or identifier in (b"NSR02", b"NSR03")
+            if identifier == b"TEA01":
+                break
+        else:
+            break
+    if primary is None:
+        if udf:
+            raise ArchiveUnsupportedError("a UDF image without an ISO 9660 tree; UDF has no built-in reader")
+        raise ArchiveFormatError("no ISO 9660 primary volume descriptor at sector 16")
+    block_size = struct.unpack_from("<H", primary, 128)[0]
+    if block_size not in (512, 1024, 2048):
+        raise ArchiveFormatError(f"an ISO 9660 logical block size of {block_size}")
+    volume_bytes = struct.unpack_from("<L", primary, 80)[0] * block_size
+    info: dict[str, Any] = {
+        "volume_id": _iso_text(primary[40:72]), "system_id": _iso_text(primary[8:40]),
+        "publisher": _iso_text(primary[318:446]), "preparer": _iso_text(primary[446:574]),
+        "application": _iso_text(primary[574:702]), "created": _iso_volume_time(primary[813:830]),
+        "modified": _iso_volume_time(primary[830:847]), "block_size": block_size, "volume_bytes": volume_bytes,
+    }
+    listing = Listing(metadata={"iso": info})
+    skip = _rock_ridge_skip(stream, size, block_size, primary)
+    use_joliet = joliet is not None and skip is None  # Rock Ridge has modes and links, Joliet only names
+    tree = _IsoTree(stream, size, block_size, use_joliet, skip, max_entries, max_index_bytes, deadline, listing)
+    root = _ISO_RECORD.unpack_from(joliet if use_joliet else primary, 156)
+    tree.walk(root[2], root[4])
+    info["tree"] = "rock-ridge" if skip is not None else "joliet" if use_joliet else "primary"
+    info["extensions"] = [name for name, present in (("rock-ridge", skip is not None), ("joliet", joliet is not None),
+                                                     ("el-torito", boot), ("udf", udf)) if present]
+    if tree.issues:
+        info["structure_issues"] = dict(sorted(tree.issues.items()))
+    if volume_bytes > size:
+        info["missing_bytes"] = volume_bytes - size  # a truncated image
+    return listing
+
+
+# ---------------------------------------------------------------------------------------
+# Single compressed files: gzip, bzip2, xz, LZMA and Zstandard
+
+STREAM_CODECS = ("gzip", "bzip2", "xz", "lzma", "zstd")
+_DEFLATE_MAX_RATIO = 1032  # deflate cannot expand data by more than this
+_XZ_FOOTER = 12  # the size of an xz stream's header and of its footer
+_GZIP_SYSTEMS = {0: "FAT", 1: "Amiga", 2: "VMS", 3: "Unix", 4: "VM/CMS", 5: "Atari TOS", 6: "HPFS", 7: "Macintosh",
+                 8: "Z-System", 9: "CP/M", 10: "TOPS-20", 11: "NTFS", 12: "QDOS", 13: "Acorn RISCOS", 255: "unknown"}
+
+
+def _zero_terminated(stream: BinaryIO, limit: int) -> bytes:
+    data = bytearray()
+    while len(data) <= limit:
+        chunk = stream.read(1)
+        if not chunk:
+            raise ArchiveFormatError("a truncated gzip header")
+        if chunk == b"\x00":
+            return bytes(data)
+        data += chunk
+    raise ArchiveFormatError(f"a gzip header field longer than {limit:,} bytes")
+
+
+def _gzip(stream: BinaryIO, size: int) -> dict[str, Any]:
+    head = stream.read(10)
+    if len(head) < 10 or head[:2] != b"\x1f\x8b":
+        raise ArchiveFormatError("not a gzip stream")
+    method, flags, mtime, system = head[2], head[3], struct.unpack_from("<L", head, 4)[0], head[9]
+    if method != 8:
+        raise ArchiveFormatError(f"gzip compression method {method}, not deflate")
+    if flags & 0xE0:
+        raise ArchiveFormatError("reserved gzip header flags are set")
+    if flags & 0x04:  # FEXTRA
+        extra = stream.read(2)
+        if len(extra) < 2:
+            raise ArchiveFormatError("a truncated gzip header")
+        stream.seek(struct.unpack("<H", extra)[0], io.SEEK_CUR)
+    name = _zero_terminated(stream, 4096).decode("latin-1") if flags & 0x08 else None
+    comment = _zero_terminated(stream, 65536) if flags & 0x10 else None
+    if size < 18:
+        raise ArchiveFormatError("a gzip stream shorter than its header and trailer")
+    stream.seek(size - 4)
+    trailer = struct.unpack("<L", stream.read(4))[0]
+    return {
+        "original_name": name, "mtime": _utc(mtime) if mtime else None,
+        "system": _GZIP_SYSTEMS.get(system, str(system)), "has_comment": comment is not None,
+        "trailer_size": trailer,
+        # The trailer holds the size modulo 4 GiB, so it is the size only for a file too small to
+        # expand past 4 GiB (and, in a file of several gzip members, only the last member's).
+        "content_bytes": trailer if size * _DEFLATE_MAX_RATIO < 1 << 32 else None,
+    }
+
+
+def _xz_vint(data: bytes, cursor: int) -> tuple[int, int]:
+    """An xz multibyte integer: 7 bits a byte, little-endian, at most 9 bytes."""
+    value = 0
+    for shift in range(0, 63, 7):
+        if cursor >= len(data):
+            raise ArchiveFormatError("a truncated xz index")
+        byte = data[cursor]
+        cursor += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, cursor
+    raise ArchiveFormatError("an xz index integer longer than 9 bytes")
+
+
+def _padding_start(stream: BinaryIO, end: int, deadline: float | None) -> int | None:
+    """Where the zero bytes that end at ``end`` start (None when the deadline passes first)."""
+    position = end
+    while position > 0:
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        start = max(0, position - 65536)
+        stream.seek(start)
+        stripped = stream.read(position - start).rstrip(b"\0")
+        if stripped:
+            return start + len(stripped)
+        position = start
+    return 0
+
+
+def _xz(stream: BinaryIO, size: int, max_index_bytes: int, deadline: float | None) -> dict[str, Any]:
+    """An xz file's streams and blocks and its uncompressed size, from each stream's index,
+    walked from the end of the file; no block is decompressed."""
+    streams = blocks = total = index_bytes = 0
+    end = size
+    while end > 0:
+        if deadline is not None and time.monotonic() >= deadline:
+            return {"streams": streams, "blocks": blocks, "content_bytes": None, "complete": False}
+        if end >= 4:
+            stream.seek(end - 4)
+            if stream.read(4) == b"\0\0\0\0":  # stream padding, in multiples of four bytes
+                start = _padding_start(stream, end, deadline)
+                if start is None:
+                    return {"streams": streams, "blocks": blocks, "content_bytes": None, "complete": False}
+                if (end - start) % 4:
+                    raise ArchiveFormatError("xz stream padding that is not a multiple of four bytes")
+                end = start
+                continue
+        if end < 2 * _XZ_FOOTER:
+            raise ArchiveFormatError("an xz stream shorter than its header and footer")
+        stream.seek(end - _XZ_FOOTER)
+        footer = stream.read(_XZ_FOOTER)
+        if footer[10:12] != b"YZ":
+            raise ArchiveFormatError("no xz stream footer")
+        backward = (struct.unpack_from("<L", footer, 4)[0] + 1) * 4
+        index_bytes += backward
+        if index_bytes > max_index_bytes:
+            raise ArchiveLimitError("index_bytes", index_bytes, f"the xz indexes hold {index_bytes:,} bytes")
+        index_start = end - _XZ_FOOTER - backward
+        if index_start < _XZ_FOOTER:
+            raise ArchiveFormatError("an xz index that starts before its stream")
+        stream.seek(index_start)
+        index = stream.read(backward)
+        if index[:1] != b"\0":
+            raise ArchiveFormatError("no xz index indicator")
+        records, cursor = _xz_vint(index, 1)
+        if records > backward:
+            raise ArchiveFormatError("an xz index declaring more records than it holds")
+        packed = 0
+        for _ in range(records):
+            unpadded, cursor = _xz_vint(index, cursor)
+            uncompressed, cursor = _xz_vint(index, cursor)
+            packed += unpadded + (-unpadded % 4)
+            total += uncompressed
+        blocks += records
+        streams += 1
+        end = index_start - packed - _XZ_FOOTER
+        if end < 0:
+            raise ArchiveFormatError("xz blocks that start before the file")
+        stream.seek(end)
+        if stream.read(6) != b"\xfd7zXZ\x00":
+            raise ArchiveFormatError(f"no xz stream header at offset {end}")
+    if not streams:
+        raise ArchiveFormatError("no xz stream")
+    return {"streams": streams, "blocks": blocks, "content_bytes": total, "complete": True}
+
+
+def _zstd(stream: BinaryIO, size: int, deadline: float | None) -> dict[str, Any]:
+    """A Zstandard file's frames, walked through their block headers without decompressing:
+    their declared content sizes (exact for raw and RLE blocks), window and dictionaries."""
+    frames = skippable = checksums = steps = known = window = 0
+    exact, dictionaries, position = True, set(), 0
+    result: dict[str, Any] = {}
+    while position < size:
+        steps += 1
+        if deadline is not None and steps % 4096 == 0 and time.monotonic() >= deadline:
+            result["complete"], exact = False, False
+            break
+        stream.seek(position)
+        head = stream.read(18)
+        magic = struct.unpack_from("<L", head)[0] if len(head) >= 4 else None
+        if magic is not None and 0x184D2A50 <= magic <= 0x184D2A5F and len(head) >= 8:
+            skippable += 1
+            position += 8 + struct.unpack_from("<L", head, 4)[0]
+            continue
+        if magic != 0xFD2FB528 or len(head) < 6:
+            raise ArchiveFormatError(f"no Zstandard frame at offset {position}")
+        descriptor = head[4]
+        size_flag, single, checksum, dictionary_flag = descriptor >> 6, descriptor & 0x20, descriptor & 0x04, descriptor & 3
+        if descriptor & 0x08:
+            raise ArchiveFormatError("a reserved Zstandard frame header bit is set")
+        cursor = 5
+        if not single:
+            exponent, mantissa = head[cursor] >> 3, head[cursor] & 7
+            base = 1 << (10 + exponent)
+            window = max(window, base + base // 8 * mantissa)
+            cursor += 1
+        dictionary_bytes = (0, 1, 2, 4)[dictionary_flag]
+        if dictionary_bytes:
+            dictionaries.add(int.from_bytes(head[cursor:cursor + dictionary_bytes], "little"))
+        cursor += dictionary_bytes
+        content_bytes = (1 if single else 0, 2, 4, 8)[size_flag]
+        content = None
+        if content_bytes:
+            content = int.from_bytes(head[cursor:cursor + content_bytes], "little") + (256 if content_bytes == 2 else 0)
+            if single:
+                window = max(window, content)
+        position += cursor + content_bytes
+        regenerated, blocks_exact = 0, True
+        while True:
+            steps += 1
+            if deadline is not None and steps % 4096 == 0 and time.monotonic() >= deadline:
+                result["complete"] = False
+                exact = False
+                break
+            stream.seek(position)
+            block = stream.read(3)
+            if len(block) < 3:
+                raise ArchiveFormatError("a truncated Zstandard block header")
+            header = int.from_bytes(block, "little")
+            last, kind, block_size = header & 1, (header >> 1) & 3, header >> 3
+            if kind == 3:
+                raise ArchiveFormatError("a reserved Zstandard block type")
+            if kind == 2:
+                blocks_exact = False  # a compressed block regenerates up to 128 KiB
+            regenerated += block_size if kind in (0, 1) else 128 * 1024
+            position += 3 + (1 if kind == 1 else block_size)
+            if position > size:
+                raise ArchiveFormatError("a Zstandard block runs past the end of the file")
+            if last:
+                break
+        if result.get("complete") is False:
+            break
+        if checksum:
+            checksums += 1
+            position += 4
+        frames += 1
+        if content is not None:
+            known += content
+        elif blocks_exact:
+            known += regenerated
+        else:
+            exact = False
+    result.setdefault("complete", True)
+    result.update(frames=frames, skippable_frames=skippable, checksummed_frames=checksums,
+                  window_bytes=window or None, dictionaries=sorted(dictionaries),
+                  content_bytes=known if exact else None)
+    return result
+
+
+def read_compressed(stream: BinaryIO, size: int, codec: str, max_index_bytes: int,
+                    deadline: float | None = None) -> dict[str, Any]:
+    """The metadata of a single compressed file's header (and, for xz and Zstandard, of its
+    index or frames), with ``content_bytes`` when the format says how large the content is."""
+    stream.seek(0)
+    if codec == "gzip":
+        return _gzip(stream, size)
+    if codec == "xz":
+        return _xz(stream, size, max_index_bytes, deadline)
+    if codec == "zstd":
+        return _zstd(stream, size, deadline)
+    head = stream.read(13)
+    if codec == "bzip2":
+        if len(head) < 4 or head[:3] != b"BZh" or head[3] not in b"123456789":
+            raise ArchiveFormatError("not a bzip2 stream")
+        return {"block_size_kb": 100 * (head[3] - 0x30), "content_bytes": None}
+    if codec == "lzma":
+        if len(head) < 13 or head[0] >= 9 * 5 * 5:
+            raise ArchiveFormatError("not an LZMA stream")
+        dictionary, declared = struct.unpack_from("<LQ", head, 1)
+        return {"dictionary_bytes": dictionary, "content_bytes": None if declared == (1 << 64) - 1 else declared}
+    raise ValueError(f"unknown codec {codec!r}")

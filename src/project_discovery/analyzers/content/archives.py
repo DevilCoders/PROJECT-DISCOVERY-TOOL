@@ -42,8 +42,11 @@ from .archive_formats import (
     ZSTD_UNAVAILABLE,
     ArchiveFormatError,
     ArchiveLimitError,
+    ArchiveUnsupportedError,
     read_ar,
     read_cab,
+    read_compressed,
+    read_iso,
     read_rpm,
     zstd_reader,
 )
@@ -108,6 +111,7 @@ _MAX_DECLARED_UNCOMPRESSED_BYTES = 16 * 1024 * 1024 * 1024
 _MAX_NESTED_DEPTH = 1  # archives inside an archive are inspected one level down
 _MAX_NESTED_BYTES = 64 * 1024 * 1024  # nested archives one archive may buffer in memory, in total
 _HIGH_COMPRESSION_RATIO = 1000.0  # a member compressed more than this is flagged "high-ratio"
+_ZSTD_MAX_WINDOW = 1 << 27  # libzstd's default decoder window limit, which both decompressors keep
 _MIB = 1024 * 1024
 # `pdt scan --archive-limit NAME=VALUE`: option name -> (limit, unit in bytes or 1, whole number)
 ARCHIVE_LIMIT_OPTIONS = {
@@ -213,9 +217,10 @@ class _Unsupported(Exception):
     """This installation cannot read the archive (a decompressor it does not have)."""
 
 
-def _tar_decompressor(stream):
-    """(codec, decompressing file object) for a gzip, bzip2, xz or Zstandard TAR stream, or
-    (None, None) for a plain one; raises _Unsupported for Zstandard without a decompressor."""
+def _decompressor(stream, codec: str | None = None):
+    """(codec, decompressing file object) for a gzip, bzip2, xz or Zstandard stream by its
+    signature, or for LZMA (which has none) when ``codec`` says so; (None, None) for anything
+    else. Raises _Unsupported for Zstandard without a decompressor."""
     head = stream.peek(6)[:6]
     if head.startswith(b"\x1f\x8b"):
         return "gzip", gzip.GzipFile(fileobj=stream, mode="rb")
@@ -228,7 +233,20 @@ def _tar_decompressor(stream):
         if reader is None:
             raise _Unsupported(ZSTD_UNAVAILABLE)
         return "zstd", reader
+    if codec == "lzma" and not _tar_header(stream.peek(512)[:512]):
+        return "lzma", lzma.LZMAFile(stream, format=lzma.FORMAT_ALONE)
     return None, None
+
+
+def _tar_header(block: bytes) -> bool:
+    """Whether ``block`` starts with a TAR header (its checksum is valid)."""
+    if len(block) < 512:
+        return False
+    try:
+        stored = int(block[148:156].strip(b" \x00") or b"-1", 8)
+    except ValueError:
+        return False
+    return stored == sum(block[:148]) + 8 * 32 + sum(block[156:512])
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,44 +592,82 @@ class _Nested:
 
 
 _NESTED_ZIP_SUFFIXES = (".zip", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa", ".whl", ".egg", ".nupkg")
-_NESTED_TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst")
+_NESTED_TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst",
+                        ".tar.lzma", ".tlz")
 _TAR_SUFFIXES = _NESTED_TAR_SUFFIXES
+_STREAM_SUFFIXES = (".gz", ".bz2", ".xz", ".lzma", ".zst")
+# Member names these readers inspect as archives, most specific first (.tar.gz before .gz).
+_NESTED_KINDS = (
+    (_NESTED_ZIP_SUFFIXES, "zip"), (_NESTED_TAR_SUFFIXES, "tar"), ((".deb", ".udeb"), "ar"), ((".rpm",), "rpm"),
+    ((".cab",), "cab"), ((".iso",), "iso"), (_STREAM_SUFFIXES, "stream"),
+)
+_NESTED_TYPES = {"zip": "archive/zip", "tar": "archive/tar", "ar": "archive/deb", "rpm": "archive/rpm",
+                 "cab": "archive/cab", "iso": "disk-image/iso9660", "stream": "archive/compressed"}
 # The readers by content family, then by name: a name decides unless the content is another
-# archive format (a .zip holding a RAR archive), and compressed content is read by name only
-# as a TAR stream (.tgz, .tar.zst, .ipk). Content with a prefix that is no archive (a .jar
-# behind a launcher script, a self-extracting .zip) is read by name, as ZIP readers find
-# the directory from the end of the file.
-_READER_FAMILIES = {"zip": "zip", "tar": "tar", "ar": "ar", "cab": "cab", "rpm": "rpm"}
-_COMPRESSION_FAMILIES = frozenset({"gzip", "bzip2", "xz", "zstandard"})
+# archive format (a .zip holding a RAR archive). Compressed content is a TAR stream under a TAR
+# name (.tgz, .tar.zst, .ipk) and otherwise a single compressed file, whose content may still
+# turn out to be TAR. Content whose start is no archive (a .jar behind a launcher script, a
+# self-extracting .zip) is read by name, as ZIP readers find the directory from the end.
+_READER_FAMILIES = {"zip": "zip", "tar": "tar", "ar": "ar", "cab": "cab", "rpm": "rpm", "iso9660": "iso",
+                    "udf": "iso"}
+_COMPRESSION_FAMILIES = frozenset({"gzip", "bzip2", "xz", "lzma", "zstandard"})
 _READER_SUFFIXES = (
     (_NESTED_ZIP_SUFFIXES, "zip"), (_TAR_SUFFIXES + (".ipk",), "tar"), ((".deb", ".udeb"), "ar"),
-    ((".cab",), "cab"), ((".rpm",), "rpm"),
+    ((".cab",), "cab"), ((".rpm",), "rpm"), ((".iso",), "iso"), (_STREAM_SUFFIXES, "stream"),
 )
+_CODEC_FAMILIES = {"gzip": "gzip", "bzip2": "bzip2", "xz": "xz", "lzma": "lzma", "zstandard": "zstd"}
+_CODEC_SUFFIXES = (
+    ((".gz", ".tgz", ".svgz"), "gzip"), ((".bz2", ".tbz2", ".tbz"), "bzip2"), ((".xz", ".txz"), "xz"),
+    ((".lzma", ".tlz"), "lzma"), ((".zst", ".tzst"), "zstd"),
+)
+# What a compressed file's member is called when its header names none: its name without the suffix.
+_UNCOMPRESSED_SUFFIXES = {".tgz": ".tar", ".tbz2": ".tar", ".tbz": ".tar", ".txz": ".tar", ".tzst": ".tar",
+                          ".tlz": ".tar", ".svgz": ".svg"}
 
 
 def _reader(record: FileRecord) -> str | None:
-    """The reader for an archive record ("zip", "tar", "ar", "cab" or "rpm"), or None."""
+    """The reader for an archive record ("zip", "tar", "ar", "cab", "rpm", "iso" or "stream"), or None."""
     family = family_of(record.file_type)
     if family in _READER_FAMILIES:
         return _READER_FAMILIES[family]
     lowered = record.path.lower()
+    if family in _COMPRESSION_FAMILIES:
+        return "tar" if lowered.endswith(_TAR_SUFFIXES + (".ipk",)) else "stream"
     for suffixes, reader in _READER_SUFFIXES:
         if lowered.endswith(suffixes):
-            if family in _COMPRESSION_FAMILIES:
-                return reader if reader == "tar" else None
             if record.file_type.startswith("archive/") or family in ARCHIVE_FAMILIES:
                 return None
             return reader
     return None
 
 
-def _nested_kind(name: str) -> str | None:
-    """"zip" or "tar" for a member named like an archive these readers inspect, else None."""
+def _codec(name: str, file_type: str = "") -> str | None:
+    """The compression of a single compressed file, by its content family, else by its name."""
+    family = family_of(file_type)
+    if family in _CODEC_FAMILIES:
+        return _CODEC_FAMILIES[family]
     lowered = name.lower()
-    if lowered.endswith(_NESTED_ZIP_SUFFIXES):
-        return "zip"
-    if lowered.endswith(_NESTED_TAR_SUFFIXES):
-        return "tar"
+    for suffixes, codec in _CODEC_SUFFIXES:
+        if lowered.endswith(suffixes):
+            return codec
+    return None
+
+
+def _uncompressed_name(name: str) -> str:
+    """A compressed file's name without its compression suffix (app.log.gz: app.log)."""
+    base = PurePosixPath(name.replace("\\", "/")).name
+    suffix = PurePosixPath(base).suffix.lower()
+    if suffix in _UNCOMPRESSED_SUFFIXES:
+        return base[:-len(suffix)] + _UNCOMPRESSED_SUFFIXES[suffix]
+    return base[:-len(suffix)] if suffix in _STREAM_SUFFIXES and len(base) > len(suffix) else base
+
+
+def _nested_kind(name: str) -> str | None:
+    """The reader for a member named like an archive these readers inspect, else None."""
+    lowered = name.lower()
+    for suffixes, kind in _NESTED_KINDS:
+        if lowered.endswith(suffixes):
+            return kind
     return None
 
 
@@ -627,6 +683,7 @@ class _Inspection:
         self.indexed = 0
         self.regular = 0  # indexed regular-file members and their uncompressed bytes
         self.regular_bytes = 0
+        self.unsized = 0  # regular members whose size the format does not say (a bzip2 stream)
         self.compressed_bytes: int | None = None
         self.sampled = 0  # members whose content was read, in part or in full
         self.fully_sampled = 0
@@ -668,6 +725,7 @@ class _Inspection:
         if kind == "file":
             self.regular += 1
             self.regular_bytes += max(0, int(size or 0))
+            self.unsized += size is None
         # Permission bits only: the type is the record's own field (a ZIP mode carries both).
         permissions = stat.S_IMODE(mode) if mode else None
         if emit_archive_member(self.path, ordinal, name, kind, size, compressed, permissions, mtime, flags,
@@ -714,10 +772,14 @@ class _Inspection:
             "regular_members": self.regular, "member_bytes": self.regular_bytes,
             "members_sampled": self.sampled, "members_fully_sampled": self.fully_sampled,
             "members_not_fully_sampled": self.truncated, "member_bytes_sampled": self.sample_bytes,
-            "content_coverage_pct": _pct(self.regular_sample_bytes, self.regular_bytes) if self.index_read else None,
+            # Unknown when a member's size is: the share of an undeclared size is not a number.
+            "content_coverage_pct": (_pct(self.regular_sample_bytes, self.regular_bytes)
+                                     if self.index_read and not self.unsized else None),
             "encrypted_members": self.encrypted, "member_records": self.records,
             "limits": [self.limits[name] for name in sorted(self.limits)],
         }
+        if self.unsized:
+            detail["members_unsized"] = self.unsized
         detail.update(self.extra)
         if self.malformed is not None:
             detail["error"] = self.malformed
@@ -735,7 +797,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         outcome="UNKNOWN or partial finding at an index, entry, sample, decompression or wall-time limit",
     )
     domains = ("archives", "filesystem_inventory", "supply_chain")
-    languages = ("ZIP", "TAR", "GZIP", "BZIP2", "XZ", "Zstandard", "AR", "DEB", "RPM", "CAB", "7z", "RAR", "ISO")
+    languages = ("ZIP", "TAR", "GZIP", "BZIP2", "XZ", "LZMA", "Zstandard", "AR", "DEB", "RPM", "CAB", "ISO", "7z", "RAR")
 
     def supports(self, record: FileRecord) -> bool:
         return record.error is None and record.content_skipped_reason is None and is_archive(record)
@@ -745,7 +807,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         if reader == "zip":
             return self._zip(path, record, _Limits())
         if reader == "tar":
-            return self._tar(path, record, _Limits())
+            return self._tar(path, record, _Limits(), codec=_codec(record.path, record.file_type))
+        if reader == "stream":
+            return self._stream(path, record, _Limits(), _codec(record.path, record.file_type))
         if reader is not None:
             return self._listed(path, record, _Limits(), reader)
         return self._unsupported(_Inspection(record, _archive_format(record), _Limits()))
@@ -1041,12 +1105,13 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
     def _tar(self, path: Path, record: FileRecord, limits: _Limits | None = None, *,
              data: bytes | _Slice | None = None, depth: int = 0, nested: _Nested | None = None,
-             deadline: float | None = None, package: bool = False) -> list[Finding]:
+             deadline: float | None = None, package: bool = False, codec: str | None = None) -> list[Finding]:
         """Traverse every TAR header under budgets; content sampling never ends traversal.
 
         Stopping at the first large member would hide later traversal, link and setuid
         entries, so sampling limits only skip sampling. Compressed streams are read through
-        a budgeted reader that enforces wall time and decompressed bytes inside each read.
+        a budgeted reader that enforces wall time and decompressed bytes inside each read;
+        ``codec`` "lzma" names an LZMA stream, which has no signature to find it by.
         A package payload (a DEB's tarballs) has links the package manager installs as links,
         to anywhere: only its member paths are checked for traversal, not its link targets.
         """
@@ -1073,7 +1138,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             source = (open_verified_binary(path, record.analysis_identity) if data is None
                       else _open_data(data, buffered=True))  # buffered: the decompressor peeks
             with source as archive_stream:
-                codec, decompressor = _tar_decompressor(archive_stream)
+                codec, decompressor = _decompressor(archive_stream, codec)
                 if decompressor is None:
                     # Plain TAR on a seekable descriptor: headers are reached by seeking.
                     archive = tarfile.open(fileobj=archive_stream, mode="r:")
@@ -1260,12 +1325,14 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
     def _listed(self, path: Path, record: FileRecord, limits: _Limits | None = None, reader: str = "ar", *,
                 data: bytes | _Slice | None = None, depth: int = 0, nested: _Nested | None = None,
                 deadline: float | None = None) -> list[Finding]:
-        """Inspect an ar (DEB package, static library), Cabinet or RPM archive from its own headers.
+        """Inspect an ar (DEB package, static library), Cabinet, RPM or ISO 9660 archive from its
+        own headers.
 
-        ar members are stored as is: each is sampled in place like a TAR member, and those
-        named like archives (a DEB's control and data tarballs) are inspected as nested
-        archives without being buffered. Cabinet and RPM member data is compressed and is not
-        read: their records come from the cabinet's file table and the RPM header.
+        ar and ISO members are stored as is: each is sampled in place like a TAR member, and
+        those named like archives (a DEB's control and data tarballs, the packages on an
+        install image) are inspected as nested archives without being buffered. Cabinet and
+        RPM member data is compressed and is not read: their records come from the cabinet's
+        file table and the RPM header.
         """
         limits = limits or _Limits()
         nested = nested or _Nested(limits.nested_bytes)
@@ -1290,6 +1357,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     listing = read_ar(stream, size, limits.entries, limits.index_bytes, deadline)
                 elif reader == "cab":
                     listing = read_cab(stream, size, limits.entries, limits.index_bytes)
+                elif reader == "iso":
+                    listing = read_iso(stream, size, limits.entries, limits.index_bytes, deadline)
                 else:
                     listing = read_rpm(stream, size, limits.entries, limits.index_bytes)
                 deb = "deb" in listing.metadata
@@ -1298,7 +1367,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 inspection.index_read = True
                 inspection.extra.update(listing.metadata)
                 # An RPM installs its paths from /: absolute paths are its design, a parent
-                # traversal is not.
+                # traversal is not, and its links, like any package's, may point anywhere. An
+                # image's symlinks are checked like a TAR's.
                 unsafe = _unsafe_package_path if reader == "rpm" else _unsafe_member_path
                 for ordinal, entry in enumerate(listing.entries):
                     if ordinal % 256 == 0 and time.monotonic() >= deadline:
@@ -1307,9 +1377,11 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     names.append(entry.name)
                     counts[entry.kind] += 1
                     flags = []
-                    if unsafe(entry.name):
+                    if unsafe(entry.name) or (reader == "iso" and entry.kind == "symlink" and entry.link_target
+                                              and _unsafe_member_path(entry.link_target)):
                         unsafe_paths.append(entry.name)
                         flags.append("unsafe-path")
+                    flags.extend(entry.flags)
                     if entry.kind == "symlink":
                         symlinks.append(entry.name)
                     elif entry.kind == "hardlink":
@@ -1378,6 +1450,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 analyzer=self.name,
                 severity="MEDIUM",
             )]
+        except ArchiveUnsupportedError as exc:
+            inspection.format = "udf"
+            return self._unsupported(inspection, str(exc))
         except (OSError, ArchiveFormatError, EOFError, struct.error) as exc:
             inspection.malformed = describe_error(exc)
             inspection.emit()
@@ -1395,12 +1470,18 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             len(listing.entries) if listing.complete else None)
         inspection.declared = declared
         member_bytes = sum(max(0, entry.size or 0) for entry in listing.entries if entry.kind == "file")
-        # Cabinet folders and an RPM payload compress every member together: the ratio is the archive's.
+        # Cabinet folders and an RPM payload compress every member together, so the ratio is the
+        # archive's; an ISO image stores its files as is, so files that declare more than the
+        # image holds share their data.
         compressed = {"cab": size, "rpm": listing.metadata.get("rpm", {}).get("payload_bytes")}.get(reader)
         inspection.compressed_bytes = compressed
-        ratio = member_bytes / compressed if compressed else None
+        base = size if reader == "iso" else compressed
+        ratio = member_bytes / base if base else None
         if ratio is not None:
-            inspection.extra["compression_ratio"] = round(ratio, 1)
+            inspection.extra["expansion_ratio" if reader == "iso" else "compression_ratio"] = round(ratio, 1)
+        out_of_bounds = [entry.name for entry in listing.entries if "out-of-bounds" in entry.flags]
+        if out_of_bounds:
+            inspection.malformed = f"{len(out_of_bounds):,} member(s) extend past the end of the file"
         if listing.stopped == "wall_seconds":
             time_budget_reached = True
         if time_budget_reached:
@@ -1424,7 +1505,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             compressor = listing.metadata["rpm"].get("payload_compressor") or "compressed"
             source_note = f"the package header; the {compressor} payload was not decompressed"
         else:
-            source_note = (f"the ar member headers; {content_bytes:,} member bytes were inspected through bounded "
+            headers = ("the ar member headers" if reader == "ar"
+                       else f"the image's {listing.metadata['iso']['tree']} ISO 9660 directory tree")
+            source_note = (f"{headers}; {content_bytes:,} member bytes were inspected through bounded "
                            "in-memory streams and no member was written to disk")
         evidence = [
             f"{counts['file']:,} regular file(s)", f"{counts['directory']:,} directory(ies)",
@@ -1456,17 +1539,23 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         if member_bytes > limits.uncompressed_bytes:
             findings.append(self._bomb_finding(record, member_bytes, limits))
         if ratio is not None and member_bytes and ratio > limits.compression_ratio:
+            if reader == "iso":
+                title = f"ISO image files declare far more data than it holds: {record.path}"
+                detail = (f"Its files declare {member_bytes:,} bytes, {ratio:,.0f} times the image's {base:,} bytes "
+                          f"(over {limits.compression_ratio:g}:1): they share their data, so extracting them "
+                          "writes far more than the image holds, like an overlapping-member zip bomb.")
+            else:
+                title = f"High compression-ratio archive: {record.path}"
+                detail = (f"Its members declare {member_bytes:,} bytes, {ratio:,.0f} times its {base:,} compressed "
+                          f"bytes (over {limits.compression_ratio:g}:1). Review for archive-bomb risk; contents "
+                          "were not decompressed.")
             findings.append(Finding(
-                "security",
-                f"High compression-ratio archive: {record.path}",
-                f"Its members declare {member_bytes:,} bytes, {ratio:,.0f} times its {compressed:,} compressed "
-                f"bytes (over {limits.compression_ratio:g}:1). Review for archive-bomb risk; contents were not "
-                "decompressed.",
-                confidence="INFERRED",
-                evidence=[record.path, f"declared member bytes: {member_bytes:,}", f"compressed bytes: {compressed:,}"],
-                analyzer=self.name,
-                severity="HIGH",
+                "security", title, detail, confidence="INFERRED",
+                evidence=[record.path, f"declared member bytes: {member_bytes:,}", f"archive bytes: {base:,}"],
+                analyzer=self.name, severity="HIGH",
             ))
+        if reader == "iso":
+            findings.extend(self._iso_findings(record, listing.metadata["iso"], out_of_bounds))
         findings.extend(self._link_findings(record, hardlinks, special_entries))
         collisions = _colliding_names(names)
         if collisions:
@@ -1475,17 +1564,232 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         findings.extend(self._budget_findings(record, label, limits, content_truncated, time_budget_reached))
         return findings
 
+    def _iso_findings(self, record: FileRecord, iso: dict, out_of_bounds: list[str]) -> list[Finding]:
+        """Findings for an ISO image's directory loops, both-endian disagreements, corrupt or
+        truncated directories and a UDF tree that was not read."""
+        issues = iso.get("structure_issues", {})
+        findings = []
+        if issues.get("directory-loop"):
+            findings.append(Finding(
+                "security", f"ISO directory loop: {record.path}",
+                f"{issues['directory-loop']:,} directory record(s) point back to a directory already listed. "
+                "Tools that follow them recurse without end; PDT listed each directory once.",
+                confidence="CONFIRMED", evidence=[record.path], analyzer=self.name, severity="MEDIUM",
+            ))
+        if issues.get("both-endian-mismatch"):
+            findings.append(Finding(
+                "security", f"ISO directory records disagree with themselves: {record.path}",
+                f"{issues['both-endian-mismatch']:,} directory record(s) hold different little- and big-endian "
+                "extents or sizes. Systems that read the other half see other files; PDT read the little-endian "
+                "half.",
+                confidence="CONFIRMED", evidence=[record.path], analyzer=self.name, severity="MEDIUM",
+            ))
+        corrupt = sum(issues.get(name, 0) for name in ("corrupt-record", "directory-out-of-bounds",
+                                                         "continuation-out-of-bounds"))
+        if corrupt or out_of_bounds or iso.get("missing_bytes"):
+            evidence = [f"{record.path}::{name}" for name in out_of_bounds[:_MAX_EVIDENCE]] or [record.path]
+            findings.append(Finding(
+                "archive", f"Truncated or corrupt ISO image: {record.path}",
+                f"{corrupt:,} directory record(s) or area(s) could not be read and {len(out_of_bounds):,} file(s) "
+                f"extend past the end of the image"
+                + (f", which is {iso['missing_bytes']:,} bytes shorter than its volume" if iso.get("missing_bytes")
+                   else "") + ". The listing may be incomplete.",
+                confidence="UNKNOWN", evidence=evidence, analyzer=self.name, severity="MEDIUM",
+            ))
+        if "udf" in iso.get("extensions", ()):
+            findings.append(Finding(
+                "archive", f"UDF file system not read: {record.path}",
+                "The image also holds a UDF file system, which has no built-in reader. Hybrid images (Windows "
+                "install media) may list only a few files in their ISO 9660 tree; files only in the UDF tree "
+                "were not inspected.",
+                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name, severity="LOW",
+            ))
+        return findings
+
     def _nested(self, data: bytes | _Slice, display: str, kind: str, limits: _Limits, depth: int,
                 nested: _Nested, deadline: float, package: bool = False) -> list[Finding]:
         """Inspect a member that is itself an archive, from its bytes in memory or in place; its
         archive and member records and findings name it "outer.zip::inner.jar"."""
         name = display.rsplit("::", 1)[-1]
         record = FileRecord(display, _data_size(data), PurePosixPath(name).suffix.lower(), "Archive",
-                            file_type="archive/zip" if kind == "zip" else "archive/tar")
+                            file_type=_NESTED_TYPES[kind])
+        options = {"data": data, "depth": depth, "nested": nested, "deadline": deadline}
         if kind == "zip":
-            return self._zip(Path(name), record, limits, data=data, depth=depth, nested=nested, deadline=deadline)
-        return self._tar(Path(name), record, limits, data=data, depth=depth, nested=nested, deadline=deadline,
-                         package=package)
+            return self._zip(Path(name), record, limits, **options)
+        if kind == "tar":
+            return self._tar(Path(name), record, limits, package=package, codec=_codec(name), **options)
+        if kind == "stream":
+            return self._stream(Path(name), record, limits, _codec(name), **options)
+        return self._listed(Path(name), record, limits, kind, **options)
+
+    def _stream(self, path: Path, record: FileRecord, limits: _Limits | None = None, codec: str | None = None, *,
+                data: bytes | _Slice | None = None, depth: int = 0, nested: _Nested | None = None,
+                deadline: float | None = None) -> list[Finding]:
+        """Inspect a single compressed file (gzip, bzip2, xz, LZMA, Zstandard) as an archive of one
+        member: its header's metadata (an original name, a time, the declared size) and a
+        bounded sample of its content. Content that is a TAR stream is inspected as TAR."""
+        limits = limits or _Limits()
+        nested = nested or _Nested(limits.nested_bytes)
+        codec = codec or "gzip"
+        deadline = deadline if deadline is not None else time.monotonic() + limits.wall_seconds
+        inspection = _Inspection(record, codec, limits)
+        scan_limit = min(limits.member_sample_bytes, limits.archive_sample_bytes)
+        head, eof, timed_out = b"", False, False
+        unreadable = unsupported = None
+        try:
+            source = (open_verified_binary(path, record.analysis_identity) if data is None
+                      else _open_data(data, buffered=True))
+            with source as stream:
+                stream.seek(0, 2)
+                size = stream.tell()
+                info = read_compressed(stream, size, codec, limits.index_bytes, deadline)
+                window = info.get("window_bytes") or 0
+                if codec == "zstd" and info.get("dictionaries"):
+                    unreadable = "its Zstandard frames need a dictionary"
+                elif codec == "zstd" and window > _ZSTD_MAX_WINDOW:
+                    unreadable = (f"its Zstandard window of {window:,} bytes is over the decompressors' "
+                                  f"{_ZSTD_MAX_WINDOW:,}-byte limit")
+                else:
+                    stream.seek(0)
+                    try:
+                        _, reader = _decompressor(stream, codec)
+                    except _Unsupported as exc:
+                        unsupported, reader = str(exc), None
+                    if reader is None and unsupported is None:
+                        raise ArchiveFormatError(f"no {codec} stream signature")
+                    if reader is not None:
+                        # Enough to tell a TAR stream (512 bytes) and to sample the content.
+                        sniff = max(512, scan_limit)
+                        try:
+                            head, _, more = _read_member_sample(
+                                _BudgetedReader(reader, deadline, limits.tar_decompressed_bytes), sniff, deadline, sniff)
+                        except _ArchiveBudgetExceeded:
+                            timed_out = True
+                        else:
+                            timed_out = time.monotonic() >= deadline
+                            eof = not more and not timed_out
+        except ArchiveLimitError as exc:
+            limit = getattr(limits, exc.limit)
+            limit_reached("bytes", limit, exc.used)
+            inspection.limit(exc.limit, limit, exc.used)
+            inspection.emit()
+            return [Finding(
+                "archive", f"{codec.upper()} index budget exceeded: {record.path}",
+                f"The compressed file's index was not read: {exc}, more than the {limit:,}-byte budget "
+                "(--archive-limit index_mb).",
+                confidence="UNKNOWN", evidence=[record.path], analyzer=self.name, severity="MEDIUM",
+            )]
+        except (OSError, ArchiveFormatError, EOFError, lzma.LZMAError, struct.error, *ZSTD_ERRORS) as exc:
+            inspection.malformed = describe_error(exc)
+            inspection.emit()
+            return [Finding(
+                "archive", f"{codec.upper()} read error: {record.path}", describe_error(exc),
+                confidence="UNKNOWN", severity="LOW", evidence=[record.path], analyzer=self.name,
+            )]
+        if _tar_header(head[:512]):
+            return self._tar(path, record, limits, data=data, depth=depth, nested=nested, deadline=deadline,
+                             codec=codec)
+
+        label = codec.upper()
+        name = info.get("original_name") or _uncompressed_name(record.path.rsplit("::", 1)[-1])
+        # An xz index and Zstandard frame sizes are exact (Python's xz reader also stops at stream
+        # padding); a gzip trailer and an LZMA header may not be, so a content read to its end wins.
+        exact = info.get("content_bytes") if codec in ("xz", "zstd") else None
+        member_size = exact if exact is not None else len(head) if eof else info.get("content_bytes")
+        flags: list[str] = []
+        unsafe_paths = [name] if _unsafe_member_path(name) else []
+        if unsafe_paths:
+            flags.append("unsafe-path")  # gunzip -N restores the name the header gives
+        high_ratios = []
+        if member_size and member_size / max(size, 1) > limits.compression_ratio:
+            high_ratios.append(name)
+            flags.append("high-ratio")
+        nested_kind = _nested_kind(name)
+        if nested_kind == "tar":
+            nested_kind = None  # its content was no TAR stream
+        if nested_kind is not None:
+            flags.append("nested-archive")
+        inspection.index_read, inspection.declared, inspection.compressed_bytes = True, 1, size
+        inspection.extra["stream"] = info
+        inspection.member(0, name, "file", member_size, size, None, info.get("mtime"), flags)
+        content_findings: list[Finding] = []
+        sampled = truncated = 0
+        timed_out = timed_out or info.get("complete") is False  # the index or frame walk ran out of time
+        inspected_nested = False
+        if unsupported is not None:
+            inspection.unsupported = True
+            inspection.extra["unsupported_reason"] = unsupported
+        elif unreadable is not None:
+            inspection.extra["stream"]["unreadable"] = unreadable
+            inspection.truncated += 1
+            truncated = 1
+        elif nested_kind is not None and not timed_out:
+            if depth >= limits.nested_depth:
+                inspection.limit("nested_depth", limits.nested_depth, members=1)
+            else:
+                inner = head if eof else self._decompressed(path, record, data, codec, nested.remaining, deadline,
+                                                            limits)
+                if inner is None or len(inner) > nested.remaining:
+                    inspection.limit("nested_bytes", limits.nested_bytes, members=1)
+                else:
+                    nested.remaining -= len(inner)
+                    inspected_nested = True
+                    content_findings.extend(self._nested(
+                        inner, f"{record.path}::{name}", nested_kind, limits, depth + 1, nested, deadline))
+        if unsupported is None and unreadable is None and not inspected_nested:
+            # Sampled like any member, also when it is an archive left uninspected by a limit.
+            sample = head[:scan_limit]
+            short = timed_out or not eof or len(head) > scan_limit
+            sampled = len(sample)
+            inspection.sample("file", member_size if member_size is not None else sampled + int(short), sampled,
+                              short, limits.archive_sample_bytes)
+            truncated = int(short)
+            findings_found, member_timed_out = _member_content_findings(record.path, name, sample, deadline)
+            content_findings.extend(findings_found)
+            timed_out = timed_out or member_timed_out
+        if member_size is not None and member_size > limits.uncompressed_bytes:
+            inspection.limit("uncompressed_bytes", limits.uncompressed_bytes, member_size)
+        if timed_out:
+            inspection.limit("wall_seconds", limits.wall_seconds)
+        inspection.emit()
+
+        evidence = [f"member: {name}", f"compressed bytes: {size:,}",
+                    f"uncompressed bytes: {member_size:,}" if member_size is not None
+                    else "uncompressed size: not declared"]
+        if codec == "xz" and info.get("streams"):
+            evidence.append(f"{info['streams']:,} xz stream(s), {info['blocks']:,} block(s)")
+        elif codec == "zstd" and info.get("frames"):
+            evidence.append(f"{info['frames']:,} Zstandard frame(s)")
+        reason = unsupported or unreadable
+        detail = (f"A single compressed member, {name}; "
+                  + (f"its content was not decompressed: {reason}." if reason else
+                     f"{sampled:,} decompressed bytes were inspected through bounded in-memory streams and "
+                     "nothing was written to disk."))
+        findings = [Finding("archive", f"{label} compressed file inventory: {record.path}", detail,
+                            confidence="CONFIRMED", evidence=evidence, analyzer=self.name)]
+        findings.extend(self._risk_findings(record, unsafe_paths, [], [], high_ratios, [], 0))
+        if member_size is not None and member_size > limits.uncompressed_bytes:
+            findings.append(self._bomb_finding(record, member_size, limits))
+        findings.extend(content_findings)
+        findings.extend(self._budget_findings(record, label, limits, truncated, timed_out))
+        return findings
+
+    def _decompressed(self, path: Path, record: FileRecord, data: bytes | _Slice | None, codec: str, limit: int,
+                      deadline: float, limits: _Limits) -> bytes | None:
+        """A compressed file's whole content, or None when it is larger than ``limit`` or the
+        wall-time budget ends first."""
+        try:
+            source = (open_verified_binary(path, record.analysis_identity) if data is None
+                      else _open_data(data, buffered=True))
+            with source as stream:
+                _, reader = _decompressor(stream, codec)
+                if reader is None:
+                    return None
+                content, _, more = _read_member_sample(
+                    _BudgetedReader(reader, deadline, limits.tar_decompressed_bytes), limit, deadline, limit)
+        except (_ArchiveBudgetExceeded, _Unsupported, OSError, EOFError, lzma.LZMAError, *ZSTD_ERRORS):
+            return None
+        return None if more else content
 
     def _link_findings(self, record: FileRecord, hardlinks: list[str], special_entries: list[str]) -> list[Finding]:
         findings = []

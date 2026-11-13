@@ -125,8 +125,10 @@ ARCHIVE_EXTENSIONS = frozenset({
     ".cab", ".iso", ".deb", ".rpm",
 })
 # Signature families that are archives whatever their label: Office Open XML, OpenDocument,
-# EPUB, APK and PyTorch files are ZIP archives, static libraries ar archives.
-ARCHIVE_FAMILIES = frozenset({"zip", "tar", "gzip", "bzip2", "xz", "zstandard", "7z", "rar", "cab", "ar", "rpm", "cpio"})
+# EPUB, APK and PyTorch files are ZIP archives, static libraries ar archives, ISO 9660 and
+# UDF disc images archives of files.
+ARCHIVE_FAMILIES = frozenset({"zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstandard", "7z", "rar", "cab", "ar",
+                              "rpm", "cpio", "iso9660", "udf"})
 
 
 def is_archive(record) -> bool:
