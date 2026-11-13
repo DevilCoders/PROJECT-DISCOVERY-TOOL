@@ -35,7 +35,9 @@ from typing import Any, Literal, Sequence
 # read and cpu stop counts), scan_memory_mb and the scan_memory block (--max-memory-mb). 1.20
 # added metrics.performance.phases: the scan's six phases (inventory, hashing, analyzer
 # domains, archive inspection, correlation, reporting) with their state, time and counts.
-REPORT_SCHEMA_VERSION = "1.20"
+# 1.21 added the top-level archives (each archive's inspection states, member and content
+# coverage and the limits that stopped it) and archive_members lists, and metrics.archives.
+REPORT_SCHEMA_VERSION = "1.21"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -285,6 +287,9 @@ class ScanResult:
     directories: Sequence[DirectoryRecord] = field(default_factory=list)
     symlinks: Sequence[SymlinkRecord] = field(default_factory=list)
     special_entries: Sequence[SpecialEntryRecord] = field(default_factory=list)
+    # How each archive was inspected, and its members' metadata (dict rows, see the store).
+    archives: Sequence[dict[str, Any]] = field(default_factory=list)
+    archive_members: Sequence[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         from .reporting.writers import scan_summary  # the writers import this module
@@ -300,6 +305,8 @@ class ScanResult:
             "directories": [item.to_dict() for item in self.directories],
             "symlinks": [item.to_dict() for item in self.symlinks],
             "special_entries": [item.to_dict() for item in self.special_entries],
+            "archives": list(self.archives),
+            "archive_members": list(self.archive_members),
             "findings": [item.to_dict() for item in self.findings],
             "metrics": _materialized(self.metrics),
             "errors": list(self.errors),

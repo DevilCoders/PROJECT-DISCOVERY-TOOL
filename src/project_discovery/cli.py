@@ -61,6 +61,8 @@ from .inventory.markers import TREE_MODES, describe_profiles, normalize_profiles
 from .inventory.signatures import count_classification
 from .inventory.store import (
     InventoryStore,
+    StoredArchiveMembers,
+    StoredArchives,
     StoredDiagnosticRecords,
     StoredFileRecords,
     StoredFindingRecords,
@@ -113,7 +115,7 @@ from .projects.catalog import ProjectCatalog
 from .projects.comparison import compare_many_reports, load_report, write_comparison
 from .reporting.terminal import PhaseDisplay
 from .reporting.writers import (
-    aggregate_summary, attribute_summary, budget_summary, development_summary, gpu_fallback_text,
+    aggregate_summary, archive_summary, attribute_summary, budget_summary, development_summary, gpu_fallback_text,
     gpu_status_text, tree_mode_summary, type_summary,
     write_remote_batch_summary, write_reports,
 )
@@ -1405,12 +1407,17 @@ def run_scan(
             },
             "architecture_layout": architecture_layout,
         }
+        with InventoryStore(inventory_path) as archive_store:
+            # How each archive was inspected (states, coverage, limits), summed over the scan.
+            metrics["archives"] = archive_store.archive_metrics()
         result = ScanResult(
             display_root or str(root), started, now(), records, findings, metrics, errors,
             [analyzer.name for analyzer in analyzers] + ["python-module-graph"],
             directories=directories,
             symlinks=symlinks,
             special_entries=special_entries,
+            archives=StoredArchives(inventory_path),
+            archive_members=StoredArchiveMembers(inventory_path),
         )
         reports = write_reports(result, output, formats, on_format=lambda name: phases.step("reporting", name))
         timer.lap("reporting")
@@ -1464,6 +1471,8 @@ def run_scan(
         summary.add_row("Large files skipped by request", str(metrics["oversized_files"]))
         if not inventory_only:
             summary.add_row("Analyzer budgets", budget_summary(metrics.get("analysis_budgets")))
+            if metrics["archives"]["archives"]:
+                summary.add_row("Archives", escape(archive_summary(metrics["archives"])))
         summary.add_row("Analyzer domains catalogued", str(metrics["analyzer_domain_count"]))
         summary.add_row("Native backend", metrics["native_backend"]["backend"])
         summary.add_row("GPU acceleration", gpu_status_text(metrics["native_backend"]))

@@ -118,11 +118,20 @@ def _budget_stop_finding(analyzer, record: FileRecord, stop: BudgetStop) -> Find
     )
 
 
-def _rollback_facts(sizes: tuple[int, int, int] | None) -> None:
-    """Drop the code facts a stopped analyzer emitted for the file."""
+def _fact_sizes() -> tuple[int, ...] | None:
+    facts = current_facts()
+    if facts is None:
+        return None
+    return (len(facts.symbols), len(facts.calls), len(facts.facts), len(facts.archives),
+            len(facts.archive_members))
+
+
+def _rollback_facts(sizes: tuple[int, ...] | None) -> None:
+    """Drop the code facts and archive records a stopped analyzer emitted for the file."""
     facts = current_facts()
     if facts is not None and sizes is not None:
-        del facts.symbols[sizes[0]:], facts.calls[sizes[1]:], facts.facts[sizes[2]:]
+        del (facts.symbols[sizes[0]:], facts.calls[sizes[1]:], facts.facts[sizes[2]:],
+             facts.archives[sizes[3]:], facts.archive_members[sizes[4]:])
 
 
 def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: FileOutcome) -> None:
@@ -135,8 +144,7 @@ def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: Fi
                 if analyzer.supports(record):
                     # Isolated plugins run in their own hosts under --plugin-timeout/--plugin-memory-mb.
                     budget = None if isinstance(analyzer, _isolated_analyzer_type()) else policy.for_analyzer(analyzer)
-                    facts = current_facts()
-                    sizes = (len(facts.symbols), len(facts.calls), len(facts.facts)) if facts is not None else None
+                    sizes = _fact_sizes()
                     read_limit = budget.read_mb * 1024 * 1024 if budget is not None and budget.read_mb else None
                     with accounting(read_limit) as account:
                         run = budgets.run_with_budget(budget, partial(analyzer.analyze, path, record))
@@ -145,6 +153,11 @@ def _run_analyzers(analyzers, locks, record: FileRecord, path: Path, outcome: Fi
                         _rollback_facts(sizes)
                         outcome.budget_stops.append((analyzer.name, run.stop.kind, run.stop.limit, run.stop.used))
                         outcome.findings.append(_budget_stop_finding(analyzer, record, run.stop))
+                        # A built-in analyzer may record what the stop left (the archive analyzer
+                        # records the archive as budget-stopped).
+                        stopped = getattr(analyzer, "budget_stopped", None)
+                        if stopped is not None:
+                            stopped(record, run.stop)
                         continue
                     produced = run.result
                     outcome.limit_hits.extend((analyzer.name, *limit) for limit in account.limits)

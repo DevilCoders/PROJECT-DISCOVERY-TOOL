@@ -228,6 +228,22 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: archive inspection records
+- Every inspected archive has a record in the JSON report's `archives` list: its format, a primary
+  inspection `state` and every state that applies (detected, index-read, metadata-complete,
+  sample-read, sample-truncated, encrypted, unsupported, malformed, budget-stopped), members
+  declared, indexed and sampled, member and content coverage percentages, and every limit that
+  prevented deeper inspection with its value. An archive the engine's per-call budget stops is
+  recorded as budget-stopped.
+- Every indexed ZIP and TAR member has an `archive_members` record: path, type, sizes, permission
+  bits, ZIP DOS or TAR UTC time, link target, TAR owner and group, and risk flags (unsafe-path,
+  setuid, setgid, world-writable, encrypted, high-ratio, duplicate). Up to 200,000 per archive and
+  1,000,000 per scan are kept in the scan's SQLite inventory and streamed to the report.
+- `metrics.archives` counts archives by state and format, sums members, bytes and coverage and
+  counts the archives each limit stopped; the Markdown report has an *Archives* section, the HTML
+  report an *Archives by inspection state* card and the terminal summary an *Archives* row.
+- Report schema 1.21: the top-level `archives` and `archive_members` lists and `metrics.archives`.
+
 ### Fixed: memory that grew with the corpus
 - The coordinator kept the path of every file whose fingerprint cache write failed (a full disk
   fails them all) and of every lockfile it could not read, to report one diagnostic and twenty

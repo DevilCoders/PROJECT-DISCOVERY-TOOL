@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import time
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from itertools import islice
 from pathlib import Path
@@ -24,6 +25,9 @@ _RECORD_KINDS = frozenset({"file", "directory", "symlink", "special", "finding",
     # The architecture layout's top-level components with their file counts.
     "layout_component",
 })
+# Archive member records a scan keeps (the JSON report lists them all); past it, archives
+# keep their summaries and the store records that member rows were dropped.
+ARCHIVE_MEMBER_ROWS = 1_000_000
 # Cross-file code facts (see code_facts). Rows are idempotent, so re-analysing a file
 # after --resume cannot duplicate them. Each table stops growing at its ceiling.
 _CODE_TABLES = {
@@ -66,7 +70,31 @@ _CODE_TABLES = {
         "CREATE INDEX IF NOT EXISTS code_facts_path ON code_facts(kind, path)",
         5_000_000,
     ),
+    # Archive inspection: one summary per archive (replaced when --resume analyzes it again)
+    # and its members' metadata in archive order.
+    "archive_summaries": (
+        """CREATE TABLE IF NOT EXISTS archive_summaries (
+            archive TEXT NOT NULL PRIMARY KEY, format TEXT NOT NULL, state TEXT NOT NULL,
+            states TEXT NOT NULL, detail TEXT NOT NULL
+        ) WITHOUT ROWID""",
+        "INSERT OR REPLACE INTO archive_summaries(format, state, states, detail, archive) VALUES (?, ?, ?, ?, ?)",
+        None,
+        10_000_000,
+    ),
+    "archive_members": (
+        """CREATE TABLE IF NOT EXISTS archive_members (
+            archive TEXT NOT NULL, ordinal INTEGER NOT NULL, path TEXT NOT NULL, type TEXT NOT NULL,
+            size INTEGER, compressed_size INTEGER, mode INTEGER, mtime TEXT, flags TEXT NOT NULL,
+            link_target TEXT, uid INTEGER, gid INTEGER, owner TEXT, grp TEXT,
+            PRIMARY KEY(archive, ordinal)
+        ) WITHOUT ROWID""",
+        "INSERT OR IGNORE INTO archive_members(ordinal, path, type, size, compressed_size, mode, mtime, flags, "
+        "link_target, uid, gid, owner, grp, archive) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        None,
+        ARCHIVE_MEMBER_ROWS,
+    ),
 }
+_ARCHIVE_TABLES = frozenset({"archive_summaries", "archive_members"})
 _CODE_BATCH_ROWS = 8192
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 _CONFIDENCE_ORDER = {"CONFIRMED": 0, "INFERRED": 1, "UNKNOWN": 2}
@@ -87,6 +115,11 @@ def sqlite_text(value: str) -> str:
     except UnicodeEncodeError:
         escaped = value.encode("utf-8", "surrogatepass").decode("utf-8", "backslashreplace")
         return _UNDECODABLE_KEY_PREFIX + escaped
+
+
+def _shown_key(key: str) -> str:
+    """A path key for reports: an undecodable name keeps its backslash escapes."""
+    return key[len(_UNDECODABLE_KEY_PREFIX):] if key.startswith(_UNDECODABLE_KEY_PREFIX) else key
 
 
 def _payload_json(value: Any) -> str:
@@ -277,6 +310,8 @@ class InventoryStore:
         self.db.commit()
         self._code_pending: dict[str, list[tuple]] = {table: [] for table in _CODE_TABLES}
         self._code_truncated: set[str] = set()
+        self._archive_truncated: set[str] = set()  # archive tables past their ceilings
+        self._archive_truncated_saved: set[str] = set()
         self._code_file_truncations: list[tuple[str, list[str]]] = []
         self._code_rows = {
             table: int(row[0]) for table, row in (
@@ -377,7 +412,8 @@ class InventoryStore:
 
         They are committed in the same transaction as pending findings, so a file record
         committed after a flush never lacks its facts. Rows beyond a table's ceiling are
-        dropped and the table is recorded in the ``code_index_truncated`` metadata.
+        dropped and the table is recorded in the ``code_index_truncated`` metadata, or, for
+        the archive tables, in ``archive_records_truncated``.
         """
         if self._closed:
             raise RuntimeError("inventory store is closed")
@@ -387,6 +423,8 @@ class InventoryStore:
             "code_calls": [(*item, key) for item in facts.calls],
             "code_references": [(name, key) for name in sorted(facts.references)],
             "code_facts": [(*item, key) for item in facts.facts],
+            "archive_summaries": [(*item, key) for item in getattr(facts, "archives", ())],
+            "archive_members": [(*item, key) for item in getattr(facts, "archive_members", ())],
         }
         for table, new_rows in rows.items():
             if not new_rows:
@@ -395,10 +433,12 @@ class InventoryStore:
             room = ceiling - self._code_rows[table] - len(self._code_pending[table])
             if room < len(new_rows):
                 new_rows = new_rows[:max(0, room)]
-                self._code_truncated.add(table)
+                (self._archive_truncated if table in _ARCHIVE_TABLES else self._code_truncated).add(table)
             self._code_pending[table].extend(new_rows)
-        if facts.truncated:
-            self._code_file_truncations.append((key, sorted(facts.truncated)))
+        # An archive's own record limit is in its summary, not a code-index truncation.
+        code_truncated = set(facts.truncated) - {"archive_members"}
+        if code_truncated:
+            self._code_file_truncations.append((key, sorted(code_truncated)))
         if sum(map(len, self._code_pending.values())) >= _CODE_BATCH_ROWS:
             self.flush()
 
@@ -407,7 +447,9 @@ class InventoryStore:
         if self._closed:
             raise RuntimeError("inventory store is closed")
         code_rows = sum(map(len, self._code_pending.values()))
-        if not self._pending and not self._directory_pending and not code_rows and not self._code_file_truncations:
+        archive_truncated = self._archive_truncated - self._archive_truncated_saved
+        if (not self._pending and not self._directory_pending and not code_rows and not self._code_file_truncations
+                and not archive_truncated):
             return 0
         pending, self._pending = self._pending, []
         directory_pending, self._directory_pending = self._directory_pending, {}
@@ -452,6 +494,16 @@ class InventoryStore:
                         """INSERT INTO inventory_metadata(key, value) VALUES ('code_index_truncated', ?)
                            ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
                         (json.dumps(state, sort_keys=True),),
+                    )
+                if archive_truncated:
+                    previous = self.db.execute(
+                        "SELECT value FROM inventory_metadata WHERE key='archive_records_truncated'"
+                    ).fetchone()
+                    tables = set(json.loads(previous[0])) if previous else set()
+                    self.db.execute(
+                        """INSERT INTO inventory_metadata(key, value) VALUES ('archive_records_truncated', ?)
+                           ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                        (json.dumps(sorted(tables | archive_truncated)),),
                     )
                 if pending:
                     self.db.executemany(
@@ -513,6 +565,7 @@ class InventoryStore:
             raise
         for table, count in inserted.items():
             self._code_rows[table] += count
+        self._archive_truncated_saved |= archive_truncated
         return len(pending) + len(directory_pending) + code_rows
 
     def count(self, kind: str | None = None) -> int:
@@ -814,6 +867,8 @@ class InventoryStore:
         self._directory_pending.clear()
         self._code_pending = {table: [] for table in _CODE_TABLES}
         self._code_truncated.clear()
+        self._archive_truncated.clear()
+        self._archive_truncated_saved.clear()
         self._code_file_truncations.clear()
         self._code_rows = dict.fromkeys(_CODE_TABLES, 0)
         with self.db:
@@ -857,6 +912,84 @@ class InventoryStore:
             raise RuntimeError("inventory store is closed")
         row = self.db.execute("PRAGMA quick_check").fetchone()
         return str(row[0]) if row else "no result"
+
+    # -- archive inspection ------------------------------------------------------------
+    def iter_archives(self, *, fetch_size: int = 256) -> Iterator[dict[str, Any]]:
+        """Each inspected archive's summary, in path order, paged by key."""
+        self.flush()
+        last = ""
+        while True:
+            rows = self.db.execute(
+                "SELECT archive, format, state, states, detail FROM archive_summaries "
+                "WHERE archive > ? ORDER BY archive LIMIT ?", (last, fetch_size),
+            ).fetchall()
+            if not rows:
+                return
+            for archive, archive_format, state, states, detail in rows:
+                yield {"path": _shown_key(archive), "format": archive_format, "state": state,
+                       "states": states.split(",") if states else [], **json.loads(detail)}
+            last = rows[-1][0]
+
+    def iter_archive_members(self, *, fetch_size: int = 1024) -> Iterator[dict[str, Any]]:
+        """Every recorded archive member, archive by archive in archive order, paged by key."""
+        self.flush()
+        last: tuple[str, int] = ("", -1)
+        while True:
+            rows = self.db.execute(
+                "SELECT archive, ordinal, path, type, size, compressed_size, mode, mtime, flags, link_target, "
+                "uid, gid, owner, grp FROM archive_members WHERE (archive, ordinal) > (?, ?) "
+                "ORDER BY archive, ordinal LIMIT ?", (*last, fetch_size),
+            ).fetchall()
+            if not rows:
+                return
+            for (archive, ordinal, path, kind, size, compressed, mode, mtime, flags, link_target,
+                 uid, gid, owner, group) in rows:
+                yield {"archive": _shown_key(archive), "ordinal": ordinal, "path": path, "type": kind,
+                       "size": size, "compressed_size": compressed, "mode": mode, "mtime": mtime,
+                       "flags": flags.split(",") if flags else [], "link_target": link_target,
+                       "uid": uid, "gid": gid, "owner": owner, "group": group}
+            last = (rows[-1][0], rows[-1][1])
+
+    def archive_metrics(self) -> dict[str, Any]:
+        """metrics.archives: archives by state and format, members, coverage, limits, records."""
+        self.flush()
+        by_state: Counter[str] = Counter()
+        with_state: Counter[str] = Counter()
+        by_format: Counter[str] = Counter()
+        limits: Counter[str] = Counter()
+        totals: Counter[str] = Counter()
+        for item in self.iter_archives():
+            by_state[item["state"]] += 1
+            with_state.update(item["states"])
+            by_format[item["format"]] += 1
+            limits.update(entry["limit"] for entry in item.get("limits", ()))
+            for name in ("members_indexed", "member_bytes", "member_bytes_sampled", "member_records",
+                         "encrypted_members", "members_not_fully_sampled"):
+                totals[name] += int(item.get(name) or 0)
+            if item.get("members_declared") is not None:
+                totals["members_declared"] += int(item["members_declared"])
+                totals["members_indexed_of_declared"] += int(item.get("members_indexed") or 0)
+        stored = int(self.db.execute("SELECT COUNT(*) FROM archive_members").fetchone()[0])
+        row = self.db.execute("SELECT value FROM inventory_metadata WHERE key='archive_records_truncated'").fetchone()
+        truncated = json.loads(row[0]) if row else []
+        return {
+            "archives": sum(by_state.values()),
+            "by_state": dict(sorted(by_state.items())), "with_state": dict(sorted(with_state.items())),
+            "by_format": dict(sorted(by_format.items())),
+            "members_declared": totals["members_declared"], "members_indexed": totals["members_indexed"],
+            "member_coverage_pct": round(100 * totals["members_indexed_of_declared"] / totals["members_declared"], 1)
+            if totals["members_declared"] else None,
+            "member_bytes": totals["member_bytes"], "member_bytes_sampled": totals["member_bytes_sampled"],
+            "content_coverage_pct": round(100 * min(totals["member_bytes_sampled"], totals["member_bytes"])
+                                          / totals["member_bytes"], 1) if totals["member_bytes"] else None,
+            "members_not_fully_sampled": totals["members_not_fully_sampled"],
+            "encrypted_members": totals["encrypted_members"],
+            "limits_reached": dict(sorted(limits.items())),
+            "member_records": stored,
+            "member_records_dropped": max(0, totals["member_records"] - stored),
+            "member_record_ceiling": ARCHIVE_MEMBER_ROWS,
+            "records_truncated": truncated,
+        }
 
     def close(self) -> None:
         if self._closed:
@@ -1137,3 +1270,49 @@ class StoredDiagnosticRecords(Sequence[str]):
                 raise IndexError("diagnostic index out of range") from exc
         finally:
             iterator.close()
+
+
+class StoredArchives(Sequence[dict]):
+    """Lazy archive inspection summaries (``iter_archives``) of the scan's SQLite store."""
+
+    _method = "iter_archives"
+    _table = "archive_summaries"
+
+    def __init__(self, database_path: Path, *, fetch_size: int = 256) -> None:
+        self.database_path = Path(database_path).expanduser().absolute()
+        self.fetch_size = fetch_size
+
+    def __len__(self) -> int:
+        with InventoryStore(self.database_path) as store:
+            store.flush()
+            return int(store.db.execute(f"SELECT COUNT(*) FROM {self._table}").fetchone()[0])
+
+    def __iter__(self) -> Iterator[dict]:
+        with InventoryStore(self.database_path) as store:
+            rows = getattr(store, self._method)(fetch_size=self.fetch_size)
+            try:
+                yield from rows
+            finally:
+                rows.close()
+
+    def __getitem__(self, index):
+        items = list(islice(self, None)) if isinstance(index, slice) or index < 0 else None
+        if items is not None:
+            return items[index]
+        iterator = iter(self)
+        try:
+            return next(islice(iterator, index, index + 1))
+        except StopIteration as exc:
+            raise IndexError("archive index out of range") from exc
+        finally:
+            iterator.close()
+
+
+class StoredArchiveMembers(StoredArchives):
+    """Lazy archive member records (``iter_archive_members``), archive by archive."""
+
+    _method = "iter_archive_members"
+    _table = "archive_members"
+
+    def __init__(self, database_path: Path, *, fetch_size: int = 1024) -> None:
+        super().__init__(database_path, fetch_size=fetch_size)

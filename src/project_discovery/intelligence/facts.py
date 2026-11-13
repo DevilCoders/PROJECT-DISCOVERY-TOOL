@@ -20,6 +20,8 @@ MAX_SYMBOLS_PER_FILE = 5_000
 MAX_CALLS_PER_FILE = 20_000
 MAX_REFERENCES_PER_FILE = 10_000
 MAX_FACTS_PER_FILE = 5_000
+# An archive's member records: as many as its readers index (their entry limit).
+MAX_ARCHIVE_MEMBERS_PER_FILE = 200_000
 
 
 @dataclass(slots=True)
@@ -34,10 +36,16 @@ class FileFacts:
     references: set[str] = field(default_factory=set)
     # (kind, name, detail_json) for other domains (imports, components, HDL modules...)
     facts: list[tuple] = field(default_factory=list)
+    # The archive inspection of the file: (format, state, states_csv, detail_json)
+    archives: list[tuple] = field(default_factory=list)
+    # (ordinal, path, type, size, compressed_size, mode, mtime, flags_csv, link_target,
+    #  uid, gid, owner, group) per archive member, in archive order
+    archive_members: list[tuple] = field(default_factory=list)
     truncated: set[str] = field(default_factory=set)
 
     def __bool__(self) -> bool:
-        return bool(self.symbols or self.calls or self.references or self.facts)
+        return bool(self.symbols or self.calls or self.references or self.facts or self.archives
+                    or self.archive_members)
 
 
 _collector = threading.local()
@@ -117,3 +125,38 @@ def emit_fact(kind: str, name: str, /, **detail) -> None:
     facts.facts.append((
         kind, name[:400], json.dumps(detail, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
     ))
+
+
+def emit_archive(format: str, state: str, states: list[str], /, **detail) -> None:
+    """Record how an archive was inspected: its primary ``state``, every state that applies
+    and the counts, coverage and limits in ``detail`` (one record per archive file)."""
+    facts = _current()
+    if facts is None:
+        return
+    facts.archives[:] = [(format, state, ",".join(states),
+                          json.dumps(detail, ensure_ascii=True, sort_keys=True, separators=(",", ":")))]
+
+
+def emit_archive_member(ordinal: int, path: str, kind: str, size: int | None, compressed_size: int | None,
+                        mode: int | None, mtime: str | None, flags: list[str], link_target: str | None = None,
+                        uid: int | None = None, gid: int | None = None, owner: str | None = None,
+                        group: str | None = None) -> bool:
+    """Record one archive member's metadata; False once the per-file record limit is reached."""
+    facts = _current()
+    if facts is None:
+        return False
+    if len(facts.archive_members) >= MAX_ARCHIVE_MEMBERS_PER_FILE:
+        facts.truncated.add("archive_members")
+        return False
+    # Member names come from the archive, as bytes decoded by the reader: keep them storable.
+    facts.archive_members.append((
+        ordinal, _storable(path)[:4096], kind, size, compressed_size, mode, mtime, ",".join(flags),
+        None if link_target is None else _storable(link_target)[:4096], uid, gid,
+        None if owner is None else _storable(owner)[:256], None if group is None else _storable(group)[:256],
+    ))
+    return True
+
+
+def _storable(text: str) -> str:
+    """Text SQLite can store: lone surrogates (undecodable bytes) become backslash escapes."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")

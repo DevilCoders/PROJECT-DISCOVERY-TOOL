@@ -76,6 +76,20 @@ fillBars("mime-types",metrics.mime_types);
    number(item.done)+(item.total!=null?" of "+number(item.total):"")+" "+item.unit+
    (item.bytes?" / "+number(Math.round(item.bytes/10485.76)/100)+" MiB":"")+(item.reused?" / "+number(item.reused)+" from the cache":"");
   list.append(row);}}
+{const archives=metrics.archives||{},gaps=$("archive-gaps");
+ fillBars("archive-states",archives.by_state);gaps.replaceChildren();
+ $("archive-summary").textContent=!archives.archives?"No archive inspected":
+  number(archives.archives)+" archive(s); "+number(archives.members_indexed)+" member(s) indexed"+
+  (archives.member_coverage_pct!=null?" ("+archives.member_coverage_pct+"% of declared)":"")+
+  (archives.content_coverage_pct!=null?"; content sampled "+archives.content_coverage_pct+"%":"")+
+  "; limits reached: "+(Object.entries(archives.limits_reached||{}).map(function(item){return item[0]+" "+number(item[1]);}).join(", ")||"none");
+ for(const item of (REPORT.archives||[])){
+  if(item.state==="metadata-complete"&&!(item.limits||[]).length)continue;
+  const row=document.createElement("div");
+  row.textContent=item.path+": "+item.state+" ("+(item.limits||[]).map(function(entry){return entry.limit;}).join(", ")+")";
+  gaps.append(row);
+  if(gaps.childElementCount>=200)break;}
+ if(!gaps.childElementCount)gaps.textContent="Every archive was fully inspected";}
 const budgets=metrics.analysis_budgets||{};
 {const seconds={};for(const [name,entry] of Object.entries(budgets.analyzers||{}))seconds[name]=Math.round(entry.seconds*100)/100;
  fillBars("analyzer-time",seconds);

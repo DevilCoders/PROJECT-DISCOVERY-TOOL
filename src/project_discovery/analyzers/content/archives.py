@@ -13,10 +13,12 @@ import time
 import unicodedata
 import zipfile
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...core.source_utils import LineIndex, describe_error, open_verified_binary, redact_source_excerpt
+from ...intelligence.facts import MAX_ARCHIVE_MEMBERS_PER_FILE, current_facts, emit_archive, emit_archive_member
 from ...inventory.signatures import family_of, is_archive
 from ...models import CodeEvidence, FileRecord, Finding
 from ..base import Analyzer
@@ -280,6 +282,147 @@ def _mode_risks(mode: int) -> list[str]:
     return risks
 
 
+# Limits that stop the metadata traversal (the archive is budget-stopped) and limits that only
+# leave member content partly read (sample-truncated).
+_TRAVERSAL_LIMITS = frozenset({"entries", "index_bytes", "wall_seconds", "tar_decompressed_bytes",
+                               "analyzer_time", "analyzer_memory", "analyzer_cpu", "analyzer_read"})
+
+
+def _zip_time(date_time) -> str | None:
+    """A ZIP member's DOS timestamp: local time without a zone, at two-second resolution."""
+    try:
+        year, month, day, hour, minute, second = date_time
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}T{int(hour):02d}:{int(minute):02d}:{int(second):02d}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _tar_time(mtime) -> str | None:
+    """A TAR member's modification time (seconds since the epoch, UTC)."""
+    try:
+        return datetime.fromtimestamp(float(mtime), timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError, TypeError):
+        return None
+
+
+def _pct(part: int, whole: int | None) -> float | None:
+    if whole is None:
+        return None
+    return 100.0 if whole == 0 else round(100 * min(part, whole) / whole, 1)
+
+
+def _archive_format(record: FileRecord) -> str:
+    """The archive format a record names: its signature's family, or its extension."""
+    if record.file_type.startswith("archive/"):
+        return record.file_type.split("/", 1)[1]
+    return family_of(record.file_type) or record.extension.lstrip(".") or "unknown"
+
+
+class _Inspection:
+    """How far one archive's inspection got: its states, member counts and coverage, and
+    every limit that stopped deeper inspection, recorded with ``emit_archive`` at the end."""
+
+    def __init__(self, record: FileRecord, archive_format: str) -> None:
+        self.record, self.format = record, archive_format
+        self.declared: int | None = None  # members the archive's index declares
+        self.index_read = False
+        self.indexed = 0
+        self.regular = 0  # indexed regular-file members and their uncompressed bytes
+        self.regular_bytes = 0
+        self.compressed_bytes: int | None = None
+        self.sampled = 0  # members whose content was read, in part or in full
+        self.fully_sampled = 0
+        self.sample_bytes = 0
+        self.regular_sample_bytes = 0
+        self.truncated = 0  # members eligible for sampling that were not read in full
+        self.encrypted = 0
+        self.records = 0
+        self.malformed: str | None = None
+        self.unsupported = False
+        self.limits: dict[str, dict] = {}
+        facts = current_facts()
+        self._first_record = len(facts.archive_members) if facts is not None else 0
+
+    def flag_duplicates(self, names) -> None:
+        """Add the "duplicate" flag to the recorded members whose name occurs more than once."""
+        repeated = {name for name, count in Counter(names).items() if count > 1}
+        facts = current_facts()
+        if not repeated or facts is None:
+            return
+        records = facts.archive_members
+        for index in range(self._first_record, len(records)):
+            item = records[index]
+            if item[1] in repeated:
+                records[index] = (*item[:7], ",".join(filter(None, (item[7], "duplicate"))), *item[8:])
+
+    def limit(self, name: str, value, used=None, members: int | None = None) -> None:
+        entry = self.limits.setdefault(name, {"limit": name, "value": value})
+        if used is not None:
+            entry["used"] = used
+        if members is not None:
+            entry["members"] = entry.get("members", 0) + members
+
+    def member(self, ordinal: int, name: str, kind: str, size, compressed, mode, mtime, flags,
+               link_target=None, uid=None, gid=None, owner=None, group=None) -> None:
+        self.indexed += 1
+        if kind == "file":
+            self.regular += 1
+            self.regular_bytes += max(0, int(size or 0))
+        # Permission bits only: the type is the record's own field (a ZIP mode carries both).
+        permissions = stat.S_IMODE(mode) if mode else None
+        if emit_archive_member(ordinal, name, kind, size, compressed, permissions, mtime, flags,
+                               link_target, uid, gid, owner, group):
+            self.records += 1
+
+    def sample(self, kind: str, size: int, consumed: int, truncated: bool, remaining: int) -> None:
+        """One member's content sample; a sample short of the member names the limit."""
+        self.sampled += 1
+        self.sample_bytes += consumed
+        if kind == "file":
+            self.regular_sample_bytes += consumed
+        if not truncated and size <= consumed:
+            self.fully_sampled += 1
+            return
+        self.truncated += 1
+        if consumed >= remaining:
+            self.limit("archive_sample_bytes", _MAX_ARCHIVE_SCAN_BYTES, members=1)
+        elif consumed >= _MAX_MEMBER_SCAN_BYTES:
+            self.limit("member_sample_bytes", _MAX_MEMBER_SCAN_BYTES, members=1)
+
+    def skipped_sample(self) -> None:
+        """A member that the spent archive sample budget left unread."""
+        self.truncated += 1
+        self.limit("archive_sample_bytes", _MAX_ARCHIVE_SCAN_BYTES, members=1)
+
+    def emit(self) -> None:
+        if self.records < self.indexed:
+            self.limit("member_records", MAX_ARCHIVE_MEMBERS_PER_FILE, members=self.indexed - self.records)
+        stopped = bool(_TRAVERSAL_LIMITS & set(self.limits))
+        complete = self.index_read and not stopped and self.malformed is None
+        states = ["detected"] + [name for name, applies in (
+            ("unsupported", self.unsupported), ("index-read", self.index_read), ("metadata-complete", complete),
+            ("sample-read", self.sampled > 0), ("sample-truncated", self.truncated > 0),
+            ("encrypted", self.encrypted > 0), ("malformed", self.malformed is not None), ("budget-stopped", stopped),
+        ) if applies]
+        state = ("malformed" if self.malformed is not None else "unsupported" if self.unsupported
+                 else "budget-stopped" if stopped else "metadata-complete" if complete
+                 else "index-read" if self.index_read else "detected")
+        detail = {
+            "archive_bytes": self.record.size_bytes, "compressed_bytes": self.compressed_bytes,
+            "members_declared": self.declared, "members_indexed": self.indexed,
+            "member_coverage_pct": _pct(self.indexed, self.declared),
+            "regular_members": self.regular, "member_bytes": self.regular_bytes,
+            "members_sampled": self.sampled, "members_fully_sampled": self.fully_sampled,
+            "members_not_fully_sampled": self.truncated, "member_bytes_sampled": self.sample_bytes,
+            "content_coverage_pct": _pct(self.regular_sample_bytes, self.regular_bytes) if self.index_read else None,
+            "encrypted_members": self.encrypted, "member_records": self.records,
+            "limits": [self.limits[name] for name in sorted(self.limits)],
+        }
+        if self.malformed is not None:
+            detail["error"] = self.malformed
+        emit_archive(self.format, state, states, **detail)
+
+
 class ArchiveIntelligenceAnalyzer(Analyzer):
     """Inspect archive indexes and metadata under entry-count and evidence limits."""
 
@@ -306,6 +449,9 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
         )):
             return self._tar(path, record)
+        inspection = _Inspection(record, _archive_format(record))
+        inspection.unsupported = True
+        inspection.emit()
         return [Finding(
             "archive",
             f"Archive/container detected: {record.path}",
@@ -317,9 +463,18 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             analyzer=self.name,
         )]
 
+    def budget_stopped(self, record: FileRecord, stop) -> None:
+        """The engine stopped this analyzer on the file: record the archive as budget-stopped."""
+        inspection = _Inspection(record, _archive_format(record))
+        inspection.limit(f"analyzer_{stop.kind}", stop.limit, round(stop.used, 3))
+        inspection.emit()
+
     def _zip(self, path: Path, record: FileRecord) -> list[Finding]:
+        inspection = _Inspection(record, "zip")
         index_hint = _zip_index_hint(path, record.analysis_identity)
         if index_hint is None:
+            inspection.malformed = "the central directory could not be bounded from its ZIP/ZIP64 trailer"
+            inspection.emit()
             return [Finding(
                 "archive",
                 f"ZIP central-directory bounds unavailable: {record.path}",
@@ -330,26 +485,31 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 analyzer=self.name,
                 severity="MEDIUM",
             )]
-        if index_hint is not None:
-            entry_count, index_bytes = index_hint
-            if (over_limit(entry_count, _MAX_ARCHIVE_ENTRIES, "entries")
-                    or over_limit(index_bytes, _MAX_ARCHIVE_INDEX_BYTES)):
-                return [Finding(
-                    "archive",
-                    f"ZIP central-directory budget exceeded: {record.path}",
-                    "The archive index was not materialized because its declared entry count "
-                    "or central-directory byte size exceeds the configured safety budget. "
-                    "No members were extracted or decompressed.",
-                    confidence="UNKNOWN",
-                    evidence=[
-                        f"declared entries: {entry_count:,}",
-                        f"central-directory bytes: {index_bytes:,}",
-                        f"entry limit: {_MAX_ARCHIVE_ENTRIES:,}",
-                        f"index-byte limit: {_MAX_ARCHIVE_INDEX_BYTES:,}",
-                    ],
-                    analyzer=self.name,
-                    severity="MEDIUM",
-                )]
+        entry_count, index_bytes = index_hint
+        if (over_limit(entry_count, _MAX_ARCHIVE_ENTRIES, "entries")
+                or over_limit(index_bytes, _MAX_ARCHIVE_INDEX_BYTES)):
+            inspection.declared = entry_count
+            if entry_count > _MAX_ARCHIVE_ENTRIES:
+                inspection.limit("entries", _MAX_ARCHIVE_ENTRIES, entry_count)
+            if index_bytes > _MAX_ARCHIVE_INDEX_BYTES:
+                inspection.limit("index_bytes", _MAX_ARCHIVE_INDEX_BYTES, index_bytes)
+            inspection.emit()
+            return [Finding(
+                "archive",
+                f"ZIP central-directory budget exceeded: {record.path}",
+                "The archive index was not materialized because its declared entry count "
+                "or central-directory byte size exceeds the configured safety budget. "
+                "No members were extracted or decompressed.",
+                confidence="UNKNOWN",
+                evidence=[
+                    f"declared entries: {entry_count:,}",
+                    f"central-directory bytes: {index_bytes:,}",
+                    f"entry limit: {_MAX_ARCHIVE_ENTRIES:,}",
+                    f"index-byte limit: {_MAX_ARCHIVE_INDEX_BYTES:,}",
+                ],
+                analyzer=self.name,
+                severity="MEDIUM",
+            )]
         deadline = time.monotonic() + _MAX_ARCHIVE_WALL_SECONDS
         time_budget_reached = False
         counts: Counter[str] = Counter()
@@ -365,13 +525,14 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
             with open_verified_binary(path, record.analysis_identity) as archive_stream, zipfile.ZipFile(archive_stream, "r") as archive:
                 infos = archive.infolist()
                 total = len(infos)
+                inspection.index_read, inspection.declared, inspection.compressed_bytes = True, total, 0
                 duplicates = [
                     name for name, count in Counter(
                         item.filename for item in infos
                     ).items() if count > 1
                 ]
                 collisions = _colliding_names({item.filename for item in infos})
-                for info in infos[:_MAX_ARCHIVE_ENTRIES]:
+                for ordinal, info in enumerate(infos[:_MAX_ARCHIVE_ENTRIES]):
                     if time.monotonic() >= deadline:
                         time_budget_reached = True
                         break
@@ -385,54 +546,74 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     else:
                         kind = "file"
                     counts[kind] += 1
+                    # A FIFO, socket or device node among the members is read as a file, as
+                    # before, but its record names it.
+                    file_type = stat.S_IFMT(mode)
+                    record_kind = "special" if kind == "file" and file_type and file_type != stat.S_IFREG else kind
+                    flags = ["encrypted"] if encrypted_member else []
                     if _unsafe_member_path(info.filename):
                         unsafe_paths.append(info.filename)
+                        flags.append("unsafe-path")
                     if encrypted_member:
                         encrypted += 1
                     for risk in _mode_risks(mode):
                         risky_modes.append(f"{info.filename} ({risk})")
+                        flags.append(risk)
                     if info.file_size > 0 and (
                         info.compress_size == 0
                         or info.file_size / max(info.compress_size, 1) > 1000
                     ):
                         high_ratios.append(info.filename)
+                        flags.append("high-ratio")
+                    inspection.compressed_bytes += info.compress_size
+                    link_target = None
 
-                    if encrypted_member or kind not in {"file", "symlink"}:
-                        continue
-                    remaining = _MAX_ARCHIVE_SCAN_BYTES - content_bytes
-                    if remaining <= 0:
-                        content_truncated += 1
-                        continue
-                    try:
-                        with archive.open(info, "r") as member_stream:
-                            sample, consumed, truncated = _read_member_sample(
-                                member_stream, remaining, deadline
-                            )
-                        content_bytes += consumed
-                        if time.monotonic() >= deadline:
-                            time_budget_reached = True
-                        if truncated or info.file_size > consumed:
+                    if not encrypted_member and kind in {"file", "symlink"}:
+                        remaining = _MAX_ARCHIVE_SCAN_BYTES - content_bytes
+                        if remaining <= 0:
                             content_truncated += 1
-                        if kind == "symlink":
-                            target = sample.decode("utf-8", errors="replace").strip("\x00")
-                            if target and _unsafe_member_path(target):
-                                unsafe_paths.append(f"{info.filename} -> {target}")
+                            inspection.skipped_sample()
                         else:
-                            member_findings, member_timed_out = _member_content_findings(
-                                record.path, info.filename, sample, deadline
-                            )
-                            content_findings.extend(member_findings)
-                            if member_timed_out:
-                                time_budget_reached = True
-                    except (
-                        OSError, RuntimeError, NotImplementedError,
-                        zipfile.BadZipFile, EOFError,
-                    ):
-                        content_truncated += 1
+                            try:
+                                with archive.open(info, "r") as member_stream:
+                                    sample, consumed, truncated = _read_member_sample(
+                                        member_stream, remaining, deadline
+                                    )
+                                content_bytes += consumed
+                                inspection.sample(kind, info.file_size, consumed, truncated, remaining)
+                                if time.monotonic() >= deadline:
+                                    time_budget_reached = True
+                                if truncated or info.file_size > consumed:
+                                    content_truncated += 1
+                                if kind == "symlink":
+                                    target = sample.decode("utf-8", errors="replace").strip("\x00")
+                                    link_target = target or None
+                                    if target and _unsafe_member_path(target):
+                                        unsafe_paths.append(f"{info.filename} -> {target}")
+                                        if "unsafe-path" not in flags:
+                                            flags.append("unsafe-path")
+                                else:
+                                    member_findings, member_timed_out = _member_content_findings(
+                                        record.path, info.filename, sample, deadline
+                                    )
+                                    content_findings.extend(member_findings)
+                                    if member_timed_out:
+                                        time_budget_reached = True
+                            except (
+                                OSError, RuntimeError, NotImplementedError,
+                                zipfile.BadZipFile, EOFError,
+                            ):
+                                content_truncated += 1
+                                inspection.truncated += 1
+                    inspection.member(ordinal, info.filename, record_kind, info.file_size, info.compress_size,
+                                      mode, _zip_time(info.date_time), flags, link_target)
                     if time_budget_reached:
                         break
 
         except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError) as exc:
+            inspection.malformed = describe_error(exc)
+            inspection.encrypted = encrypted
+            inspection.emit()
             return [Finding(
                 "archive",
                 f"ZIP metadata read error: {record.path}",
@@ -442,6 +623,14 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                 analyzer=self.name,
             )]
 
+        inspection.encrypted = encrypted
+        if duplicates:
+            inspection.flag_duplicates(item.filename for item in infos)
+        if time_budget_reached:
+            inspection.limit("wall_seconds", _MAX_ARCHIVE_WALL_SECONDS)
+        if total > _MAX_ARCHIVE_ENTRIES:
+            inspection.limit("entries", _MAX_ARCHIVE_ENTRIES, total)
+        inspection.emit()
         evidence = [
             f"{counts['file']} regular file(s)",
             f"{counts['directory']} directory entry(ies)",
@@ -513,6 +702,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
         entries, so sampling limits only skip sampling. Compressed streams are read through
         a budgeted reader that enforces wall time and decompressed bytes inside each read.
         """
+        inspection = _Inspection(record, "tar")
         deadline = time.monotonic() + _MAX_ARCHIVE_WALL_SECONDS
         time_budget_reached = False
         stop_reason: str | None = None
@@ -536,11 +726,16 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                     archive = tarfile.open(fileobj=archive_stream, mode="r:")
                 else:
                     compressed = True
+                    inspection.format = "tar+" + (
+                        "gzip" if isinstance(decompressor, gzip.GzipFile)
+                        else "bzip2" if isinstance(decompressor, bz2.BZ2File) else "xz"
+                    )
                     archive = tarfile.open(
                         fileobj=_BudgetedReader(decompressor, deadline, _MAX_TAR_DECOMPRESSED_BYTES),
                         mode="r|",
                     )
                 with archive:
+                    inspection.index_read = True
                     try:
                         for member in archive:
                             if time.monotonic() >= deadline:
@@ -564,19 +759,29 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                 kind = "special"
                                 special_entries.append(member.name)
                             counts[kind] += 1
+                            linked = member.issym() or member.islnk()
+                            flags = []
                             if _unsafe_member_path(member.name) or (
-                                (member.issym() or member.islnk())
+                                linked
                                 and _unsafe_member_path(member.linkname)
                             ):
                                 unsafe_paths.append(member.name)
+                                flags.append("unsafe-path")
                             for risk in _mode_risks(member.mode):
                                 risky_modes.append(f"{member.name} ({risk})")
+                                flags.append(risk)
+                            inspection.member(
+                                total - 1, member.name, kind, member.size, None, member.mode,
+                                _tar_time(member.mtime), flags, member.linkname if linked else None,
+                                member.uid, member.gid, member.uname or None, member.gname or None,
+                            )
 
                             if kind != "file":
                                 continue
                             remaining = _MAX_ARCHIVE_SCAN_BYTES - content_bytes
                             if remaining <= 0:
                                 content_truncated += 1
+                                inspection.skipped_sample()
                                 continue
                             member_stream = archive.extractfile(member)
                             if member_stream is None:
@@ -586,6 +791,7 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                                     member_stream, remaining, deadline
                                 )
                             content_bytes += consumed
+                            inspection.sample(kind, member.size, consumed, truncated, remaining)
                             if truncated or member.size > consumed:
                                 content_truncated += 1
                             member_findings, member_timed_out = _member_content_findings(
@@ -599,6 +805,8 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
                         stop_reason = str(exc)
                         time_budget_reached = "wall-time" in stop_reason
         except (OSError, tarfile.TarError, EOFError, lzma.LZMAError) as exc:
+            inspection.malformed = describe_error(exc)
+            inspection.emit()
             return [Finding(
                 "archive",
                 f"TAR metadata read error: {record.path}",
@@ -610,6 +818,18 @@ class ArchiveIntelligenceAnalyzer(Analyzer):
 
         indexed = min(total, _MAX_ARCHIVE_ENTRIES)
         traversal_complete = not (time_budget_reached or stop_reason or total > _MAX_ARCHIVE_ENTRIES)
+        inspection.flag_duplicates(names)
+        if traversal_complete:
+            inspection.declared = indexed  # every header was read: the archive holds no more
+        if compressed:
+            inspection.compressed_bytes = record.size_bytes
+        if time_budget_reached:
+            inspection.limit("wall_seconds", _MAX_ARCHIVE_WALL_SECONDS)
+        if stop_reason and not time_budget_reached:
+            inspection.limit("tar_decompressed_bytes", _MAX_TAR_DECOMPRESSED_BYTES)
+        if total > _MAX_ARCHIVE_ENTRIES:
+            inspection.limit("entries", _MAX_ARCHIVE_ENTRIES)
+        inspection.emit()
         findings = [Finding(
             "archive",
             f"TAR archive inventory: {record.path}",

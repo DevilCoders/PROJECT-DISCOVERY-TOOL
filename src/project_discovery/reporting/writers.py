@@ -26,6 +26,7 @@ HTML_MAX_EMBEDDED = {
     "directories": 50_000,
     "symlinks": 50_000,
     "special_entries": 50_000,
+    "archives": 10_000,  # inspection summaries; member records stay in the JSON report
     "errors": 10_000,
     # Each stored list inside the metrics (the Python dependency graph's modules, edges,
     # unresolved imports and skipped modules); the graph summary keeps the true counts.
@@ -241,6 +242,60 @@ def scan_memory_text(scan: dict[str, Any] | None) -> str:
     text += f", {scan.get('waits', 0):,} wait(s)"
     over = scan.get("over_budget_submissions", 0)
     return text + (f", {over:,} batch(es) queued over it" if over else "")
+
+
+def archive_summary(archives: dict[str, Any] | None) -> str:
+    """"3 archives (metadata-complete 2, malformed 1); members 120 of 120 indexed (100.0%); ..."""
+    archives = archives or {}
+    if not archives.get("archives"):
+        return "none inspected"
+    states = ", ".join(f"{state} {count:,}" for state, count in archives.get("by_state", {}).items())
+    text = f"{archives['archives']:,} archive(s) ({states}); members {archives.get('members_indexed', 0):,} indexed"
+    if archives.get("member_coverage_pct") is not None:
+        text += f" of {archives.get('members_declared', 0):,} declared ({archives['member_coverage_pct']:g}%)"
+    if archives.get("content_coverage_pct") is not None:
+        text += (f"; content {size_text(archives.get('member_bytes_sampled', 0))} of "
+                 f"{size_text(archives.get('member_bytes', 0))} sampled ({archives['content_coverage_pct']:g}%)")
+    limits = archives.get("limits_reached") or {}
+    text += "; limits reached: " + (", ".join(f"{name} {count:,}" for name, count in limits.items()) or "none")
+    return text
+
+
+def _archive_row_text(item: dict[str, Any]) -> tuple[str, str, str]:
+    declared = item.get("members_declared")
+    members = f"{item.get('members_indexed', 0):,}" + (f" of {declared:,}" if declared is not None else "")
+    content = "-" if item.get("content_coverage_pct") is None else f"{item['content_coverage_pct']:g}%"
+    limits = ", ".join(entry["limit"] for entry in item.get("limits", ())) or "-"
+    return members, content, limits
+
+
+def _write_markdown_archives(line, result: ScanResult) -> None:
+    archives = result.metrics.get("archives") or {}
+    line("## Archives")
+    line()
+    line(f"- Inspected: {_md(archive_summary(archives))}")
+    if archives.get("archives"):
+        line(f"- Member records: {archives.get('member_records', 0):,} in the JSON report "
+             f"(at most {archives.get('member_record_ceiling', 0):,} per scan; "
+             f"{archives.get('member_records_dropped', 0):,} dropped)")
+        line()
+        line("| Archive | Format | State | Members | Content sampled | Limits reached |")
+        line("|---|---|---|---:|---:|---|")
+        shown = 0
+        # Archives that were not fully inspected first; the JSON report lists every archive.
+        for complete in (False, True):
+            for item in result.archives:
+                if shown >= 50:
+                    break
+                if (item["state"] == "metadata-complete" and not item.get("limits")) is complete:
+                    members, content, limits = _archive_row_text(item)
+                    line(f"| {_md(item['path'])} | {_md(item['format'])} | {_md(item['state'])} | {members} | "
+                         f"{content} | {_md(limits)} |")
+                    shown += 1
+        if archives["archives"] > shown:
+            line()
+            line(f"{archives['archives'] - shown:,} more archive(s) are listed in the JSON report.")
+    line()
 
 
 def _write_markdown_phases(line, phases: list[dict[str, Any]]) -> None:
@@ -655,6 +710,7 @@ td{color:#c7d5e5}td.path{max-width:520px;overflow-wrap:anywhere;font-family:ui-m
      <div class="profile-card"><h3>MIME types</h3><div id="mime-types"></div></div>
      <div class="profile-card"><h3>Host & native engine</h3><div id="host-os" class="mono muted"></div></div>
      <div class="profile-card"><h3>Scan phases (seconds)</h3><div id="scan-phases" class="mono muted"></div><div id="phase-time"></div></div>
+     <div class="profile-card"><h3>Archives by inspection state</h3><div id="archive-summary" class="mono muted"></div><div id="archive-states"></div><details><summary>Archives not fully inspected</summary><div id="archive-gaps" class="mono muted"></div></details></div>
      <div class="profile-card"><h3>Analyzer time (seconds)</h3><div id="analyzer-budgets" class="muted"></div><div id="analyzer-time"></div></div>
      <div class="profile-card"><h3>Analyzer reads (MiB)</h3><div id="analyzer-limits" class="muted"></div><div id="analyzer-bytes"></div><details><summary>Declared content limits</summary><div id="analyzer-declared" class="mono muted"></div></details></div>
      <div class="profile-card"><h3>Vulnerability intelligence</h3><div id="vuln-summary" class="mono muted"></div></div>
@@ -820,6 +876,8 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
         "directories": len(result.directories),
         "symlinks": len(result.symlinks),
         "special_entries": len(result.special_entries),
+        "archives": len(result.archives),
+        "archive_members": len(result.archive_members),
         "errors": len(result.errors),
     }
 
@@ -876,6 +934,8 @@ def _write_html_payload(stream: TextIO, result: ScanResult) -> None:
         stream, bounded("special_entries", result.special_entries), lambda item: item.to_dict(),
         script_safe=True,
     )
+    stream.write(',"archives":')
+    _write_json_array(stream, bounded("archives", result.archives), lambda item: item, script_safe=True)
     stream.write(',"metrics":')
     _write_metrics(stream, result.metrics, script_safe=True, rows_limit=HTML_MAX_EMBEDDED["graph_rows"])
     stream.write(',"errors":')
@@ -902,6 +962,10 @@ def _write_json_report(stream: TextIO, result: ScanResult) -> None:
     _write_json_array(stream, result.symlinks, lambda item: item.to_dict())
     stream.write(',"special_entries":')
     _write_json_array(stream, result.special_entries, lambda item: item.to_dict())
+    stream.write(',"archives":')
+    _write_json_array(stream, result.archives, lambda item: item)
+    stream.write(',"archive_members":')
+    _write_json_array(stream, result.archive_members, lambda item: item)
     stream.write(',"findings":')
     _write_json_array(stream, result.findings, lambda item: item.to_dict())
     stream.write(',"metrics":')
@@ -1103,6 +1167,8 @@ def _write_markdown_report(stream: TextIO, result: ScanResult) -> None:
             )
     _write_markdown_vulnerabilities(line, result, metrics.get("vulnerability_intelligence") or {})
     line()
+    if metrics.get("archives") is not None:
+        _write_markdown_archives(line, result)
     line("## Findings")
     line()
     if not result.findings:
