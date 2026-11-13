@@ -576,11 +576,20 @@ def test_rate_limiter_enforces_a_rolling_window():
     assert time.monotonic() - started >= 0.45
 
 
-def test_cache_expires_entries(tmp_path: Path):
-    with ResponseCache(tmp_path / "c.sqlite3", ttl_seconds=0.2) as cache:
+def test_cache_expires_entries(tmp_path: Path, monkeypatch):
+    # A fake clock in the cache module: a 0.2 s TTL against the wall clock raced the SQLite
+    # commit on slow CI runners (the entry had expired before the first read).
+    import types
+
+    from project_discovery.online import cache as cache_module
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(cache_module, "time", types.SimpleNamespace(time=lambda: now[0]))
+    with ResponseCache(tmp_path / "c.sqlite3", ttl_seconds=60) as cache:
         cache.put("osv:query:x", ["A"])
+        now[0] += 59.9
         assert cache.get("osv:query:x") == ["A"]
-        time.sleep(0.3)
+        now[0] += 0.2
         assert cache.get("osv:query:x") is None
         assert cache.statistics()["hits"] == 1 and cache.statistics()["misses"] == 1
 
