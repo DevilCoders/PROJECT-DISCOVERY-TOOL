@@ -153,8 +153,8 @@ def test_scan_records_integration_summary(tmp_path: Path):
     report = json.loads((output / "discovery-report.json").read_text(encoding="utf-8"))
     integration = report["metrics"]["code_index"]["integration"]
     assert integration["packages"][0]["name"] == "svc"
-    # Flask routes without methods= accept any method; client calls still match them.
-    assert {"method": "ANY", "path": "/health", "file": "app/main.py"} in integration["endpoints"]
+    # A Flask route without methods= serves GET (Flask adds HEAD and OPTIONS); the GET call matches it.
+    assert {"method": "GET", "path": "/health", "file": "app/main.py"} in integration["endpoints"]
     assert integration["internal_calls_matched"] == 1
     assert any(item["title"] == "Integration points" for item in report["findings"])
 

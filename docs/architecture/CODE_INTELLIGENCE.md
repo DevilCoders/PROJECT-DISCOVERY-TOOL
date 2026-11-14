@@ -78,6 +78,7 @@ connection using temporary tables (memory does not grow with repository size):
 | Complexity, type usage, concurrency model, memory | Project totals of the per-file facts. |
 | Data flow | Totals of taint flows and Python flows that cross module boundaries (see §4). |
 | Embedded, firmware, HDL, shaders, frontend | Domain summaries (targets, binary hardening, design hierarchy, shader inventory, component graph and routes). |
+| Endpoints | Served routes with the prefixes of routers mounted from other files (Django `include`, FastAPI `include_router`, Flask `register_blueprint`, aiohttp `add_subapp`, Express/Koa/Hono `use` of an imported router), resolved by module name or import specifier ([Route structure](../analyzers/API_ANALYZER.md#route-structure)). |
 | Integration | What the project serves and calls (endpoints, HTTP calls, topics, gRPC, package names), used by `pdt compare` (see §6). |
 | Network services | The ports Dockerfiles, Compose, Kubernetes and Terraform declare, joined by number with the ports code listens on, and the services code connects to by name; findings for declared ports nothing listens on, undeclared listeners, ports code serves that a rule opens to every address, Services whose target ports their pods do not declare and connections to ports a service does not declare ([Service map](../analyzers/NETWORK_ANALYZER.md#service-map)). |
 

@@ -240,6 +240,13 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   `Route::resource`/`apiResource`, Phoenix `resources` and Django REST framework routers.
 - A class-level mapping is a prefix, no longer a route of its own (`@RequestMapping("/api")` on a class
   was reported as `ANY /api`). `api_endpoint` facts name the router variable a route is declared on.
+- Routers mounted from other files are resolved by a new code index pass, `endpoints`: Django
+  `include("app.urls")`, FastAPI `include_router` and Flask `register_blueprint` of an imported router
+  (relative imports included), aiohttp `add_subapp`, and Express, Koa and Hono `use()` of a router
+  imported or required from a relative module, nested up to 8 deep. The integration summary and
+  `pdt compare` use the full paths.
+- A Flask, Quart, Sanic, Bottle or FastAPI `route()`/`api_route()` without `methods=` is GET, as those
+  frameworks default (was `ANY`).
 
 ### Added: endpoint adapters across languages
 - `api-endpoints` reads each language with its own adapters (by file extension): framework forms for

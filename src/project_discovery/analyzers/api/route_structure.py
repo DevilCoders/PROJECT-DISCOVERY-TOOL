@@ -110,6 +110,7 @@ class Event:
     unless: str = ""
     role: str = ""
     names: tuple[str, ...] = ()
+    target: str = ""  # an import's module specifier
     # Where the event's block opens: the line and column of its brace (or parenthesis), and the
     # depth inside it; for indented groups, the line's indentation.
     open_line: int = 0
@@ -182,6 +183,47 @@ def _inside(route: Route, span: tuple[int, int, int]) -> bool:
     return (route.line, route.column) > (open_line, open_column) and route.line <= end_line
 
 
+def _variables(events: list[Event]) -> dict[str, tuple[str, str]]:
+    """Router variable -> (the router it derives from or is mounted on, its prefix there)."""
+    variables: dict[str, tuple[str, str]] = {}
+    for event in events:
+        if event.kind == "var":
+            variables[event.name] = (event.parent, event.prefix)
+        elif event.kind == "mount":
+            for name in event.names:
+                variables.setdefault(name, (event.parent, event.prefix))
+    return variables
+
+
+def _chain(variables: dict[str, tuple[str, str]], receiver: str) -> list[str]:
+    """The prefixes of a router variable, outermost first."""
+    prefixes, guard = [], set()
+    while receiver in variables and receiver not in guard:
+        guard.add(receiver)
+        receiver, prefix = variables[receiver]
+        prefixes.append(prefix)
+    return prefixes[::-1]
+
+
+def external_mounts(routes: list[Route], events: list[Event], seen: set[str]) -> list[dict[str, str]]:
+    """Routers a file mounts but imports from another module (``app.use('/api', users)`` with
+    ``users`` required from ``./routes/users``): the prefix they are mounted at, with the
+    mounting router's own prefixes in the file, the import specifier and the imported name."""
+    events = [event for event in events if _active(event, seen)]
+    imports = {name: event.target for event in events if event.kind == "import" for name in event.names}
+    declared = {route.receiver for route in routes if route.receiver}
+    variables = _variables(events)
+    mounts = []
+    for event in events:
+        if event.kind != "mount":
+            continue
+        for name in event.names:
+            if name in imports and name not in declared:
+                mounts.append({"prefix": join_path([*_chain(variables, event.parent), event.prefix]),
+                               "spec": imports[name], "name": name})
+    return mounts
+
+
 def resolve(routes: list[Route], events: list[Event], seen: set[str], layout: Layout) -> list[Route]:
     """The routes with their paths resolved through the file's structure; class-level mappings
     become prefixes rather than routes."""
@@ -252,27 +294,13 @@ def resolve(routes: list[Route], events: list[Event], seen: set[str], layout: La
             spans.append((event.line, event.column, _indent_end(layout, event.line), event.prefix))
     spans.sort()
 
-    variables: dict[str, tuple[str, str]] = {}
-    for event in events:
-        if event.kind == "var":
-            variables[event.name] = (event.parent, event.prefix)
-        elif event.kind == "mount":
-            for name in event.names:
-                variables.setdefault(name, (event.parent, event.prefix))
+    variables = _variables(events)
     rocket = {name: event.prefix for event in events if event.kind == "rocket-mount" for name in event.names}
     functions = sorted((event.line, event.name) for event in events if event.kind == "function")
 
-    def chain(receiver: str) -> list[str]:
-        prefixes, guard = [], set()
-        while receiver in variables and receiver not in guard:
-            guard.add(receiver)
-            receiver, prefix = variables[receiver]
-            prefixes.append(prefix)
-        return prefixes[::-1]
-
     resolved = []
     for route in routes:
-        parts = chain(route.receiver) if route.receiver else []
+        parts = _chain(variables, route.receiver) if route.receiver else []
         parts += [prefix for open_line, open_column, end, prefix in spans
                   if _inside(route, (open_line, open_column, end))]
         absolute = route.path.startswith(("/", "~/")) and any(scope[5] == "asp" for scope in scopes)

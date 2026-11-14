@@ -40,6 +40,7 @@ from .route_structure import (
     Route,
     Shape,
     depth_changes,
+    external_mounts,
     join_path,
     resolve,
     segments_prefix,
@@ -716,6 +717,19 @@ _STRUCTURE: dict[str, tuple[Shape, ...]] = {
             r"""\b(?P<parent>[A-Za-z_$][\w$]{0,63})[ \t]*\.[ \t]*(?:use|route)[ \t]*\([ \t]*['"`](?P<prefix>/[^'"`\n]*)['"`]"""
             r"""[ \t]*,"""
         ), marker="js-server"),
+        # Where a mounted router comes from: import x from '...', const x = require('...'),
+        # import { router as x } from '...'.
+        Shape("import", re.compile(
+            r"""\bimport[ \t]+(?P<name>[A-Za-z_$][\w$]{0,63})[ \t]*(?:,[ \t]*\{[^{}\n]{0,300}\}[ \t]*)?from[ \t]+"""
+            r"""['"](?P<spec>[^'"\n]{1,300})['"]"""
+        )),
+        Shape("import", re.compile(
+            r"""\b(?:const|let|var)[ \t]+(?P<name>[A-Za-z_$][\w$]{0,63})[ \t]*=[ \t]*require[ \t]*\([ \t]*"""
+            r"""['"](?P<spec>[^'"\n]{1,300})['"][ \t]*\)"""
+        )),
+        Shape("import", re.compile(
+            r"""\bimport[ \t]*\{(?P<names>[^{}\n]{1,300})\}[ \t]*from[ \t]+['"](?P<spec>[^'"\n]{1,300})['"]"""
+        )),
     ),
     "go": (
         Shape("var", re.compile(r'\b(?P<name>\w{1,64})[ \t]*:?=[ \t]*(?P<parent>\w{1,64})[ \t]*\.[ \t]*Group[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"')),
@@ -948,6 +962,33 @@ def _receiver(func: ast.AST) -> str:
     return value.id if isinstance(value, ast.Name) else ""
 
 
+def _python_imports(tree: ast.AST) -> dict[str, tuple[str, str, int]]:
+    """Local name -> (module, imported attribute or "", relative level) of the file's imports."""
+    imports: dict[str, tuple[str, str, int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name if alias.asname else alias.name.split(".")[0], "", 0)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imports[alias.asname or alias.name] = (node.module or "", alias.name, node.level)
+    return imports
+
+
+def _imported_router(node: ast.AST | None, imports: dict[str, tuple[str, str, int]]) -> tuple[str, str, int] | None:
+    """(module, router variable, relative level) of a router imported from another module:
+    ``users.router`` after ``from app.routers import users``, or ``router`` after
+    ``from app.routers.users import router``."""
+    if isinstance(node, ast.Name) and node.id in imports:
+        module, attribute, level = imports[node.id]
+        return (module, attribute, level) if attribute else None
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in imports:
+        module, attribute, level = imports[node.value.id]
+        return (f"{module}.{attribute}" if module and attribute else module or attribute), node.attr, level
+    return None
+
+
 def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str, str]]:
     """(method, path, line, framework, receiver) of the routes a Python file declares, with the
     prefixes the file gives its routers: ``APIRouter(prefix=)``, ``Blueprint(url_prefix=)``,
@@ -962,6 +1003,18 @@ def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str,
     mounts: dict[str, tuple[str, str, bool]] = {}  # router -> (mounting router, prefix, replaces its own)
     nested: dict[int, str] = {}  # id(route inside a Starlette Mount) -> the Mount's prefix
     drf: set[str] = set()  # Django REST framework routers
+    imports = _python_imports(tree)
+    external: list[dict[str, object]] = []  # routers mounted from other modules
+
+    def mount_elsewhere(target: ast.AST | None, prefix: str, receiver: str) -> bool:
+        imported = _imported_router(target, imports)
+        if imported is None:
+            return False
+        module, name, level = imported
+        external.append({"prefix": prefix, "target_module": module, "target_name": name, "level": level,
+                         "receiver": receiver, "framework": framework})
+        return True
+
     for node in ast.walk(tree):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
                 and isinstance(node.value, ast.Call)):
@@ -975,18 +1028,42 @@ def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str,
         elif isinstance(node, ast.Call):
             callee = _callee(node)
             first = node.args[0] if node.args else None
-            if callee == "include_router" and isinstance(first, ast.Name):
-                mounts[first.id] = (_receiver(node.func), _literal(_keyword(node, "prefix")) or "", False)
-            elif callee == "register_blueprint" and isinstance(first, ast.Name):
+            if callee == "include_router" and first is not None:
+                prefix = _literal(_keyword(node, "prefix")) or ""
+                local = isinstance(first, ast.Name) and (first.id in own or first.id not in imports)
+                if local:
+                    mounts[first.id] = (_receiver(node.func), prefix, False)
+                else:
+                    mount_elsewhere(first, prefix, _receiver(node.func))
+            elif callee == "register_blueprint" and first is not None:
                 prefix = _literal(_keyword(node, "url_prefix"))
-                mounts[first.id] = (_receiver(node.func), prefix or "", prefix is not None)
-            elif callee == "add_subapp" and len(node.args) >= 2 and isinstance(node.args[1], ast.Name):
-                mounts[node.args[1].id] = (_receiver(node.func), _literal(first) or "", False)
+                local = isinstance(first, ast.Name) and (first.id in own or first.id not in imports)
+                if local:
+                    mounts[first.id] = (_receiver(node.func), prefix or "", prefix is not None)
+                else:
+                    mount_elsewhere(first, prefix or "", _receiver(node.func))
+            elif callee == "add_subapp" and len(node.args) >= 2:
+                target = node.args[1]
+                if isinstance(target, ast.Name) and target.id not in imports:
+                    mounts[target.id] = (_receiver(node.func), _literal(first) or "", False)
+                else:
+                    mount_elsewhere(target, _literal(first) or "", _receiver(node.func))
             elif callee in {"path", "re_path", "url"} and len(node.args) >= 2 and isinstance(node.args[1], ast.Call):
                 included = node.args[1]
                 inner = included.args[0] if _callee(included) == "include" and included.args else None
-                if isinstance(inner, ast.Attribute) and inner.attr == "urls" and isinstance(inner.value, ast.Name):
+                if isinstance(inner, ast.Tuple) and inner.elts:
+                    inner = inner.elts[0]  # include(("blog.urls", "blog"))
+                if isinstance(inner, ast.Attribute) and inner.attr == "urls" and isinstance(inner.value, ast.Name) \
+                        and inner.value.id not in imports:
                     mounts[inner.value.id] = ("", _literal(first) or "", False)  # include(router.urls)
+                elif _literal(inner) is not None:  # include("blog.urls"): another module's urlpatterns
+                    external.append({"prefix": _literal(first) or "", "target_module": _literal(inner), "target_name": "",
+                                     "level": 0, "receiver": "", "framework": "Django"})
+                elif isinstance(inner, ast.Name) and inner.id in imports:  # include(blog_urls)
+                    module, attribute, level = imports[inner.id]
+                    external.append({"prefix": _literal(first) or "", "target_module": ".".join(
+                        part for part in (module, attribute) if part), "target_name": "", "level": level,
+                        "receiver": "", "framework": "Django"})
             elif callee == "Mount" and first is not None:
                 prefix = join_path([nested.get(id(node), ""), _literal(first) or ""])
                 children = _keyword(node, "routes") or (node.args[1] if len(node.args) > 1 else None)
@@ -1036,7 +1113,8 @@ def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str,
                 path = _literal(decorator.args[0]) if decorator.args else _literal(_keyword(decorator, "path"))
                 receiver = _receiver(func)
                 if method in {"route", "api_route"}:
-                    add(_py_methods(decorator), path, node.lineno, receiver=receiver)
+                    # Flask, Quart, Sanic, Bottle and FastAPI default a route without methods= to GET.
+                    add(_py_methods(decorator, "GET"), path, node.lineno, receiver=receiver)
                 else:
                     add(["WEBSOCKET" if method == "websocket" else method.upper()], path, node.lineno, receiver=receiver)
         elif isinstance(node, ast.Call):
@@ -1084,7 +1162,7 @@ def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str,
                     path = _literal(item.elts[0])
                     if path and path.lstrip("^").startswith("/"):
                         add(["ANY"], path, item.lineno, "Tornado")
-    return sorted(set(routes), key=lambda item: (item[2], item[0], item[1], item[3]))
+    return sorted(set(routes), key=lambda item: (item[2], item[0], item[1], item[3])), external
 
 
 # --------------------------------------------------------------------------------- text scan
@@ -1232,7 +1310,17 @@ class _Scan:
                     event.names = tuple(dict.fromkeys(_IDENTIFIER.findall(re.sub(r"""(['"`]).*?\1""", "", rest))))
                 elif shape.kind == "rocket-mount":
                     event.names = tuple(_IDENTIFIER.findall(groups.get("handlers") or ""))
+                elif shape.kind == "import":
+                    event.target = groups.get("spec") or ""
+                    listed = groups.get("names")
+                    # import { router as users, other } binds users and other.
+                    event.names = tuple(item.split(" as ")[-1].strip() for item in listed.split(",") if item.strip()) \
+                        if listed else (event.name,)
                 self.events.append(event)
+
+    def mounts(self) -> list[dict[str, str]]:
+        """Routers this file mounts but imports from another module (after ``result``)."""
+        return external_mounts(self.routes, self.events, self.seen)
 
     def result(self) -> list[Route]:
         self.flush()
@@ -1289,7 +1377,9 @@ class APIEndpointAnalyzer(Analyzer):
                     path, MAX_PYTHON_ENDPOINT_AST_BYTES,
                     expected_identity=record.analysis_identity,
                 )
-                routes = _python_routes(source, record.path)
+                routes, mounts = _python_routes(source, record.path)
+                for mount in mounts:
+                    code_facts.emit_fact("api_mount", str(mount.pop("prefix")), kind="python", **mount)
             except SourceBudgetExceeded as exc:
                 return [Finding(
                     "api", f"Python endpoint AST resource limit: {record.path}",
@@ -1337,6 +1427,8 @@ class APIEndpointAnalyzer(Analyzer):
                     evidence=[record.path], analyzer=self.name,
                 )]
             routes = [(route.method, route.path, route.line, route.framework, route.receiver) for route in scan.result()]
+            for mount in scan.mounts():
+                code_facts.emit_fact("api_mount", mount["prefix"], kind="js", spec=mount["spec"], name=mount["name"])
 
         # One declaration per method, route and line; the first form's framework names it.
         first: dict[tuple[str, str, int], tuple[str, str]] = {}

@@ -140,6 +140,9 @@ class _Context:
         self.file_count = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         self._ambiguous: dict[str, list[str]] | None = None
         self._python_types: _PythonTypes | None = None
+        # Served routes with the prefixes of routers mounted from other files (the endpoints
+        # pass), for the integration summary.
+        self.endpoint_routes: list[dict] | None = None
 
     @property
     def ambiguous(self) -> dict[str, list[str]]:
@@ -1575,6 +1578,102 @@ def _dependencies(context: _Context) -> tuple[dict, list[Finding]]:
     }, []
 
 
+MAX_ENDPOINT_ROUTES = 20_000
+MAX_MOUNT_DEPTH = 8
+_JS_ROUTE_EXTENSIONS = ("", ".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", "/index.js", "/index.ts", "/index.mjs")
+
+
+def _js_target(importer: str, spec: str, paths: set[str]) -> str | None:
+    """The scanned file a relative import specifier names, from the importing file."""
+    if not spec.startswith("."):
+        return None
+    base = posixpath.normpath(posixpath.join(posixpath.dirname(importer), spec))
+    return next((base + extension for extension in _JS_ROUTE_EXTENSIONS if base + extension in paths), None)
+
+
+def _endpoint_routes(context: _Context) -> tuple[dict, list[Finding]]:
+    """Served routes with the prefixes of routers mounted from other files: Django
+    ``include("app.urls")``, FastAPI ``include_router`` and Flask ``register_blueprint`` of an
+    imported router, aiohttp ``add_subapp``, and Express, Koa and Hono ``use()`` of a router
+    imported from another module. A mounting file mounted in turn adds its own prefix."""
+    from ..analyzers.api.route_structure import join_path
+
+    db = context.db
+    routes: list[dict] = []
+    total = 0
+    for name, path, values in _fact_rows(db, "api_endpoint", ordered=True):
+        total += 1
+        if len(routes) < MAX_ENDPOINT_ROUTES:
+            method, _, route = name.partition(" ")
+            routes.append({"method": method, "path": route, "file": path, "line": values.get("line"),
+                           "framework": str(values.get("framework", "")), "receiver": str(values.get("receiver", ""))})
+    modules: dict[str, str] = {}
+    for path, module in db.execute("SELECT path, module FROM files WHERE module IS NOT NULL ORDER BY path"):
+        modules.setdefault(module, path)
+    module_of = {path: module for module, path in modules.items()}
+    paths = {row[0] for row in db.execute("SELECT path FROM files")}
+    # (target file, router variable or "" for the whole file) -> (mounting file, its router, prefix)
+    targets: dict[tuple[str, str], tuple[str, str, str]] = {}
+    resolved_mounts: list[dict] = []
+    unresolved: list[dict] = []
+    for prefix, path, values in _fact_rows(db, "api_mount", ordered=True):
+        if values.get("kind") == "js":
+            spec = str(values.get("spec", ""))
+            target, receiver, label = _js_target(path.replace("\\", "/"), spec, paths), "", spec
+        else:
+            written, level = str(values.get("target_module", "")), int(values.get("level", 0) or 0)
+            module = written
+            if level:
+                importer = module_of.get(path, "")
+                package = importer if path.endswith("__init__.py") else importer.rpartition(".")[0]
+                try:
+                    module = resolve_name("." * level + written, package) if importer else ""
+                except (ImportError, ValueError):
+                    module = ""
+            receiver = str(values.get("target_name", ""))
+            target = modules.get(module)
+            label = "." * level + written + (f".{receiver}" if receiver else "")
+        entry = {"file": path, "prefix": prefix, "target": label}
+        if target is None:
+            if len(unresolved) < MAX_LISTED:
+                unresolved.append(entry)
+            continue
+        targets.setdefault((target, receiver), (path, str(values.get("receiver", "")), prefix))
+        if len(resolved_mounts) < MAX_INTEGRATION_ITEMS:
+            resolved_mounts.append({**entry, "resolved": target})
+
+    def prefix_of(path: str, receiver: str, depth: int = 0) -> str:
+        mount = targets.get((path, receiver)) or targets.get((path, ""))
+        if mount is None or depth >= MAX_MOUNT_DEPTH:
+            return ""
+        outer = prefix_of(mount[0], mount[1], depth + 1)
+        return join_path([outer, mount[2]]) if outer.strip("/") else mount[2]
+
+    mounted = []
+    for route in routes:
+        prefix = prefix_of(route["file"], route["receiver"])
+        if prefix.strip("/"):
+            route["path"] = join_path([prefix, route["path"]])
+            route["mounted_at"] = prefix
+            mounted.append(route)
+    context.endpoint_routes = routes
+    value = {
+        "routes": mounted[:MAX_INTEGRATION_ITEMS], "mounts": resolved_mounts, "unresolved_mounts": unresolved,
+        "route_count": total, "truncated": max(0, total - len(routes)),
+    }
+    if not mounted:
+        return value, []
+    files = {route["file"] for route in mounted}
+    return value, [Finding(
+        "api", "Routes mounted from other files",
+        f"{len(mounted):,} route(s) in {len(files):,} file(s) take the prefix of a router mounted in another file "
+        "(Django include, FastAPI include_router, Flask register_blueprint, aiohttp add_subapp, Express use). "
+        "Their full paths feed the integration summary.",
+        confidence="INFERRED", analyzer="code-index",
+        evidence=[f"{route['file']}:{route['line']} {route['method']} {route['path']}" for route in mounted[:MAX_LISTED]],
+    )]
+
+
 MAX_INTEGRATION_ITEMS = 5000
 MAX_INTEGRATION_PACKAGES = 500
 
@@ -1593,7 +1692,10 @@ def _integration(context: _Context) -> tuple[dict, list[Finding]]:
     if len(all_packages) > len(packages):
         truncated["packages"] = len(all_packages) - len(packages)
     endpoints: dict[tuple[str, str], str] = {}
-    for name, path, _ in _fact_rows(db, "api_endpoint"):
+    # Routes with the prefixes of routers mounted from other files, when the endpoints pass ran.
+    served = ((f"{item['method']} {item['path']}", item["file"], None) for item in context.endpoint_routes) \
+        if context.endpoint_routes is not None else _fact_rows(db, "api_endpoint")
+    for name, path, _ in served:
         method, _, route = name.partition(" ")
         key = (method.upper(), normalize_route(route))
         if key not in endpoints and len(endpoints) >= MAX_INTEGRATION_ITEMS:
@@ -2168,6 +2270,7 @@ _PASSES = (
     ("hdl", _hdl_hierarchy),
     ("shaders", _shader_inventory),
     ("frontend", _component_graph),
+    ("endpoints", _endpoint_routes),
     ("integration", _integration),
     ("network_services", _network_services),
 )

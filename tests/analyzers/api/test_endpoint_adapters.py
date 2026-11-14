@@ -484,7 +484,7 @@ def test_python_frameworks_beyond_decorators(tmp_path: Path):
     assert _routes(tmp_path, "app.py", litestar) == ["GET /books", "POST /books"]
     bottle = ("from bottle import route, get, run\n\n@route('/hello')\ndef hello(): return 'Hi'\n\n"
               "@get('/items')\ndef items(): return []\n")
-    assert _routes(tmp_path, "app.py", bottle) == ["ANY /hello", "GET /items"]
+    assert _routes(tmp_path, "app.py", bottle) == ["GET /hello", "GET /items"]  # route() defaults to GET
     aiohttp = (
         "from aiohttp import web\n\napp = web.Application()\n"
         "app.router.add_get('/', handle)\n"
