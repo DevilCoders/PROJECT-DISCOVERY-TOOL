@@ -562,6 +562,8 @@ def test_native_vcs_checkouts_exclude_control_metadata(
         commands.append(command)
         if backend == "jj" and command[1:3] == ["--repository", str(temporary / "jj-repository")]:
             return SimpleNamespace(stdout=b"jj-revision")
+        if backend == "pijul" and command[1] == "log":
+            return SimpleNamespace(stdout=b'[{"hash": "CHANGE", "state": "D224YNVCF542WHB53NWBAG6YT5MX6GKUHVWQKKMOJV62NHXL6CNAC", "authors": ["key"]}]')
         repository = Path(command[-1])
         repository.mkdir(parents=True, exist_ok=True)
         (repository / metadata_directory).mkdir()
@@ -580,6 +582,10 @@ def test_native_vcs_checkouts_exclude_control_metadata(
     assert (checkout / "main.py").is_file()
     assert not (checkout / metadata_directory).exists()
     assert metadata["vcs"] == backend
+    if backend == "pijul":
+        # The channel state is the revision; it is read before the metadata is removed.
+        assert metadata["revision"] == "D224YNVCF542WHB53NWBAG6YT5MX6GKUHVWQKKMOJV62NHXL6CNAC"
+        assert commands[1][:2] == ["pijul", "log"] and "--state" in commands[1]
 
 
 def test_cvs_checkout_uses_noninteractive_native_checkout_and_strips_CVS_metadata(

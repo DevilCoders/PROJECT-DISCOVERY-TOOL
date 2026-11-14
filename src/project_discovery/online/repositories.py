@@ -15,6 +15,7 @@ removed on every exit path; a removal failure is reported, never silently ignore
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import posixpath
 import re
@@ -112,7 +113,11 @@ _PROVIDER_HOSTS = (
     (re.compile(r"(^|\.)git-codecommit\.[a-z0-9-]+\.amazonaws\.com$", re.I), "AWS CodeCommit"),
     (re.compile(r"(^|\.)git\.sr\.ht$|(^|\.)sr\.ht$", re.I), "SourceHut"),
     (re.compile(r"(^|\.)source\.developers\.google\.com$", re.I), "Google Cloud Source Repositories"),
+    (re.compile(r"(^|\.)nest\.pijul\.com$", re.I), "Pijul Nest"),
+    (re.compile(r"(^|\.)hub\.darcs\.net$", re.I), "Darcs Hub"),
 )
+# A Pijul channel state: base32, as `pijul log --state` prints it.
+_PIJUL_STATE = re.compile(r"[A-Z2-7]{40,64}")
 # Device names Windows reserves in every directory, with or without an extension.
 _WINDOWS_RESERVED = re.compile(
     r"^(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³]|CONIN\$|CONOUT\$)"
@@ -1652,13 +1657,26 @@ def _pijul_checkout(
         command, timeout=timeout, env=environment, label="Pijul clone",
         disk_guard=(temporary, limits.min_free_bytes),
     )
+    channel = target.ref or "main"
+    # The channel's state identifies exactly the changes applied: the report's revision. Change
+    # authors (identity keys) are not recorded.
+    log = _run(
+        ["pijul", "log", "--repository", str(repository), "--channel", channel, "--state", "--limit", "1",
+         "--output-format", "json"],
+        timeout=timeout, env=environment, label="Pijul state lookup",
+    ).stdout.decode("utf-8", errors="replace")
+    try:
+        entries = json.loads(log)
+    except ValueError:
+        entries = []
+    latest = entries[0] if isinstance(entries, list) and entries and isinstance(entries[0], dict) else {}
+    state = str(latest.get("state", ""))
     _strip_metadata(repository, (".pijul",))
     _replace_directory(repository, checkout)
-    channel = target.ref or "main"
     return {
         "mode": "remote", "vcs": "pijul", "provider": target.provider,
         "url": target.clone_url, "repository": target.repository_name,
-        "revision": None, "branch": channel, "history_complete": False,
+        "revision": state if _PIJUL_STATE.fullmatch(state) else None, "branch": channel, "history_complete": False,
         "coverage": [],
         "warnings": [f"Pijul source was materialized from the {channel} channel; repository metadata was excluded."],
     }

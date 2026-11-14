@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -254,3 +255,18 @@ def test_fossil_server_end_to_end(tmp_path: Path, monkeypatch):
         tag = _scan(monkeypatch, tmp_path / "tag", url, "--ref", "v1.0")
         assert _files(tag) == {"README.md", "src/app.py"}
         assert _remote(tag)["revision"] != source["revision"]
+
+
+@pytest.mark.skipif(os.environ.get("PDT_LIVE_NETWORK_TESTS") != "1" or shutil.which("pijul") is None,
+                    reason="set PDT_LIVE_NETWORK_TESTS=1, with the Pijul client installed, to clone from the public Nest")
+def test_pijul_repository_on_the_nest(tmp_path: Path, monkeypatch):
+    # Pijul has no standalone server (its HTTP remotes speak the Nest's protocol), so this reads a
+    # small public repository on the Nest itself.
+    report = _scan(monkeypatch, tmp_path / "nest", "pijul+https://nest.pijul.com/pijul/manual")
+    source = _remote(report)
+    assert (source["vcs"], source["provider"], source["branch"], source["transport"]) == (
+        "pijul", "Pijul Nest", "main", "https")
+    assert re.fullmatch(r"[A-Z2-7]{40,64}", source["revision"] or "")
+    files = _files(report)
+    assert {"README.md", "book.toml"} <= files
+    assert not any(".pijul" in path.split("/") for path in files)
