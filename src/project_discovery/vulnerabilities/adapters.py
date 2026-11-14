@@ -380,6 +380,10 @@ def _ghsa(document: list) -> Iterator[dict]:
             patched = patched.get("identifier") if isinstance(patched, dict) else patched
             entry: dict[str, Any] = {"package": {"ecosystem": ecosystem, "name": name},
                                      "database_specific": {"vulnerable_version_range": expression[:200]}}
+            functions = [_text(item, 200) for item in _items(vulnerability.get("vulnerable_functions")) if _text(item)]
+            if functions:
+                # The functions the advisory names, for reachability evidence.
+                entry["ecosystem_specific"] = {"vulnerable_functions": functions[:50]}
             if events and "exact" in events[0]:
                 entry["versions"] = [events[0]["exact"]]
             elif events:

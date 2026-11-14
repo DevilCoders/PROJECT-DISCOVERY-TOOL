@@ -60,6 +60,30 @@ A vulnerability finding says whether the package is a direct dependency. If it i
 
 The inventory finding counts direct and transitive dependencies, and how many packages the graph reaches. The graph says what the lockfile resolved, not what is loaded at runtime.
 
+## Reachability evidence
+
+A version match says nothing about whether the vulnerable code runs. For each package an advisory confirms, locally or through `--vuln-online`, the code index's reachability pass looks for static evidence in the scanned code. It reports one `INFERRED`, `INFO` finding per package, under the `dependency-reachability` analyzer:
+
+- **Imported by the code.** Files import the package (each `imported_by: path:line`). When the advisory names its affected functions, calls to them in those files are listed too (`calls: template at src/app.js:3`). Go's vulndb, RustSec and GitHub's `vulnerable_functions` name them.
+- **Reached through an imported dependency.** No file imports the package itself, but the direct dependency that brings it in (from the [dependency graph](#dependency-graphs)) is imported.
+- **Not imported by the scanned code.** Neither the package nor the dependency that brings it in is imported. The package may still be loaded dynamically, by a framework, by configuration or by code outside the scan, so this is not evidence that the vulnerability cannot be reached.
+
+Imports name packages as each ecosystem writes them:
+
+| Ecosystem | How an import names the package |
+|---|---|
+| npm, Pub | by name (`require("lodash")`, `@babel/core/...`, `package:http/...`) |
+| Go | by module path, packages below it included |
+| crates.io | by crate name with `-` read as `_` |
+| NuGet | by dotted namespace |
+| PyPI | by module name, including the common renames (`PyYAML` is `yaml`, `beautifulsoup4` is `bs4`) |
+| Maven | by group (`com.fasterxml.jackson`), which cannot tell a group's artifacts apart |
+| Packagist | by vendor namespace |
+| RubyGems | by `require` path |
+| Hex | by module |
+
+Packages of other ecosystems, and packages in a language with no code in the scan, get no reachability finding. `metrics.code_index.reachability` counts every outcome. This evidence never establishes exploitability.
+
 ## Installed OS packages and SBOMs
 
 A scanned tree that holds a root file system (an unpacked container image, an appliance image, a chroot) names its installed packages in the package manager's database. These databases and SBOM files are read like lockfiles:

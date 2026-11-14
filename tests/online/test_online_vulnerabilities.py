@@ -765,3 +765,13 @@ def test_incomplete_online_lookups_name_their_cause():
     assert online_gap_text({"lockfiles_content_skipped": 1, "packages_failed": 3}) == (
         "3 package(s) could not be checked; 1 lockfile(s) were skipped by --skip"
     )
+
+
+def test_online_matches_feed_the_reachability_pass(tmp_path: Path):
+    # The coordinator writes the packages OSV.dev confirms into the store for the code index.
+    with RunningService(_service()) as running:
+        _, report = _scan(_project(tmp_path), tmp_path / "out", _options(running, tmp_path))
+    reachability = [item for item in report["findings"] if item["analyzer"] == "dependency-reachability"]
+    assert [item["title"] for item in reachability] == ["Vulnerable package imported by the code: lodash@4.17.20"]
+    assert "imported_by: app.js:1" in reachability[0]["evidence"]
+    assert report["metrics"]["code_index"]["reachability"]["imported"] == 1

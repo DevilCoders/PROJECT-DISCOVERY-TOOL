@@ -12,6 +12,7 @@ reported as UNKNOWN coverage findings plus scan diagnostics, never as "no vulner
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -30,7 +31,7 @@ from ..analyzers.dependencies.lockfile_parsers import (
     parse_lockfile,
 )
 from ..analyzers.dependencies.lockfile_parsers import lockfile_key, osv_covers
-from ..analyzers.dependencies.vulnerabilities import _affected_version, advisory_findings
+from ..analyzers.dependencies.vulnerabilities import _affected_version, advisory_findings, vulnerable_package_fact
 from ..core.source_utils import SourceBudgetExceeded, redact_source_excerpt
 from ..models import Finding
 from ..vulnerabilities.database import osv_record_to_advisories
@@ -148,6 +149,8 @@ class OnlineLookupResult:
     findings: list[Finding]
     diagnostics: list[str]
     status: dict[str, Any]
+    # Code facts per lockfile ("vulnerable_package": the reachability pass reads them).
+    facts: dict[str, list[tuple[str, str, str]]] = field(default_factory=dict)
 
 
 def _coverage_finding(title: str, detail: str, evidence: list[str], *, severity: str = "LOW") -> Finding:
@@ -235,6 +238,7 @@ class OnlineVulnerabilityLookup:
         paths_by_package: dict[PackageQuery, list[str]] = defaultdict(list)
         # Each lockfile's dependency graph (how a package entered the project), when it records one.
         graphs: dict[str, Any] = {}
+        facts_by_lockfile: dict[str, list[tuple[str, str, str]]] = {}
         parse_failures: list[tuple[str, str]] = []
         # Packages of ecosystems OSV.dev has no advisories for: never sent, reported as not checked.
         unsupported: Counter = Counter()
@@ -374,6 +378,11 @@ class OnlineVulnerabilityLookup:
             status["advisories"] += len(advisories)
             # Every lockfile gets its findings, as offline (the cap is for evidence lists).
             for lockfile in sorted(paths_by_package[query]):
+                fact = vulnerable_package_fact(package, matches, graphs.get(lockfile))
+                if fact is not None:
+                    facts_by_lockfile.setdefault(lockfile, []).append((
+                        "vulnerable_package", package.name[:400],
+                        json.dumps(fact, ensure_ascii=True, sort_keys=True, separators=(",", ":"))))
                 for finding in advisory_findings(
                     lockfile, package, matches,
                     analyzer=ONLINE_ANALYZER_NAME, source_label="OSV.dev advisory", vex=self.vex,
@@ -486,7 +495,7 @@ class OnlineVulnerabilityLookup:
                 {"reason": reason, "packages": len(failed)} for reason, failed in sorted(by_reason.items())
             ],
         })
-        return OnlineLookupResult(findings, diagnostics, status)
+        return OnlineLookupResult(findings, diagnostics, status, facts_by_lockfile)
 
     def _enrich(self, http: HttpClient, cache: ResponseCache, records: dict[str, dict[str, Any]]):
         options = self.options

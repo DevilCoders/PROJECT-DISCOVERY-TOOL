@@ -87,6 +87,8 @@ connection using temporary tables (memory does not grow with repository size):
 | Endpoint catalog | Every route with its method, full path, framework, handler, contract operation, the authentication, rate-limit and validation declarations that apply as written, source evidence and confidence; routes no authentication declaration covers ([Endpoint catalog](../analyzers/API_ANALYZER.md#endpoint-catalog)). |
 | Integration | What the project serves and calls (endpoints, HTTP calls, topics, gRPC, package names), used by `pdt compare` (see §6). |
 | Network services | The ports Dockerfiles, Compose, Kubernetes and Terraform declare, joined by number with the ports code listens on, and the services code connects to by name; findings for declared ports nothing listens on, undeclared listeners, ports code serves that a rule opens to every address, Services whose target ports their pods do not declare and connections to ports a service does not declare ([Service map](../analyzers/NETWORK_ANALYZER.md#service-map)). |
+| Provenance | Repository hosts, submodules, package registries, CI workflows, container image registries and deployment targets as one graph ([Provenance graph](../analyzers/VCS_ANALYZER.md#provenance-graph)). |
+| Reachability | For each package an advisory confirms, the scanned code's imports of it, calls to the functions the advisory names, or the imported direct dependency that brings it in. The evidence is `INFERRED` and never a claim of exploitability ([Reachability evidence](../analyzers/LOCKFILE_ANALYZER.md#reachability-evidence)). |
 
 Each pass that fails is isolated: it produces an `UNKNOWN` finding and the other passes
 still run. Results are in the report under `metrics.code_index`.

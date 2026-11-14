@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.limits import AnalyzerLimits, over_limit
+from ...intelligence import facts as code_facts
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
 from ...models import FileRecord, Finding
 from ...vulnerabilities.database import VulnerabilityDatabase
@@ -241,6 +242,40 @@ def match_advisories(
         if affected is not False:
             matches.append((advisory, affected is True, reason))
     return matches
+
+
+def _affected_symbols(affected: dict[str, Any]) -> list[str]:
+    """The functions an advisory names: Go's vulndb (ecosystem_specific.imports), RustSec
+    (affects.functions) and GitHub's vulnerable_functions."""
+    specific = affected.get("ecosystem_specific") if isinstance(affected.get("ecosystem_specific"), dict) else {}
+    symbols: list[str] = []
+    for item in specific.get("imports") or [] if isinstance(specific.get("imports"), list) else []:
+        if isinstance(item, dict):
+            prefix = str(item.get("path") or "")
+            symbols += [f"{prefix}.{symbol}" if prefix else str(symbol) for symbol in item.get("symbols") or []
+                        if isinstance(symbol, str)]
+    affects = specific.get("affects") if isinstance(specific.get("affects"), dict) else {}
+    symbols += [str(item) for item in affects.get("functions") or [] if isinstance(item, str)]
+    symbols += [str(item) for item in specific.get("vulnerable_functions") or [] if isinstance(item, str)]
+    return [symbol[:200] for symbol in symbols]
+
+
+def vulnerable_package_fact(
+    package: ResolvedPackage, matches: list[tuple[dict[str, Any], bool, str]], graph: DependencyGraph | None,
+) -> dict[str, Any] | None:
+    """The code index's record of a package an advisory confirms (the reachability pass reads
+    it): the advisories, the functions they name, and how the package entered the project."""
+    confirmed = [advisory for advisory, matched, _ in matches if matched]
+    if not confirmed:
+        return None
+    path = graph.path(package.name, package.version) if graph is not None and graph.edges_known else None
+    return {
+        "ecosystem": package.ecosystem, "version": package.version,
+        "advisories": sorted({str(advisory["id"]) for advisory in confirmed})[:20],
+        "symbols": sorted({symbol for advisory in confirmed for symbol in _affected_symbols(advisory["affected"])})[:50],
+        "direct": graph.is_direct(package.name) if graph is not None else None,
+        "via": path[0][0] if path is not None and len(path) > 1 else "",
+    }
 
 
 def advisory_findings(
@@ -538,4 +573,7 @@ class LocalVulnerabilityAnalyzer(Analyzer):
         graph: DependencyGraph | None = None,
     ) -> list[Finding]:
         matches = match_advisories(package, database.query(package.ecosystem, package.name))
+        fact = vulnerable_package_fact(package, matches, graph)
+        if fact is not None:
+            code_facts.emit_fact("vulnerable_package", package.name, **fact)
         return advisory_findings(record.path, package, matches, vex=self.vex, graph=graph)

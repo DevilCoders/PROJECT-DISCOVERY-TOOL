@@ -33,6 +33,7 @@ from ..inventory.store import sqlite_text
 from ..models import FileRecord, Finding
 from .model import supports_language
 from .python_graph import _import_name, _strongly_connected_components
+from .reachability import reachability as _reachability
 
 MAX_GRAPH_EDGES = 500_000
 MAX_LISTED = 100
@@ -3227,4 +3228,5 @@ _PASSES = (
     ("integration", _integration),
     ("network_services", _network_services),
     ("provenance", _provenance),
+    ("reachability", _reachability),
 )

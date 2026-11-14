@@ -50,6 +50,7 @@ from .engine.progress import ScanProgress
 from .engine.native import capabilities as native_capabilities
 from .engine.native import GPU_DEFAULT_THRESHOLD_BYTES, gpu_configuration, native_available, probe_gpu
 from .intelligence.architecture import analyze_project_architecture
+from .intelligence.facts import FileFacts
 from .intelligence.index import QUERY_KINDS, analyze_code_index, code_index_state, query_code_index
 from .intelligence.python_graph import analyze_python_dependencies
 from .inventory.aggregates import inventory_aggregates
@@ -615,6 +616,12 @@ def _run_online_vulnerability_lookup(
     )
     finding_store.extend_findings(result.findings)
     finding_store.extend_run_diagnostics(result.diagnostics)
+    # The packages OSV.dev confirmed, for the code index's reachability pass (which reads the
+    # store through its own connection: flush first).
+    if result.facts and hasattr(finding_store, "extend_code_facts"):
+        for path, facts in sorted(result.facts.items()):
+            finding_store.extend_code_facts(path, FileFacts(facts=facts))
+        finding_store.flush()
     status = result.status
     if skipped:
         status["lockfiles_content_skipped"] = len(skipped)

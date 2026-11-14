@@ -228,6 +228,16 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: static reachability evidence for vulnerable packages
+- A code index pass gives each package an advisory confirms (locally or online) one `INFERRED`,
+  `INFO` finding. It says whether the scanned code imports the package and calls a function
+  the advisory names (Go vulndb, RustSec and GitHub's `vulnerable_functions`), or imports the
+  direct dependency that brings it in, or imports neither.
+- Imports are matched per ecosystem: npm, Pub, Go, crates.io, NuGet, PyPI (with module renames),
+  Maven (by group), Packagist, RubyGems and Hex.
+- The findings never claim exploitability. `metrics.code_index.reachability` counts the outcomes.
+- The GitHub advisory adapter keeps `vulnerable_functions`.
+
 ### Added: dependency graphs and the path to each vulnerable package
 - Lockfiles' dependency edges and direct dependencies are read where the format records them.
   Formats with both: npm v2/v3 (resolved as Node resolves them), Yarn Berry, pnpm, Cargo, uv,

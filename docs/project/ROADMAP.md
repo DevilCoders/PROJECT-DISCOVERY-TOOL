@@ -256,7 +256,10 @@ The baseline is not production-ready:
   - Local and online vulnerability findings name the package's direct or transitive status and its shortest path from a direct dependency, with tests per format.
   - Inventory findings count direct and transitive dependencies.
   - Formats that record no graph (go.sum, Pipfile.lock, Gradle, SwiftPM, mix.lock and others) give no path.
-- [ ] Add static dependency reachability evidence where symbol/call graphs support it; never claim exploitability from version matching alone.
+- [x] Add static dependency reachability evidence where symbol/call graphs support it; never claim exploitability from version matching alone. The code index's `reachability` pass covers each package an advisory confirms, locally or online ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#reachability-evidence)):
+  - It reports whether the scanned code imports the package, whether it calls the functions the advisory names (Go vulndb, RustSec, GitHub `vulnerable_functions`), whether the dependency that brings the package in is imported, or that neither is.
+  - Imports are mapped for npm, Pub, Go, crates.io, NuGet, PyPI, Maven, Packagist, RubyGems and Hex.
+  - The findings are `INFERRED` and `INFO`, and state that they do not establish exploitability.
 - [ ] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping.
 - [ ] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds.
 - [x] Include advisory snapshot provenance, import timestamp, source identity/hash, ecosystem coverage and freshness warning in reports.
