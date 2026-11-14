@@ -228,6 +228,19 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: route prefixes, groups, mounts and resources
+- `api-endpoints` resolves each route's full path from its file (`analyzers/api/route_structure.py`):
+  class-level mappings (Spring, JAX-RS, NestJS, Micronaut, ASP.NET with `[controller]`, Symfony), brace
+  blocks (chi, Fiber, Ktor, Javalin, Spark, Akka, Laravel, Slim, Vapor), parenthesized groups (Compojure,
+  Giraffe, Dream), indented scopes (Rails, Grape, Roda, Phoenix), router variables (Gin, Echo, Fiber,
+  ASP.NET `MapGroup`, Vapor, Mojolicious, FastAPI `APIRouter`, Flask blueprints) and same-file mounts
+  (Express, Koa, Hono, axum `nest`, Rocket `mount`, `include_router`, `register_blueprint`, aiohttp
+  `add_subapp`, Starlette `Mount`, Django `include(router.urls)`).
+- Resource declarations expand to their routes: Rails `resources`/`resource`, Laravel
+  `Route::resource`/`apiResource`, Phoenix `resources` and Django REST framework routers.
+- A class-level mapping is a prefix, no longer a route of its own (`@RequestMapping("/api")` on a class
+  was reported as `ANY /api`). `api_endpoint` facts name the router variable a route is declared on.
+
 ### Added: endpoint adapters across languages
 - `api-endpoints` reads each language with its own adapters (by file extension): framework forms for
   Python (Litestar, Bottle, BlackSheep, aiohttp, Starlette, Falcon, Pyramid, Tornado and more, from the

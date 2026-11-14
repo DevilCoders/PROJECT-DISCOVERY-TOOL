@@ -83,7 +83,7 @@ def test_http_client_calls_in_a_file_without_a_server_are_not_endpoints(tmp_path
 
 def test_nestjs_and_file_system_routers(tmp_path: Path):
     nest = "@Controller('cats')\nexport class CatsController {\n  @Get(':id')\n  findOne() {}\n  @Post()\n  create() {}\n}\n"
-    assert _routes(tmp_path, "cats.controller.ts", nest) == ["GET :id", "POST "]
+    assert _routes(tmp_path, "cats.controller.ts", nest) == ["GET /cats/:id", "POST /cats"]
     handlers = ('import { NextResponse } from "next/server";\n'
                 "export async function GET(request: Request) { return NextResponse.json({}); }\n"
                 "export const DELETE = async () => new Response(null);\n")
@@ -118,7 +118,7 @@ def test_go_routers(tmp_path: Path):
     )
     assert _routes(tmp_path, "main.go", source) == [
         "ANY /health", "GET /items/{id}", "GET /books/{id}", "PUT /books/{id}", "GET /articles",
-        "PATCH /articles/{id}", "GET /users/:id", "POST /jobs", "ANY /admin",
+        "PATCH /articles/{id}", "GET /users/:id", "POST /v1/jobs", "ANY /admin",
     ]
 
 
@@ -137,7 +137,7 @@ def test_spring_mappings_take_their_arguments_in_any_order(tmp_path: Path):
         "}\n"
     )
     assert _lines(tmp_path, "OrderController.java", source) == [
-        "2 ANY /api", "4 POST /orders", "6 GET /orders/{id}", "6 HEAD /orders/{id}", "8 DELETE /orders/{id}",
+        "4 POST /api/orders", "6 GET /api/orders/{id}", "6 HEAD /api/orders/{id}", "8 DELETE /api/orders/{id}",
     ]
 
 
@@ -175,7 +175,7 @@ def test_jvm_frameworks(tmp_path: Path):
         '    client.get("https://example.com")\n'
         "}\n"
     )
-    assert _routes(tmp_path, "Application.kt", ktor) == ["GET /", "POST /orders", "GET /items"]
+    assert _routes(tmp_path, "Application.kt", ktor) == ["GET /", "POST /orders", "GET /api/items"]
     scala = (
         "import org.http4s._\n"
         "import akka.http.scaladsl.server.Directives._\n"
@@ -274,7 +274,7 @@ def test_ruby_routers(tmp_path: Path):
     )
     assert _routes(tmp_path, "config/routes.rb", rails) == ["GET photos", "GET photos/:id", "POST photos/:id", "GET /"]
     grape = "class API < Grape::API\n  resource :users do\n    get ':id' do\n    end\n    post do\n    end\n  end\nend\n"
-    assert _routes(tmp_path, "api.rb", grape) == ["GET :id", "POST "]
+    assert _routes(tmp_path, "api.rb", grape) == ["GET /users/:id", "POST /users"]
     with collecting_facts() as facts:
         _analyze(tmp_path, "api.rb", grape)
     # Grape's form names the framework, not the Sinatra form that reads the same line.
@@ -326,7 +326,7 @@ def test_swift_and_dart_routers(tmp_path: Path):
         '    try app.client.get("https://example.com")\n'
         "}\n"
     )
-    assert _routes(tmp_path, "routes.swift", vapor) == ["GET /hello", "POST /users/:id", "PATCH /items/:id", "GET "]
+    assert _routes(tmp_path, "routes.swift", vapor) == ["GET /hello", "POST /users/:id", "PATCH /items/:id", "GET /users"]
     kitura = 'import Kitura\nlet router = Router()\nrouter.get("/hello") { request, response, next in\n    next()\n}\n'
     assert _routes(tmp_path, "main.swift", kitura) == ["GET /hello"]
     shelf = (
@@ -517,11 +517,11 @@ def test_python_frameworks_beyond_decorators(tmp_path: Path):
     assert _routes(tmp_path, "tools/files.py", 'def path(value):\n    return value\n\npath("x", 1)\n') == []
 
 
-def test_endpoint_facts_name_the_framework(tmp_path: Path):
+def test_endpoint_facts_name_the_framework_and_the_router(tmp_path: Path):
     with collecting_facts() as facts:
         _analyze(tmp_path, "server.js", 'const express = require("express");\nconst app = express();\n'
                                         'app.get("/health", ok);\n')
         _analyze(tmp_path, "main.go", 'package main\nfunc main() {\n\te.GET("/users", list)\n}\n')
     endpoints = [(name, json.loads(detail)) for kind, name, detail in facts.facts if kind == "api_endpoint"]
-    assert endpoints == [("GET /health", {"framework": "Express-style", "line": 3}),
-                         ("GET /users", {"framework": "Gin/Echo", "line": 3})]
+    assert endpoints == [("GET /health", {"framework": "Express-style", "line": 3, "receiver": "app"}),
+                         ("GET /users", {"framework": "Gin/Echo", "line": 3, "receiver": "e"})]

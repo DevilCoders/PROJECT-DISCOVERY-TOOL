@@ -8,8 +8,10 @@ own (``router.get('/x')`` is also how an HTTP client is called), a marker the fi
 contain, usually the framework's import. A declaration spanning lines (a call a formatter
 wrapped, a multi-line annotation) is read from its first line joined with the next ones, up
 to 8 lines and 2,048 characters, and each route keeps the line it starts on. File-system
-routers (Next.js, SvelteKit, Nuxt, Dart Frog) take the route from the file's path. Route
-prefixes, mounts and resource expansions are not resolved here.
+routers (Next.js, SvelteKit, Nuxt, Dart Frog) take the route from the file's path. Resource
+declarations (Rails, Laravel, Phoenix, Django REST framework routers) expand to their routes, and
+``route_structure`` resolves each route's full path in the file: class-level mappings, router
+groups and blocks, indented scopes and mounted router variables.
 """
 from __future__ import annotations
 
@@ -32,6 +34,17 @@ from ...core.source_utils import (
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
 from ..base import Analyzer
+from .route_structure import (
+    Event,
+    Layout,
+    Route,
+    Shape,
+    depth_changes,
+    join_path,
+    resolve,
+    segments_prefix,
+    singular,
+)
 
 _SOURCE_EXTENSIONS = source_extensions()
 MAX_PYTHON_ENDPOINT_AST_BYTES = 4 * 1024 * 1024  # the syntax-tree budget
@@ -60,10 +73,6 @@ _WP_METHODS_FIELD = re.compile(
 _WP_GROUP = re.compile(r"\(\?P<(\w{1,60})>[^()\n]{0,100}\)")
 _METHODS_FIELD = re.compile(r"""\bmethods?\s*[:=]\s*(\[[^\]\n]{0,200}\]|\{[^}\n]{0,200}\}|['"][^'"\n]{0,60}['"]|[\w.]{1,80})""")
 _QUOTED = re.compile(r""""([^"\n]{0,200})"|'([^'\n]{0,200})'""")
-# Parentheses and brackets, and string literals to skip; an unterminated literal runs to the
-# end of the line (the closing quote is optional), so every character is read once.
-_DEPTH_TOKEN = re.compile(r'''[()\[\]]|"(?:[^"\\\n]|\\.)*+"?|'(?:[^'\\\n]|\\.)*+'?|`(?:[^`\\\n]|\\.)*+`?''')
-_DEPTH = {"(": 1, "[": 1, ")": -1, "]": -1}
 # Cheap test before a line's forms run: every form's declarations name one of these words
 # (JVM files skip the test: JAX-RS annotations are paired across lines).
 _HINT = re.compile(r"(?i)get|post|put|patch|delete|route|handle|map|options|head|any|all|path|endpoint|resource|"
@@ -111,6 +120,9 @@ class _Form:
     the pattern captures none, ``marker`` a ``_MARKERS`` key the file must match, ``read``
     a reader for forms the groups alone do not give, and ``file_route`` the file-system
     router kinds whose handler files the form marks (the route is then the file's path).
+    A ``recv`` group names the router variable the route is declared on; ``unless`` is a
+    marker that rules the form out (Rails resources are Grape namespaces in a Grape API), and
+    ``role`` tells ``route_structure`` how the declaration may combine with others.
     """
 
     framework: str
@@ -119,6 +131,8 @@ class _Form:
     marker: str = ""
     read: Reader | None = None
     file_route: tuple[str, ...] = ()
+    role: str = ""
+    unless: str = ""
 
 
 def _read(form: _Form, match: re.Match) -> list[tuple[str, str]]:
@@ -299,9 +313,80 @@ def _route_object(match: re.Match) -> list[tuple[str, str]]:
     return [(item, path.group(1)) for item in (_methods(method.group(1)) if method else []) or ["ANY"]]
 
 
+_RAILS_PLURAL = (("index", "GET", ""), ("create", "POST", ""), ("new", "GET", "/new"), ("edit", "GET", "/:id/edit"),
+                 ("show", "GET", "/:id"), ("update", "PATCH", "/:id"), ("update", "PUT", "/:id"),
+                 ("destroy", "DELETE", "/:id"))
+_RAILS_SINGULAR = (("create", "POST", ""), ("new", "GET", "/new"), ("edit", "GET", "/edit"), ("show", "GET", ""),
+                   ("update", "PATCH", ""), ("update", "PUT", ""), ("destroy", "DELETE", ""))
+_PHOENIX = (("index", "GET", ""), ("edit", "GET", "/:id/edit"), ("new", "GET", "/new"), ("show", "GET", "/:id"),
+            ("create", "POST", ""), ("update", "PATCH", "/:id"), ("update", "PUT", "/:id"), ("delete", "DELETE", "/:id"))
+_LARAVEL = (("index", "GET", ""), ("create", "GET", "/create"), ("store", "POST", ""), ("show", "GET", "/{%s}"),
+            ("edit", "GET", "/{%s}/edit"), ("update", "PUT", "/{%s}"), ("update", "PATCH", "/{%s}"),
+            ("destroy", "DELETE", "/{%s}"))
+_ONLY = re.compile(r"""\b(only|except)\s*:\s*(\[[^\]\n]{0,300}\]|%i\[[^\]\n]{0,300}\]|:\w{1,40})""")
+_RAILS_PATH = re.compile(r"""\bpath\s*:\s*['"]([^'"\n]{0,200})['"]""")
+_LARAVEL_ONLY = re.compile(r"""->\s*(only|except)\s*\(\s*\[?([^\])\n]{0,300})""")
+
+
+def _actions(options: str, pattern: re.Pattern = _ONLY) -> tuple[set[str] | None, set[str]]:
+    """The ``only`` and ``except`` action names a resource declaration lists."""
+    only: set[str] | None = None
+    excluded: set[str] = set()
+    for kind, listed in pattern.findall(options):
+        names = set(re.findall(r"\w+", listed.removeprefix("%i")))
+        if kind == "only":
+            only = names
+        else:
+            excluded |= names
+    return only, excluded
+
+
+def _rails_resources(match: re.Match) -> list[tuple[str, str]]:
+    """Rails ``resources :photos`` (and ``resource :profile``): the routes it declares, with its
+    ``only:``/``except:`` and ``path:`` options."""
+    options = match.group("options") or ""
+    only, excluded = _actions(options)
+    renamed = _RAILS_PATH.search(options)
+    actions = _RAILS_PLURAL if match.group("kind") == "resources" else _RAILS_SINGULAR
+    routes = []
+    for name in re.findall(r":(\w+)", match.group("names")):
+        base = "/" + (renamed.group(1).strip("/") if renamed else name)
+        routes += [(method, base + suffix) for action, method, suffix in actions
+                   if (only is None or action in only) and action not in excluded]
+    return routes
+
+
+def _phoenix_resources(match: re.Match) -> list[tuple[str, str]]:
+    """Phoenix ``resources "/users", UserController``, with ``only:``/``except:`` and singletons."""
+    options = match.group("options") or ""
+    only, excluded = _actions(options)
+    base = "/" + match.group("path").strip("/")
+    if re.search(r"\bsingleton\s*:\s*true", options):
+        actions = tuple((action, method, suffix.replace("/:id", "")) for action, method, suffix in _PHOENIX
+                        if action != "index")
+    else:
+        actions = _PHOENIX
+    return [(method, base + suffix) for action, method, suffix in actions
+            if (only is None or action in only) and action not in excluded]
+
+
+def _laravel_resource(match: re.Match) -> list[tuple[str, str]]:
+    """Laravel ``Route::resource('photos', ...)`` and ``apiResource``, nested names
+    (``photos.comments``) and a chained ``->only([...])``/``->except([...])``."""
+    rest = _call_rest(match.string, match.end())
+    following = match.string[match.end() + len(rest):match.end() + len(rest) + 400]
+    only, excluded = _actions(following, _LARAVEL_ONLY)
+    names = match.group("name").split(".")
+    base = "".join(f"/{name}/{{{singular(name).replace('-', '_')}}}" for name in names[:-1]) + "/" + names[-1]
+    parameter = singular(names[-1]).replace("-", "_")
+    api = match.group("kind") == "apiResource"
+    return [(method, base + (suffix % parameter if "%s" in suffix else suffix)) for action, method, suffix in _LARAVEL
+            if not (api and action in {"create", "edit"}) and (only is None or action in only) and action not in excluded]
+
+
 def _http_receiver(methods: str) -> str:
     """A ``receiver.verb(`` call prefix: a whole identifier or a call's closing parenthesis."""
-    return rf"(?:\b[A-Za-z_$][\w$]{{0,63}}|\))\s*\.\s*(?P<method>{methods})\s*\("
+    return rf"(?:\b(?P<recv>[A-Za-z_$][\w$]{{0,63}})|\))\s*\.\s*(?P<method>{methods})\s*\("
 
 
 _MARKERS = {
@@ -318,7 +403,9 @@ _MARKERS = {
         r"\bimport\s+(?:static\s+)?(?:io\.javalin|io\.vertx|io\.jooby|ratpack|org\.scalatra|spark\.|io\.ktor"
         r"|org\.http4k|com\.linecorp\.armeria|io\.helidon|org\.jooby)"
     ),
-    "free-router": re.compile(r"\bimport\s+(?:static\s+)?(?:spark\.Spark|spark\.kotlin|io\.ktor|org\.scalatra)"),
+    "free-router": re.compile(
+        r"\bimport\s+(?:static\s+)?(?:spark\.Spark|spark\.kotlin|io\.ktor|org\.scalatra|io\.javalin\.apibuilder)"
+    ),
     "vertx": re.compile(r"\bimport\s+io\.vertx"),
     "micronaut": re.compile(r"\bimport\s+io\.micronaut"),
     "quarkus": re.compile(r"\bimport\s+io\.quarkus\.vertx\.web"),
@@ -346,13 +433,13 @@ _JS = (
     # Express-style routers with the receivers routers are usually named (not `api`, which
     # names an HTTP client as often as a router: it counts in a file importing a server).
     _Form("Express-style", re.compile(
-        r"""(?<![\w$])(?:app|router|server|fastify|r|mux|e|g|group|engine)\s*\.\s*"""
+        r"""(?<![\w$])(?P<recv>app|router|server|fastify|r|mux|e|g|group|engine)\s*\.\s*"""
         r"""(?P<method>get|post|put|patch|delete|options|head)\s*\(\s*['"`](?P<path>(?:/|\*)[^'"`]*)['"`]""",
         re.I,
     )),
     # Any receiver, in a file that imports a server framework (HTTP clients are excluded by name).
     _Form("Express-style", re.compile(
-        r"""(?<![\w$])""" + _JS_CLIENTS + r"""[A-Za-z_$][\w$]{0,63}\s*\.\s*"""
+        r"""(?<![\w$])""" + _JS_CLIENTS + r"""(?P<recv>[A-Za-z_$][\w$]{0,63})\s*\.\s*"""
         r"""(?P<method>get|post|put|patch|delete|options|head|all)\s*\(\s*['"`](?P<path>/[^'"`]*)['"`]"""
     ), marker="js-server"),
     _Form("Express", re.compile(r"""\.\s*route\s*\(\s*['"`](?P<path>/[^'"`]*)['"`]\s*\)"""), read=_route_chain,
@@ -374,16 +461,16 @@ _JS = (
 _GO = (
     # net/http (Go 1.22 method patterns: "GET /items/{id}") and gorilla/mux's .Methods(...).
     _Form("net/http", re.compile(
-        r'\bHandle(?:Func)?\s*\(\s*"(?P<path>(?:[A-Z]{3,7}\s+)?[^"\s/]*/[^"\n]*)"'
+        r'(?:\b(?P<recv>\w{1,64})\s*\.\s*)?\bHandle(?:Func)?\s*\(\s*"(?P<path>(?:[A-Z]{3,7}\s+)?[^"\s/]*/[^"\n]*)"'
         r"(?:[^()\n]{0,200}\)\s*\.\s*Methods\s*\((?P<methods>[^()\n]{0,200})\))?"
     ), read=_go_handle),
     # Gin, Echo, httprouter and Iris: upper-case method names on any receiver.
     _Form("Gin/Echo", re.compile(
-        r'(?:\b\w{1,64}|\))\s*\.\s*(?P<method>GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Any)\s*\(\s*"(?P<path>[^"\n]*)"'
+        r'(?:\b(?P<recv>\w{1,64})|\))\s*\.\s*(?P<method>GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|Any)\s*\(\s*"(?P<path>[^"\n]*)"'
     )),
     # chi and Fiber: capitalized method names, in a file that imports a router.
     _Form("chi/Fiber", re.compile(
-        r'(?:\b\w{1,64}|\))\s*\.\s*(?P<method>Get|Post|Put|Patch|Delete|Options|Head|Connect|Trace|All)\s*\(\s*"(?P<path>/[^"\n]*)"'
+        r'(?:\b(?P<recv>\w{1,64})|\))\s*\.\s*(?P<method>Get|Post|Put|Patch|Delete|Options|Head|Connect|Trace|All)\s*\(\s*"(?P<path>/[^"\n]*)"'
     ), marker="go-router"),
     _Form("chi/Echo", re.compile(
         r'\.\s*(?:Method|MethodFunc|Add|Handle)\s*\(\s*"(?P<method>[A-Z]{3,7})"\s*,\s*"(?P<path>[^"\n]*)"'
@@ -393,7 +480,7 @@ _GO = (
 _JVM = (
     # Spring: @GetMapping, @GetMapping("/x"), @GetMapping(value = "/x"), and @RequestMapping
     # with its method = RequestMethod.X.
-    _Form("Spring", re.compile(r"@(?P<method>Get|Post|Put|Patch|Delete|Request)Mapping\b"), read=_spring),
+    _Form("Spring", re.compile(r"@(?P<method>Get|Post|Put|Patch|Delete|Request)Mapping\b"), read=_spring, role="mapping"),
     _Form("Micronaut", re.compile(r"""@(?P<method>Get|Post|Put|Patch|Delete|Options|Head)\(\s*(?:["'](?P<path>[^"']*)["'])?""")),
     _Form("Micronaut", re.compile(r"@(?P<method>Get|Post|Put|Patch|Delete|Options|Head)\b(?!\s*\()"), marker="micronaut"),
     # Javalin, Spark, Vert.x, Jooby, Ratpack and Scalatra: receiver.verb("/x", ...).
@@ -420,10 +507,10 @@ _CSHARP = (
     _Form("ASP.NET", re.compile(
         r"""\[\s*Http(?P<method>Get|Post|Put|Patch|Delete|Options|Head)(?:\s*\(\s*['"](?P<path>[^'"]*)['"]\s*\))?\s*\]""",
         re.I,
-    )),
+    ), role="http-verb"),
     # Minimal APIs and Carter: MapGet on any receiver; MapMethods with its method list.
     _Form("ASP.NET minimal API", re.compile(
-        r'(?:\b\w{1,64}|\))\s*\.\s*Map(?P<method>Get|Post|Put|Patch|Delete)\s*\(\s*(?:pattern\s*:\s*)?@?"(?P<path>[^"\n]*)"'
+        r'(?:\b(?P<recv>\w{1,64})|\))\s*\.\s*Map(?P<method>Get|Post|Put|Patch|Delete)\s*\(\s*(?:pattern\s*:\s*)?@?"(?P<path>[^"\n]*)"'
     )),
     _Form("ASP.NET minimal API", re.compile(
         r'\.\s*MapMethods\s*\(\s*@?"(?P<path>[^"\n]*)"\s*,\s*(?:new\s*+(?:\[\]\s*+)?\{|\[)(?P<methods>[^}\]\n]{0,200})'
@@ -450,8 +537,12 @@ _PHP = (
     )),
     _Form("Slim", re.compile(r"""\$\w{1,64}\s*->\s*map\s*\(\s*\[(?P<methods>[^\]\n]{0,200})\]\s*,\s*['"](?P<path>[^'"\n]*)['"]""")),
     # Symfony: #[Route('/x', methods: ['GET'])] and the docblock @Route("/x", methods={"GET"}).
-    _Form("Symfony", re.compile(r"""#\[\s*Route\s*\(\s*(?:path\s*:\s*)?['"](?P<path>[^'"\n]*)['"]"""), read=_field_methods),
-    _Form("Symfony", re.compile(r"""@Route\s*\(\s*(?:path\s*=\s*)?"(?P<path>[^"\n]*)\""""), read=_field_methods),
+    _Form("Symfony", re.compile(r"""#\[\s*Route\s*\(\s*(?:path\s*:\s*)?['"](?P<path>[^'"\n]*)['"]"""), read=_field_methods,
+          role="mapping"),
+    _Form("Symfony", re.compile(r"""@Route\s*\(\s*(?:path\s*=\s*)?"(?P<path>[^"\n]*)\""""), read=_field_methods,
+          role="mapping"),
+    _Form("Laravel", re.compile(r"""Route\s*::\s*(?P<kind>resource|apiResource)\s*\(\s*['"](?P<name>[^'"\n]{1,200})['"]"""),
+          read=lambda match: _laravel_resource(match)),
     _Form("WordPress REST API", re.compile(
         r"""\bregister_rest_route\s*\(\s*['"](?P<ns>[^'"\n]{1,200})['"]\s*,\s*['"](?P<path>[^'"\n]{0,300})['"]"""
     ), read=_wordpress),
@@ -479,6 +570,9 @@ _RUBY = (
     ), marker="grape"),
     _Form("Roda", re.compile(r"""\br\s*\.\s*(?P<method>get|post|put|patch|delete|is)\s+['"](?P<path>[^'"\n]*)['"]"""),
           marker="roda"),
+    _Form("Rails", re.compile(
+        r"(?m)^[ \t]*(?P<kind>resources|resource)[ \t]+(?P<names>:\w{1,64}(?:[ \t]*,[ \t]*:\w{1,64}){0,20})(?P<options>[^\n]*)"
+    ), read=lambda match: _rails_resources(match), unless="grape"),
 )
 _RUST = (
     # actix-web and Rocket attributes.
@@ -502,7 +596,7 @@ _SWIFT = (
 _DART = (
     # router.get('/x', h), and the cascade form: Router()..get('/x', h)..post('/y', h).
     _Form("shelf_router", re.compile(
-        r"""(?:\b[A-Za-z_$][\w$]{0,63}\s*\.|\)\s*\.|\.\.)\s*(?P<method>get|post|put|patch|delete|head|options|all)"""
+        r"""(?:\b(?P<recv>[A-Za-z_$][\w$]{0,63})\s*\.|\)\s*\.|\.\.)\s*(?P<method>get|post|put|patch|delete|head|options|all)"""
         r"""\s*\(\s*['"](?P<path>/[^'"\n]*)['"]"""
     ), marker="shelf"),
     _Form("shelf_router", re.compile(
@@ -521,7 +615,7 @@ _CPP = (
     _Form("oatpp", re.compile(r'\bENDPOINT(?:_ASYNC)?\s*\(\s*"(?P<method>[A-Z]{3,7})"\s*,\s*"(?P<path>[^"\n]*)"')),
     # httplib::Server's svr.Get("/x", ...); an httplib::Client is usually named cli or client.
     _Form("cpp-httplib", re.compile(
-        r'(?:\b(?!(?:cli|client)\b)[A-Za-z_]\w{0,63}|\))\s*\.\s*(?P<method>Get|Post|Put|Patch|Delete|Options)\s*\(\s*"(?P<path>/[^"\n]*)"'
+        r'(?:\b(?!(?:cli|client)\b)(?P<recv>[A-Za-z_]\w{0,63})|\))\s*\.\s*(?P<method>Get|Post|Put|Patch|Delete|Options)\s*\(\s*"(?P<path>/[^"\n]*)"'
     ), marker="httplib"),
 )
 _C = (
@@ -538,6 +632,8 @@ _ELIXIR = (
         r'(?m)^[ \t]*(?P<method>get|post|put|patch|delete|options|head|match)[ \t]+"(?P<path>[^"\n]*)"'
         r'(?:[ \t]*,[ \t]*via:[ \t]*(?P<methods>\[[^\]\n]{0,100}\]|:\w+))?(?:[ \t]*,[^\n]{0,100}?)?[ \t]+do\b'
     )),
+    _Form("Phoenix", re.compile(r'(?m)^[ \t]*resources[ \t]+"(?P<path>[^"\n]*)"[ \t]*,[ \t]*[A-Z][\w.]{0,200}(?P<options>[^\n]*)'),
+          read=lambda match: _phoenix_resources(match)),
 )
 _CLOJURE = (
     _Form("Compojure", re.compile(r'\(\s*(?P<method>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|ANY)\s+"(?P<path>[^"\n]*)"')),
@@ -556,7 +652,7 @@ _PERL = (
         r"""(?m)^[ \t]*(?P<method>get|post|put|patch|del|any|options)\s+['"](?P<path>[^'"\n]*)['"]\s*=>"""
     )),
     _Form("Mojolicious", re.compile(
-        r"""\$(?:r|routes?|router|auth|api|admin|bridge)\s*->\s*(?P<method>get|post|put|patch|delete|any)\s*\(\s*['"](?P<path>/[^'"\n]*)['"]"""
+        r"""\$(?P<recv>r|routes?|router|auth|api|admin|bridge|v\d{1,3})\s*->\s*(?P<method>get|post|put|patch|delete|any)\s*\(\s*['"](?P<path>/[^'"\n]*)['"]"""
     )),
 )
 _LUA = (
@@ -604,6 +700,107 @@ _FAMILY_FORMS: dict[str, tuple[_Form, ...]] = {
     "perl": _PERL, "lua": _LUA, "haskell": _HASKELL, "nim": _NIM, "fsharp": _FSHARP, "erlang": _ERLANG,
     "julia": _JULIA, "r": _R, "ocaml": _OCAML, "d": _D, "pascal": _PASCAL, "routes": _ROUTES_FILE,
 }
+def _quoted_prefix(match: re.Match) -> str:
+    return match.groupdict().get("prefix") or match.groupdict().get("path2") or ""
+
+
+_STRUCTURE: dict[str, tuple[Shape, ...]] = {
+    "js": (
+        Shape("class", re.compile(r"\bclass[ \t]+(?P<name>[A-Za-z_$][\w$]{0,63})")),
+        Shape("class-prefix", re.compile(
+            r"""@Controller[ \t]*\([ \t]*(?:['"`](?P<prefix>[^'"`\n]*)['"`]|\{[^{}\n]{0,200}?\bpath[ \t]*:[ \t]*"""
+            r"""['"`](?P<path2>[^'"`\n]*)['"`])?"""
+        ), read=_quoted_prefix),
+        # Express, Koa and Hono: app.use('/api', router) / app.route('/api', api).
+        Shape("mount", re.compile(
+            r"""\b(?P<parent>[A-Za-z_$][\w$]{0,63})[ \t]*\.[ \t]*(?:use|route)[ \t]*\([ \t]*['"`](?P<prefix>/[^'"`\n]*)['"`]"""
+            r"""[ \t]*,"""
+        ), marker="js-server"),
+    ),
+    "go": (
+        Shape("var", re.compile(r'\b(?P<name>\w{1,64})[ \t]*:?=[ \t]*(?P<parent>\w{1,64})[ \t]*\.[ \t]*Group[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"')),
+        Shape("block", re.compile(r'\.[ \t]*Route[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"[ \t]*,[ \t]*func\b'), marker="go-router"),
+    ),
+    "jvm": (
+        Shape("class", re.compile(r"\b(?:class|interface|object|record)[ \t]+(?P<name>[A-Za-z_]\w{0,63})")),
+        Shape("class-prefix", re.compile(r'@Controller[ \t]*\([ \t]*(?:value[ \t]*=[ \t]*)?"(?P<prefix>[^"\n]*)"')),
+        Shape("block", re.compile(r'(?<![\w.])route[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"[ \t]*\)[ \t]*\{'), marker="free-router"),
+        Shape("block", re.compile(r'(?<![\w.])path[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"[ \t]*,[ \t]*\([ \t]*\)[ \t]*->'),
+              marker="jvm-router"),
+        Shape("block", re.compile(r'(?<![\w.])pathPrefix[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"'), marker="akka"),
+    ),
+    "csharp": (
+        Shape("class", re.compile(r"\b(?:class|record)[ \t]+(?P<name>[A-Za-z_]\w{0,63})")),
+        Shape("path-annotation", re.compile(
+            r'\[[ \t]*(?:Route|RoutePrefix)[ \t]*\([ \t]*(?:template[ \t]*:[ \t]*)?@?"(?P<prefix>[^"\n]*)"[ \t]*'
+            r'(?:,[ \t]*(?:Name|Order)[ \t]*=[^\]\n]{0,100})?\)[ \t]*\]'
+        ), role="asp"),
+        Shape("var", re.compile(
+            r'\b(?:var|RouteGroupBuilder)[ \t]+(?P<name>\w{1,64})[ \t]*=[ \t]*(?P<parent>\w{1,64})[ \t]*\.[ \t]*MapGroup'
+            r'[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"'
+        )),
+    ),
+    "vb": (
+        Shape("path-annotation", re.compile(r'<[ \t]*(?:Route|RoutePrefix)[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"[ \t]*\)[ \t]*>', re.I),
+              role="asp"),
+    ),
+    "php": (
+        Shape("class", re.compile(r"\bclass[ \t]+(?P<name>[A-Za-z_]\w{0,63})")),
+        Shape("block", re.compile(r"""(?:Route[ \t]*::|->)[ \t]*prefix[ \t]*\([ \t]*['"](?P<prefix>[^'"\n]*)['"]""")),
+        Shape("block", re.compile(
+            r"""Route[ \t]*::[ \t]*group[ \t]*\([ \t]*\[[^\]\n]{0,300}?['"]prefix['"][ \t]*=>[ \t]*['"](?P<prefix>[^'"\n]*)['"]"""
+        )),
+        Shape("block", re.compile(r"""\$\w{1,64}[ \t]*->[ \t]*group[ \t]*\([ \t]*['"](?P<prefix>[^'"\n]*)['"]""")),
+    ),
+    "ruby": (
+        Shape("indent", re.compile(r"(?m)^[ \t]*namespace[ \t]+:(?P<prefix>\w{1,64})"), unless="grape"),
+        Shape("indent", re.compile(r"""(?m)^[ \t]*scope[ \t]+(?:path:[ \t]*)?['"](?P<prefix>[^'"\n]*)['"]"""), unless="grape"),
+        Shape("indent", re.compile(r"(?m)^[ \t]*resources[ \t]+:(?P<name>\w{1,64})[^\n]*\bdo\b"), unless="grape",
+              read=lambda match: f"/{match['name']}/:{singular(match['name'])}_id"),
+        Shape("indent", re.compile(r"(?m)^[ \t]*resource[ \t]+:(?P<prefix>\w{1,64})[^\n]*\bdo\b"), unless="grape"),
+        Shape("indent", re.compile(
+            r"""(?m)^[ \t]*(?:namespace|resources?|group|segment)[ \t]+(?::(?P<prefix>\w{1,64})|['"](?P<path2>[^'"\n]*)['"])"""
+            r"""[^\n]*\bdo\b"""
+        ), marker="grape", read=_quoted_prefix),
+        Shape("indent", re.compile(r"(?m)^[ \t]*route_param[ \t]+:(?P<name>\w{1,64})"), marker="grape",
+              read=lambda match: ":" + match["name"]),
+        Shape("indent", re.compile(r"""\br[ \t]*\.[ \t]*on[ \t]+['"](?P<prefix>[^'"\n]*)['"]"""), marker="roda"),
+    ),
+    "elixir": (
+        Shape("indent", re.compile(r'(?m)^[ \t]*scope[ \t]+(?:path:[ \t]*)?"(?P<prefix>[^"\n]*)"')),
+        Shape("indent", re.compile(r'(?m)^[ \t]*resources[ \t]+"(?P<path2>[^"\n]*)"[^\n]*\bdo\b'),
+              read=lambda match: f"{match['path2'].rstrip('/')}/:{singular(match['path2'].rstrip('/').rsplit('/', 1)[-1])}_id"),
+    ),
+    "swift": (
+        Shape("var", re.compile(
+            r"\blet[ \t]+(?P<name>\w{1,64})[ \t]*=[ \t]*(?P<parent>\w{1,64})[ \t]*\.[ \t]*grouped[ \t]*\((?P<segments>[^()\n]{0,300})\)"
+        ), read=lambda match: segments_prefix(match["segments"])),
+        Shape("block", re.compile(r"\.[ \t]*group[ \t]*\((?P<segments>[^()\n]{0,300})\)[ \t]*\{"),
+              read=lambda match: segments_prefix(match["segments"])),
+    ),
+    "rust": (
+        Shape("function", re.compile(r"\bfn[ \t]+(?P<name>\w{1,64})")),
+        Shape("mount", re.compile(r'\.[ \t]*nest[ \t]*\([ \t]*"(?P<prefix>/[^"\n]*)"[ \t]*,'), marker="axum"),
+        Shape("rocket-mount", re.compile(
+            r'\.[ \t]*mount[ \t]*\([ \t]*"(?P<prefix>[^"\n]*)"[ \t]*,[ \t]*routes![ \t]*\[(?P<handlers>[^\]\n]{0,1000})\]'
+        )),
+    ),
+    "clojure": (Shape("paren-block", re.compile(r'\([ \t]*context[ \t]+"(?P<prefix>[^"\n]*)"')),),
+    "fsharp": (Shape("paren-block", re.compile(r'\bsubRoute[ \t]+"(?P<prefix>[^"\n]*)"')),),
+    "ocaml": (Shape("paren-block", re.compile(r'\bDream[ \t]*\.[ \t]*scope[ \t]+"(?P<prefix>[^"\n]*)"')),),
+    "perl": (
+        Shape("var", re.compile(
+            r"""\bmy[ \t]+\$(?P<name>\w{1,64})[ \t]*=[ \t]*\$(?P<parent>\w{1,64})[ \t]*->[ \t]*(?:under|any)[ \t]*\([ \t]*"""
+            r"""['"](?P<prefix>/[^'"\n]*)['"]"""
+        )),
+    ),
+}
+# Single quotes enclose a character (or a Rust lifetime) in these families, not a string.
+_CHAR_FAMILIES = frozenset({"rust", "c", "cpp", "jvm", "csharp", "go"})
+# axum's `let api = Router::new()`: the variable a statement's routes are declared on.
+_RUST_ROUTER_VARIABLE = re.compile(r"^[ \t]*let[ \t]+(?:mut[ \t]+)?(?P<name>\w{1,64})\b[^=\n]{0,80}=[ \t]*Router[ \t]*::[ \t]*new\b")
+_IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]{0,63}")
+
 _EXTENSION_FAMILIES = {
     **dict.fromkeys((".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte", ".astro"), "js"),
     ".go": "go", **dict.fromkeys((".java", ".kt", ".kts", ".scala", ".sc", ".groovy"), "jvm"), ".cs": "csharp",
@@ -737,17 +934,90 @@ def _py_imports(tree: ast.AST) -> tuple[set[str], set[str]]:
     return modules, free
 
 
-def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str]]:
-    """(method, path, line, framework) of the routes a Python file declares."""
+def _callee(call: ast.Call) -> str:
+    func = call.func
+    return func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+
+
+def _receiver(func: ast.AST) -> str:
+    """The router variable a decorator or call is made on: ``router`` in ``router.get(...)``,
+    ``app`` in aiohttp's ``app.router.add_get(...)``."""
+    value = func.value if isinstance(func, ast.Attribute) else None
+    while isinstance(value, ast.Attribute) and value.attr == "router":
+        value = value.value
+    return value.id if isinstance(value, ast.Name) else ""
+
+
+def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str, str]]:
+    """(method, path, line, framework, receiver) of the routes a Python file declares, with the
+    prefixes the file gives its routers: ``APIRouter(prefix=)``, ``Blueprint(url_prefix=)``,
+    ``include_router(..., prefix=)``, ``register_blueprint(..., url_prefix=)`` (which replaces
+    the blueprint's own), aiohttp ``add_subapp``, Starlette ``Mount`` and Django
+    ``include(router.urls)``."""
     tree = parse_python(source, filename=relative)
     modules, free = _py_imports(tree)
     framework = next((name for module, name in _PY_FRAMEWORKS if module in modules), "Python")
     django = "django" in modules or PurePosixPath(relative.replace("\\", "/")).name == "urls.py"
-    routes: list[tuple[str, str, int, str]] = []
+    own: dict[str, str] = {}  # router variable -> its own prefix
+    mounts: dict[str, tuple[str, str, bool]] = {}  # router -> (mounting router, prefix, replaces its own)
+    nested: dict[int, str] = {}  # id(route inside a Starlette Mount) -> the Mount's prefix
+    drf: set[str] = set()  # Django REST framework routers
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Call)):
+            name, callee = node.targets[0].id, _callee(node.value)
+            if callee == "APIRouter":
+                own[name] = _literal(_keyword(node.value, "prefix")) or ""
+            elif callee == "Blueprint":
+                own[name] = _literal(_keyword(node.value, "url_prefix")) or ""
+            elif callee in {"DefaultRouter", "SimpleRouter"}:
+                drf.add(name)
+        elif isinstance(node, ast.Call):
+            callee = _callee(node)
+            first = node.args[0] if node.args else None
+            if callee == "include_router" and isinstance(first, ast.Name):
+                mounts[first.id] = (_receiver(node.func), _literal(_keyword(node, "prefix")) or "", False)
+            elif callee == "register_blueprint" and isinstance(first, ast.Name):
+                prefix = _literal(_keyword(node, "url_prefix"))
+                mounts[first.id] = (_receiver(node.func), prefix or "", prefix is not None)
+            elif callee == "add_subapp" and len(node.args) >= 2 and isinstance(node.args[1], ast.Name):
+                mounts[node.args[1].id] = (_receiver(node.func), _literal(first) or "", False)
+            elif callee in {"path", "re_path", "url"} and len(node.args) >= 2 and isinstance(node.args[1], ast.Call):
+                included = node.args[1]
+                inner = included.args[0] if _callee(included) == "include" and included.args else None
+                if isinstance(inner, ast.Attribute) and inner.attr == "urls" and isinstance(inner.value, ast.Name):
+                    mounts[inner.value.id] = ("", _literal(first) or "", False)  # include(router.urls)
+            elif callee == "Mount" and first is not None:
+                prefix = join_path([nested.get(id(node), ""), _literal(first) or ""])
+                children = _keyword(node, "routes") or (node.args[1] if len(node.args) > 1 else None)
+                if isinstance(children, ast.List | ast.Tuple):
+                    for child in children.elts:
+                        nested[id(child)] = prefix
 
-    def add(methods: list[str], path: str | None, line: int, name: str = framework) -> None:
+    def prefixed(path: str, receiver: str, node: ast.AST | None = None) -> str:
+        parts, name, guard = [], receiver, set()
+        while name and name not in guard:
+            guard.add(name)
+            mount = mounts.get(name)
+            if mount and mount[2]:
+                parts.append(mount[1])
+            else:
+                parts.append(own.get(name, ""))
+                if mount:
+                    parts.append(mount[1])
+            name = mount[0] if mount else ""
+        parts.reverse()
+        if node is not None and id(node) in nested:
+            parts.insert(0, nested[id(node)])
+        return join_path([*parts, path]) if any(part.strip("/") for part in parts) else path
+
+    routes: list[tuple[str, str, int, str, str]] = []
+
+    def add(methods: list[str], path: str | None, line: int, name: str = framework, receiver: str = "",
+            node: ast.AST | None = None) -> None:
         if path is not None:
-            routes.extend((method, path, line, name) for method in methods)
+            full = prefixed(path, receiver, node)
+            routes.extend((method, full, line, name, receiver) for method in methods)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
@@ -764,32 +1034,41 @@ def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str]
                 if method not in _HTTP_METHODS | {"route", "api_route", "websocket"}:
                     continue
                 path = _literal(decorator.args[0]) if decorator.args else _literal(_keyword(decorator, "path"))
+                receiver = _receiver(func)
                 if method in {"route", "api_route"}:
-                    add(_py_methods(decorator), path, node.lineno)
+                    add(_py_methods(decorator), path, node.lineno, receiver=receiver)
                 else:
-                    add(["WEBSOCKET" if method == "websocket" else method.upper()], path, node.lineno)
+                    add(["WEBSOCKET" if method == "websocket" else method.upper()], path, node.lineno, receiver=receiver)
         elif isinstance(node, ast.Call):
             func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+            name = _callee(node)
+            receiver = _receiver(func)
             strings = [_literal(argument) for argument in node.args]
             first = strings[0] if strings else None
             if name in {"path", "re_path", "url"} and django and first is not None and (name != "url" or "django" in modules):
-                add(["ANY"], first, node.lineno, "Django")
+                included = node.args[1] if len(node.args) > 1 else None
+                if not (isinstance(included, ast.Call) and _callee(included) == "include"):
+                    add(["ANY"], first, node.lineno, "Django")
+            elif name == "register" and receiver in drf and first is not None:
+                # A Django REST framework router's list and detail routes.
+                base = first.strip("/")
+                add(["ANY"], base + "/", node.lineno, "Django REST framework", receiver)
+                add(["ANY"], base + "/{pk}/", node.lineno, "Django REST framework", receiver)
             elif name in _PY_ROUTE_CLASSES and first is not None and first.startswith("/"):
-                add(_py_methods(node, _PY_ROUTE_CLASSES[name]), first, node.lineno)
+                add(_py_methods(node, _PY_ROUTE_CLASSES[name]), first, node.lineno, node=node)
             elif name in {"add_url_rule", "add_api_route", "add_api_websocket_route"} and first is not None:
                 default = "WEBSOCKET" if name == "add_api_websocket_route" else "GET" if name == "add_url_rule" else "ANY"
-                add(_py_methods(node, default), first, node.lineno)
+                add(_py_methods(node, default), first, node.lineno, receiver=receiver)
             elif name.startswith("add_") and name[4:] in _HTTP_METHODS and first is not None:  # aiohttp
-                add([name[4:].upper()], first, node.lineno, "aiohttp")
+                add([name[4:].upper()], first, node.lineno, "aiohttp", receiver)
             elif name == "add_route":
                 literal = [value for value in strings if value is not None]
                 if len(literal) >= 2 and literal[0].upper() in {item.upper() for item in _HTTP_METHODS} | {"*"}:
-                    add([_method(literal[0])], literal[1], node.lineno, "aiohttp")  # add_route('GET', '/x', h)
+                    add([_method(literal[0])], literal[1], node.lineno, "aiohttp", receiver)  # add_route('GET', '/x', h)
                 elif len(literal) >= 2 and not literal[0].startswith("/"):
-                    add(["ANY"], literal[1], node.lineno, "Pyramid")  # config.add_route('name', '/x')
+                    add(["ANY"], literal[1], node.lineno, "Pyramid", receiver)  # config.add_route('name', '/x')
                 elif literal and literal[0].startswith("/"):
-                    add(_py_methods(node), literal[0], node.lineno)  # Falcon, and Sanic's add_route(h, '/x')
+                    add(_py_methods(node), literal[0], node.lineno, receiver=receiver)  # Falcon; Sanic's add_route(h, '/x')
             elif (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "web"
                     and name in _HTTP_METHODS | {"route", "view"} and "aiohttp" in modules):
                 if name == "route" and len(strings) >= 2 and strings[0] and strings[1] is not None:
@@ -811,22 +1090,32 @@ def _python_routes(source: str, relative: str) -> list[tuple[str, str, int, str]
 # --------------------------------------------------------------------------------- text scan
 
 class _Scan:
-    """Reads a source file's logical lines and collects the declarations its forms match."""
+    """Reads a source file's logical lines: the declarations its forms match, the structure its
+    shapes find, and each line's brace, bracket and indentation depth."""
 
-    def __init__(self, forms: tuple[_Form, ...], jaxrs: bool, file_route: tuple[str, str, str] | None) -> None:
-        self.forms = forms
-        self.jaxrs = jaxrs
+    def __init__(self, family: str, file_route: tuple[str, str, str] | None) -> None:
+        self.family = family
+        self.forms = _FAMILY_FORMS[family]
+        self.shapes = _STRUCTURE.get(family, ())
+        self.jaxrs = family == "jvm"
+        self.chars = family in _CHAR_FAMILIES
         self.file_route = file_route
-        self.markers = {form.marker: _MARKERS[form.marker] for form in forms if form.marker}
+        names = {form.marker for form in self.forms} | {form.unless for form in self.forms}
+        names |= {shape.marker for shape in self.shapes} | {shape.unless for shape in self.shapes}
+        self.markers = {name: _MARKERS[name] for name in names if name}
         self.seen: set[str] = set()
-        self.routes: list[tuple[str, str, int, str, str]] = []  # (method, path, line, framework, marker)
-        self.jaxrs_methods: list[tuple[str, int]] = []
-        self.jaxrs_paths: list[tuple[str, int]] = []
+        self.routes: list[Route] = []
+        self.events: list[Event] = []
+        self.layout = Layout()
         self._lines: list[str] = []
         self._numbers: list[int] = []
         self._depth = 0
         self._chars = 0
         self._complete = False
+        self._braces = 0  # running totals over the file
+        self._parens = 0
+        self._base = (0, 0)  # the totals before the logical line being read
+        self._router = ""  # Rust: the Router variable the current statement declares
 
     def add(self, line: str, number: int) -> None:
         for name, marker in self.markers.items():
@@ -837,11 +1126,26 @@ class _Scan:
         # (a fluent chain, `.get(...)` or `.route(...)` on a line of its own).
         if self._complete and not text.lstrip().startswith("."):
             self.flush()
+        if not self._lines:
+            self._base = (self._braces, self._parens)
         self._lines.append(text)
         self._numbers.append(number)
         self._chars += len(text) + 1
-        if "(" in text or "[" in text or ")" in text or "]" in text:
-            self._depth += sum(_DEPTH.get(token, 0) for token in _DEPTH_TOKEN.findall(text))
+        parens = braces = 0
+        if any(character in text for character in "()[]{}"):
+            parens, braces = depth_changes(text, self.chars)
+        self._depth += parens
+        self._braces += braces
+        self._parens += parens
+        layout = self.layout
+        if len(layout.braces) >= number:  # the next part of a line longer than one read
+            layout.braces[number - 1], layout.parens[number - 1] = self._braces, self._parens
+        else:
+            while len(layout.braces) < number:
+                layout.braces.append(self._braces)
+                layout.parens.append(self._parens)
+                stripped = text.lstrip(" \t")
+                layout.indents.append(len(text) - len(stripped) if stripped else -1)
         self._complete = self._depth <= 0
         if len(self._lines) >= MAX_JOINED_LINES or self._chars >= MAX_JOINED_CHARS:
             self.flush()
@@ -855,41 +1159,98 @@ class _Scan:
             position += len(text) + 1
         joined = "\n".join(self._lines)
         numbers = self._numbers
+        base_braces, base_parens = self._base
         self._lines, self._numbers, self._depth, self._chars, self._complete = [], [], 0, 0, False
+
+        def place(offset: int) -> tuple[int, int]:
+            index = bisect.bisect_right(offsets, offset) - 1
+            return numbers[index], offset - offsets[index]
+
+        self._structure(joined, place, base_braces, base_parens)
         if not _HINT.search(joined) and not self.jaxrs:
             return
-
-        def line_of(offset: int) -> int:
-            return numbers[bisect.bisect_right(offsets, offset) - 1]
-
+        if self.family == "rust":
+            variable = _RUST_ROUTER_VARIABLE.match(joined)
+            if variable:
+                self._router = variable.group("name")
+            elif not joined.lstrip().startswith("."):
+                self._router = ""
         if self.jaxrs:
-            self.jaxrs_methods += [(match.group(1).upper(), line_of(match.start())) for match in _JAXRS_METHOD.finditer(joined)]
-            self.jaxrs_paths += [(match.group(1), line_of(match.start())) for match in _JAXRS_PATH.finditer(joined)]
+            for match in _JAXRS_METHOD.finditer(joined):
+                line, column = place(match.start())
+                self.routes.append(Route(match.group(1).upper(), "", line, column, "JAX-RS", role="jaxrs"))
+            for match in _JAXRS_PATH.finditer(joined):
+                line, column = place(match.start())
+                self.events.append(Event("path-annotation", line, column, prefix=match.group(1), role="jaxrs"))
         for form in self.forms:
             if form.file_route and (self.file_route is None or self.file_route[0] not in form.file_route):
                 continue
             for match in form.pattern.finditer(joined):
-                line = line_of(match.start())
+                line, column = place(match.start())
                 if form.file_route:
                     kind, route, method = self.file_route
                     methods = [method] if method else [_method(match.groupdict().get("method"))]
-                    self.routes.extend((item, route, line, _FILE_ROUTE_FRAMEWORKS[kind], form.marker) for item in methods)
+                    self.routes.extend(Route(item, route, line, column, _FILE_ROUTE_FRAMEWORKS[kind], form.marker)
+                                       for item in methods)
                     continue
+                receiver = match.groupdict().get("recv") or self._router
                 for method, route in _read(form, match):
-                    self.routes.append((method, route, line, form.framework, form.marker))
+                    self.routes.append(Route(method, route, line, column, form.framework, form.marker, form.unless,
+                                             receiver, form.role))
 
-    def result(self) -> list[tuple[str, str, int, str]]:
+    def _structure(self, joined: str, place, base_braces: int, base_parens: int) -> None:
+        for shape in self.shapes:
+            for match in shape.pattern.finditer(joined):
+                line, column = place(match.start())
+                groups = match.groupdict()
+                prefix = shape.read(match) if shape.read else (groups.get("prefix") or "")
+                event = Event(shape.kind, line, column, prefix=prefix, name=groups.get("name") or "",
+                              parent=groups.get("parent") or "", marker=shape.marker, unless=shape.unless, role=shape.role)
+                if shape.kind in {"class", "block"}:
+                    # The block opens at the first brace after the declaration: on this logical
+                    # line, or on the next line (a brace on a line of its own).
+                    brace = joined.find("{", match.end())
+                    if brace >= 0:
+                        event.open_line, event.open_column = place(brace)
+                        event.level = base_braces + depth_changes(joined[:brace], self.chars)[1] + 1
+                    else:
+                        event.open_line, event.open_column = numbers_after(place, joined), -1
+                        event.level = base_braces + depth_changes(joined, self.chars)[1] + 1
+                elif shape.kind == "paren-block":
+                    # Compojure's (context ...) and Giraffe's subRoute (...): the parenthesis or
+                    # bracket the group opens.
+                    opening = match.start() if joined[match.start()] == "(" else _next_open(joined, match.end())
+                    if self.family == "ocaml" and opening >= 0:
+                        # Dream.scope "/x" [middlewares] [routes]: the routes are the second list.
+                        opening = _next_open(joined, opening + len(_call_rest(joined, opening + 1)) + 2)
+                    if opening < 0:
+                        continue
+                    event.open_line, event.open_column = place(opening)
+                    event.level = base_parens + depth_changes(joined[:opening], self.chars)[0] + 1
+                elif shape.kind == "mount":
+                    rest = _call_rest(joined, match.end())
+                    event.names = tuple(dict.fromkeys(_IDENTIFIER.findall(re.sub(r"""(['"`]).*?\1""", "", rest))))
+                elif shape.kind == "rocket-mount":
+                    event.names = tuple(_IDENTIFIER.findall(groups.get("handlers") or ""))
+                self.events.append(event)
+
+    def result(self) -> list[Route]:
         self.flush()
         # A form gated by its framework's marker is the more specific: where two forms match
         # one declaration (Grape's `get ':id' do` reads as Sinatra too), it names the framework.
-        routes = [(method, path, line, framework)
-                  for method, path, line, framework, marker in sorted(self.routes, key=lambda item: not item[4])
-                  if not marker or marker in self.seen]
-        # JAX-RS: @GET and its @Path on neighbouring lines (either order).
-        for method, line in self.jaxrs_methods:
-            near = sorted((abs(path_line - line), path) for path, path_line in self.jaxrs_paths if abs(path_line - line) <= 3)
-            routes.append((method, near[0][1] if near else "", line, "JAX-RS"))
-        return routes
+        routes = sorted(self.routes, key=lambda route: not route.marker)
+        return resolve(routes, self.events, self.seen, self.layout)
+
+
+def numbers_after(place, joined: str) -> int:
+    """The line after the logical line ``joined`` (where a brace on its own line opens)."""
+    return place(len(joined))[0] + 1
+
+
+def _next_open(text: str, start: int) -> int:
+    """The first parenthesis or bracket at or after ``start``, or -1."""
+    positions = [position for position in (text.find("(", start), text.find("[", start)) if position >= 0]
+    return min(positions) if positions else -1
 
 
 class APIEndpointAnalyzer(Analyzer):
@@ -909,7 +1270,7 @@ class APIEndpointAnalyzer(Analyzer):
         return record.error is None and (record.extension in _SOURCE_EXTENSIONS or _is_routes_file(record.path))
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
-        routes: list[tuple[str, str, int, str]] = []
+        routes: list[tuple[str, str, int, str, str]] = []
         truncated = False
         if record.extension in {".py", ".pyi"}:
             if over_limit(record.size_bytes, MAX_PYTHON_ENDPOINT_AST_BYTES):
@@ -945,7 +1306,7 @@ class APIEndpointAnalyzer(Analyzer):
             family = _family(record)
             if family is None:
                 return []
-            scan = _Scan(_FAMILY_FORMS[family], family == "jvm", _file_route(record.path))
+            scan = _Scan(family, _file_route(record.path))
             bytes_scanned = 0
             line_number = 1
             try:
@@ -975,25 +1336,27 @@ class APIEndpointAnalyzer(Analyzer):
                     describe_error(exc), confidence="UNKNOWN", severity="LOW",
                     evidence=[record.path], analyzer=self.name,
                 )]
-            routes = scan.result()
+            routes = [(route.method, route.path, route.line, route.framework, route.receiver) for route in scan.result()]
 
         # One declaration per method, route and line; the first form's framework names it.
-        first: dict[tuple[str, str, int], str] = {}
-        for method, route, line, framework in routes:
-            first.setdefault((str(method).upper(), route, line), framework)
+        first: dict[tuple[str, str, int], tuple[str, str]] = {}
+        for method, route, line, framework, receiver in routes:
+            first.setdefault((str(method).upper(), route, line), (framework, receiver))
         unique = sorted(first.items(), key=lambda item: (item[0][2], item[0][0], item[0][1]))
-        for (method, route, line), framework in unique[:MAX_ENDPOINT_FACTS]:
+        for (method, route, line), (framework, receiver) in unique[:MAX_ENDPOINT_FACTS]:
             # Provided endpoints, for the scan's integration summary and cross-project maps.
-            code_facts.emit_fact("api_endpoint", f"{method} {route}", line=line, framework=framework)
+            code_facts.emit_fact("api_endpoint", f"{method} {route}", line=line, framework=framework,
+                                 **({"receiver": receiver} if receiver else {}))
         findings: list[Finding] = []
         if unique:
-            frameworks = sorted({framework for _, framework in unique})
+            frameworks = sorted({framework for _, (framework, _) in unique})
             findings.append(Finding(
                 "api",
                 f"API route declarations: {record.path}",
                 f"Detected {len(unique)} statically recognizable endpoint declaration(s) "
-                f"({', '.join(frameworks[:8])}). Route prefixes, middleware, runtime registration, and deployed "
-                "reachability are not resolved.",
+                f"({', '.join(frameworks[:8])}), with the prefixes this file declares for them (class mappings, "
+                "router groups, scopes and mounts). Prefixes added in other files, middleware, runtime "
+                "registration, and deployed reachability are not resolved.",
                 confidence="CONFIRMED",
                 evidence=[
                     f"{record.path}:{line} {method} {route}"

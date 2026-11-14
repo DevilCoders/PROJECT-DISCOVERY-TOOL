@@ -136,17 +136,17 @@ def _routes(tmp_path: Path, filename: str, source: str) -> list[str]:
 def test_framework_route_forms_the_docs_list(tmp_path: Path):
     # Regressions: JAX-RS yielded nothing, Spring needed a string literal first argument and
     # had no @RequestMapping, NestJS @Get(':id') was recorded twice, and Echo and Rails
-    # routes were not recognized.
+    # routes were not recognized. Class-level @Path and @RequestMapping are prefixes.
     jaxrs = _routes(tmp_path, "FruitResource.java", (
         '@Path("/fruits")\npublic class FruitResource {\n    @GET\n    public List<Fruit> list() {}\n'
         '    @GET\n    @Path("/{id}")\n    public Fruit get() {}\n}\n'
     ))
-    assert "GET /{id}" in jaxrs and len(jaxrs) == 2
+    assert jaxrs == ["GET /fruits", "GET /fruits/{id}"]
     spring = _routes(tmp_path, "UserController.java", (
         '@RequestMapping(path = "/api/users")\nclass C {\n  @GetMapping\n  List<User> all() {}\n'
         '  @PostMapping(value = "/new")\n  User add() {}\n}\n'
     ))
-    assert spring == ["ANY /api/users", "GET ", "POST /new"]
+    assert spring == ["GET /api/users", "POST /api/users/new"]
     nest = _routes(tmp_path, "cats.controller.ts", "@Get(':id')\nfindOne() {}\n@Post()\ncreate() {}\n")
     assert nest == ["GET :id", "POST "]
     echo = _routes(tmp_path, "main.go", 'e.GET("/users/:id", getUser)\ng.DELETE("/users/:id", del)\n')

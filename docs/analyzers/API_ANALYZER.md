@@ -27,4 +27,20 @@ Python routes come from the syntax tree, the file's imports deciding which frame
 | Elixir, Clojure, Crystal, Perl, Lua | Phoenix routers and Plug.Router (`via:`); Compojure and Reitit; Kemal and Amber; Mojolicious and Dancer2; Lapis and lor |
 | Haskell, Nim, F#, Erlang, Julia, R, OCaml, D, Pascal | Scotty and Servant API types; Jester; Giraffe, Saturn and Falco; Cowboy dispatch rules; Genie, Oxygen and `HTTP.register!`; plumber; Dream; vibe.d; Horse |
 
-Methods are upper-case HTTP methods, `ANY` where the declaration names none (Django's `path()`, `@RequestMapping` without a method, catch-all handlers), and `WEBSOCKET` for WebSocket routes. Paths are reported as written: a path relative to a class, group or module prefix (`@Get(':id')` under `@Controller('cats')`) stays relative, since prefixes, mounts, resource expansions (`resources :users`, `Route::resource`) and routes registered at run time are not resolved yet.
+Methods are upper-case HTTP methods, `ANY` where the declaration names none (Django's `path()`, `@RequestMapping` without a method, catch-all handlers), and `WEBSOCKET` for WebSocket routes. A route's path includes the prefixes its file declares for it ([Route structure](#route-structure)); a route with none is reported as written.
+
+## Route structure
+
+Each route's full path is resolved from what encloses it in its file:
+
+| Structure | Frameworks |
+|---|---|
+| Class-level mappings, applied to the routes in the class body | Spring `@RequestMapping`, JAX-RS `@Path`, NestJS and Micronaut `@Controller`, ASP.NET `[Route]`/`[RoutePrefix]` (with the `[controller]` token, and templates starting with `/` or `~/` left absolute), Symfony `#[Route]` and `@Route` |
+| Blocks, applied to the routes in their braces | chi and Fiber `Route`, Ktor `route`, Javalin and Spark `path`, Akka and Pekko `pathPrefix`, Laravel `Route::prefix(...)->group` and `Route::group(['prefix' => ...])`, Slim `group`, Vapor `group` closures |
+| Parenthesized and bracketed groups | Compojure `context`, Giraffe `subRoute`, Dream `scope` |
+| Indented scopes, applied to the routes indented under them | Rails `namespace`, `scope` and nested resources (`/posts/:post_id/comments`), Grape `namespace`, `resource` and `route_param`, Roda `r.on`, Phoenix `scope` and nested resources |
+| Router variables, applied to the routes declared on them | Gin, Echo and Fiber `Group`, ASP.NET `MapGroup`, Vapor `grouped`, Mojolicious `under`; Python: FastAPI `APIRouter(prefix=)`, Flask and Sanic `Blueprint(url_prefix=)` |
+| Mounts in the same file | Express, Koa and Hono `use`/`route` of a router variable, axum `nest` (a `let` router), Rocket `mount` (by handler name), FastAPI `include_router(..., prefix=)`, Flask `register_blueprint(..., url_prefix=)` (which replaces the blueprint's own), aiohttp `add_subapp`, Starlette `Mount` (nested), Django `include(router.urls)` |
+| Resource declarations, expanded to their routes | Rails `resources`/`resource` (`only:`, `except:`, `path:`), Laravel `Route::resource`/`apiResource` (nested names, `->only`, `->except`), Phoenix `resources` (`only:`, `except:`, `singleton:`), Django REST framework `router.register` (list and detail routes, method `ANY`) |
+
+A class-level mapping is one followed within a few lines by a class declaration, with no route and no brace between them; otherwise it maps a method. A method-level JAX-RS `@Path` or ASP.NET `[Route]` completes the method annotation beside it. Spans come from the brace, parenthesis and indentation depth of every line, strings and `//` comments skipped. Not resolved in the file: routers mounted from another file (Django `include('app.urls')`, an imported FastAPI router or Flask blueprint, an Express router `require`d from another module), Visual Basic class-level routes (its classes end with `End Class`, not a brace), actix-web `scope`, Fastify `register` prefixes and NestJS `RouterModule`.
