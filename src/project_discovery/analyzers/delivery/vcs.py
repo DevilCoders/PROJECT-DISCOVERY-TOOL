@@ -12,6 +12,7 @@ from ...catalog.hosting import classify_host
 from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...core.source_utils import (SourceBudgetExceeded, describe_error, open_verified_binary, read_bytes_bounded,
                                   read_text_bounded)
+from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 from .vcs_metadata import (MAX_SQLITE_STEPS, MAX_SQLITE_VALUE_BYTES, hg_bookmarks, hg_changelog, hg_changelog_ends,
@@ -128,6 +129,17 @@ def _remote_host(raw: str) -> tuple[str | None, str | None]:
         return host, locator
     except ValueError:
         return None, None
+
+
+def _emit_remote(kind: str, name: str, vcs: str, raw: str) -> tuple[str | None, str]:
+    """A remote or submodule location as a provenance fact (credential-free host and locator);
+    returns the host and the provider label."""
+    host, locator = _remote_host(raw)
+    provider = classify_host(host)
+    label = _hosting_provider(host)
+    code_facts.emit_fact(kind, str(name)[:200], vcs=vcs, host=host or "", provider=label,
+                         provider_source=provider.source if provider else "", locator=(locator or "")[:500])
+    return host, label
 
 
 def _hosting_provider(host: str | None) -> str:
@@ -516,6 +528,7 @@ class VCSHostingAnalyzer(Analyzer):
                  if relative.startswith(prefix + "/")), None
             )
         if provider:
+            code_facts.emit_fact("ci_system", provider)
             return [Finding(
                 "ci_cd", f"CI/CD provider: {provider}",
                 "A provider-specific pipeline definition is present. Pipeline jobs are not "
@@ -524,6 +537,7 @@ class VCSHostingAnalyzer(Analyzer):
             )]
         if name in _CLOUD_MARKERS:
             label = _CLOUD_MARKERS[name]
+            code_facts.emit_fact("deploy_target", label, source="marker")
             return [Finding(
                 "cloud_services", f"Cloud/deployment platform marker: {label}",
                 "A provider-specific deployment/application configuration file is present. "
@@ -618,7 +632,7 @@ class VCSHostingAnalyzer(Analyzer):
             analyzer=self.name,
         )]
 
-    def _git_config(self, record: FileRecord, text: str, label: str) -> list[Finding]:
+    def _git_config(self, record: FileRecord, text: str, label: str, vcs: str = "git") -> list[Finding]:
         parser = configparser.ConfigParser(
             interpolation=None, strict=False, allow_no_value=True, inline_comment_prefixes=("#", ";"),
         )
@@ -632,6 +646,7 @@ class VCSHostingAnalyzer(Analyzer):
                 remote_name = section[8:-1] if section.endswith('"') else section
                 raw = parser.get(section, "url", fallback="")
                 host, locator = _remote_host(raw)
+                _emit_remote("vcs_remote", remote_name, vcs, raw)
                 remotes.append((remote_name, classify_host(host), host, locator))
         findings = [
             Finding(
@@ -735,7 +750,7 @@ class VCSHostingAnalyzer(Analyzer):
         if root_name == ".git" and name in {"config", "config.worktree"}:
             return self._git_config(record, text, "Git repository configuration")
         if root_name == ".jj" and inner == "repo/store/git/config":
-            return self._git_config(record, text, "Jujutsu Git backend configuration")
+            return self._git_config(record, text, "Jujutsu Git backend configuration", "jj")
         if root_name == ".git" and name == "head" and inner.startswith("refs/"):
             # refs/remotes/origin/HEAD names the remote's default branch, not the checkout.
             stripped = text.strip()
@@ -788,8 +803,8 @@ class VCSHostingAnalyzer(Analyzer):
             for section in parser.sections():
                 if section.lower() in {"paths", "path"}:
                     for key, raw in parser.items(section):
-                        host, _ = _remote_host(raw)
-                        refs.append((key, host, _hosting_provider(host)))
+                        host, provider = _emit_remote("vcs_remote", key, "hg", raw)
+                        refs.append((key, host, provider))
             return [Finding(
                 "vcs", "Mercurial repository configuration",
                 f"Detected {len(refs)} path alias(es). Hosting providers: "
@@ -804,10 +819,10 @@ class VCSHostingAnalyzer(Analyzer):
         if root_name == ".bzr" and inner == "branch/branch.conf":
             providers = []
             for line in text.splitlines():
-                match = re.match(r"\s*(?:parent_location|push_location)\s*=\s*(\S+)", line)
+                match = re.match(r"\s*(parent_location|push_location)\s*=\s*(\S+)", line)
                 if match:
-                    host, _ = _remote_host(match.group(1))
-                    providers.append(_hosting_provider(host))
+                    _, provider = _emit_remote("vcs_remote", match.group(1).split("_")[0], "bzr", match.group(2))
+                    providers.append(provider)
             return [Finding(
                 "vcs", "Bazaar branch metadata",
                 "Hosting providers: " + (", ".join(sorted(set(providers))) or "not identified"),
@@ -815,10 +830,10 @@ class VCSHostingAnalyzer(Analyzer):
             )]
         if root_name == "_darcs" and inner == "prefs/repos":
             providers = []
-            for remote in text.splitlines():
+            for remote in text.splitlines()[:1000]:
                 host, _ = _remote_host(remote)
                 if host:
-                    providers.append(_hosting_provider(host))
+                    providers.append(_emit_remote("vcs_remote", "repos", "darcs", remote)[1])
             return [Finding(
                 "vcs", "Darcs repository remote metadata",
                 "Remote providers: " + (", ".join(sorted(set(providers))) or "not identified"),
@@ -828,9 +843,10 @@ class VCSHostingAnalyzer(Analyzer):
             providers = []
             for line in text.splitlines():
                 if re.search(r"(?i)(?:remote|url|path)\s*=", line):
-                    host, _ = _remote_host(line.split("=", 1)[1].strip().strip("\"'"))
+                    raw = line.split("=", 1)[1].strip().strip("\"'")
+                    host, _ = _remote_host(raw)
                     if host:
-                        providers.append(_hosting_provider(host))
+                        providers.append(_emit_remote("vcs_remote", line.split("=", 1)[0].strip()[:100], "pijul", raw)[1])
             return [Finding(
                 "vcs", "Pijul repository configuration",
                 "Remote providers: " + (", ".join(sorted(set(providers))) or "not identified"),
@@ -840,9 +856,10 @@ class VCSHostingAnalyzer(Analyzer):
             providers = []
             for line in text.splitlines():
                 if re.search(r"(?i)(?:remote|url)\s*=", line):
-                    host, _ = _remote_host(line.split("=", 1)[1].strip().strip('"\''))
+                    raw = line.split("=", 1)[1].strip().strip('"\'')
+                    host, _ = _remote_host(raw)
                     if host:
-                        providers.append(_hosting_provider(host))
+                        providers.append(_emit_remote("vcs_remote", line.split("=", 1)[0].strip()[:100], "jj", raw)[1])
             return [Finding(
                 "vcs", "Jujutsu repository configuration",
                 "Remote providers: " + (", ".join(sorted(set(providers))) or "not identified"),
@@ -865,8 +882,8 @@ class VCSHostingAnalyzer(Analyzer):
         for section in parser.sections():
             if section.lower().startswith('submodule "'):
                 module = section[10:-1] if section.endswith('"') else section
-                host, _ = _remote_host(parser.get(section, "url", fallback=""))
-                entries.append((module, host, _hosting_provider(host)))
+                host, provider = _emit_remote("vcs_submodule", module, "git", parser.get(section, "url", fallback=""))
+                entries.append((module, host, provider))
         return [Finding(
             "vcs", f"Git submodule declarations: {record.path}",
             f"Detected {len(entries)} submodule declaration(s).",

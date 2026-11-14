@@ -228,6 +228,17 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: the provenance graph
+- The code index's `provenance` pass correlates remotes, submodules, package registries, CI workflows (their
+  actions, publish and deploy steps), container image registries and deployment targets into one graph in
+  `metrics.code_index.provenance`, with a *Software provenance* summary finding, *Packages of one ecosystem
+  from several registries* (dependency confusion) and *Source locations over an unencrypted transport*.
+- Lockfiles record the registry hosts their packages resolved from (npm, Yarn v1, pnpm tarballs, Cargo,
+  uv, Poetry, Pipfile.lock, Composer, Gemfile.lock, Hex, SwiftPM, pub), hosts only; the inventory finding
+  names them.
+- New code facts: `vcs_remote`, `vcs_submodule`, `ci_system`, `ci_workflow`, `container_image`,
+  `deploy_target` and `package_registry` (also from Helm chart dependencies).
+
 ### Added: configurable provider fingerprints
 - `pdt scan --provider-map FILE` reads a TOML file naming an organization's GitHub Enterprise, self-managed
   GitLab, Bitbucket Data Center, Azure DevOps Server, Gitea, Forgejo, Gogs, Gerrit, Gitolite and SourceHut

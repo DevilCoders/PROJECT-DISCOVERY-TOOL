@@ -61,6 +61,24 @@ The file is refused with a usage error (exit 2) when it is not TOML, names an un
 
 CI definitions (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines, Jenkins, CircleCI, Buildkite, TeamCity, Travis CI, Drone, Woodpecker, AppVeyor, AWS CodeBuild and CodeDeploy) and deployment markers (AWS CDK and SAM, Serverless Framework, Google Cloud Build and App Engine, Firebase, Cloudflare Workers, Fly.io, Render, Vercel, Netlify) are reported by file; pipelines are not run and credential values are not extracted.
 
+## Provenance graph
+
+The code index's `provenance` pass (`metrics.code_index.provenance`) correlates, across every file of the scan, where the project comes from and where it goes, as its files declare it:
+
+| Node kind | From | Edge from the project or its workflows |
+|---|---|---|
+| `source_host` | Git, Mercurial, Bazaar, Darcs, Pijul and Jujutsu remotes; `.gitmodules` submodules | `hosted-at` (with the remote names), `includes-submodule-from` |
+| `package_registry` | lockfile registry hosts ([LOCKFILE_ANALYZER.md](LOCKFILE_ANALYZER.md)), Helm chart dependency repositories | `resolves-packages-from` (with ecosystems and package counts) |
+| `ci_workflow`, `ci_system` | GitHub Actions, GitLab CI, Azure Pipelines and Jenkins workflows; the CI systems only a configuration file names (CircleCI, Travis CI, Bitbucket Pipelines and the others above) | `built-by`, `runs-on` |
+| `ci_action` | the actions a GitHub workflow uses | `uses` (with the ref and whether it is a full commit SHA) |
+| `publish_target` | publish steps: `docker push` and other image pushes, `npm`/`pnpm`/`yarn publish`, `twine`/`uv`/`poetry`/`flit`/`hatch` publishing, `cargo publish`, `gem push`, Maven and Gradle deploys, NuGet pushes, `helm push`, GitHub releases, GoReleaser, and the actions and Azure tasks that do the same | `publishes-to` |
+| `deploy_target` | deploy steps (`kubectl apply`, `helm upgrade`, `terraform apply`, Pulumi, AWS CDK/SAM/ECS/Lambda/CloudFormation/S3, Google Cloud Run/App Engine/Functions, Azure App Service/Container Apps/Functions, Serverless, Firebase, Vercel, Netlify, Fly.io, Cloudflare Workers, GitHub Pages); manifests (Kubernetes, Helm, Docker Compose, CloudFormation, Ansible, the platforms of Terraform providers and resources); deployment markers (`vercel.json`, `fly.toml` and the others above) | `deploys-to` |
+| `image_registry` | Dockerfile base images, Compose service images, Kubernetes container images (Docker Hub for an image without a registry host) | `pulls-images-from` (with sample images and how many are pinned by digest) |
+
+Each edge lists up to five files that declare it. A *Software provenance* finding summarizes the graph (where the code is hosted, where packages come from, what builds it, how many CI action references are not pinned to a commit, what it publishes and where it deploys). Two more findings follow when they apply: *Packages of one ecosystem from several registries* (LOW: when a private and a public registry serve the same names, a package published under an internal name on the public registry can be installed instead; the public registries' several hosts, such as registry.npmjs.org and registry.yarnpkg.com, count as one) and *Source locations over an unencrypted transport* (LOW: remotes and submodules over `http://` or `git://`).
+
+The graph is what the files declare: a workflow step is matched by the command or action it names, not run, and nothing says that a release was actually built, published or deployed there. Workflow command bodies and environment values are read for these names only and never copied. The graph keeps at most 2,000 nodes and 2,000 edges and counts the rest.
+
 ## Subversion working copies
 
 A Subversion 1.7+ working copy keeps its state in one SQLite database, `.svn/wc.db`. PDT reads the file's bytes (up to 256 MiB) and hands them to SQLite in memory with `deserialize`, so SQLite never opens the file, follows a link, takes a lock or writes anything. The repository finding gives:

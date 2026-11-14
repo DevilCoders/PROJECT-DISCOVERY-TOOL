@@ -3027,6 +3027,179 @@ def query_code_index(inventory_path: Path, kind: str, name: str, limit: int = 20
         db.close()
 
 
+MAX_PROVENANCE_ITEMS = 2_000
+# Public registries by the hosts they serve packages from: one registry, several hosts.
+_PUBLIC_REGISTRIES = {
+    "registry.npmjs.org": "npm registry", "registry.yarnpkg.com": "npm registry", "pypi.org": "PyPI",
+    "files.pythonhosted.org": "PyPI", "pypi.python.org": "PyPI", "crates.io": "crates.io", "static.crates.io": "crates.io",
+    "rubygems.org": "RubyGems", "index.rubygems.org": "RubyGems", "repo.packagist.org": "Packagist",
+    "repo.hex.pm": "Hex", "pub.dev": "pub.dev", "pub.dartlang.org": "pub.dev",
+}
+_RELATIONS = {
+    "hosted-at": "hosted at", "includes-submodule-from": "submodules from", "resolves-packages-from": "packages from",
+    "built-by": "built by", "runs-on": "runs on", "uses": "uses", "publishes-to": "publishes to",
+    "deploys-to": "deploys to", "pulls-images-from": "images from",
+}
+
+
+def _provenance(context: _Context) -> tuple[dict, list[Finding]]:
+    """Where the project comes from and goes to, as its files declare it: the hosts its
+    repository and submodules are at, the registries its packages resolve from, the CI
+    workflows that build it with the actions they use and what they publish and deploy, the
+    registries of the container images it uses, and the platforms its manifests deploy to."""
+    db = context.db
+    nodes: dict[str, dict] = {}
+    edges: dict[tuple[str, str, str], dict] = {}
+    truncated = 0
+
+    def node(kind: str, label: str, **attributes) -> str | None:
+        nonlocal truncated
+        key = f"{kind}:{label}"
+        if key not in nodes:
+            if len(nodes) >= MAX_PROVENANCE_ITEMS:
+                truncated += 1
+                return None
+            nodes[key] = {"id": key, "kind": kind, "label": label, **{
+                name: value for name, value in attributes.items() if value not in (None, "")}}
+        return key
+
+    def edge(source: str | None, target: str | None, relation: str, path: str | None = None, **attributes) -> None:
+        nonlocal truncated
+        if source is None or target is None:
+            return
+        key = (source, target, relation)
+        entry = edges.get(key)
+        if entry is None:
+            if len(edges) >= MAX_PROVENANCE_ITEMS:
+                truncated += 1
+                return
+            entry = edges[key] = {"from": source, "to": target, "relation": relation, "count": 0, "files": []}
+        entry["count"] += 1
+        if path and path not in entry["files"] and len(entry["files"]) < 5:
+            entry["files"].append(path)
+        for name, value in attributes.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                entry[name] = entry.get(name, 0) + value
+            elif value not in (None, "", [], False):
+                values = entry.setdefault(name, [])
+                if value not in values and len(values) < 10:
+                    values.append(value)
+
+    project = node("project", "this project")
+    insecure: list[str] = []
+    for kind, relation in (("vcs_remote", "hosted-at"), ("vcs_submodule", "includes-submodule-from")):
+        for name, path, values in _fact_rows(db, kind, ordered=True):
+            host = str(values.get("host") or "") or "unresolved host"
+            target = node("source_host", host, provider=str(values.get("provider", "")))
+            edge(project, target, relation, path, **({"remote": name} if kind == "vcs_remote" else {"submodule": name}),
+                 vcs=str(values.get("vcs", "")))
+            locator = str(values.get("locator", ""))
+            if locator.split("://", 1)[0].lower() in {"http", "git"} and len(insecure) < MAX_LISTED:
+                insecure.append(f"{'remote' if kind == 'vcs_remote' else 'submodule'} {name} -> {locator} ({path})")
+    ecosystems: dict[str, dict[str, int]] = defaultdict(dict)
+    for host, path, values in _fact_rows(db, "package_registry", ordered=True):
+        ecosystem, count = str(values.get("ecosystem", "")), int(values.get("packages") or 0)
+        target = node("package_registry", host, registry=_PUBLIC_REGISTRIES.get(host, ""))
+        edge(project, target, "resolves-packages-from", path, ecosystem=ecosystem, packages=count)
+        identity = _PUBLIC_REGISTRIES.get(host, host)
+        ecosystems[ecosystem][identity] = ecosystems[ecosystem].get(identity, 0) + count
+    workflow_files: set[str] = set()
+    unpinned = actions = 0
+    for provider, path, values in _fact_rows(db, "ci_workflow", ordered=True):
+        workflow_files.add(path)
+        workflow = node("ci_workflow", path, provider=provider, jobs=values.get("jobs"))
+        edge(project, workflow, "built-by", path)
+        edge(workflow, node("ci_system", provider), "runs-on", path)
+        for action in values.get("actions") or []:
+            action = str(action)
+            reference, _, ref = action.partition("@")
+            pinned = bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref))
+            local = reference.startswith(("./", "docker://"))
+            actions += 1
+            unpinned += bool(ref) and not pinned and not local
+            edge(workflow, node("ci_action", reference), "uses", path, ref=ref[:64], pinned=pinned)
+        for target in values.get("publishes") or []:
+            edge(workflow, node("publish_target", str(target)), "publishes-to", path)
+        for platform in values.get("deploys") or []:
+            edge(workflow, node("deploy_target", str(platform)), "deploys-to", path)
+    for provider, path, _ in _fact_rows(db, "ci_system", ordered=True):
+        if path not in workflow_files:  # a CI system only its configuration file names
+            workflow = node("ci_workflow", path, provider=provider)
+            edge(project, workflow, "built-by", path)
+            edge(workflow, node("ci_system", provider), "runs-on", path)
+    images: Counter = Counter()
+    for image, path, values in _fact_rows(db, "container_image", ordered=True):
+        registry = str(values.get("registry") or "") or "unresolved registry"
+        images[registry] += 1
+        edge(project, node("image_registry", registry), "pulls-images-from", path, images=1,
+             pinned_images=1 if values.get("pinned") else 0, role=str(values.get("role", "")), image=image[:120])
+    for platform, path, values in _fact_rows(db, "deploy_target", ordered=True):
+        edge(project, node("deploy_target", platform), "deploys-to", path, via=str(values.get("source", "")))
+    value = {
+        "nodes": list(nodes.values()), "edges": list(edges.values()), "truncated": truncated,
+        "counts": dict(sorted(Counter(item["kind"] for item in nodes.values()).items())),
+    }
+    if len(nodes) <= 1:
+        return value, []
+
+    def labels(relation: str, describe) -> str:
+        found = [describe(entry) for entry in edges.values() if entry["relation"] == relation]
+        return ", ".join(found[:8]) + (f" and {len(found) - 8:,} more" if len(found) > 8 else "") if found else ""
+
+    def target(entry: dict) -> dict:
+        return nodes[entry["to"]]
+
+    parts = [
+        ("hosted at", labels("hosted-at", lambda entry: f"{target(entry).get('provider') or target(entry)['label']} "
+                                                       f"({target(entry)['label']}: {', '.join(entry.get('remote', []))})")),
+        ("submodules from", labels("includes-submodule-from", lambda entry: f"{target(entry)['label']} "
+                                                                           f"({entry['count']:,})")),
+        ("packages from", labels("resolves-packages-from", lambda entry: f"{target(entry)['label']} "
+                                 f"({', '.join(entry.get('ecosystem', []))}: {entry.get('packages', 0):,})")),
+        ("built by", ", ".join(f"{provider} ({count:,} workflow{'s' if count != 1 else ''})" for provider, count in Counter(
+            nodes[entry["to"]].get("provider", "") for entry in edges.values() if entry["relation"] == "built-by").items())),
+        ("CI actions", f"{actions:,} reference(s), {unpinned:,} not pinned to a commit" if actions else ""),
+        ("publishes to", ", ".join(sorted({nodes[entry["to"]]["label"] for entry in edges.values()
+                                           if entry["relation"] == "publishes-to"}))),
+        ("images from", ", ".join(f"{registry} ({count:,})" for registry, count in images.most_common(8))),
+        ("deploys to", ", ".join(sorted({nodes[entry["to"]]["label"] for entry in edges.values()
+                                         if entry["relation"] == "deploys-to"}))),
+    ]
+    summary = "; ".join(f"{name}: {text}" for name, text in parts if text)
+    evidence = [f"{nodes[entry['from']]['label']} {_RELATIONS[entry['relation']]} {nodes[entry['to']]['label']}"
+                + (f" ({', '.join(entry['files'])})" if entry["files"] else "") for entry in edges.values()][:MAX_LISTED]
+    findings = [Finding(
+        "supply_chain", "Software provenance",
+        summary + ". The graph records what the scanned files declare; it does not prove where releases are "
+        "actually built, published or deployed." + (f" {truncated:,} node(s) or edge(s) past the "
+                                                     f"{MAX_PROVENANCE_ITEMS:,}-item cap are not listed." if truncated else ""),
+        confidence="INFERRED", analyzer="code-index", evidence=evidence,
+    )]
+    mixed = {ecosystem: hosts for ecosystem, hosts in ecosystems.items() if len(hosts) > 1}
+    if mixed:
+        findings.append(Finding(
+            "supply_chain", "Packages of one ecosystem from several registries",
+            "Packages of " + ", ".join(sorted(mixed)) + " resolve from more than one registry. When a private and a "
+            "public registry serve the same names, a package published under an internal name on the public "
+            "registry can be installed instead (dependency confusion).",
+            confidence="INFERRED", severity="LOW", analyzer="code-index",
+            evidence=[f"{ecosystem}: " + ", ".join(f"{host} ({count:,})" for host, count in sorted(hosts.items()))
+                      for ecosystem, hosts in sorted(mixed.items())],
+            recommendation="Scope private packages to the private registry (npm scopes, a pip index per package or "
+                           "PEP 708 tracking, Cargo registries per dependency) and reserve internal names on public "
+                           "registries.",
+        ))
+    if insecure:
+        findings.append(Finding(
+            "supply_chain", "Source locations over an unencrypted transport",
+            f"{len(insecure):,} remote(s) or submodule(s) are fetched over http:// or git://, which neither "
+            "encrypts nor authenticates the server: a network attacker can change the code fetched.",
+            confidence="CONFIRMED", severity="LOW", analyzer="code-index", evidence=insecure,
+            recommendation="Use https:// or ssh:// locations.",
+        ))
+    return value, findings
+
+
 _PASSES = (
     ("dependencies", _dependencies),
     ("symbols", _symbols),
@@ -3053,4 +3226,5 @@ _PASSES = (
     ("endpoint_catalog", _endpoint_catalog),
     ("integration", _integration),
     ("network_services", _network_services),
+    ("provenance", _provenance),
 )

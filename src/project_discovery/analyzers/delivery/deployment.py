@@ -4,6 +4,7 @@ from __future__ import annotations
 import itertools
 import json
 import re
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +106,23 @@ def _azure_jobs(root: dict[str, Any]) -> list[str]:
     return names
 
 
+def _azure_steps(root: dict[str, Any]) -> list[dict[str, Any]]:
+    """The steps of an Azure Pipelines file: the implicit job's, every job's and the hooks of
+    deployment jobs' strategies (runOnce, rolling, canary), at most 5,000."""
+    jobs = list(_items(root.get("jobs")))
+    for stage in _items(root.get("stages")):
+        jobs.extend(_items(_mapping(stage).get("jobs")))
+    steps: list[dict[str, Any]] = []
+    for job in [root, *(_mapping(job) for job in jobs)]:
+        steps.extend(_mapping(step) for step in _items(job.get("steps")))
+        for phase in _mapping(job.get("strategy")).values():
+            for hook in _mapping(phase).values():
+                steps.extend(_mapping(step) for step in _items(_mapping(hook).get("steps")))
+        if len(steps) >= 5000:
+            break
+    return steps[:5000]
+
+
 def _logical_lines(lines: list[str]) -> list[tuple[int, str]]:
     """Dockerfile instructions with backslash continuations joined, by starting line."""
     logical: list[tuple[int, str]] = []
@@ -132,6 +150,95 @@ def _from_image(value: str) -> tuple[str, str | None]:
         return "", None
     stage = tokens[2] if len(tokens) >= 3 and tokens[1].lower() == "as" else None
     return tokens[0], stage
+
+
+# Publish and deploy steps in CI workflows, by a command or an action/task name they contain
+# (lower case): the target they publish to or the platform they deploy to.
+_PUBLISH_COMMANDS = (
+    ("docker push", "container registry"), ("podman push", "container registry"), ("buildah push", "container registry"),
+    ("docker buildx build --push", "container registry"), ("npm publish", "npm"), ("pnpm publish", "npm"),
+    ("yarn npm publish", "npm"), ("yarn publish", "npm"), ("twine upload", "PyPI"), ("uv publish", "PyPI"),
+    ("poetry publish", "PyPI"), ("flit publish", "PyPI"), ("hatch publish", "PyPI"), ("cargo publish", "crates.io"),
+    ("gem push", "RubyGems"), ("mvn deploy", "Maven repository"), ("gradle publish", "Maven repository"),
+    ("gradlew publish", "Maven repository"), ("dotnet nuget push", "NuGet"), ("nuget push", "NuGet"),
+    ("helm push", "Helm repository"), ("gh release create", "GitHub release"), ("gh release upload", "GitHub release"),
+    ("goreleaser", "release artifacts"),
+)
+_PUBLISH_ACTIONS = (
+    ("docker/build-push-action", "container registry"), ("redhat-actions/push-to-registry", "container registry"),
+    ("pypa/gh-action-pypi-publish", "PyPI"), ("js-devtools/npm-publish", "npm"),
+    ("softprops/action-gh-release", "GitHub release"), ("ncipollo/release-action", "GitHub release"),
+    ("goreleaser/goreleaser-action", "release artifacts"), ("docker@", "container registry"),
+)
+_DEPLOY_COMMANDS = (
+    ("kubectl apply", "Kubernetes"), ("kubectl rollout", "Kubernetes"), ("kubectl set image", "Kubernetes"),
+    ("helm upgrade", "Kubernetes (Helm)"), ("helm install", "Kubernetes (Helm)"), ("terraform apply", "Terraform"),
+    ("pulumi up", "Pulumi"), ("cdk deploy", "AWS CDK"), ("sam deploy", "AWS SAM"),
+    ("aws ecs update-service", "AWS ECS"), ("aws lambda update-function-code", "AWS Lambda"),
+    ("aws cloudformation deploy", "AWS CloudFormation"), ("aws s3 sync", "AWS S3"),
+    ("gcloud run deploy", "Google Cloud Run"), ("gcloud app deploy", "Google App Engine"),
+    ("gcloud functions deploy", "Google Cloud Functions"), ("az webapp", "Azure App Service"),
+    ("az containerapp", "Azure Container Apps"), ("az functionapp", "Azure Functions"),
+    ("serverless deploy", "Serverless Framework"), ("sls deploy", "Serverless Framework"),
+    ("firebase deploy", "Firebase"), ("vercel deploy", "Vercel"), ("vercel --prod", "Vercel"),
+    ("netlify deploy", "Netlify"), ("flyctl deploy", "Fly.io"), ("fly deploy", "Fly.io"),
+    ("wrangler deploy", "Cloudflare Workers"), ("wrangler publish", "Cloudflare Workers"),
+)
+_DEPLOY_ACTIONS = (
+    ("aws-actions/amazon-ecs-deploy-task-definition", "AWS ECS"),
+    ("aws-actions/aws-cloudformation-github-deploy", "AWS CloudFormation"),
+    ("google-github-actions/deploy-cloudrun", "Google Cloud Run"),
+    ("google-github-actions/deploy-appengine", "Google App Engine"), ("azure/webapps-deploy", "Azure App Service"),
+    ("azure/functions-action", "Azure Functions"), ("azure/k8s-deploy", "Kubernetes"),
+    ("cloudflare/wrangler-action", "Cloudflare Workers"), ("amondnet/vercel-action", "Vercel"),
+    ("nwtgck/actions-netlify", "Netlify"), ("superfly/flyctl-actions", "Fly.io"),
+    ("firebaseextended/action-hosting-deploy", "Firebase"), ("actions/deploy-pages", "GitHub Pages"),
+    ("peaceiris/actions-gh-pages", "GitHub Pages"), ("kubernetesmanifest@", "Kubernetes"),
+    ("helmdeploy@", "Kubernetes (Helm)"), ("azurewebapp@", "Azure App Service"),
+    ("azurefunctionapp@", "Azure Functions"), ("azurermwebappdeployment@", "Azure App Service"),
+)
+# Terraform providers and resource prefixes, by the platform they manage.
+_TERRAFORM_PLATFORMS = {
+    "aws": "AWS", "google": "Google Cloud", "google-beta": "Google Cloud", "azurerm": "Azure", "azuread": "Azure",
+    "kubernetes": "Kubernetes", "helm": "Kubernetes (Helm)", "cloudflare": "Cloudflare", "digitalocean": "DigitalOcean",
+    "oci": "Oracle Cloud", "alicloud": "Alibaba Cloud", "ibm": "IBM Cloud", "vercel": "Vercel", "netlify": "Netlify",
+    "fastly": "Fastly", "heroku": "Heroku", "hcloud": "Hetzner Cloud", "linode": "Akamai Cloud (Linode)",
+    "vsphere": "VMware vSphere", "openstack": "OpenStack", "docker": "Docker",
+}
+_MAX_STEP_TEXT = 4096
+
+
+def _steps_targets(texts: list[str]) -> tuple[list[str], list[str]]:
+    """(publish targets, deploy platforms) the commands and action names of a workflow name."""
+    publishes: list[str] = []
+    deploys: list[str] = []
+    for text in texts:
+        lowered = " ".join(text[:_MAX_STEP_TEXT].lower().split())
+        for table, found in ((_PUBLISH_COMMANDS, publishes), (_PUBLISH_ACTIONS, publishes),
+                             (_DEPLOY_COMMANDS, deploys), (_DEPLOY_ACTIONS, deploys)):
+            for needle, target in table:
+                if needle in lowered and target not in found and len(found) < _MAX_FACT_ITEMS:
+                    found.append(target)
+    return publishes, deploys
+
+
+def image_registry(image: str) -> str:
+    """The registry host of a container image reference: its first path component when that is
+    a host (a dot or port, or localhost), else Docker Hub; "" for a reference built from variables."""
+    if not image or "$" in image or "{{" in image:
+        return ""
+    first, slash, _ = image.partition("/")
+    if slash and ("." in first or ":" in first or first == "localhost"):
+        return first.lower()[:200]
+    return "docker.io"
+
+
+def _emit_image(image: Any, source: str, role: str) -> None:
+    if not isinstance(image, str) or not image.strip():
+        return
+    image = image.strip()[:300]
+    code_facts.emit_fact("container_image", image, source=source, role=role, registry=image_registry(image),
+                         pinned="@sha256:" in image)
 
 
 def _containers(pod_spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -573,6 +680,8 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         stages: set[str] = set()
         for line, value in bases:
             image, stage = _from_image(value)
+            if image and image.lower() not in stages and image != "scratch":
+                _emit_image(image, "dockerfile", "base")
             # Earlier build stages, scratch and ARG-supplied images are not registry tags.
             mutable = bool(image) and image.lower() not in stages and image != "scratch" and "$" not in image and (
                 ":" not in image.rsplit("/", 1)[-1] or image.endswith(":latest")
@@ -624,6 +733,15 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         findings = []
         lines = LineIndex(source)
         _terraform_ports(source, lines)
+        platforms: list[str] = []
+        for kind, first, _ in blocks:
+            if kind in {"provider", "resource", "data"}:
+                prefix = first if kind == "provider" else first.split("_", 1)[0]
+                platform = _TERRAFORM_PLATFORMS.get(prefix.lower())
+                if platform and platform not in platforms:
+                    platforms.append(platform)
+        for platform in platforms[:_MAX_FACT_ITEMS]:
+            code_facts.emit_fact("deploy_target", platform, source="terraform")
         if blocks:
             counts: dict[str, int] = {}
             for kind, _, _ in blocks:
@@ -672,18 +790,41 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         github = record.path.lower().replace("\\", "/").startswith(".github/workflows/")
         jobs = _mapping(root.get("jobs")) if github else {}
         steps = []
+        texts: list[str] = []  # commands and action names, read for publish and deploy steps only
         for job_name, job_value in jobs.items():
             job = _mapping(job_value)
             for step in _items(job.get("steps")):
                 step = _mapping(step)
                 if step.get("uses"):
                     steps.append((str(job_name), str(step["uses"])))
+                    texts.append(str(step["uses"]))
+                if isinstance(step.get("run"), str):
+                    texts.append(step["run"])
         if name == ".gitlab-ci.yml":
             job_names = _gitlab_jobs(root)
+            for job in job_names:
+                for key in ("before_script", "script", "after_script"):
+                    texts.extend(str(line) for line in _items(_mapping(root.get(job)).get(key)) if isinstance(line, str))
         elif name == "azure-pipelines.yml":
             job_names = _azure_jobs(root)
+            for step in _azure_steps(root):
+                for key in ("script", "bash", "powershell", "pwsh", "task"):
+                    if isinstance(step.get(key), str):
+                        texts.append(step[key])
+                if str(step.get("task", "")).lower().startswith("docker@") and "push" in str(
+                        _mapping(step.get("inputs")).get("command", "")).lower():
+                    texts.append("docker push")
         else:
             job_names = list(jobs)
+        publishes, deploys = _steps_targets(texts)
+        unpinned = sum(1 for _, uses in steps if "@" in uses and not re.search(r"@[0-9a-fA-F]{40}$", uses))
+        code_facts.emit_fact(
+            "ci_workflow", "GitHub Actions" if github else "GitLab CI" if name == ".gitlab-ci.yml" else "Azure Pipelines",
+            jobs=len(job_names), actions=sorted({uses[:200] for _, uses in steps})[:50], unpinned_actions=unpinned,
+            publishes=publishes, deploys=deploys,
+            write_permissions=bool(github and any(_writes(scope) for scope in (
+                root.get("permissions"), *(_mapping(job).get("permissions") for job in jobs.values())))),
+        )
         findings = [Finding(
             "ci_cd",
             f"CI/CD workflow: {record.path}",
@@ -736,6 +877,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         for index, document in enumerate(documents or []):
             if isinstance(document, list):
                 if name_is_ansible(record.path, {"plays": document}):
+                    code_facts.emit_fact("deploy_target", "Ansible", source="ansible", plays=len(document))
                     findings.append(Finding(
                         "infrastructure", f"Ansible playbook: {record.path}",
                         f"Detected {len(document)} top-level play item(s). Tasks and module "
@@ -758,10 +900,12 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         services = _mapping(root.get("services"))
         evidence = []
         risks = []
+        code_facts.emit_fact("deploy_target", "Docker Compose", source="compose", services=len(services))
         for service_name, value in services.items():
             service = _mapping(value)
             if service.get("image"):
                 evidence.append(f"service {service_name}: image {service['image']}")
+                _emit_image(service["image"], "compose", "service")
             if service.get("build"):
                 evidence.append(f"service {service_name}: build context declared")
             for key in ("ports", "depends_on", "volumes", "networks"):
@@ -812,9 +956,11 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         evidence = [record.path, f"document: {index + 1}"]
         namespace = metadata.get("namespace")
         labels = _pod_labels(kind, root, spec) if containers else {}
+        code_facts.emit_fact("deploy_target", "Kubernetes", source="kubernetes", resource=f"{kind}/{name}"[:200])
         for container in containers:
             if container.get("image"):
                 evidence.append(f"image: {container['image']}")
+                _emit_image(container["image"], "kubernetes", "workload")
             for port in _items(container.get("ports")):
                 port = _mapping(port)
                 if port.get("containerPort"):
@@ -883,6 +1029,16 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
         if not chart.get("apiVersion") or not chart.get("name"):
             return []
         dependencies = _items(chart.get("dependencies"))
+        code_facts.emit_fact("deploy_target", "Kubernetes (Helm)", source="helm", chart=str(chart["name"])[:200])
+        hosts: dict[str, int] = {}
+        for dependency in dependencies:
+            repository = _mapping(dependency).get("repository")
+            if isinstance(repository, str) and "://" in repository:
+                host = urllib.parse.urlsplit(repository).hostname
+                if host and (host in hosts or len(hosts) < _MAX_FACT_ITEMS):
+                    hosts[host.lower()] = hosts.get(host.lower(), 0) + 1
+        for host, count in hosts.items():
+            code_facts.emit_fact("package_registry", host, ecosystem="Helm", packages=count)
         return [Finding(
             "orchestration",
             f"Helm chart: {chart['name']}",
@@ -893,6 +1049,7 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
 
     def _cloudformation(self, root: dict[str, Any], record: FileRecord) -> list[Finding]:
         resources = _mapping(root.get("Resources"))
+        code_facts.emit_fact("deploy_target", "AWS CloudFormation", source="cloudformation", resources=len(resources))
         types = sorted({
             str(_mapping(value).get("Type"))
             for value in resources.values() if _mapping(value).get("Type")
@@ -935,6 +1092,9 @@ class DeploymentIntelligenceAnalyzer(Analyzer):
             )]
         stages = re.findall(r"""(?m)\bstage\s*\(\s*['"]([^'"]+)['"]\s*\)""", source)
         agents = re.findall(r"(?m)^[ \t]*agent\s+([A-Za-z_][A-Za-z0-9_]*)", source)
+        publishes, deploys = _steps_targets(source.splitlines()[:20_000])
+        code_facts.emit_fact("ci_workflow", "Jenkins", jobs=len(stages), actions=[], unpinned_actions=0,
+                             publishes=publishes, deploys=deploys, write_permissions=False)
         return [Finding(
             "ci_cd", f"Jenkins pipeline: {record.path}",
             f"Detected {len(stages)} named stage(s) and {len(agents)} agent declaration(s). "

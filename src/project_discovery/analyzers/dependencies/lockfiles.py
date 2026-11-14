@@ -82,6 +82,10 @@ class LockfileAnalyzer(Analyzer):
             )]
 
         ecosystem = LOCKFILE_ECOSYSTEMS[Path(record.path).name.lower()]
+        registries = getattr(packages, "registries", {})
+        for host, count in list(registries.items())[:100]:
+            # Where the packages came from, for the code index's provenance graph.
+            code_facts.emit_fact("package_registry", host, ecosystem=ecosystem, packages=count)
         for item in packages[:MAX_RESOLVED_FACTS]:
             code_facts.emit_fact("resolved_package", item.name, version=item.version, ecosystem=ecosystem)
         if len(packages) > MAX_RESOLVED_FACTS:
@@ -94,6 +98,10 @@ class LockfileAnalyzer(Analyzer):
         )
         if omitted:
             detail += f" Evidence lists the first {_MAX_INVENTORY_EVIDENCE}; {omitted} more are omitted."
+        if registries:
+            detail += " Resolved from: " + ", ".join(
+                f"{host} ({count:,})" for host, count in list(registries.items())[:10]) + (
+                f" and {len(registries) - 10:,} more registries" if len(registries) > 10 else "") + "."
         findings = [Finding(
             "dependency",
             f"Resolved dependency inventory: {record.path}",

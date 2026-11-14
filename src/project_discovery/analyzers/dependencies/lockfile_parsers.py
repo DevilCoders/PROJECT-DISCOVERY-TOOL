@@ -9,6 +9,8 @@ import io
 import json
 import re
 import tomllib
+import urllib.parse
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 from ...core.limits import limit_reached
@@ -75,6 +77,28 @@ _LOCAL_SPECIFIER = re.compile(r"(?i)^(?:file|link|portal|workspace|exec):|^\.{1,
 _REMOTE_SPECIFIER = re.compile(
     r"(?i)^(?:git|github|gitlab|bitbucket|gist|https?|ssh)[+:]|^[a-z][a-z0-9+.-]{0,20}+://|[/\\@\s]"
 )
+# Distinct registry hosts kept per lockfile.
+MAX_REGISTRY_HOSTS = 1_000
+
+
+def registry_host(value: Any) -> str | None:
+    """The host a package resolved from, from a download or index URL (Cargo's ``registry+``
+    and ``sparse+`` forms too); None for anything else. Only the host is kept: these URLs can
+    carry credentials and private paths. crates.io's index, wherever it is served, is crates.io."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip().removeprefix("registry+").removeprefix("sparse+")
+    if "://" not in text[:16]:
+        return None
+    try:
+        host = urllib.parse.urlsplit(text).hostname
+    except ValueError:
+        return None
+    if not host:
+        return None
+    if host == "index.crates.io" or text.rstrip("/").endswith("github.com/rust-lang/crates.io-index"):
+        return "crates.io"
+    return host.lower()
 
 
 class ParsedLockfile(list):
@@ -88,6 +112,10 @@ class ParsedLockfile(list):
 
     local: list[str]
     non_registry: list[str]
+    # Registry hosts by the number of packages resolved from each, where the format records
+    # it (npm and Yarn v1 download URLs, pnpm tarballs, Cargo sources, uv and Poetry indexes,
+    # Pipfile.lock sources, Composer dists, Gemfile.lock remotes, Hex, SwiftPM and pub).
+    registries: dict[str, int]
 
 
 class _Collector:
@@ -97,10 +125,19 @@ class _Collector:
         self.packages: set[ResolvedPackage] = set()
         self.local_names: set[str] = set()
         self.non_registry: set[str] = set()
+        self.registries: Counter[str] = Counter()
+        # The registry of packages that name none, where the format implies one (Poetry: PyPI).
+        self.default_registry: str | None = None
 
-    def add(self, name: Any, version: Any) -> None:
+    def count_registry(self, value: Any, number: int = 1) -> None:
+        host = value if value in self.registries else registry_host(value)
+        if host and number > 0 and (host in self.registries or len(self.registries) < MAX_REGISTRY_HOSTS):
+            self.registries[host] += number
+
+    def add(self, name: Any, version: Any, registry: Any = None) -> bool:
+        """Record one registry package; True when it is new (``registry``: where it came from)."""
         if not name or not version:
-            return
+            return False
         name, text = str(name).strip(), normalize_version(version)
         if text[:4].lower() == "npm:":
             # npm alias ("npm:real-name@1.2.3"): the real package and its version.
@@ -110,19 +147,24 @@ class _Collector:
         # Only the name is kept: a specifier can hold credentials or local paths.
         if _LOCAL_SPECIFIER.search(text):
             self.local(name)
-            return
+            return False
         if _REMOTE_SPECIFIER.search(text):
             self.remote(name)
-            return
+            return False
         package = ResolvedPackage(self.ecosystem, name, text)
         if not package.name or not package.version or package in self.packages:
-            return
+            return False
         if len(self.packages) >= self.max_entries:
             limit_reached("entries", self.max_entries, len(self.packages) + 1)
             raise LockfileEntryBudgetExceeded(
                 f"lockfile exceeded the {self.max_entries:,}-package entry budget"
             )
         self.packages.add(package)
+        if registry is not None:
+            self.count_registry(registry)
+        elif self.default_registry:
+            self.registries[self.default_registry] += 1
+        return True
 
     def local(self, name: Any) -> None:
         """Record one of the project's own packages (never sent anywhere or matched)."""
@@ -149,7 +191,7 @@ def _npm_lock(data: Any, out: _Collector) -> None:
             if not item_path or "node_modules/" not in item_path or item.get("link"):
                 out.local(name or item_path)
                 continue
-            out.add(name, item.get("version"))
+            out.add(name, item.get("version"), item.get("resolved"))
     if out.packages or not isinstance(data.get("dependencies"), dict):
         return
     stack = [iter(data["dependencies"].items())]
@@ -160,7 +202,7 @@ def _npm_lock(data: Any, out: _Collector) -> None:
             stack.pop()
             continue
         if isinstance(item, dict):
-            out.add(name, item.get("version"))
+            out.add(name, item.get("version"), item.get("resolved"))
             nested = item.get("dependencies")
             if isinstance(nested, dict) and nested:
                 stack.append(iter(nested.items()))
@@ -173,6 +215,7 @@ _YARN_VERSION = re.compile(r"""^\s+version:?\s+["']?([^"'\s]+)""")
 def _yarn_lock(source: str, out: _Collector) -> None:
     """Parse Yarn v1 and Berry (v2+) lockfiles without a YAML dependency."""
     names: list[str] = []
+    added = 0  # the packages of the last entry, for its v1 "resolved" download URL
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if not line or line.lstrip().startswith("#"):
@@ -196,9 +239,13 @@ def _yarn_lock(source: str, out: _Collector) -> None:
         if names:
             match = _YARN_VERSION.match(line)
             if match:
-                for name in names:
-                    out.add(name, match.group(1))
+                added = sum(out.add(name, match.group(1)) for name in names)
                 names = []
+                continue
+        stripped = line.strip()
+        if added and stripped.startswith("resolved "):
+            out.count_registry(stripped[9:].strip().strip("\"'"), added)
+            added = 0
 
 
 _PNPM_KEY = re.compile(r"""^ {2}(?P<key>['"]?[^\s'":][^'":]*['"]?):\s*$""")
@@ -222,7 +269,7 @@ def _pnpm_package_key(key: str) -> tuple[str, str] | None:
 
 
 def _pnpm_lock(source: str, out: _Collector) -> None:
-    section = None
+    section, added = None, False
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if line and not line[0].isspace():
@@ -233,13 +280,20 @@ def _pnpm_lock(source: str, out: _Collector) -> None:
         match = _PNPM_KEY.match(line)
         if match:
             parsed = _pnpm_package_key(match.group("key"))
-            if parsed:
-                out.add(*parsed)
+            added = bool(parsed) and out.add(*parsed)
+            continue
+        # A package from another registry or a URL records its tarball; the default registry
+        # (from .npmrc) is not in the lockfile.
+        at = line.find("tarball:")
+        if added and at >= 0:
+            out.count_registry(line[at + 8:].strip().split(",", 1)[0].strip().strip("}\"' "))
+            added = False
 
 
 def _toml_packages(source: str, out: _Collector, *, cargo: bool = False) -> None:
     data = tomllib.loads(source)
     for item in data.get("package", []):
+        registry = None
         if not isinstance(item, dict):
             continue
         origin = item.get("source")
@@ -252,6 +306,7 @@ def _toml_packages(source: str, out: _Collector, *, cargo: bool = False) -> None
             if not origin.startswith(("registry+", "sparse+")):
                 out.remote(item.get("name"))
                 continue
+            registry = origin
         elif isinstance(origin, dict):
             # uv: {registry = ...} or editable/virtual/path/directory/git/url;
             # poetry: [package.source] with type directory/file/git/url (legacy = an index).
@@ -262,13 +317,14 @@ def _toml_packages(source: str, out: _Collector, *, cargo: bool = False) -> None
             if kind in {"git", "url"}:
                 out.remote(item.get("name"))
                 continue
+            registry = origin.get("registry") or origin.get("url")
         elif item.get("path") or item.get("editable"):
             out.local(item.get("name"))   # pdm: a local or editable package
             continue
         elif item.get("git") or item.get("url"):
             out.remote(item.get("name"))
             continue
-        out.add(item.get("name"), item.get("version"))
+        out.add(item.get("name"), item.get("version"), registry)
 
 
 def _composer_lock(data: Any, out: _Collector) -> None:
@@ -280,10 +336,15 @@ def _composer_lock(data: Any, out: _Collector) -> None:
             if dist.get("type") == "path":
                 out.local(item.get("name"))   # a path repository: the project's own code
                 continue
-            out.add(item.get("name"), item.get("version"))
+            origin = item.get("source") if isinstance(item.get("source"), dict) else {}
+            out.add(item.get("name"), item.get("version"), dist.get("url") or origin.get("url"))
 
 
 def _pipfile_lock(data: Any, out: _Collector) -> None:
+    meta = data.get("_meta") if isinstance(data, dict) and isinstance(data.get("_meta"), dict) else {}
+    sources = [item for item in meta.get("sources") or [] if isinstance(item, dict)]
+    indexes = {str(item.get("name")): item.get("url") for item in sources}
+    default_index = sources[0].get("url") if sources else None
     for group in ("default", "develop"):
         entries = data.get(group, {}) if isinstance(data, dict) else {}
         for name, item in entries.items() if isinstance(entries, dict) else ():
@@ -294,21 +355,25 @@ def _pipfile_lock(data: Any, out: _Collector) -> None:
                 out.remote(name)
                 continue
             version = item.get("version") if isinstance(item, dict) else item
-            out.add(name, version)
+            index = item.get("index") if isinstance(item, dict) else None
+            out.add(name, version, indexes.get(str(index), default_index) if index else default_index)
 
 
 _GEM_SPEC = re.compile(r"^ {4}([A-Za-z0-9_.-]+) \(([^)]+)\)\s*$")
 
 
 def _gemfile_lock(source: str, out: _Collector) -> None:
-    in_specs, section = False, ""
+    in_specs, section, remote = False, "", None
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if line.strip() == "specs:":
             in_specs = True
             continue
         if line and not line.startswith(" "):
-            in_specs, section = False, line.strip()
+            in_specs, section, remote = False, line.strip(), None
+        if section == "GEM" and line.startswith("  remote:"):
+            remote = line.split(":", 1)[1].strip()
+            continue
         if in_specs:
             match = _GEM_SPEC.match(line)
             if match and section == "PATH":
@@ -317,7 +382,7 @@ def _gemfile_lock(source: str, out: _Collector) -> None:
                 out.remote(match.group(1))
             elif match:
                 # Platform gems are locked as "1.15.4-x86_64-linux"; gem versions never contain "-".
-                out.add(match.group(1), match.group(2).split("-", 1)[0])
+                out.add(match.group(1), match.group(2).split("-", 1)[0], remote)
 
 
 _GO_SUM = re.compile(r"^(\S+)\s+(v\S+?)(/go\.mod)?\s+h\d+:")
@@ -341,7 +406,7 @@ def _mix_lock(source: str, out: _Collector) -> None:
         if not match:
             continue
         if match.group(2) == "hex" and match.group(3):
-            out.add(match.group(3), match.group(4))
+            out.add(match.group(3), match.group(4), "https://repo.hex.pm")
         elif match.group(2) in {"git", "path"}:
             (out.local if match.group(2) == "path" else out.remote)(match.group(1))
 
@@ -363,7 +428,9 @@ def _package_resolved(data: Any, out: _Collector) -> None:
     for item in pins:
         if isinstance(item, dict):
             state = item.get("state") or {}
-            out.add(_swift_identity(item), state.get("version") if isinstance(state, dict) else None)
+            location = item.get("location") or item.get("repositoryURL")
+            out.add(_swift_identity(item), state.get("version") if isinstance(state, dict) else None,
+                    location if isinstance(location, str) and "://" in location else None)
 
 
 def _nuget_lock(data: Any, out: _Collector) -> None:
@@ -382,10 +449,11 @@ def _nuget_lock(data: Any, out: _Collector) -> None:
 _PUB_PACKAGE = re.compile(r"^ {2}([A-Za-z0-9_]+):\s*$")
 _PUB_VERSION = re.compile(r"""^ {4}version:\s*["']?([^"'\s]+)""")
 _PUB_SOURCE = re.compile(r"""^ {4}source:\s*["']?(\w+)""")
+_PUB_URL = re.compile(r"""^ {6}url:\s*["']?([^"'\s]+)""")
 
 
 def _pubspec_lock(source: str, out: _Collector) -> None:
-    in_packages, current, origin = False, None, "hosted"
+    in_packages, current, origin, registry = False, None, "hosted", None
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if line and not line[0].isspace():
@@ -395,7 +463,11 @@ def _pubspec_lock(source: str, out: _Collector) -> None:
             continue
         package = _PUB_PACKAGE.match(line)
         if package:
-            current, origin = package.group(1), "hosted"
+            current, origin, registry = package.group(1), "hosted", None
+            continue
+        url = _PUB_URL.match(line)
+        if current and url:
+            registry = url.group(1)
             continue
         source_line = _PUB_SOURCE.match(line)
         if current and source_line:
@@ -408,7 +480,7 @@ def _pubspec_lock(source: str, out: _Collector) -> None:
             elif origin == "git":
                 out.remote(current)
             else:
-                out.add(current, version.group(1))
+                out.add(current, version.group(1), registry)
             current = None
 
 
@@ -429,6 +501,8 @@ def parse_lockfile(
     if ecosystem is None:
         raise ValueError(f"unsupported lockfile format: {filename}")
     out = _Collector(ecosystem, max_entries)
+    if name == "poetry.lock":
+        out.default_registry = "pypi.org"  # Poetry records a source only for packages from another index
     if name in {"package-lock.json", "npm-shrinkwrap.json"}:
         _npm_lock(json.loads(source), out)
     elif name == "yarn.lock":
@@ -457,4 +531,5 @@ def parse_lockfile(
     registry_names = {package.name for package in out.packages}
     result.local = sorted(out.local_names - registry_names)
     result.non_registry = sorted(out.non_registry - registry_names - out.local_names)
+    result.registries = dict(sorted(out.registries.items(), key=lambda item: (-item[1], item[0])))
     return result
