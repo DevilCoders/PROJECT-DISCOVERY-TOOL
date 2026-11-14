@@ -1,12 +1,14 @@
 # API Contract Intelligence
 
-PDT inventories APIs from three directions, and GraphQL in depth ([GraphQL](#graphql)).
+PDT inventories APIs from three directions, with GraphQL and RPC in depth ([GraphQL](#graphql), [RPC services](#rpc-services)).
 
 **Contracts** (`api-contracts`): OpenAPI/Swagger JSON and YAML (HTTP operations and component schemas), AsyncAPI (channels and publish/subscribe operations), OpenRPC, WSDL (services, port types, bindings and operations), RAML, GraphQL schema definitions and named query/mutation/subscription operations, Protocol Buffers messages, enums, services and RPCs, Thrift services, structs, exceptions, enums and typedefs, and Postman collections (request grouping only; request secrets are not reported). JSON is parsed with the standard library; YAML uses PyYAML when installed, otherwise a deliberately shallow line-based fallback inventories common paths, methods and operation IDs. Each contract is read with a 16 MiB budget.
 
 **Source declarations** (`api-endpoints`): framework route declarations found statically in source code, with the method, the path as written, the line and the framework (see [Endpoint adapters](#endpoint-adapters)). Retrofit and Feign interfaces declare calls a client makes, so they are not served endpoints. The first 500 endpoints of a file feed the integration summary; more are reported as an `UNKNOWN` finding. The API-style classifier (`api-type-classifier`) adds REST, GraphQL, gRPC, JSON-RPC, SOAP, WebSocket and event-driven markers. Outbound HTTP calls and served endpoints also feed the scan's integration summary and the cross-project integration map in `pdt compare` (see [CODE_INTELLIGENCE.md](../architecture/CODE_INTELLIGENCE.md)).
 
 **GraphQL** (`api-graphql`): schemas, operations, resolvers, directives, federation and subscriptions, in GraphQL files and in code ([GraphQL](#graphql)).
+
+**RPC** (`api-rpc`): gRPC services, methods and protobuf messages, Thrift services and Avro protocols, RPC frameworks in code and generated clients and servers ([RPC services](#rpc-services)).
 
 **Limits.** Contracts and route declarations are static evidence. PDT does not make network requests or claim that an API is deployed, reachable, authorized or behaviorally correct. Route prefixes added at run time, middleware, dynamic registration, compatibility analysis between contract versions and security testing are not covered.
 
@@ -57,6 +59,57 @@ Resolvers are found per framework, with field names as each framework derives th
 | Ruby, Rust, Elixir | graphql-ruby (`field :name` in a `QueryType`), async-graphql and juniper (`#[Object]`/`#[graphql_object]` impls), Absinthe (`query do field :name ...`) |
 
 The code index's `graphql` pass matches the scan's schema root fields, resolvers and client operations by type and field name (`metrics.code_index.graphql`): a "GraphQL API" summary, fields a schema declares that no resolver answers (on root types that have resolvers in the scan), resolvers for root fields no schema declares (on root types that have a schema in the scan, so code-first projects are not compared), and client operations that select root fields the scan's schemas do not declare. Each GraphQL file is read with a 16 MiB budget; a larger schema file is an `UNKNOWN` finding.
+
+## RPC services
+
+The `api-rpc` analyzer reads Protocol Buffers with a tokenizer and parser of its own (strings and comments skipped, every character read once), Apache Thrift and Avro IDL with a token scanner, and finds the RPC frameworks code serves and calls and the code protoc plugins and RPC compilers generate. Nothing is compiled, generated or called.
+
+| Finding | What it reports |
+|---|---|
+| Protocol Buffers schema | The syntax (`proto2`, `proto3`) or edition, the package, imports and language options (`go_package`, `java_package`, `csharp_namespace` and others), and every message and enum, nested ones by qualified name (`Outer.Inner`), with its fields: label (`repeated`, `optional`, `required`), type, number, `map<K, V>` and `oneof` membership. `reserved`, `extensions`, `extend` and options are skipped; a proto2 group is a field |
+| gRPC services | Each service's methods with their request and response types, the streaming kind (unary, server streaming, client streaming, bidirectional) and the HTTP routes a `google.api.http` option maps them to (gRPC-Gateway and gRPC transcoding, `additional_bindings` and `custom` verbs included) |
+| Apache Thrift services, Avro protocols | Thrift services (`extends` included) and their functions; Avro IDL protocols and their messages. Throws lists, annotations, records, errors, enums, `fixed` and `decimal(p, s)` types are not methods |
+| Generated RPC code | Files protoc plugins and RPC compilers write, by name and generator header, with the services they generate clients and servers for (table below) |
+| RPC servers and clients | The servers and clients a source file declares, by framework and service (table below), and tRPC procedures with their kind (query, mutation, subscription) |
+
+RPC frameworks in code (`X` is the service name):
+
+| Framework | Servers | Clients |
+|---|---|---|
+| gRPC, Python | `add_XServicer_to_server(...)` | `x_pb2_grpc.XStub(channel)` |
+| gRPC, Go | `pb.RegisterXServer(s, ...)` | `pb.NewXClient(conn)` |
+| gRPC, Java and Kotlin | `extends XGrpc.XImplBase`, `XGrpcKt.XCoroutineImplBase` | `XGrpc.newStub`, `newBlockingStub` and `newFutureStub`, `XGrpcKt.XCoroutineStub(...)` |
+| gRPC, C# | `: X.XBase` | `new X.XClient(channel)`, `AddGrpcClient<X.XClient>` |
+| gRPC, C++ | `: public X::Service` (`AsyncService`, `CallbackService`) | `X::NewStub(channel)` |
+| gRPC, Rust (tonic) | `.add_service(XServer::new(...))` | `XClient::connect(...)` |
+| gRPC, Node.js | `addService(proto.X.service, ...)`, `addService(XService, ...)` | `new proto.X('host:port', grpc.credentials...)` |
+| gRPC, Swift | `class ...: XProvider` (`XAsyncProvider`), `: X.SimpleServiceProtocol` | `XNIOClient(...)`, `XAsyncClient(...)`, `X.Client(wrapping:)` |
+| gRPC, Dart | `extends XServiceBase` | `XClient(channel)` |
+| gRPC, Ruby | `< X::Service`, `include X::Service` | `X::Stub.new(...)` |
+| gRPC, PHP | | `new XClient('host:port', ...)` |
+| Connect | Go `xconnect.NewXHandler(...)`, Connect-ES `router.service(X, ...)` | Go `xconnect.NewXClient(...)`, Connect-ES `createClient(X, transport)` |
+| Twirp | `NewXServer(...)` | `NewXProtobufClient(...)`, `NewXJSONClient(...)` |
+| gRPC-Web | | `new XClient(...)`, `new XPromiseClient(...)` |
+| Apache Thrift | Python and JVM `X.Processor(handler)`, Go `NewXProcessor(...)` | Python and JVM `X.Client(protocol)`, Go `NewXClient(...)` and `NewXClientFactory(...)` |
+| Apache Dubbo | `@DubboService` | `@DubboReference` |
+| tRPC | `initTRPC`, and its procedures (`name: t.procedure... .query(...)`) | `createTRPCProxyClient`, `createTRPCClient`, `createTRPCReact`, `createTRPCNext` |
+| Go `net/rpc`, Kitex | `rpc.Register(...)`, Kitex `x.NewServer(...)` | `rpc.Dial(...)`, `rpc.DialHTTP(...)`, `jsonrpc.Dial(...)`, Kitex `x.NewClient("...")` |
+
+Forms that ordinary code also uses count only in files that import the framework: Rust `XClient::new` only with `tonic`, Swift providers only with `import GRPC`, and the Dart, Ruby, Connect-ES, gRPC-Web, Twirp server, Go Thrift, Go `net/rpc` and Kitex forms only with their imports. Swift's `Helloworld_Greeter` is reported as `Greeter`.
+
+Generated code is recognized by file name and, where a hand-written file could have the name, by the generator's mark in the file's first 8 KiB:
+
+| Generator | Files |
+|---|---|
+| protoc | `*_pb2.py`, `*_pb.js`, `*_pb.ts`, `*_pb.d.ts`, `*_pb.rb`, `*.pb.h` and `*.pb.cc`, and any file headed "Generated by the protocol buffer compiler" (C#, Java and other message code) |
+| grpcio-tools, grpc-tools | `*_pb2_grpc.py`; Node.js `*_grpc_pb.js`; Ruby `*_services_pb.rb` |
+| protoc-gen-go, protoc-gen-go-grpc, grpc-gateway | `*.pb.go`, `*_grpc.pb.go`, `*.pb.gw.go` |
+| Connect, Twirp | `*.connect.go`, `*.twirp.go`, and `*_connect.ts` and `*_connect.js` with the generator's mark |
+| gRPC Java, Kotlin and C# | `*Grpc.java`, `*GrpcKt.kt` and `*Grpc.cs`, with the generator's mark |
+| gRPC-Web, Swift, Dart, C++ | `*_grpc_web_pb.js`, `*.grpc.swift`, `*.pb.swift`, `*.pbgrpc.dart`, `*.pb.dart` (`.pbenum`, `.pbjson`, `.pbserver`), `*.grpc.pb.h` and `*.grpc.pb.cc` |
+| Thrift compiler, thriftgo, Kitex | Files headed "Autogenerated by Thrift Compiler", "Code generated by thriftgo" or "Code generated by Kitex" |
+
+The code index's `rpc` pass (`metrics.code_index.rpc`) matches services by name (the last part of the qualified name, case-folded) across the scan: an "RPC services" summary with each service's definition, generated code, servers and clients; services no server implements, when the scan has servers for other services (Avro protocols are not compared: their servers are not looked for); and servers and clients of services that no definition or generated code in the scan declares. Each file is read with a 16 MiB budget; a larger IDL file is an `UNKNOWN` finding, and larger generated code is still recognized by its name.
 
 ## Route structure
 

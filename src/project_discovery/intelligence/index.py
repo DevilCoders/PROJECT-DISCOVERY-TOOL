@@ -1775,6 +1775,144 @@ def _graphql(context: _Context) -> tuple[dict, list[Finding]]:
     return value, findings
 
 
+MAX_RPC_ITEMS = 5000
+_RPC_UNSERVED = frozenset({"Avro IPC"})  # frameworks whose servers the scan does not look for
+
+
+def _rpc_key(name: str) -> str:
+    """The name RPC services are matched by: the last part, case-folded (``helloworld.Greeter``
+    is ``greeter``; Kitex packages are lowercase)."""
+    return name.rsplit(".", 1)[-1].casefold()
+
+
+def _count(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _rpc(context: _Context) -> tuple[dict, list[Finding]]:
+    """RPC across the scan: the services IDL files define, matched by name to the generated code,
+    servers and clients code declares."""
+    db = context.db
+    services: dict[str, dict] = {}
+    for name, path, values in _fact_rows(db, "rpc_service", ordered=True):
+        if name not in services and len(services) < MAX_RPC_ITEMS:
+            methods = values.get("methods")
+            services[name] = {"name": name, "framework": str(values.get("framework", "")), "file": path,
+                              "line": values.get("line"),
+                              "methods": [str(item) for item in methods] if isinstance(methods, list) else []}
+    streaming: Counter = Counter()
+    mapped: list[dict] = []
+    for name, path, values in _fact_rows(db, "rpc_method", ordered=True):
+        streaming[str(values.get("streaming", ""))] += 1
+        http = values.get("http")
+        if isinstance(http, list) and http and len(mapped) < MAX_RPC_ITEMS:
+            mapped.append({"method": name, "file": path, "line": values.get("line"), "http": [str(item) for item in http]})
+    schemas = {"files": 0, "messages": 0, "enums": 0}
+    for _, _, values in _fact_rows(db, "rpc_schema"):
+        schemas["files"] += 1
+        schemas["messages"] += _count(values.get("messages"))
+        schemas["enums"] += _count(values.get("enums"))
+    generators: Counter = Counter()
+    generated: dict[str, list[dict]] = {}
+    for name, path, values in _fact_rows(db, "rpc_generated", ordered=True):
+        generators[name] += 1
+        listed = values.get("services")
+        for service in listed if isinstance(listed, list) else []:
+            key = _rpc_key(str(service))
+            if key in generated or len(generated) < MAX_RPC_ITEMS:
+                items = generated.setdefault(key, [])
+                if len(items) < 5:
+                    items.append({"file": path, "generator": name})
+    code: dict[str, dict[str, list[dict]]] = {"server": {}, "client": {}}
+    frameworks: Counter = Counter()
+    unnamed: Counter = Counter()  # frameworks whose servers and clients name no service (Dubbo, net/rpc, tRPC)
+    for role in ("server", "client"):
+        for _, path, values in _fact_rows(db, f"rpc_{role}", ordered=True):
+            framework = str(values.get("framework", ""))
+            frameworks[framework] += 1
+            service = str(values.get("service", ""))
+            if not service:
+                unnamed[f"{framework} {role}"] += 1
+                continue
+            key = _rpc_key(service)
+            if key in code[role] or len(code[role]) < MAX_RPC_ITEMS:
+                items = code[role].setdefault(key, [])
+                if len(items) < 5:
+                    items.append({"service": service, "file": path, "line": values.get("line"), "framework": framework})
+    procedures = Counter(str(values.get("role", "")).split(" ", 1)[0] for _, _, values in _fact_rows(db, "rpc_procedure"))
+    value = {"service_total": len(services), "methods": sum(streaming.values()), "streaming": dict(streaming),
+             "schemas": schemas, "generated_files": dict(generators), "frameworks": dict(frameworks),
+             "procedures": dict(procedures)}
+    if not (services or generators or frameworks or procedures):
+        return value, []
+    defined = {_rpc_key(name) for name in services}
+    listed = [{**service, "generated": generated.get(_rpc_key(name), []), "servers": code["server"].get(_rpc_key(name), []),
+               "clients": code["client"].get(_rpc_key(name), [])} for name, service in sorted(services.items())]
+    # Services no server in the scan implements, when the scan has servers for others (with none at
+    # all, the project only defines or calls them).
+    unimplemented = [item for item in listed if code["server"] and not item["servers"]
+                     and item["framework"] not in _RPC_UNSERVED]
+    # Servers and clients of services no definition and no generated code in the scan declares:
+    # the definition is outside the scan, or the code names the service differently.
+    undeclared = [{"role": role, **items[0]} for role in ("server", "client") for key, items in sorted(code[role].items())
+                  if services and key not in defined and key not in generated]
+    value.update({
+        "services": listed[:MAX_LISTED * 10], "http_mapped": mapped[:MAX_LISTED * 10],
+        "unimplemented": [item["name"] for item in unimplemented][:MAX_RPC_ITEMS],
+        "undeclared": undeclared[:MAX_RPC_ITEMS], "unnamed": dict(unnamed),
+    })
+    parts = []
+    if services:
+        by_framework = Counter(item["framework"] for item in services.values())
+        parts.append(f"{len(services):,} service(s) defined (" + ", ".join(
+            f"{count:,} {name}" for name, count in sorted(by_framework.items())) + ")" + (
+            f" with {value['methods']:,} gRPC method(s): " + ", ".join(
+                f"{count:,} {kind}" for kind, count in sorted(streaming.items(), key=lambda item: (-item[1], item[0])))
+            if streaming else ""))
+    if schemas["files"]:
+        parts.append(f"{schemas['messages']:,} protobuf message(s) and {schemas['enums']:,} enum(s) in "
+                     f"{schemas['files']:,} schema file(s)")
+    if mapped:
+        parts.append(f"{len(mapped):,} method(s) mapped to HTTP routes")
+    if generators:
+        parts.append(f"{sum(generators.values()):,} generated file(s) ({', '.join(sorted(generators))})")
+    if frameworks:
+        parts.append(f"servers for {len(code['server']):,} service(s) and clients for {len(code['client']):,} in code "
+                     f"({', '.join(sorted(frameworks))})")
+    if procedures:
+        parts.append("tRPC procedures: " + ", ".join(f"{count:,} {kind}" for kind, count in sorted(procedures.items())))
+    evidence = []
+    for item in listed[:MAX_LISTED]:
+        line = f"{item['name']} ({item['framework']}): defined {item['file']}:{item['line']}"
+        if item["generated"]:
+            line += f"; generated {item['generated'][0]['file']} ({item['generated'][0]['generator']})"
+        for role in ("servers", "clients"):
+            if item[role]:
+                line += f"; {role[:-1]} {item[role][0]['file']}:{item[role][0]['line']} ({item[role][0]['framework']})"
+        evidence.append(line)
+    findings = [Finding("api", "RPC services", "; ".join(parts) + ". Services are matched to code by name across every "
+                        "scanned file.", confidence="INFERRED", analyzer="code-index", evidence=evidence)]
+    if unimplemented:
+        findings.append(Finding(
+            "api", "RPC services without a server",
+            f"{len(unimplemented):,} service(s) a definition declares have no server in the scan, which has servers for "
+            "other services: the service is implemented in another repository, not yet implemented, or registered in a "
+            "form the scan does not recognize.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{item['name']}: {item['file']}:{item['line']}" for item in unimplemented[:MAX_LISTED]],
+        ))
+    if undeclared:
+        findings.append(Finding(
+            "api", "RPC servers and clients for services no definition declares",
+            f"{len(undeclared):,} server(s) or client(s) use services that no definition or generated code in the scan "
+            "declares: the definition lives in another repository or a dependency, or the service was renamed.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{item['file']}:{item['line']} {item['framework']} {item['role']} {item['service']}"
+                      for item in undeclared[:MAX_LISTED]],
+        ))
+    return value, findings
+
+
 MAX_INTEGRATION_ITEMS = 5000
 MAX_INTEGRATION_PACKAGES = 500
 
@@ -2373,6 +2511,7 @@ _PASSES = (
     ("frontend", _component_graph),
     ("endpoints", _endpoint_routes),
     ("graphql", _graphql),
+    ("rpc", _rpc),
     ("integration", _integration),
     ("network_services", _network_services),
 )

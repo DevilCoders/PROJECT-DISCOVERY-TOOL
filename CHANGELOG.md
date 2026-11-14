@@ -228,6 +228,20 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: gRPC, Protocol Buffers, Thrift and Avro services, RPC frameworks and generated code
+- `api-rpc`: a Protocol Buffers tokenizer and parser (syntax or edition, package, imports, options,
+  messages with their fields, maps and oneofs, nested types, enums; services with request and response
+  types, streaming kinds and `google.api.http` routes), and a token scanner for Thrift services and
+  Avro IDL protocols.
+- RPC servers and clients in code: gRPC in Python, Go, Java, Kotlin, C#, C++, Rust (tonic), Node.js,
+  Swift, Dart, Ruby and PHP; Connect, Twirp, gRPC-Web, Apache Thrift, Apache Dubbo, tRPC (with its
+  procedures), Go `net/rpc` and Kitex. Forms ordinary code shares count only in files that import the
+  framework.
+- Generated code from protoc plugins and RPC compilers, by file name and generator header, with the
+  services it generates clients and servers for.
+- The code index's `rpc` pass ties each service to its definition, generated code, servers and clients:
+  services without a server, and servers and clients of services no definition declares.
+
 ### Added: GraphQL schemas, operations, resolvers, federation and subscriptions
 - `api-graphql`: a GraphQL tokenizer and parser for `.graphql`, `.gql` and `.graphqls` files and GraphQL
   embedded in code (`gql` tags, `buildSchema`, Python `gql(...)`, C# `AddDocumentFromString`): root fields

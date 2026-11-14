@@ -40,6 +40,7 @@ def builtin_analyzers() -> list[Analyzer]:
     from .api.integration import IntegrationAnalyzer
     from .api.messaging import MessagingIntelligenceAnalyzer
     from .api.routes import APIEndpointAnalyzer
+    from .api.rpc import RPCAnalyzer
     from .api.styles import APITypeAnalyzer
     from .code.concurrency import ConcurrencyAnalyzer
     from .code.index import CodeIndexAnalyzer
@@ -119,6 +120,7 @@ def builtin_analyzers() -> list[Analyzer]:
         APIContractAnalyzer(),
         APIEndpointAnalyzer(),
         GraphQLAnalyzer(),
+        RPCAnalyzer(),
         AccessibilityAnalyzer(),
         SQLSchemaAnalyzer(),
         MigrationIntelligenceAnalyzer(),
