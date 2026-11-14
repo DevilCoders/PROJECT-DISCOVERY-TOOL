@@ -15,10 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Iterator
 
-from .adapters import convert
+from .adapters import convert, exploit_maturity, known_exploited
 from .cvss import base_score, qualitative_severity
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _MAX_ZIP_MEMBERS = 5_000_000
 _MAX_ZIP_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
 _IMPORT_BATCH = 500
@@ -56,7 +56,16 @@ CREATE TABLE IF NOT EXISTS affected_packages (
 );
 CREATE INDEX IF NOT EXISTS idx_affected_lookup
 ON affected_packages(ecosystem, package_name);
+CREATE TABLE IF NOT EXISTS known_exploited (
+    cve TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    date_added TEXT NOT NULL,
+    due_date TEXT NOT NULL,
+    ransomware TEXT NOT NULL,
+    name TEXT NOT NULL
+);
 """
+_MAX_KNOWN_EXPLOITED = 1_000_000
 
 
 def normalize_ecosystem(ecosystem: str) -> str:
@@ -169,6 +178,26 @@ def _advisory_files(source: Path) -> Iterator[tuple[Path, str]]:
                 yield path, path.relative_to(source).as_posix()
 
 
+def _timestamp(value: Any) -> datetime | None:
+    """An advisory's ISO 8601 time (UTC when it names no zone), or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text[-1:] in {"Z", "z"}:
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _older(candidate: Any, stored: Any) -> bool:
+    """Whether a record was modified before the stored copy (False when either time is unknown)."""
+    new, old = _timestamp(candidate), _timestamp(stored)
+    return new is not None and old is not None and new < old
+
+
 def _read_bounded(stream, limit: int) -> bytes | None:
     """At most ``limit`` bytes of a stream, or None when it holds more."""
     data = stream.read(limit + 1)
@@ -268,8 +297,15 @@ class VulnerabilityDatabase:
                 "(its advisory tables are missing); import an OSV snapshot with `pdt vuln-db import`."
             )
         self._has_keys = {"ecosystem_key", "name_key"} <= columns
+        # Databases from before schema 3, opened read-only, have neither.
+        self._has_exploited = "known_exploited" in tables
+        self._has_maturity = "exploit_maturity" in {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(advisories)")
+        }
 
     def _migrate(self) -> None:
+        if "exploit_maturity" not in {row[1] for row in self.connection.execute("PRAGMA table_info(advisories)")}:
+            self.connection.execute("ALTER TABLE advisories ADD COLUMN exploit_maturity TEXT")
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(affected_packages)")}
         if "ecosystem_key" not in columns:
             self.connection.execute("ALTER TABLE affected_packages ADD COLUMN ecosystem_key TEXT")
@@ -385,6 +421,8 @@ class VulnerabilityDatabase:
                              f"directory): {source}")
         imported = 0
         skipped = 0
+        superseded = 0
+        exploited = 0
         errors: list[str] = []
         affected_count = 0
         pending = 0
@@ -408,6 +446,14 @@ class VulnerabilityDatabase:
                     skipped += 1
                     errors.append(f"{relative}: not a supported advisory record or feed")
                     continue
+                if kind == "kev":
+                    stored_kev = self._store_known_exploited(document)
+                    if stored_kev is None:
+                        superseded += 1  # the database holds a newer catalog
+                    else:
+                        exploited += stored_kev
+                        formats["kev"] = formats.get("kev", 0) + stored_kev
+                    continue
                 if kind == "osv" and len(raw) > max_record_bytes:
                     skipped += 1
                     errors.append(f"{relative}: record exceeds {max_record_bytes} byte import budget")
@@ -425,12 +471,17 @@ class VulnerabilityDatabase:
                                       f"{'y' if len(malformed) == 1 else 'ies'} skipped")
                         data = {**data, "affected": [entry for entry in data["affected"] if not _malformed_affected(entry)]}
                     try:
-                        affected_count += self._store_advisory(data, relative)
-                        imported += 1
-                        stored += 1
+                        stored_rows = self._store_advisory(data, relative)
                     except sqlite3.Error as exc:
                         skipped += 1
                         errors.append(f"{relative}: {type(exc).__name__}: {exc}")
+                    else:
+                        if stored_rows is None:
+                            superseded += 1  # the database holds a newer copy
+                        else:
+                            affected_count += stored_rows
+                            imported += 1
+                            stored += 1
                     pending += 1
                     if pending >= _IMPORT_BATCH:
                         self.connection.execute("COMMIT")
@@ -450,14 +501,46 @@ class VulnerabilityDatabase:
             "imported_advisories": imported,
             "affected_package_records": affected_count,
             "formats": dict(sorted(formats.items())),
+            "known_exploited_records": exploited,
+            "superseded_records": superseded,
             "skipped_records": skipped,
             "errors": errors[:200],
             "database": str(self.path),
             "imported_at": status.get("last_imported_at"),
         }
 
-    def _store_advisory(self, data: dict[str, Any], relative: str) -> int:
+    def _store_known_exploited(self, document: dict[str, Any]) -> int | None:
+        """Replace the stored Known Exploited Vulnerabilities catalog with this one and return
+        its entry count; None, storing nothing, when the stored catalog was released later."""
+        released = str(document.get("dateReleased") or "")[:40]
+        stored = self.connection.execute("SELECT value FROM metadata WHERE key='kev_date_released'").fetchone()
+        if stored is not None and _older(released, stored[0]):
+            return None
+        rows = []
+        for row in known_exploited(document):
+            rows.append(row)
+            if len(rows) >= _MAX_KNOWN_EXPLOITED:
+                break
+        self.connection.execute("DELETE FROM known_exploited")
+        self.connection.executemany(
+            "INSERT OR REPLACE INTO known_exploited (cve, source, date_added, due_date, ransomware, name) "
+            "VALUES (?, ?, ?, ?, ?, ?)", rows,
+        )
+        self.connection.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", [
+            ("kev_catalog_version", str(document.get("catalogVersion") or "")[:40]),
+            ("kev_date_released", released),
+            ("kev_imported_at", datetime.now(timezone.utc).isoformat()),
+        ])
+        return len(rows)
+
+    def _store_advisory(self, data: dict[str, Any], relative: str) -> int | None:
+        """Store one advisory, replacing a stored copy, and return its affected-package row
+        count. When the stored copy was modified later, store nothing and return None: an
+        older snapshot must not undo a correction, a withdrawal or a newer range."""
         advisory_id = str(data["id"])
+        stored = self.connection.execute("SELECT modified FROM advisories WHERE id=?", (advisory_id,)).fetchone()
+        if stored is not None and _older(data.get("modified"), stored[0]):
+            return None
         aliases = sorted({
             str(item) for item in _items(data.get("aliases")) if isinstance(item, str) and item
         })
@@ -486,13 +569,13 @@ class VulnerabilityDatabase:
             self.connection.execute(
                 """INSERT OR REPLACE INTO advisories
                 (id, aliases_json, summary, details, severity, published,
-                 modified, withdrawn, references_json, source_file)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 modified, withdrawn, references_json, source_file, exploit_maturity)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     advisory_id, json.dumps(aliases), str(data.get("summary") or advisory_id)[:4000],
                     str(data.get("details") or "")[:100_000], _severity(data),
                     data.get("published"), data.get("modified"), data.get("withdrawn"),
-                    json.dumps(references), relative,
+                    json.dumps(references), relative, exploit_maturity(data),
                 ),
             )
             self.connection.execute("DELETE FROM affected_packages WHERE advisory_id=?", (advisory_id,))
@@ -564,10 +647,37 @@ class VulnerabilityDatabase:
                 "affected": json.loads(row["affected_json"]),
                 "ecosystem": row["affected_ecosystem"],
                 "source_file": row["source_file"],
+                "exploit_maturity": row["exploit_maturity"] if self._has_maturity else None,
             }
             for row in rows
         ]
-        return self._severities_by_alias(results)
+        return self._known_exploited(self._severities_by_alias(results))
+
+    def _known_exploited(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Each advisory's entry in the Known Exploited Vulnerabilities catalog, found by its
+        ID or an alias (``known_exploited``: source, CVE, date added, due date, ransomware use)."""
+        if not self._has_exploited or not results:
+            return results
+        identifiers = sorted({key for item in results for key in [item["id"], *item["aliases"]]
+                              if str(key).upper().startswith("CVE-")})[:900]
+        if not identifiers:
+            return results
+        catalog = {
+            row["cve"]: dict(row) for row in self.connection.execute(
+                "SELECT cve, source, date_added, due_date, ransomware, name FROM known_exploited "
+                f"WHERE cve IN ({','.join('?' * len(identifiers))})", [key.upper() for key in identifiers],
+            )
+        }
+        for item in results:
+            entry = next((catalog[key.upper()] for key in [item["id"], *item["aliases"]] if key.upper() in catalog), None)
+            if entry is not None:
+                item["known_exploited"] = entry
+        return results
+
+    def known_exploited_count(self) -> int:
+        if not self._has_exploited:
+            return 0
+        return self.connection.execute("SELECT COUNT(*) FROM known_exploited").fetchone()[0]
 
     def _severities_by_alias(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """An advisory without a severity takes the severity of an imported record it aliases
@@ -606,6 +716,7 @@ class VulnerabilityDatabase:
             "affected_package_records": affected_count,
             "ecosystems": {row[0]: row[1] for row in ecosystem_rows},
             "indexed_lookup": self._has_keys,
+            "known_exploited_count": self.known_exploited_count(),
             **metadata,
         }
         imported_at = metadata.get("last_imported_at")

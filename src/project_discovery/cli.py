@@ -122,6 +122,7 @@ from .reporting.writers import (
     write_remote_batch_summary, write_reports,
 )
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
+from .vulnerabilities.vex import VexDocuments, load_vex
 
 
 def now() -> str:
@@ -416,7 +417,9 @@ def _describe_inventory_options(options: dict) -> dict[str, str]:
 def _describe_analysis_settings(settings: dict | None) -> dict[str, str]:
     """The finding-shaping settings as the command-line spellings that produce them."""
     digest = (settings or {}).get("provider_map")
-    return {"--provider-map": f"a map with SHA-256 {digest[:12]}" if digest else "none"}
+    vex = (settings or {}).get("vex")
+    return {"--provider-map": f"a map with SHA-256 {digest[:12]}" if digest else "none",
+            "--vex": f"documents with SHA-256 {vex[:12]}" if vex else "none"}
 
 
 def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict, settings: dict | None = None) -> dict | None:
@@ -595,7 +598,7 @@ def _lockfile_sources(root: Path, records, skipped: list[str], memory_source=Non
 
 def _run_online_vulnerability_lookup(
     console: Console, options: OnlineVulnerabilityOptions, root: Path, records,
-    finding_store, *, inventory_only: bool, memory_source=None,
+    finding_store, *, inventory_only: bool, memory_source=None, vex=(),
 ) -> dict:
     """Run the opt-in OSV.dev lookup in the coordinator and persist its findings."""
     if inventory_only:
@@ -607,7 +610,7 @@ def _run_online_vulnerability_lookup(
         + " (sends package ecosystem, name and version only)", "cyan",
     )
     skipped: list[str] = []
-    result = OnlineVulnerabilityLookup(options).run(
+    result = OnlineVulnerabilityLookup(options, vex).run(
         _lockfile_sources(root, records, skipped, memory_source),
     )
     finding_store.extend_findings(result.findings)
@@ -672,12 +675,17 @@ def run_scan(
     gpu: bool = False,
     gpu_min_mb: int = GPU_DEFAULT_THRESHOLD_BYTES // (1024 * 1024),
     provider_map: ProviderMap | None = None,
+    vex: VexDocuments | None = None,
 ) -> int:
     # The hosting-provider fingerprints this scan classifies hosts with (--provider-map; None:
     # none), in this process and in the analyzer workers, which receive the same map.
     configure_provider_map(provider_map)
     provider_map = configured_provider_map()
     analysis_settings = {"provider_map": provider_map.sha256} if provider_map else {}
+    if vex is not None:
+        # VEX statements shape the vulnerability findings: --resume must not mix two sets.
+        analysis_settings["vex"] = vex.sha256
+    vex_statements = vex.statements if vex is not None else ()
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
     if jobs < 0 or jobs > 64:
@@ -759,6 +767,8 @@ def run_scan(
         vulnerability_db_status["sources"] = (["local-database"] if vulnerability_db is not None else []) + (
             ["osv.dev"] if online_vulnerabilities is not None else []
         )
+        if vex is not None:
+            vulnerability_db_status["vex"] = vex.describe()
         if online_vulnerabilities is not None and online_vulnerabilities.cache_path is not None:
             cache_location = online_vulnerabilities.cache_path.expanduser().resolve()
             if cache_location == root or root in cache_location.parents:
@@ -903,7 +913,7 @@ def run_scan(
                 memory_source.staged_plugins = sorted(plugin_names)
         try:
             if vulnerability_db is not None:
-                analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db))
+                analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db, vex_statements))
             # The worker pool serves both per-file analysis and import-graph parsing.
             engine = AnalysisExecutor(
                 executor, worker_count, analyzers,
@@ -1192,7 +1202,7 @@ def run_scan(
                     phases.step("correlation", "online_vulnerabilities")
                     vulnerability_db_status["online"] = _run_online_vulnerability_lookup(
                         console, online_vulnerabilities, root, records, finding_store,
-                        inventory_only=inventory_only, memory_source=memory_source,
+                        inventory_only=inventory_only, memory_source=memory_source, vex=vex_statements,
                     )
                     timer.lap("online_vulnerabilities")
                 if inventory_only:
@@ -2070,6 +2080,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use a local OSV advisory SQLite database; scanning performs no network access",
     )
     scan.add_argument(
+        "--vex", type=Path, action="append", default=[], metavar="FILE",
+        help="Apply an OpenVEX, CycloneDX VEX or CSAF VEX document to the vulnerability findings "
+             "(repeatable): not_affected and fixed statements turn matching findings into INFO "
+             "findings that say so. Needs --vuln-db or --vuln-online",
+    )
+    scan.add_argument(
         "--no-download-plugins", action="store_true",
         help="With --no-download, also run sandboxed third-party plugins: each file a plugin analyzes "
              "is copied into the plugin host's private folder under OUTPUT/.pdt-cache/plugins for that "
@@ -2307,9 +2323,16 @@ def main() -> None:
                 if imported.get("formats"):
                     print("[ INFO ] Records by source format: " + ", ".join(
                         f"{kind} {count:,}" for kind, count in sorted(imported["formats"].items())))
+                if imported.get("known_exploited_records"):
+                    print(f"[ INFO ] Known exploited vulnerabilities catalog: {imported['known_exploited_records']:,} "
+                          "entries (it replaces the stored catalog).")
+                if imported.get("superseded_records"):
+                    print(f"[ INFO ] {imported['superseded_records']:,} record(s) older than the copies already "
+                          "stored were kept out (superseded).")
                 for error in imported["errors"][:20]:
                     print("[ WARNING ] " + error)
-                if not imported["imported_advisories"]:
+                if not (imported["imported_advisories"] or imported.get("known_exploited_records")
+                        or imported.get("superseded_records")):
                     print("[ ERROR ] No advisory was imported; the snapshot's provenance is unchanged.")
                     raise SystemExit(EXIT_USAGE)
                 raise SystemExit(0 if imported["skipped_records"] == 0 else 1)
@@ -2330,6 +2353,10 @@ def main() -> None:
             if status.get("stale"):
                 print(f"[ WARNING ] The snapshot is older than {status['stale_after_days']} days; "
                       "advisories published since are missing.")
+            if status.get("known_exploited_count"):
+                print(f"[ INFO ] Known exploited vulnerabilities: {status['known_exploited_count']:,} "
+                      f"(catalog {status.get('kev_catalog_version') or 'unknown'}, "
+                      f"released {status.get('kev_date_released') or 'unknown'})")
             for ecosystem, count in status["ecosystems"].items():
                 print(f"[ ECOSYSTEM ] {ecosystem}: {count}")
             raise SystemExit(0)
@@ -2508,6 +2535,14 @@ def main() -> None:
                     parser.error(f"--provider-map {args.provider_map}: {exc}")
             # Before the URL targets are parsed: their providers come from the map too.
             configure_provider_map(provider_map)
+            vex_documents = None
+            if args.vex:
+                if args.vuln_db is None and not args.vuln_online:
+                    parser.error("--vex needs --vuln-db or --vuln-online: its statements apply to vulnerability findings")
+                try:
+                    vex_documents = load_vex(args.vex)
+                except ValueError as exc:
+                    parser.error(str(exc))
             no_download_options = None
             api_options = (
                 ("--api-provider", args.api_provider != "auto"), ("--api-url", args.api_url is not None),
@@ -2608,6 +2643,7 @@ def main() -> None:
                 "skip_oversized": args.skip,
                 "ignores": set(args.exclude_dir),
                 "vulnerability_db": args.vuln_db,
+                "vex": vex_documents,
                 "jobs": args.jobs,
                 "fail_on": args.fail_on,
                 "strict": args.strict,
@@ -2675,6 +2711,7 @@ def main() -> None:
                 domain_budgets=list(args.domain_budget),
                 online_vulnerabilities=online_vulnerabilities,
                 provider_map=provider_map,
+                vex=vex_documents,
             ))
 
         if not formats or formats - {"json", "markdown"}:

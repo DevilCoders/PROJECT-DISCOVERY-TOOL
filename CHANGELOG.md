@@ -228,6 +228,24 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: CPE matching, superseded advisories, exploit maturity and VEX
+- SBOM components without a package URL are matched by their CPE (CycloneDX `cpe`, SPDX
+  `cpe23Type`) against NVD criteria. The match uses the version bounds and the other CPE
+  attributes, such as target software, where both sides state them.
+- On a duplicate ID, the import keeps the copy modified later, so an older snapshot cannot undo
+  a correction or a withdrawal. The older copy is counted as superseded. Withdrawn advisories
+  now have a test showing they give no findings.
+- `pdt vuln-db import` reads CISA's Known Exploited Vulnerabilities catalog. A confirmed finding
+  of a listed CVE names the entry and is raised to at least HIGH. The CVSS `E` metric gives an
+  advisory's exploit maturity.
+- `pdt scan --vex FILE` applies OpenVEX, CycloneDX VEX and CSAF VEX documents to local and
+  online findings. `not_affected` and `fixed` statements turn findings into INFO findings that
+  say so; other statements are added to the finding. `--resume` refuses another set of
+  documents.
+- Advisory database schema 3: the `known_exploited` table and an `exploit_maturity` column.
+- Report schema 1.23: `metrics.vulnerability_intelligence.vex` (documents, statements by status,
+  SHA-256).
+
 ### Added: Maven, Go, Pub, Hackage, R, Conan and vendor version ordering
 - Maven `ECOSYSTEM` ranges were `UNKNOWN` for every Gradle-locked package; they are now
   evaluated in Maven's version order. The ordering is checked against `ComparableVersion`'s own

@@ -39,7 +39,9 @@ from typing import Any, Literal, Sequence
 # coverage and the limits that stopped it) and archive_members lists, and metrics.archives.
 # 1.22 added metrics.provider_map and scan.provider_map (the --provider-map file name, SHA-256,
 # entries and kinds) and provider_source to the remote source (provider-map, built-in or host-name).
-REPORT_SCHEMA_VERSION = "1.22"
+# 1.23 added metrics.vulnerability_intelligence.vex (the --vex documents, statement count by
+# status and SHA-256).
+REPORT_SCHEMA_VERSION = "1.23"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

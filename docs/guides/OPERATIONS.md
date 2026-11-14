@@ -440,8 +440,10 @@ The terminal summary also prints phase timings, including report writing.
 pdt vuln-db import /data/osv/all.zip --db ~/.pdt/advisories.sqlite3   # OSV bundle, offline
 pdt vuln-db import /data/nvd --db ~/.pdt/advisories.sqlite3            # nvdcve-2.0-*.json.gz feeds
 pdt vuln-db import /data/debian-tracker.json --db ~/.pdt/advisories.sqlite3
+pdt vuln-db import /data/known_exploited_vulnerabilities.json --db ~/.pdt/advisories.sqlite3   # CISA KEV
 pdt vuln-db status --db ~/.pdt/advisories.sqlite3
 pdt scan /src --output /reports/src --vuln-db ~/.pdt/advisories.sqlite3
+pdt scan /src --output /reports/src --vuln-db ~/.pdt/advisories.sqlite3 --vex /src/vex/app.openvex.json
 ```
 
 One database can hold every source: OSV records, NVD feeds, GitHub advisory exports, the Debian

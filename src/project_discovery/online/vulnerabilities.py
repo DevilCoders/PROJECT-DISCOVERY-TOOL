@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 from ..analyzers.dependencies.lockfile_parsers import (
     MAX_LOCKFILE_PACKAGE_ENTRIES,
@@ -34,6 +34,7 @@ from ..analyzers.dependencies.vulnerabilities import _affected_version, advisory
 from ..core.source_utils import SourceBudgetExceeded, redact_source_excerpt
 from ..models import Finding
 from ..vulnerabilities.database import osv_record_to_advisories
+from ..vulnerabilities.vex import VexStatement
 from .advisories import GITHUB_API_URL, NVD_API_URL, GhsaClient, NvdClient, is_cve_id, is_ghsa_id
 from .cache import DEFAULT_CACHE_TTL_SECONDS, ResponseCache, default_cache_path
 from .http import DEFAULT_TIMEOUT, HttpClient, NetworkError
@@ -220,8 +221,10 @@ def _placeholder_advisory(identifier: str, query: PackageQuery, summary: str) ->
 class OnlineVulnerabilityLookup:
     """Run one online lookup for a set of lockfiles and build findings and provenance."""
 
-    def __init__(self, options: OnlineVulnerabilityOptions) -> None:
+    def __init__(self, options: OnlineVulnerabilityOptions, vex: Sequence[VexStatement] = ()) -> None:
         self.options = options
+        # The operator's VEX statements (pdt scan --vex), applied as offline.
+        self.vex = tuple(vex)
 
     def run(self, lockfiles: Iterable[LockfileSource]) -> OnlineLookupResult:
         options = self.options
@@ -369,7 +372,7 @@ class OnlineVulnerabilityLookup:
             for lockfile in sorted(paths_by_package[query]):
                 for finding in advisory_findings(
                     lockfile, package, matches,
-                    analyzer=ONLINE_ANALYZER_NAME, source_label="OSV.dev advisory",
+                    analyzer=ONLINE_ANALYZER_NAME, source_label="OSV.dev advisory", vex=self.vex,
                 ):
                     finding.evidence.append(
                         f"source: OSV.dev ({urllib.parse.urlsplit(options.osv_url).hostname}), "

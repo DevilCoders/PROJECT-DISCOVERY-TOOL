@@ -244,11 +244,13 @@ The baseline is not production-ready:
   - `pub_semver`, the Haskell PVP, R's `package_version` (CRAN, Bioconductor) and Conan 2.
   - dpkg, apk and rpm.
   - A documented vendor order for NVD CPE bounds, including exclusive starts.
-- [ ] Support CPE/purl matching, duplicate/alias resolution, withdrawn/superseded advisories, exploit maturity, CVSS vector parsing and VEX status.
-  - With tests: CVSS v2/v3 vector severity, alias merging (including severities taken from aliased NVD records) and package URLs mapped to OSV ecosystems. CycloneDX VEX `not_affected`, `false_positive` and `resolved` statements are left out at import.
-  - Withdrawn advisories are skipped, but no test covers this.
-  - NVD CPE ranges are evaluated from their bounds in a vendor order, but no inventory names CPEs yet.
-  - Missing: matching NVD CPE criteria against inventories, superseded advisories, exploit maturity, and VEX applied to scan findings.
+- [x] Support CPE/purl matching, duplicate/alias resolution, withdrawn/superseded advisories, exploit maturity, CVSS vector parsing and VEX status, each with tests ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#cpe-matching-exploitation-and-vex)):
+  - **CPE and purl matching.** SBOM components without a package URL are matched by their CPE against NVD criteria (bounds in the vendor order, other attributes where both state them). Package URLs map to OSV ecosystems, including the `distro` and `upstream` qualifiers.
+  - **Duplicates and aliases.** Aliases merge into one finding, and an aliased record supplies a missing severity.
+  - **Withdrawn and superseded.** Withdrawn advisories give no findings, and an older copy of a stored advisory is kept out.
+  - **Exploit maturity.** The CISA KEV catalog raises confirmed findings to at least HIGH, and the CVSS `E` metric is reported.
+  - **CVSS.** v2 and v3.x vectors are scored. v4.0 vectors are not; the advisory's own severity label is used for them.
+  - **VEX.** `pdt scan --vex` applies OpenVEX, CycloneDX VEX and CSAF VEX statements to local and online findings.
 - [ ] Resolve direct/transitive dependency graphs and retain parent path/provenance for vulnerable packages.
 - [ ] Add static dependency reachability evidence where symbol/call graphs support it; never claim exploitability from version matching alone.
 - [ ] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping.

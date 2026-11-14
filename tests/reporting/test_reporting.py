@@ -172,7 +172,7 @@ def test_markdown_writer_streams_without_compatibility_string_builder(tmp_path: 
 def test_json_report_includes_additive_inventory_schema(tmp_path: Path):
     path = write_reports(_result(), tmp_path, {"json"})[0]
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.22"
+    assert payload["schema_version"] == "1.23"
     assert payload["directories"][1]["path"] == "src"
     assert payload["symlinks"][0]["target_scope"] == "internal"
     assert payload["special_entries"][0]["entry_type"] == "fifo"
@@ -215,7 +215,7 @@ def test_json_and_html_report_writers_do_not_materialize_scanresult_dict(
     paths = write_reports(result, tmp_path, {"json", "html"})
     assert {path.suffix for path in paths} == {".json", ".html"}
     payload = json.loads((tmp_path / "discovery-report.json").read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.22"
+    assert payload["schema_version"] == "1.23"
     assert "const REPORT =" in (tmp_path / "discovery-report.html").read_text(encoding="utf-8")
 
 

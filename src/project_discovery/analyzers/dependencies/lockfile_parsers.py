@@ -114,6 +114,9 @@ class ResolvedPackage:
     ecosystem: str
     name: str
     version: str
+    # A CPE-named component's full CPE (its other attributes are checked against an NVD
+    # criterion's); "" for every other package.
+    cpe: str = ""
 
 
 def normalize_version(value: Any, *, strip_prefix: bool = False) -> str:
@@ -199,9 +202,11 @@ class _Collector:
         if host and number > 0 and (host in self.registries or len(self.registries) < MAX_REGISTRY_HOSTS):
             self.registries[host] += number
 
-    def add(self, name: Any, version: Any, registry: Any = None, ecosystem: str | None = None) -> bool:
+    def add(self, name: Any, version: Any, registry: Any = None, ecosystem: str | None = None, *,
+            cpe: str = "") -> bool:
         """Record one registry package; True when it is new (``registry``: where it came from;
-        ``ecosystem``: another than the lockfile's, as in a Deno lockfile's JSR packages)."""
+        ``ecosystem``: another than the lockfile's, as in a Deno lockfile's JSR packages;
+        ``cpe``: a CPE-named SBOM component's CPE)."""
         if not name or not version:
             return False
         name, text = str(name).strip(), normalize_version(version)
@@ -217,7 +222,7 @@ class _Collector:
         if _REMOTE_SPECIFIER.search(text):
             self.remote(name)
             return False
-        package = ResolvedPackage(ecosystem or self.ecosystem, name, text)
+        package = ResolvedPackage(ecosystem or self.ecosystem, name, text, cpe[:1000])
         if not package.name or not package.version or package in self.packages:
             return False
         if len(self.packages) >= self.max_entries:

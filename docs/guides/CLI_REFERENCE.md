@@ -110,6 +110,7 @@ pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color
 | Option | Default | Description |
 |---|---|---|
 | `--vuln-db FILE` | none | Match lockfile packages, installed OS packages (dpkg, apk, rpm) and SBOM components against a local advisory snapshot imported with `pdt vuln-db import`. No network access. The file must be outside the scanned project. |
+| `--vex FILE` | none | Apply an OpenVEX, CycloneDX VEX or CSAF VEX document to the vulnerability findings; repeatable. A `not_affected` or `fixed` statement turns matching findings into INFO findings titled "Not affected per VEX" or "Fixed per VEX". These keep their evidence and the statement's justification. An `affected` or `under_investigation` statement is added to the finding. A statement that names packages (OpenVEX subcomponents, CycloneDX `affects`, CSAF products with a purl) applies to those packages; one that names none applies to the whole scanned product. Needs `--vuln-db` or `--vuln-online`. `--resume` refuses another set of documents. |
 | `--vuln-online` | off | Look lockfile packages up in OSV.dev. Only the ecosystem, package name and version are sent, never file contents or paths. Failures are `UNKNOWN` coverage findings. |
 | `--vuln-enrich SOURCES` | none | With `--vuln-online`: add CVSS and CWE details from `nvd` (NVD CVE API 2.0) and/or `ghsa` (GitHub Advisory Database), comma-separated. Keys come from `NVD_API_KEY` and `GITHUB_TOKEN`. |
 | `--vuln-cache FILE` | `~/.pdt/online-vulnerability-cache.sqlite3` | With `--vuln-online`: the response cache, outside the scanned project. |
@@ -385,8 +386,9 @@ Imports advisories from a local file, directory tree or OSV `all.zip` into the d
 | Alpine secdb | each origin package per branch (`Alpine:v3.19`) |
 | CSAF 2.0 (Red Hat and other vendors) | each product with a package URL: fixed products give the fixed version, and known-affected products give exact versions |
 | CycloneDX vulnerabilities (VDR and VEX BOMs) | each affected component's package URL. VEX analyses that say `not_affected`, `false_positive` or `resolved` are left out. |
+| CISA Known Exploited Vulnerabilities catalog (`known_exploited_vulnerabilities.json`) | none: it marks the CVEs it lists, and findings of them say so and are raised to at least HIGH. A catalog replaces the stored one, unless the stored one was released later. |
 
-A file in no known format is skipped and reported, as is a corrupt compressed file or archive member. Exit 0 when every record imported, 1 when some were skipped (each is reported), and 2 when none could be imported (the database's snapshot provenance is then unchanged). The summary counts the records from each format.
+A file in no known format is skipped and reported, as is a corrupt compressed file or archive member. When an advisory ID is already stored, the copy modified later is kept. An older record changes nothing and is counted as superseded, so importing an old snapshot cannot undo a correction or a withdrawal. Exit 0 when every record imported or was superseded, 1 when some were skipped (each is reported), and 2 when none could be imported (the database's snapshot provenance is then unchanged). The summary counts the records from each format.
 
 | Option | Default | Description |
 |---|---|---|
@@ -399,7 +401,7 @@ A file in no known format is skipped and reported, as is a corrupt compressed fi
 pdt vuln-db status [--db FILE]
 ```
 
-Shows the advisory and affected-package counts, the last import and snapshot age (with a warning when the snapshot is stale), the snapshot source and the advisories per ecosystem. A missing database is an error (exit 2).
+Shows the advisory and affected-package counts, the last import and snapshot age (with a warning when the snapshot is stale), the snapshot source, the imported Known Exploited Vulnerabilities catalog (entries, version, release date) and the advisories per ecosystem. A missing database is an error (exit 2).
 
 | Option | Default | Description |
 |---|---|---|

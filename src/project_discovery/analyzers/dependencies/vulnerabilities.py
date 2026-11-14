@@ -4,6 +4,7 @@ from __future__ import annotations
 import functools
 import sqlite3
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,9 @@ from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
 from ...models import FileRecord, Finding
 from ...vulnerabilities.database import VulnerabilityDatabase
-from ...vulnerabilities.versions import comparator_for, compare_versions, go_pseudo_version
+from ...vulnerabilities.adapters import cpe_attributes_match, cpe_fields
+from ...vulnerabilities.versions import comparator_for, compare_vendor, compare_versions, go_pseudo_version
+from ...vulnerabilities.vex import CLEARING, VexStatement, vex_statement
 from ..base import Analyzer
 from .lockfile_parsers import (
     LOCKFILE_ECOSYSTEMS,
@@ -36,6 +39,22 @@ _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 
 def _normalise_version(value: str) -> str:
     return normalize_version(value, strip_prefix=True)
+
+
+# Distributions whose advisories PDT reads from their own files rather than OSV.
+_VENDOR_ADVISORY_ECOSYSTEMS = frozenset({"Red Hat", "Fedora", "openSUSE", "SUSE", "Mageia", "openEuler", "Photon OS"})
+
+
+def _coverage_hint(ecosystem: str) -> str:
+    """What to import so a snapshot covers an ecosystem."""
+    base = ecosystem.partition(":")[0]
+    if base == "CPE":
+        return "Import NVD CVE feeds, which name products by CPE."
+    if osv_covers(ecosystem) or base in OSV_ECOSYSTEMS:
+        return "Import an advisory snapshot that includes this ecosystem."
+    if base in _VENDOR_ADVISORY_ECOSYSTEMS:
+        return "Import the distribution's advisories (Red Hat publishes CSAF files)."
+    return f"OSV publishes no {ecosystem} advisories."
 
 
 def _compare_versions(left: str, right: str, ecosystem: str | None = None) -> int | None:
@@ -131,6 +150,10 @@ def _affected_version(
         normalized = {_normalise_version(str(item)) for item in versions}
         if _normalise_version(version) in normalized:
             return True, "explicit affected-version list"
+        # A CPE's version is a vendor's: 2.4 and 2.4.0 are one release.
+        if (ecosystem or "").upper() == "CPE" and any(
+                compare_vendor(_normalise_version(version), item) == 0 for item in normalized):
+            return True, "explicit affected-version list"
     ranges = affected.get("ranges", [])
     if not isinstance(ranges, list):
         return None, "advisory range data is malformed"
@@ -200,9 +223,17 @@ def match_advisories(
 ) -> list[tuple[dict[str, Any], bool, str]]:
     """Return (advisory, confirmed, reason) for advisories that may affect ``package``."""
     matches: list[tuple[dict[str, Any], bool, str]] = []
+    inventory_cpe = cpe_fields(package.cpe) if package.cpe else None
     for advisory in advisories:
         if advisory.get("withdrawn"):
             continue
+        if inventory_cpe is not None:
+            # An NVD criterion names one product build: its other attributes (target
+            # software, update, edition...) must fit the component's CPE.
+            specific = advisory["affected"].get("database_specific")
+            criteria = cpe_fields(specific.get("cpe")) if isinstance(specific, dict) else None
+            if criteria is not None and not cpe_attributes_match(inventory_cpe, criteria):
+                continue
         affected, reason = _affected_version(
             package.version, advisory["affected"], advisory.get("ecosystem") or package.ecosystem,
         )
@@ -218,11 +249,13 @@ def advisory_findings(
     *,
     analyzer: str = LOCAL_ANALYZER_NAME,
     source_label: str = "local advisory",
+    vex: Sequence[VexStatement] = (),
 ) -> list[Finding]:
     """One finding per group of advisories that describe the same vulnerability.
 
     Shared by the offline database matcher and the opt-in online lookup so both report
-    the same fields; ``source_label`` and ``analyzer`` record where the advisory came from.
+    the same fields; ``source_label`` and ``analyzer`` record where the advisory came from,
+    and ``vex`` holds the operator's VEX statements (pdt scan --vex).
     """
     if not matches:
         return []
@@ -235,7 +268,7 @@ def advisory_findings(
     return [
         _advisory_group_finding(
             lockfile_path, package, [row for item in group for row in rows_by_id[item["id"]]],
-            analyzer=analyzer, source_label=source_label,
+            analyzer=analyzer, source_label=source_label, vex=vex,
         )
         for group in _alias_groups([rows[0][0] for rows in rows_by_id.values()])
     ]
@@ -252,6 +285,7 @@ def _advisory_group_finding(
     *,
     analyzer: str,
     source_label: str,
+    vex: Sequence[VexStatement] = (),
 ) -> Finding:
     primary, confirmed, reason = next(
         (item for item in group if item[1]), group[0],
@@ -282,6 +316,22 @@ def _advisory_group_finding(
         # A confirmed match without an advisory severity is not a low-risk result.
         severity = "MEDIUM"
     related = f" Related advisories: {', '.join(ids[1:])}." if len(ids) > 1 else ""
+    # Exploitation: the CISA KEV catalog's entry, and the highest maturity a CVSS vector states.
+    exploited = next((advisory["known_exploited"] for advisory, _, _ in group if advisory.get("known_exploited")), None)
+    maturity = next((advisory["exploit_maturity"] for advisory, _, _ in group if advisory.get("exploit_maturity")), None)
+    exploitation_note = ""
+    if exploited:
+        exploitation_note = (
+            f"Known exploited: {exploited['cve']} is in the {exploited['source']} catalog"
+            + (f" since {exploited['date_added']}" if exploited.get("date_added") else "")
+            + (f"; known ransomware use: {exploited['ransomware']}" if exploited.get("ransomware") else "")
+            + (f"; remediation due {exploited['due_date']}" if exploited.get("due_date") else "") + ". "
+        )
+        if confirmed and _SEVERITY_ORDER.get(severity, 9) > _SEVERITY_ORDER["HIGH"]:
+            severity = "HIGH"
+            exploitation_note += "Severity raised to HIGH: the vulnerability is exploited in the wild. "
+    if maturity:
+        exploitation_note += f"Exploit maturity: {maturity}. "
     pseudo = go_pseudo_version(package.version) if package.ecosystem == "Go" else None
     pseudo_note = (
         f"{package.version} is a Go pseudo-version: commit {pseudo[2][:12]} of "
@@ -293,7 +343,7 @@ def _advisory_group_finding(
     detail = (
         f"{package.ecosystem} package {package.name}@{package.version} matched {source_label} "
         f"{primary['id']} ({reason}).{related} Aliases: {', '.join(aliases[:8]) or 'none recorded'}. "
-        f"Fixed version boundary: {fixed}. " + pseudo_note
+        f"Fixed version boundary: {fixed}. " + exploitation_note + pseudo_note
         + ("" if known or not confirmed else "The advisory does not record a severity. ")
         + "This is static dependency/advisory matching, not proof the package "
         "is loaded at runtime or that a vulnerable code path is reachable."
@@ -336,15 +386,36 @@ def _advisory_group_finding(
     ]
     if primary["modified"]:
         evidence.append(f"advisory_modified: {primary['modified']}")
+    if exploited:
+        evidence.append(f"known_exploited: {exploited['source']} {exploited['cve']} {exploited.get('date_added') or ''}".rstrip())
+    if maturity:
+        evidence.append(f"exploit_maturity: {maturity}")
     seen = set(evidence)
     for advisory, _, _ in group:
         for line in advisory.get("evidence_extra", ()):
             if line not in seen:
                 seen.add(line)
                 evidence.append(line)
+    title = f"{primary['id']}: {primary['summary']}"
+    statement = vex_statement(vex, [*ids, *aliases], package.ecosystem, package.name, package.version) if vex else None
+    if statement is not None:
+        note = (f"VEX statement ({statement.source}): {statement.status.replace('_', ' ')}"
+                + (f", {statement.justification.replace('_', ' ')}" if statement.justification else "")
+                + (f": {statement.detail}" if statement.detail else "") + ". ")
+        evidence.append(f"vex: {statement.status} ({statement.source})")
+        if statement.status in CLEARING:
+            # The operator states the product is not exposed: kept for the record, not counted.
+            severity = "INFO"
+            title = ("Not affected per VEX: " if statement.status == "not_affected" else "Fixed per VEX: ") + title
+            note += ("PDT matched the advisory to this package, but the VEX statement says the product is not "
+                     "exposed, so this is reported for the record and not as a vulnerability. ")
+            impact = "None stated: the VEX statement says the product is not affected. " + (impact or "")
+            recommendation = ("Keep the VEX statement current: review it when this package, its version or the "
+                              "code that uses it changes, and remove it once the package is upgraded.")
+        detail = note + detail
     return Finding(
         "vulnerabilities",
-        f"{primary['id']}: {primary['summary']}",
+        title,
         detail,
         confidence="CONFIRMED" if confirmed else "UNKNOWN",
         evidence=evidence,
@@ -368,8 +439,10 @@ class LocalVulnerabilityAnalyzer(Analyzer):
     domains = ("vulnerabilities", "dependency_resolution", "supply_chain")
     languages = tuple(sorted(set(LOCKFILE_ECOSYSTEMS.values())))
 
-    def __init__(self, database_path: Path):
+    def __init__(self, database_path: Path, vex: Sequence[VexStatement] = ()):
         self.database_path = database_path.expanduser()
+        # The operator's VEX statements (pdt scan --vex), applied to every finding.
+        self.vex = tuple(vex)
 
     def supports(self, record: FileRecord) -> bool:
         return (
@@ -428,8 +501,7 @@ class LocalVulnerabilityAnalyzer(Analyzer):
                         f"Ecosystem not covered by the local advisory snapshot: {record.path}",
                         f"The local advisory database holds no {ecosystem} advisories, so the "
                         f"{counts[ecosystem]:,} {ecosystem} packages of this lockfile were not checked. "
-                        + ("Import an advisory snapshot that includes this ecosystem." if osv_covers(ecosystem)
-                           or ecosystem.partition(":")[0] in OSV_ECOSYSTEMS else f"OSV publishes no {ecosystem} advisories."),
+                        + _coverage_hint(ecosystem),
                         confidence="UNKNOWN", evidence=[record.path, f"ecosystem: {ecosystem}"],
                         analyzer=self.name, severity="LOW",
                     ))
@@ -449,4 +521,4 @@ class LocalVulnerabilityAnalyzer(Analyzer):
         self, database: VulnerabilityDatabase, record: FileRecord, package: ResolvedPackage,
     ) -> list[Finding]:
         matches = match_advisories(package, database.query(package.ecosystem, package.name))
-        return advisory_findings(record.path, package, matches)
+        return advisory_findings(record.path, package, matches, vex=self.vex)

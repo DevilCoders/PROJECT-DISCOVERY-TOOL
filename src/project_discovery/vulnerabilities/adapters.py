@@ -162,16 +162,70 @@ def _nvd_severity(metrics: dict) -> list[dict]:
     return severity
 
 
+_CPE_PARTS = frozenset({"a", "o", "h", "*"})
+
+
+def cpe_fields(cpe: Any) -> list[str] | None:
+    """The eleven attributes of a CPE name (part, vendor, product, version, update, edition,
+    language, sw_edition, target_sw, target_hw, other), lower-cased and unescaped, from a CPE
+    2.3 formatted string or a 2.2 URI; "*" is ANY and "-" NA. None for anything else, or for
+    a name without a vendor and product."""
+    if not isinstance(cpe, str) or len(cpe) > 1000:
+        return None
+    text = cpe.strip()
+    if text[:8].lower() == "cpe:2.3:":
+        fields, current, escaped = [], "", False
+        for char in text[8:]:
+            if escaped:
+                current += char
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == ":":
+                fields.append(current)
+                current = ""
+            else:
+                current += char
+        fields.append(current)
+        if len(fields) != 11:
+            return None
+    elif text[:5].lower() == "cpe:/":
+        parts = [unquote(part) for part in text[5:].split(":")]
+        if len(parts) > 7:
+            return None
+        part, vendor, product, version, update, edition, language = parts + [""] * (7 - len(parts))
+        extra = ["*"] * 4
+        if edition.startswith("~"):  # 2.2's packed edition: ~edition~sw_edition~target_sw~target_hw~other
+            packed = edition[1:].split("~")
+            if len(packed) == 5:
+                edition, extra = packed[0], packed[1:]
+        # In a 2.2 URI an empty component is ANY.
+        fields = [value or "*" for value in (part, vendor, product, version, update, edition, language, *extra)]
+    else:
+        return None
+    fields = [value.lower() for value in fields]
+    if fields[0] not in _CPE_PARTS or fields[1] in {"", "*", "-"} or fields[2] in {"", "*", "-"}:
+        return None
+    return fields
+
+
+def cpe_attributes_match(inventory: list[str], criteria: list[str]) -> bool:
+    """Whether an inventory CPE can name what an NVD criterion names, its version aside (the
+    ranges decide that): every attribute ANY on either side, or the same on both."""
+    for index, (have, want) in enumerate(zip(inventory, criteria, strict=False)):
+        if index != 3 and have != want and "*" not in (have, want):
+            return False
+    return True
+
+
 def _cpe_affected(match: dict) -> dict | None:
     """An OSV affected entry for one vulnerable CPE match: ``vendor:product`` in the CPE
     ecosystem, the version or bounds as written, and the criteria kept for CPE matching."""
     criteria = match.get("criteria") or match.get("cpe23Uri")
-    if not match.get("vulnerable") or not isinstance(criteria, str) or not criteria.startswith("cpe:2.3:"):
+    fields = cpe_fields(criteria) if match.get("vulnerable") else None
+    if fields is None or not str(criteria).lower().startswith("cpe:2.3:"):
         return None
-    fields = criteria.split(":")
-    if len(fields) < 6:
-        return None
-    vendor, product, version = fields[3], fields[4], fields[5]
+    vendor, product, version = fields[1], fields[2], fields[3]
     bounds = {key: match[key] for key in ("versionStartIncluding", "versionStartExcluding", "versionEndIncluding",
                                           "versionEndExcluding") if isinstance(match.get(key), str)}
     entry: dict[str, Any] = {"package": {"ecosystem": "CPE", "name": f"{vendor}:{product}"},
@@ -185,8 +239,8 @@ def _cpe_affected(match: dict) -> dict | None:
         elif "versionEndIncluding" in bounds:
             events.append({"last_affected": bounds["versionEndIncluding"]})
         entry["ranges"] = [{"type": "CPE", "events": events, "database_specific": dict(bounds)}]
-    elif version not in {"*", "-", ""}:
-        entry["versions"] = [version]
+    elif version not in {"*", ""}:
+        entry["versions"] = [version]  # "-" (no version) names only components without one
     else:
         entry["ranges"] = [{"type": "CPE", "events": [{"introduced": "0"}]}]
     return entry
@@ -215,7 +269,9 @@ def _nvd_record(cve: dict, *, published: Any, modified: Any, description: str, r
     return {
         "id": identifier, "aliases": [], "summary": description.split(". ", 1)[0][:300] or identifier,
         "details": description, "published": published, "modified": modified,
-        "withdrawn": modified if rejected else None, "severity": severity, "affected": affected,
+        # A rejected CVE is withdrawn even when the record gives no time for it.
+        "withdrawn": (modified or published or "rejected") if rejected else None, "severity": severity,
+        "affected": affected,
         "references": [{"type": "WEB", "url": url} for url in references[:200]],
         "database_specific": {"source": "NVD", "cwe": weaknesses[:20]},
     }
@@ -538,6 +594,48 @@ def _cyclonedx(document: dict) -> Iterator[dict]:
 # ---------------------------------------------------------------------------------------------
 
 
+_CVE_ID = re.compile(r"CVE-[0-9]{4}-[0-9]{4,12}")
+
+
+def known_exploited(document: dict) -> Iterator[tuple[str, str, str, str, str, str]]:
+    """(CVE, catalog, date added, remediation due date, known ransomware use, name) of each
+    vulnerability in CISA's Known Exploited Vulnerabilities catalog (its JSON feed)."""
+    for item in map(_mapping, _items(document.get("vulnerabilities"))):
+        cve = str(item.get("cveID") or "").strip().upper()
+        if not _CVE_ID.fullmatch(cve):
+            continue
+        yield (cve, "CISA KEV", _text(item.get("dateAdded"), 40), _text(item.get("dueDate"), 40),
+               _text(item.get("knownRansomwareCampaignUse"), 40),
+               _text(item.get("vulnerabilityName"), 300) or f"{_text(item.get('vendorProject'), 100)} "
+               f"{_text(item.get('product'), 100)}".strip())
+
+
+# CVSS exploit-maturity values: v2 and v3 E (temporal) and v4 E (threat), lowest first.
+_EXPLOIT_MATURITY = {
+    "U": (1, "unproven"), "POC": (2, "proof-of-concept"), "P": (2, "proof-of-concept"),
+    "F": (3, "functional"), "H": (4, "high"),
+}
+_EXPLOIT_MATURITY_V4 = {"U": (1, "unreported"), "P": (2, "proof-of-concept"), "A": (4, "attacked")}
+
+
+def exploit_maturity(record: dict) -> str | None:
+    """The highest exploit maturity an advisory's CVSS vectors state (their E metric, as
+    ``functional (CVSS:3.1 E:F)``), or None when none does. NVD's vectors hold base metrics
+    only; the CISA KEV catalog says more."""
+    best: tuple[int, str] | None = None
+    for entry in map(_mapping, _items(record.get("severity"))):
+        vector = entry.get("score")
+        if not isinstance(vector, str) or "E:" not in vector:
+            continue
+        metrics = dict(part.split(":", 1) for part in vector.split("/") if part.count(":") == 1)
+        value = metrics.get("E", "")
+        version = metrics.get("CVSS", "2.0")
+        known = (_EXPLOIT_MATURITY_V4 if version.startswith("4") else _EXPLOIT_MATURITY).get(value)
+        if known and (best is None or known[0] > best[0]):
+            best = (known[0], f"{known[1]} (CVSS:{version} E:{value})")
+    return best[1] if best else None
+
+
 def detect_format(document: Any) -> str:
     """The advisory format of a parsed JSON document."""
     if isinstance(document, list):
@@ -550,6 +648,8 @@ def detect_format(document: Any) -> str:
         return "unknown"
     if document.get("id") and isinstance(document.get("affected"), list):
         return "osv"
+    if isinstance(document.get("vulnerabilities"), list) and "catalogVersion" in document:
+        return "kev"
     if isinstance(document.get("vulnerabilities"), list) and (
             document.get("format") == "NVD_CVE" or any(isinstance(_mapping(item).get("cve"), dict)
                                                        for item in document["vulnerabilities"][:3])):
@@ -569,7 +669,8 @@ def detect_format(document: Any) -> str:
 
 
 def convert(document: Any) -> tuple[str, Iterator[dict]]:
-    """(format, OSV records) of a parsed advisory document; format "unknown" yields none."""
+    """(format, OSV records) of a parsed advisory document; format "unknown" yields none, and
+    so does "kev" (the importer reads that catalog with known_exploited)."""
     kind = detect_format(document)
     if kind == "osv":
         return kind, iter([document])

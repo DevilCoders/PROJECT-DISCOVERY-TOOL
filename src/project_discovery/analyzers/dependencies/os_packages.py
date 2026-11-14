@@ -18,7 +18,7 @@ from typing import Any
 
 from ...core.safe_sqlite import plain_tables, untrusted_database
 from ...core.source_utils import read_bytes_bounded, read_text_bounded
-from ...vulnerabilities.adapters import purl_package, ubuntu_ecosystem
+from ...vulnerabilities.adapters import cpe_fields, purl_package, ubuntu_ecosystem
 
 # The databases' paths below a root file system, by lockfile key.
 OS_DATABASES = {
@@ -174,25 +174,51 @@ def rpmdb(data: bytes, out, ecosystem: str) -> None:
             out.add(name, f"{epoch}:{full}" if epoch and epoch != "0" else full, None, ecosystem)
 
 
-def sbom(document: Any, out) -> None:
-    """A CycloneDX or SPDX JSON SBOM's components, by their package URLs (each in its own
-    ecosystem); components without one are not packages PDT can match."""
-    if not isinstance(document, dict):
-        return
-    purls: list[str] = []
+def _sbom_components(document: dict, limit: int) -> list[tuple[str, list[str], str]]:
+    """(purl, CPEs, version) of each component of a CycloneDX or SPDX JSON SBOM."""
+    components: list[tuple[str, list[str], str]] = []
     if document.get("bomFormat") == "CycloneDX":
         stack = [item for item in document.get("components") or [] if isinstance(item, dict)]
-        while stack and len(purls) < out.max_entries:
+        while stack and len(components) < limit:
             component = stack.pop()
             stack.extend(item for item in component.get("components") or [] if isinstance(item, dict))
-            if isinstance(component.get("purl"), str):
-                purls.append(component["purl"])
+            cpe = component.get("cpe")
+            components.append((str(component.get("purl") or ""), [cpe] if isinstance(cpe, str) else [],
+                               str(component.get("version") or "")))
     elif document.get("spdxVersion"):
         for package in document.get("packages") or []:
-            for reference in package.get("externalRefs") or [] if isinstance(package, dict) else ():
-                if isinstance(reference, dict) and str(reference.get("referenceType", "")).lower() == "purl":
-                    purls.append(str(reference.get("referenceLocator", "")))
-    for purl in purls:
-        parsed = purl_package(purl)
+            if not isinstance(package, dict) or len(components) >= limit:
+                continue
+            purl, cpes = "", []
+            for reference in package.get("externalRefs") or []:
+                if not isinstance(reference, dict):
+                    continue
+                kind, locator = str(reference.get("referenceType", "")).lower(), str(reference.get("referenceLocator", ""))
+                if kind == "purl" and not purl:
+                    purl = locator
+                elif kind in {"cpe23type", "cpe22type"}:
+                    cpes.append(locator)
+            components.append((purl, cpes, str(package.get("versionInfo") or "")))
+    return components
+
+
+def sbom(document: Any, out) -> None:
+    """A CycloneDX or SPDX JSON SBOM's components. A component with a package URL is recorded
+    in that purl's ecosystem. One without (firmware, appliances, vendored C libraries) is
+    recorded by its CPE, as ``vendor:product`` in the CPE ecosystem, which NVD records name;
+    only then, so one component never gives two findings for one CVE. Components with
+    neither are not packages PDT can match."""
+    if not isinstance(document, dict):
+        return
+    for purl, cpes, version in _sbom_components(document, out.max_entries):
+        parsed = purl_package(purl) if purl else None
         if parsed is not None and parsed[2]:
             out.add(parsed[1], parsed[2], None, parsed[0])
+            continue
+        for cpe in cpes[:8]:
+            fields = cpe_fields(cpe)
+            # The CPE's version, or the component's when the CPE leaves it open.
+            cpe_version = fields[3] if fields and fields[3] not in {"*", ""} else version.strip()
+            if fields and cpe_version:
+                out.add(f"{fields[1]}:{fields[2]}", cpe_version, None, "CPE", cpe=cpe.strip())
+                break
