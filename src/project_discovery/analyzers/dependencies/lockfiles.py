@@ -1,0 +1,150 @@
+"""Offline dependency lockfile inventory."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from ...core.limits import AnalyzerLimits, over_limit
+from ...core.source_utils import SourceBudgetExceeded, describe_error, redact_source_excerpt
+from ...intelligence import facts as code_facts
+from ...models import FileRecord, Finding
+from ..base import Analyzer
+from .lockfile_parsers import (
+    LOCKFILE_ECOSYSTEMS,
+    LOCKFILE_NAMES,
+    MAX_LOCKFILE_BYTES,
+    MAX_LOCKFILE_PACKAGE_ENTRIES,
+    LockfileEntryBudgetExceeded,
+    lockfile_key,
+    parse_lockfile,
+)
+from .os_packages import read_lockfile
+
+_MAX_LOCKFILE_INVENTORY_BYTES = MAX_LOCKFILE_BYTES
+_MAX_LOCKFILE_PACKAGE_ENTRIES = MAX_LOCKFILE_PACKAGE_ENTRIES
+_LOCK_NAMES = LOCKFILE_NAMES
+_MAX_INVENTORY_EVIDENCE = 200
+# Resolved packages recorded per lockfile for `pdt compare` (code_index.dependencies); the
+# finding's evidence keeps a readable sample only. Below the per-file fact ceiling.
+MAX_RESOLVED_FACTS = 4_000
+
+
+class LockfileAnalyzer(Analyzer):
+    """Extract pinned/resolved package versions from common lockfile formats."""
+
+    name = "dependency-lockfiles"
+    limits = AnalyzerLimits(
+        _MAX_LOCKFILE_INVENTORY_BYTES,
+        "whole",
+        {"package_entries": _MAX_LOCKFILE_PACKAGE_ENTRIES},
+        outcome="UNKNOWN finding at the byte or entry limit",
+    )
+    domains = ("dependency_resolution", "supply_chain")
+    languages = tuple(sorted(set(LOCKFILE_ECOSYSTEMS.values())))
+
+    def supports(self, record: FileRecord) -> bool:
+        return (
+            record.error is None
+            and record.content_skipped_reason is None
+            and lockfile_key(record.path) is not None
+        )
+
+    def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if over_limit(record.size_bytes, _MAX_LOCKFILE_INVENTORY_BYTES):
+            return [Finding(
+                "dependency",
+                f"Lockfile inventory resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the lockfile inventory "
+                f"{_MAX_LOCKFILE_INVENTORY_BYTES:,}-byte content budget.",
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
+        key = lockfile_key(record.path) or Path(record.path).name.lower()
+        try:
+            content, context = read_lockfile(path, key, _MAX_LOCKFILE_INVENTORY_BYTES, record.analysis_identity)
+            packages = parse_lockfile(key, content, max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES, context=context)
+        except (SourceBudgetExceeded, LockfileEntryBudgetExceeded) as exc:
+            return [Finding(
+                "dependency", f"Lockfile inventory resource limit: {record.path}",
+                redact_source_excerpt(str(exc)), confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
+        except (OSError, ValueError, RecursionError, MemoryError) as exc:
+            return [Finding(
+                "dependency",
+                f"Lockfile parse error: {record.path}",
+                describe_error(exc),
+                confidence="UNKNOWN",
+                evidence=[record.path],
+                analyzer=self.name,
+                severity="LOW",
+            )]
+
+        ecosystem = LOCKFILE_ECOSYSTEMS[lockfile_key(record.path) or Path(record.path).name.lower()]
+        registries = getattr(packages, "registries", {})
+        for host, count in list(registries.items())[:100]:
+            # Where the packages came from, for the code index's provenance graph.
+            code_facts.emit_fact("package_registry", host, ecosystem=ecosystem, packages=count)
+        for item in packages[:MAX_RESOLVED_FACTS]:
+            code_facts.emit_fact("resolved_package", item.name, version=item.version, ecosystem=item.ecosystem)
+        if len(packages) > MAX_RESOLVED_FACTS:
+            code_facts.emit_fact("resolved_packages_truncated", ecosystem, omitted=len(packages) - MAX_RESOLVED_FACTS)
+        omitted = max(0, len(packages) - _MAX_INVENTORY_EVIDENCE)
+        detail = (
+            f"Extracted {len(packages)} package/version entries from a {ecosystem} lockfile. "
+            "This records declared resolution state; it does not prove packages are installed "
+            "or that the lockfile is current."
+        )
+        if omitted:
+            detail += f" Evidence lists the first {_MAX_INVENTORY_EVIDENCE}; {omitted} more are omitted."
+        if registries:
+            detail += " Resolved from: " + ", ".join(
+                f"{host} ({count:,})" for host, count in list(registries.items())[:10]) + (
+                f" and {len(registries) - 10:,} more registries" if len(registries) > 10 else "") + "."
+        graph = getattr(packages, "graph", None)
+        if graph is not None and packages:
+            direct = sum(1 for item in packages if graph.is_direct(item.name))
+            if graph.direct_known:
+                detail += f" Direct dependencies: {direct:,}; transitive: {len(packages) - direct:,}."
+            if graph.edges_known:
+                reached = sum(1 for item in packages if graph.path(item.name, item.version) is not None)
+                detail += (f" The lockfile records the dependency graph: {reached:,} of {len(packages):,} packages "
+                           "are reached from " + ("a direct dependency." if graph.direct_known else
+                                                  "a package nothing else depends on.")
+                           + (" The graph was truncated at its edge limit." if graph.truncated else ""))
+        findings = [Finding(
+            "dependency",
+            f"Resolved dependency inventory: {record.path}",
+            detail,
+            confidence="CONFIRMED",
+            evidence=[
+                f"{item.name}=={item.version}" for item in packages[:_MAX_INVENTORY_EVIDENCE]
+            ] or [record.path],
+            analyzer=self.name,
+        )]
+        local = getattr(packages, "local", [])
+        if local:
+            findings.append(Finding(
+                "dependency",
+                f"Local and workspace packages: {record.path}",
+                f"{len(local)} entries are the project's own code (the root project, workspace "
+                "members, path or linked packages). They are not registry releases, so they are "
+                "neither looked up online nor matched against registry advisories.",
+                confidence="CONFIRMED",
+                evidence=[record.path, *local[:_MAX_INVENTORY_EVIDENCE]],
+                analyzer=self.name,
+            ))
+        non_registry = getattr(packages, "non_registry", [])
+        if non_registry:
+            # Their specifiers (git URLs) can hold credentials: only names are listed.
+            findings.append(Finding(
+                "dependency",
+                f"Dependencies outside a package registry: {record.path}",
+                f"{len(non_registry)} third-party dependencies come from git or a URL instead of "
+                "a registry release. They have no registry version, so they are not matched "
+                "against vulnerability advisories.",
+                confidence="UNKNOWN",
+                evidence=[record.path, *non_registry[:_MAX_INVENTORY_EVIDENCE]],
+                analyzer=self.name,
+                severity="LOW",
+            ))
+        return findings

@@ -1,0 +1,351 @@
+"""Static AI/ML framework, training-pipeline and model-artifact discovery.
+
+The analyzer reads source/configuration text only. It never imports frameworks,
+loads checkpoints, deserializes model files, executes notebooks, or opens binary
+model/dataset payloads.
+"""
+from __future__ import annotations
+
+import ast
+import json
+import re
+from pathlib import Path
+
+from ...core.limits import AnalyzerLimits
+from ...core.source_utils import describe_error, parse_python, read_python_source_bounded, read_text_bounded
+from ...models import FileRecord, Finding
+from ..base import Analyzer
+
+_FRAMEWORKS = {
+    "torch": "PyTorch",
+    "tensorflow": "TensorFlow",
+    "keras": "Keras",
+    "jax": "JAX",
+    "flax": "Flax",
+    "optax": "Optax",
+    "transformers": "Hugging Face Transformers",
+    "diffusers": "Hugging Face Diffusers",
+    "datasets": "Hugging Face Datasets",
+    "accelerate": "Hugging Face Accelerate",
+    "sentence_transformers": "Sentence Transformers",
+    "onnx": "ONNX",
+    "onnxruntime": "ONNX Runtime",
+    "lightning": "Lightning",
+    "pytorch_lightning": "PyTorch Lightning",
+    "deepspeed": "DeepSpeed",
+    "bitsandbytes": "bitsandbytes",
+    "vllm": "vLLM",
+    "llama_cpp": "llama.cpp bindings",
+    "mlx": "MLX",
+    "paddle": "PaddlePaddle",
+    "mindspore": "MindSpore",
+    "triton": "Triton",
+    "torch_geometric": "PyTorch Geometric",
+    "tensorrt": "TensorRT",
+    "xgboost": "XGBoost",
+    "lightgbm": "LightGBM",
+    "sklearn": "scikit-learn",
+    "catboost": "CatBoost",
+    "ray": "Ray",
+}
+_MODEL_EXTENSIONS = {
+    ".safetensors", ".pt", ".pth", ".ckpt", ".onnx", ".gguf", ".h5",
+    ".keras", ".tflite", ".mlmodel", ".mlpackage", ".engine", ".plan",
+    ".pkl", ".pickle", ".joblib",
+}
+_DATA_EXTENSIONS = {
+    ".parquet", ".arrow", ".tfrecord", ".tfrecords", ".csv", ".tsv",
+    ".jsonl", ".jsonlines", ".npz", ".npy", ".hdf5", ".h5",
+}
+_MODEL_METADATA_NAMES = {
+    "config.json", "generation_config.json", "tokenizer.json",
+    "tokenizer_config.json", "special_tokens_map.json", "vocab.json",
+    "merges.txt", "added_tokens.json", "model_index.json",
+}
+_MODEL_CONFIG_KEYS = {
+    "model_type", "architectures", "hidden_size", "num_hidden_layers",
+    "num_attention_heads", "vocab_size", "intermediate_size",
+}
+_TRAINING_CALLS = {
+    "backward", "optimizer.step", "zero_grad", "fit", "fit_generator",
+    "train_step", "training_step", "compute_loss", "gradient",
+}
+_INFERENCE_CALLS = {
+    "generate", "predict", "infer", "inference", "from_pretrained",
+    "save_pretrained", "export",
+}
+_DATA_CALLS = {
+    "dataloader", "dataset", "tf.data", "from_tensor_slices",
+    "load_dataset", "map", "streaming",
+}
+_GPU_TOKENS = {
+    "cuda", "rocm", "mps", "xpu", "tpu", "device",
+}
+
+
+def _dotted(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    if isinstance(node, ast.Call):
+        return _dotted(node.func)
+    return ""
+
+
+def _notebook_source(path: Path, expected_identity=None) -> tuple[str, list[tuple[int, int]]]:
+    """A notebook's code cells as one Python module, and the (cell, line) of each module line.
+
+    IPython magics (%, %%), shell escapes (!) and help requests (?) are blanked: they are
+    not Python, and a blank line keeps the remaining line numbers aligned.
+    """
+    notebook = json.loads(read_text_bounded(path, _MAX_ML_FILE_BYTES, expected_identity=expected_identity))
+    cells = notebook.get("cells") if isinstance(notebook, dict) else None
+    lines: list[str] = []
+    positions: list[tuple[int, int]] = []
+    for number, cell in enumerate(cells if isinstance(cells, list) else [], 1):
+        if not isinstance(cell, dict) or cell.get("cell_type") != "code":
+            continue
+        source = cell.get("source")
+        text = "".join(item for item in source if isinstance(item, str)) if isinstance(source, list) else (
+            source if isinstance(source, str) else ""
+        )
+        for line_number, line in enumerate(text.splitlines(), 1):
+            stripped = line.lstrip()
+            lines.append("" if stripped.startswith(("%", "!", "?")) else line)
+            positions.append((number, line_number))
+    return "\n".join(lines) + "\n", positions
+
+
+def _python_evidence(
+    path: Path, relative: str, expected_identity=None, notebook: bool = False,
+) -> list[Finding]:
+    positions: list[tuple[int, int]] = []
+    try:
+        if notebook:
+            source, positions = _notebook_source(path, expected_identity)
+        else:
+            source = read_python_source_bounded(path, _MAX_ML_FILE_BYTES, expected_identity=expected_identity)
+        tree = parse_python(source, filename=relative)
+    except (OSError, ValueError, SyntaxError, LookupError, RecursionError, MemoryError) as exc:
+        return [Finding(
+            "machine_learning",
+            f"AI/ML source analysis unavailable: {relative}",
+            describe_error(exc),
+            confidence="UNKNOWN", severity="LOW",
+            evidence=[relative],
+            analyzer="ai-ml-intelligence",
+        )]
+
+    def at(line: int) -> str:
+        """Notebook evidence names the cell: the module line is not a line of the JSON file."""
+        if positions and 0 < line <= len(positions):
+            cell, cell_line = positions[line - 1]
+            return f"{relative}:cell {cell} line {cell_line}"
+        return f"{relative}:{line}"
+
+    imports: dict[str, int] = {}
+    calls: list[tuple[str, int]] = []
+    class_bases: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".", 1)[0]
+                imports.setdefault(top, node.lineno)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            top = node.module.split(".", 1)[0]
+            imports.setdefault(top, node.lineno)
+        elif isinstance(node, ast.Call):
+            name = _dotted(node.func)
+            if name:
+                calls.append((name, node.lineno))
+        elif isinstance(node, ast.ClassDef):
+            class_bases.extend((_dotted(base), node.lineno) for base in node.bases)
+
+    findings: list[Finding] = []
+    detected = sorted(
+        ((name, line) for module, line in imports.items() if (name := _FRAMEWORKS.get(module))),
+        key=lambda item: item[0].lower(),
+    )
+    if detected:
+        names = [name for name, _ in detected]
+        findings.append(Finding(
+            "machine_learning",
+            f"AI/ML frameworks imported: {relative}",
+            "Statically observed imports: " + ", ".join(names) + ". Import presence "
+            "does not prove that a model is trained or executed.",
+            confidence="CONFIRMED",
+            evidence=[f"{at(line)} ({name})" for name, line in detected],
+            analyzer="ai-ml-intelligence",
+        ))
+
+    if not detected:
+        # Call names such as fit/predict/generate/map/export are ubiquitous outside ML;
+        # without a framework import in the file they are not evidence of an ML pipeline.
+        return findings
+
+    base_names = {name.lower() for name, _ in class_bases}
+    training = [
+        (name, line) for name, line in calls
+        if name.lower().split(".")[-1] in _TRAINING_CALLS
+        or name.lower() in _TRAINING_CALLS
+    ]
+    if training or any("trainer" in name for name in base_names):
+        evidence = [f"{at(line)} ({name})" for name, line in training[:50]]
+        evidence.extend(
+            f"{at(line)} (base {name})"
+            for name, line in class_bases if "trainer" in name.lower()
+        )
+        findings.append(Finding(
+            "machine_learning",
+            f"Potential model training pipeline: {relative}",
+            "Training-related calls or trainer base classes were found. Static evidence "
+            "does not establish that a training run completed.",
+            confidence="INFERRED",
+            evidence=evidence or [relative],
+            analyzer="ai-ml-intelligence",
+        ))
+
+    inference = [
+        (name, line) for name, line in calls
+        if name.lower().split(".")[-1] in _INFERENCE_CALLS
+        or name.lower() in _INFERENCE_CALLS
+    ]
+    if inference:
+        findings.append(Finding(
+            "machine_learning",
+            f"Model inference/export operations: {relative}",
+            f"Observed {len(inference)} inference, generation, loading or export call sites.",
+            confidence="INFERRED",
+            evidence=[f"{at(line)} ({name})" for name, line in inference[:50]],
+            analyzer="ai-ml-intelligence",
+        ))
+
+    data_calls = [
+        (name, line) for name, line in calls
+        if name.lower().split(".")[-1] in _DATA_CALLS or name.lower() in _DATA_CALLS
+    ]
+    if data_calls:
+        findings.append(Finding(
+            "datasets",
+            f"Dataset pipeline references: {relative}",
+            f"Observed {len(data_calls)} dataset or input-pipeline call sites.",
+            confidence="INFERRED",
+            evidence=[f"{at(line)} ({name})" for name, line in data_calls[:50]],
+            analyzer="ai-ml-intelligence",
+        ))
+
+    # Match whole name components: "mps" must not match json.dumps, nor "tpu" output.
+    gpu_refs = [
+        (name, line) for name, line in calls
+        if _GPU_TOKENS.intersection(re.split(r"[._]", name.lower()))
+    ]
+    if gpu_refs:
+        findings.append(Finding(
+            "gpu_compute",
+            f"Accelerator/device references: {relative}",
+            f"Observed {len(gpu_refs)} device or accelerator-related call sites.",
+            confidence="INFERRED",
+            evidence=[f"{at(line)} ({name})" for name, line in gpu_refs[:50]],
+            analyzer="ai-ml-intelligence",
+        ))
+    return findings
+
+
+_MAX_ML_FILE_BYTES = 16 * 1024 * 1024
+
+
+class AIMLIntelligenceAnalyzer(Analyzer):
+    """Discover ML frameworks and artifact inventories without loading model data."""
+
+    name = "ai-ml-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_ML_FILE_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
+    domains = ("machine_learning", "datasets", "model_artifacts", "gpu_compute")
+    languages = ("Python", "JSON", "Jupyter Notebook")
+
+    def supports(self, record: FileRecord) -> bool:
+        if record.error:
+            return False
+        name = Path(record.path).name.lower()
+        path_parts = {part.lower() for part in Path(record.path).parts}
+        return (
+            record.extension in {".py", ".pyi", ".ipynb"}
+            or record.extension in _MODEL_EXTENSIONS
+            or record.extension in _DATA_EXTENSIONS
+            or name in _MODEL_METADATA_NAMES
+            or (record.extension == ".json" and bool(
+                path_parts & {"model", "models", "checkpoint", "checkpoints", "tokenizer"}
+            ))
+        )
+
+    def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if record.extension in {".py", ".pyi"}:
+            return _python_evidence(path, record.path, record.analysis_identity)
+        if record.extension == ".ipynb":
+            return _python_evidence(path, record.path, record.analysis_identity, notebook=True)
+
+        name = Path(record.path).name.lower()
+        if record.extension in _MODEL_EXTENSIONS:
+            return [Finding(
+                "model_artifacts",
+                f"Model artifact detected: {record.path}",
+                f"Recognized model/checkpoint artifact ({record.extension}). The binary "
+                "payload was not opened, deserialized or executed.",
+                confidence="CONFIRMED",
+                evidence=[record.path, f"{record.size_bytes} bytes"],
+                analyzer=self.name,
+            )]
+        if record.extension in _DATA_EXTENSIONS:
+            return [Finding(
+                "datasets",
+                f"Potential dataset artifact: {record.path}",
+                f"Recognized data container ({record.extension}); contents and schema "
+                "were not loaded.",
+                confidence="CONFIRMED",
+                evidence=[record.path, f"{record.size_bytes} bytes"],
+                analyzer=self.name,
+            )]
+        if name in _MODEL_METADATA_NAMES or record.extension == ".json":
+            try:
+                data = json.loads(read_text_bounded(
+                    path, _MAX_ML_FILE_BYTES,
+                    expected_identity=record.analysis_identity,
+                ))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                return [Finding(
+                    "model_artifacts",
+                    f"Model metadata parse error: {record.path}",
+                    describe_error(exc),
+                    confidence="UNKNOWN", severity="LOW",
+                    evidence=[record.path],
+                    analyzer=self.name,
+                )]
+            if not isinstance(data, dict):
+                return []
+            present = sorted(_MODEL_CONFIG_KEYS & set(data))
+            if not present:
+                return []
+            architecture = data.get("architectures", [])
+            model_type = data.get("model_type")
+            summary = []
+            if isinstance(model_type, str):
+                summary.append(f"model_type={model_type}")
+            if isinstance(architecture, list):
+                summary.extend(
+                    f"architecture={item}" for item in architecture if isinstance(item, str)
+                )
+            summary.append("metadata fields: " + ", ".join(present))
+            return [Finding(
+                "model_artifacts",
+                f"Model configuration metadata: {record.path}",
+                "; ".join(summary),
+                confidence="CONFIRMED",
+                evidence=[record.path],
+                analyzer=self.name,
+            )]
+        return []

@@ -1,0 +1,739 @@
+"""Local-only advisory database: import (OSV records and the formats ``adapters`` converts)
+and query helpers."""
+from __future__ import annotations
+
+import gzip
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import zipfile
+import zlib
+from urllib.parse import quote
+from datetime import datetime, timezone
+from pathlib import Path, PurePath
+from typing import Any, Iterator
+
+from .adapters import convert, exploit_maturity, known_exploited
+from .cvss import base_score, qualitative_severity
+
+SCHEMA_VERSION = 3
+_MAX_ZIP_MEMBERS = 5_000_000
+_MAX_ZIP_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
+_IMPORT_BATCH = 500
+# One advisory document: an OSV record keeps its own budget; a feed (NVD, the Debian tracker,
+# a GitHub export, Alpine secdb, CSAF) holds many records in one file.
+MAX_DOCUMENT_BYTES = 1024 * 1024 * 1024
+_ADVISORY_SUFFIXES = (".json", ".json.gz")
+
+_SCHEMA = """
+PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS advisories (
+    id TEXT PRIMARY KEY,
+    aliases_json TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    details TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    published TEXT,
+    modified TEXT,
+    withdrawn TEXT,
+    references_json TEXT NOT NULL,
+    source_file TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS affected_packages (
+    advisory_id TEXT NOT NULL REFERENCES advisories(id) ON DELETE CASCADE,
+    affected_index INTEGER NOT NULL,
+    ecosystem TEXT NOT NULL,
+    package_name TEXT NOT NULL,
+    purl TEXT NOT NULL,
+    affected_json TEXT NOT NULL,
+    PRIMARY KEY(advisory_id, affected_index, ecosystem, package_name)
+);
+CREATE INDEX IF NOT EXISTS idx_affected_lookup
+ON affected_packages(ecosystem, package_name);
+CREATE TABLE IF NOT EXISTS known_exploited (
+    cve TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    date_added TEXT NOT NULL,
+    due_date TEXT NOT NULL,
+    ransomware TEXT NOT NULL,
+    name TEXT NOT NULL
+);
+"""
+_MAX_KNOWN_EXPLOITED = 1_000_000
+
+
+def normalize_ecosystem(ecosystem: str) -> str:
+    return ecosystem.strip().casefold()
+
+
+def normalize_package_name(ecosystem: str, name: str) -> str:
+    value = name.strip()
+    if ecosystem.strip().casefold() == "pypi":
+        # PEP 503 normalization: runs of "-", "_" and "." are equivalent.
+        return re.sub(r"[-_.]+", "-", value).casefold()
+    return value.casefold()
+
+
+def default_database_path() -> Path:
+    """Return the per-user local advisory database path."""
+    return Path.home() / ".pdt" / "vulnerability-advisories.sqlite3"
+
+
+_GHSA_SEVERITY = {"CRITICAL": "CRITICAL", "HIGH": "HIGH", "MODERATE": "MEDIUM", "MEDIUM": "MEDIUM", "LOW": "LOW"}
+
+
+def _severity(record: dict[str, Any]) -> str:
+    """Derive one severity from database_specific labels or CVSS vectors/scores."""
+    scores: list[float] = []
+    for item in record.get("severity", []) if isinstance(record.get("severity"), list) else []:
+        if isinstance(item, dict) and item.get("score") is not None:
+            score = base_score(str(item.get("type") or ""), item["score"])
+            if score is not None:
+                scores.append(score)
+    if scores:
+        return qualitative_severity(max(scores))
+    database_specific = record.get("database_specific")
+    if isinstance(database_specific, dict):
+        label = _GHSA_SEVERITY.get(str(database_specific.get("severity", "")).upper())
+        if label:
+            return label
+    return "UNKNOWN"
+
+
+def advisory_severity(record: dict[str, Any]) -> str:
+    """Public name for the severity derivation shared by local and online advisories."""
+    return _severity(record)
+
+
+def osv_record_to_advisories(
+    record: dict[str, Any], ecosystem: str, package_name: str, *, source: str,
+) -> list[dict[str, Any]]:
+    """Normalize one OSV record into the advisory rows ``VulnerabilityDatabase.query`` returns.
+
+    One row is produced per ``affected`` entry naming this ecosystem/package, so local and
+    online advisories feed the same version matching and finding construction.
+    """
+    if not isinstance(record, dict) or not record.get("id"):
+        return []
+    aliases = sorted({
+        str(item) for item in record.get("aliases", []) if isinstance(item, str) and item
+    }) if isinstance(record.get("aliases"), list) else []
+    references = sorted({
+        str(item.get("url")) for item in record.get("references", [])
+        if isinstance(item, dict) and item.get("url")
+    }) if isinstance(record.get("references"), list) else []
+    wanted_ecosystem = normalize_ecosystem(ecosystem)
+    wanted_name = normalize_package_name(ecosystem, package_name)
+    rows = []
+    for affected in record.get("affected", []) if isinstance(record.get("affected"), list) else []:
+        if not isinstance(affected, dict) or not isinstance(affected.get("package"), dict):
+            continue
+        package = affected["package"]
+        affected_ecosystem = str(package.get("ecosystem") or "").strip()
+        affected_name = str(package.get("name") or "").strip()
+        # OSV ecosystems may carry a suffix (for example "Debian:12"); match the base name.
+        if (
+            normalize_ecosystem(affected_ecosystem.split(":", 1)[0]) != wanted_ecosystem
+            or normalize_package_name(ecosystem, affected_name) != wanted_name
+        ):
+            continue
+        rows.append({
+            "id": str(record["id"]),
+            "aliases": aliases,
+            "summary": str(record.get("summary") or record["id"])[:4000],
+            "details": str(record.get("details") or "")[:100_000],
+            "severity": _severity(record),
+            "published": record.get("published"),
+            "modified": record.get("modified"),
+            "withdrawn": record.get("withdrawn"),
+            "references": references,
+            "affected": affected,
+            "ecosystem": affected_ecosystem or ecosystem,
+            "source_file": source,
+        })
+    return rows
+
+
+def _advisory_files(source: Path) -> Iterator[tuple[Path, str]]:
+    if source.is_file():
+        if source.name.lower().endswith(_ADVISORY_SUFFIXES):
+            yield source, source.name
+        return
+    if not source.is_dir():
+        raise FileNotFoundError(f"Advisory source does not exist: {source}")
+    for current, dirs, names in os.walk(source, followlinks=False):
+        dirs[:] = sorted(
+            name for name in dirs
+            if not (Path(current) / name).is_symlink()
+        )
+        for name in sorted(names):
+            path = Path(current) / name
+            if name.lower().endswith(_ADVISORY_SUFFIXES) and not path.is_symlink():
+                yield path, path.relative_to(source).as_posix()
+
+
+def _timestamp(value: Any) -> datetime | None:
+    """An advisory's ISO 8601 time (UTC when it names no zone), or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text[-1:] in {"Z", "z"}:
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _older(candidate: Any, stored: Any) -> bool:
+    """Whether a record was modified before the stored copy (False when either time is unknown)."""
+    new, old = _timestamp(candidate), _timestamp(stored)
+    return new is not None and old is not None and new < old
+
+
+def _read_bounded(stream, limit: int) -> bytes | None:
+    """At most ``limit`` bytes of a stream, or None when it holds more."""
+    data = stream.read(limit + 1)
+    return None if len(data) > limit else data
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+# A local advisory snapshot older than this is reported as stale in every report format.
+STALE_SNAPSHOT_DAYS = 30
+
+
+def _items(value: Any) -> list:
+    """A list field of an advisory, or [] (a string would iterate as characters)."""
+    return value if isinstance(value, list) else []
+
+
+def _malformed_affected(entry: Any) -> bool:
+    """An affected entry the matchers cannot read: wrong types where OSV has lists/objects."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("package"), dict):
+        return True
+    if "versions" in entry and not isinstance(entry["versions"], list):
+        return True
+    ranges = entry.get("ranges", [])
+    if not isinstance(ranges, list):
+        return True
+    return any(not isinstance(item, dict) or not isinstance(item.get("events", []), list) for item in ranges)
+
+
+def sqlite_uri(path: PurePath, mode: str) -> str:
+    """A SQLite URI for an absolute path opened with ``mode`` (ro, rw); see read_only_uri."""
+    return read_only_uri(path).removesuffix("?mode=ro") + f"?mode={mode}"
+
+
+def read_only_uri(path: PurePath) -> str:
+    """A read-only SQLite URI for an absolute path, including Windows UNC shares.
+
+    SQLite accepts only an empty or ``localhost`` URI authority, so a UNC path
+    (``\\\\server\\share\\...``) is written ``file:////server/share/...``, not the
+    ``file://server/share/...`` that ``as_uri()`` produces. Built from ``as_posix()``:
+    ``PurePath.as_uri()`` is deprecated (Python 3.14).
+    """
+    if not path.is_absolute():
+        raise ValueError(f"advisory database path must be absolute: {path}")
+    posix = quote(path.as_posix(), safe="/:")
+    if posix.startswith("//"):
+        return f"file://{posix}?mode=ro"          # UNC: file: + // + //server/share/...
+    return f"file://{'' if posix.startswith('/') else '/'}{posix}?mode=ro"
+
+
+class VulnerabilityDatabase:
+    """SQLite-backed local advisory store. This class never performs network I/O.
+
+    read_only=True opens an existing database without creating or migrating anything,
+    which is how scans consume it.
+    """
+
+    def __init__(self, path: Path, *, read_only: bool = False):
+        self.path = path.expanduser()
+        self.read_only = read_only
+        if read_only:
+            if not self.path.is_file():
+                raise FileNotFoundError(f"Local vulnerability database is not a file: {self.path}")
+            self.connection = sqlite3.connect(read_only_uri(self.path.absolute()), uri=True)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.connection = sqlite3.connect(self.path)
+        self.connection.row_factory = sqlite3.Row
+        try:
+            if not read_only:
+                self.connection.executescript(_SCHEMA)
+                self._migrate()
+                self.connection.commit()
+            columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(affected_packages)")
+            }
+            tables = {
+                row[0] for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        except sqlite3.DatabaseError as exc:
+            # sqlite3 says only "file is not a database"; name the file and the remedy.
+            self.connection.close()
+            raise ValueError(
+                f"The local vulnerability database {self.path} is not a readable PDT advisory "
+                f"database ({exc}); import an OSV snapshot into a new file with `pdt vuln-db import`."
+            ) from exc
+        if not {"metadata", "advisories", "affected_packages"} <= tables:
+            self.connection.close()
+            raise ValueError(
+                f"The local vulnerability database {self.path} is not a PDT advisory database "
+                "(its advisory tables are missing); import an OSV snapshot with `pdt vuln-db import`."
+            )
+        self._has_keys = {"ecosystem_key", "name_key"} <= columns
+        # Databases from before schema 3, opened read-only, have neither.
+        self._has_exploited = "known_exploited" in tables
+        self._has_maturity = "exploit_maturity" in {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(advisories)")
+        }
+
+    def _migrate(self) -> None:
+        if "exploit_maturity" not in {row[1] for row in self.connection.execute("PRAGMA table_info(advisories)")}:
+            self.connection.execute("ALTER TABLE advisories ADD COLUMN exploit_maturity TEXT")
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(affected_packages)")}
+        if "ecosystem_key" not in columns:
+            self.connection.execute("ALTER TABLE affected_packages ADD COLUMN ecosystem_key TEXT")
+        if "name_key" not in columns:
+            self.connection.execute("ALTER TABLE affected_packages ADD COLUMN name_key TEXT")
+        stale = self.connection.execute(
+            "SELECT rowid, ecosystem, package_name FROM affected_packages "
+            "WHERE ecosystem_key IS NULL OR name_key IS NULL"
+        ).fetchall()
+        self.connection.executemany(
+            "UPDATE affected_packages SET ecosystem_key=?, name_key=? WHERE rowid=?",
+            [
+                (normalize_ecosystem(ecosystem), normalize_package_name(ecosystem, name), rowid)
+                for rowid, ecosystem, name in stale
+            ],
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_affected_key "
+            "ON affected_packages(ecosystem_key, name_key)"
+        )
+        self.connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def __enter__(self) -> "VulnerabilityDatabase":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+    def _iter_source_records(
+        self, source: Path, max_record_bytes: int,
+    ) -> Iterator[tuple[str, bytes | None, str | None]]:
+        """Yield (relative name, raw JSON bytes or None, error) from a file, tree or ZIP."""
+        if source.is_file() and source.suffix.lower() == ".zip":
+            total = 0
+            with zipfile.ZipFile(source) as archive:
+                members = [info for info in archive.infolist() if not info.is_dir()]
+                if len(members) > _MAX_ZIP_MEMBERS:
+                    raise ValueError(
+                        f"advisory archive has {len(members):,} members; limit is {_MAX_ZIP_MEMBERS:,}"
+                    )
+                for info in members:
+                    if not info.filename.lower().endswith(_ADVISORY_SUFFIXES):
+                        continue
+                    if info.file_size > max_record_bytes:
+                        yield info.filename, None, (
+                            f"record exceeds {max_record_bytes} byte import budget"
+                        )
+                        continue
+                    total += info.file_size
+                    if total > _MAX_ZIP_TOTAL_BYTES:
+                        raise ValueError("advisory archive exceeds the total uncompressed import budget")
+                    try:
+                        with archive.open(info) as stream:
+                            if info.filename.lower().endswith(".gz"):
+                                with gzip.GzipFile(fileobj=stream) as unpacked:
+                                    data = _read_bounded(unpacked, max_record_bytes)
+                            else:
+                                data = _read_bounded(stream, max_record_bytes)
+                    except (OSError, EOFError, zlib.error, zipfile.BadZipFile) as exc:
+                        # A corrupt member (a bad CRC, a broken gzip stream) fails alone.
+                        yield info.filename, None, f"{type(exc).__name__}: {exc}"
+                        continue
+                    if data is None:
+                        yield info.filename, None, (
+                            f"record exceeds {max_record_bytes} byte import budget"
+                        )
+                        continue
+                    if info.filename.lower().endswith(".gz"):
+                        # The archive's budget counts what its compressed members unpack to.
+                        total += len(data) - info.file_size
+                        if total > _MAX_ZIP_TOTAL_BYTES:
+                            raise ValueError("advisory archive exceeds the total uncompressed import budget")
+                    yield info.filename, data, None
+            return
+        for path, relative in _advisory_files(source):
+            try:
+                if path.stat().st_size > max_record_bytes:
+                    yield relative, None, f"record exceeds {max_record_bytes} byte import budget"
+                    continue
+                if path.name.lower().endswith(".gz"):
+                    with gzip.open(path, "rb") as unpacked:
+                        data = _read_bounded(unpacked, max_record_bytes)
+                    if data is None:
+                        yield relative, None, f"record exceeds {max_record_bytes} byte import budget once decompressed"
+                        continue
+                    yield relative, data, None
+                    continue
+                yield relative, path.read_bytes(), None
+            except (OSError, EOFError, zlib.error) as exc:
+                yield relative, None, f"{type(exc).__name__}: {exc}"
+
+    def import_osv(self, source: Path, *, max_record_bytes: int = 8 * 1024 * 1024,
+                   max_document_bytes: int = MAX_DOCUMENT_BYTES) -> dict[str, Any]:
+        """Import advisories from a local file, directory tree or OSV ``all.zip`` archive: OSV
+        records and the formats ``adapters`` converts (NVD, GitHub exports, the Debian tracker,
+        Alpine secdb, CSAF, CycloneDX), as ``.json`` or ``.json.gz``.
+
+        Each advisory is applied atomically (SAVEPOINT); commits are batched for speed. An OSV
+        record keeps the ``max_record_bytes`` budget; a feed document may be ``max_document_bytes``.
+        """
+        if self.read_only:
+            raise PermissionError("advisory database was opened read-only")
+        source = source.expanduser().resolve(strict=True)
+        if source.is_file() and not source.name.lower().endswith((*_ADVISORY_SUFFIXES, ".zip")):
+            # Anything else would import nothing yet look like a successful refresh.
+            raise ValueError("Unsupported advisory source (expected a .json or .json.gz file, an OSV .zip or a "
+                             f"directory): {source}")
+        imported = 0
+        skipped = 0
+        superseded = 0
+        exploited = 0
+        errors: list[str] = []
+        affected_count = 0
+        pending = 0
+        formats: dict[str, int] = {}
+
+        self.connection.execute("BEGIN")
+        try:
+            for relative, raw, error in self._iter_source_records(source, max(max_record_bytes, max_document_bytes)):
+                if error is not None:
+                    skipped += 1
+                    errors.append(f"{relative}: {error}")
+                    continue
+                try:
+                    document = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+                    skipped += 1
+                    errors.append(f"{relative}: {type(exc).__name__}: {exc}")
+                    continue
+                kind, records = convert(document)
+                if kind == "unknown":
+                    skipped += 1
+                    errors.append(f"{relative}: not a supported advisory record or feed")
+                    continue
+                if kind == "kev":
+                    stored_kev = self._store_known_exploited(document)
+                    if stored_kev is None:
+                        superseded += 1  # the database holds a newer catalog
+                    else:
+                        exploited += stored_kev
+                        formats["kev"] = formats.get("kev", 0) + stored_kev
+                    continue
+                if kind == "osv" and len(raw) > max_record_bytes:
+                    skipped += 1
+                    errors.append(f"{relative}: record exceeds {max_record_bytes} byte import budget")
+                    continue
+                stored = 0
+                for data in records:
+                    if not isinstance(data, dict) or not data.get("id") or not isinstance(data.get("affected"), list):
+                        skipped += 1
+                        errors.append(f"{relative}: not a supported OSV vulnerability record")
+                        continue
+                    malformed = [entry for entry in data["affected"] if _malformed_affected(entry)]
+                    if malformed:
+                        # Matching would raise on these; the record's valid entries still count.
+                        errors.append(f"{relative}: {len(malformed)} malformed affected entr"
+                                      f"{'y' if len(malformed) == 1 else 'ies'} skipped")
+                        data = {**data, "affected": [entry for entry in data["affected"] if not _malformed_affected(entry)]}
+                    try:
+                        stored_rows = self._store_advisory(data, relative)
+                    except sqlite3.Error as exc:
+                        skipped += 1
+                        errors.append(f"{relative}: {type(exc).__name__}: {exc}")
+                    else:
+                        if stored_rows is None:
+                            superseded += 1  # the database holds a newer copy
+                        else:
+                            affected_count += stored_rows
+                            imported += 1
+                            stored += 1
+                    pending += 1
+                    if pending >= _IMPORT_BATCH:
+                        self.connection.execute("COMMIT")
+                        self.connection.execute("BEGIN")
+                        pending = 0
+                if stored:
+                    formats[kind.split("-", 1)[0]] = formats.get(kind.split("-", 1)[0], 0) + stored
+            if imported:
+                # A no-op import must not refresh the snapshot's provenance and age.
+                self._write_import_metadata(source, imported)
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+        status = self.status()
+        return {
+            "imported_advisories": imported,
+            "affected_package_records": affected_count,
+            "formats": dict(sorted(formats.items())),
+            "known_exploited_records": exploited,
+            "superseded_records": superseded,
+            "skipped_records": skipped,
+            "errors": errors[:200],
+            "database": str(self.path),
+            "imported_at": status.get("last_imported_at"),
+        }
+
+    def _store_known_exploited(self, document: dict[str, Any]) -> int | None:
+        """Replace the stored Known Exploited Vulnerabilities catalog with this one and return
+        its entry count; None, storing nothing, when the stored catalog was released later."""
+        released = str(document.get("dateReleased") or "")[:40]
+        stored = self.connection.execute("SELECT value FROM metadata WHERE key='kev_date_released'").fetchone()
+        if stored is not None and _older(released, stored[0]):
+            return None
+        rows = []
+        for row in known_exploited(document):
+            rows.append(row)
+            if len(rows) >= _MAX_KNOWN_EXPLOITED:
+                break
+        self.connection.execute("DELETE FROM known_exploited")
+        self.connection.executemany(
+            "INSERT OR REPLACE INTO known_exploited (cve, source, date_added, due_date, ransomware, name) "
+            "VALUES (?, ?, ?, ?, ?, ?)", rows,
+        )
+        self.connection.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", [
+            ("kev_catalog_version", str(document.get("catalogVersion") or "")[:40]),
+            ("kev_date_released", released),
+            ("kev_imported_at", datetime.now(timezone.utc).isoformat()),
+        ])
+        return len(rows)
+
+    def _store_advisory(self, data: dict[str, Any], relative: str) -> int | None:
+        """Store one advisory, replacing a stored copy, and return its affected-package row
+        count. When the stored copy was modified later, store nothing and return None: an
+        older snapshot must not undo a correction, a withdrawal or a newer range."""
+        advisory_id = str(data["id"])
+        stored = self.connection.execute("SELECT modified FROM advisories WHERE id=?", (advisory_id,)).fetchone()
+        if stored is not None and _older(data.get("modified"), stored[0]):
+            return None
+        aliases = sorted({
+            str(item) for item in _items(data.get("aliases")) if isinstance(item, str) and item
+        })
+        references = sorted({
+            str(item.get("url")) for item in _items(data.get("references"))
+            if isinstance(item, dict) and item.get("url")
+        })
+        rows = []
+        for index, affected in enumerate(data["affected"]):
+            if not isinstance(affected, dict) or not isinstance(affected.get("package"), dict):
+                continue
+            package = affected["package"]
+            ecosystem = str(package.get("ecosystem") or "").strip()
+            package_name = str(package.get("name") or "").strip()
+            if not ecosystem or not package_name:
+                continue
+            rows.append((
+                advisory_id, index, ecosystem, package_name,
+                str(package.get("purl") or ""),
+                json.dumps(affected, separators=(",", ":"), ensure_ascii=False),
+                normalize_ecosystem(ecosystem),
+                normalize_package_name(ecosystem, package_name),
+            ))
+        self.connection.execute("SAVEPOINT advisory")
+        try:
+            self.connection.execute(
+                """INSERT OR REPLACE INTO advisories
+                (id, aliases_json, summary, details, severity, published,
+                 modified, withdrawn, references_json, source_file, exploit_maturity)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    advisory_id, json.dumps(aliases), str(data.get("summary") or advisory_id)[:4000],
+                    str(data.get("details") or "")[:100_000], _severity(data),
+                    data.get("published"), data.get("modified"), data.get("withdrawn"),
+                    json.dumps(references), relative, exploit_maturity(data),
+                ),
+            )
+            self.connection.execute("DELETE FROM affected_packages WHERE advisory_id=?", (advisory_id,))
+            self.connection.executemany(
+                """INSERT INTO affected_packages
+                (advisory_id, affected_index, ecosystem, package_name, purl, affected_json,
+                 ecosystem_key, name_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+            self.connection.execute("RELEASE advisory")
+        except sqlite3.Error:
+            self.connection.execute("ROLLBACK TO advisory")
+            self.connection.execute("RELEASE advisory")
+            raise
+        return len(rows)
+
+    def _write_import_metadata(self, source: Path, imported: int) -> None:
+        provenance = {
+            "last_imported_at": datetime.now(timezone.utc).isoformat(),
+            "last_source_name": source.name,
+            "last_source_kind": "directory" if source.is_dir() else source.suffix.lower().lstrip("."),
+            "last_imported_records": str(imported),
+        }
+        if source.is_file():
+            provenance["last_source_sha256"] = _file_sha256(source)
+        self.connection.executemany(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)",
+            list(provenance.items()),
+        )
+
+    def query(self, ecosystem: str, package_name: str) -> list[dict[str, Any]]:
+        """Return local advisory matches for an ecosystem/package coordinate."""
+        if self._has_keys:
+            rows = self.connection.execute(
+                """SELECT a.*, p.affected_json, p.ecosystem AS affected_ecosystem
+                FROM affected_packages p
+                JOIN advisories a ON a.id=p.advisory_id
+                WHERE p.ecosystem_key=? AND p.name_key=?
+                ORDER BY a.id""",
+                (normalize_ecosystem(ecosystem), normalize_package_name(ecosystem, package_name)),
+            ).fetchall()
+        else:
+            # Pre-migration database opened read-only: slower, but still name-normalized.
+            rows = [
+                row for row in self.connection.execute(
+                    """SELECT a.*, p.affected_json, p.ecosystem AS affected_ecosystem,
+                              p.package_name AS affected_name
+                    FROM affected_packages p
+                    JOIN advisories a ON a.id=p.advisory_id
+                    WHERE lower(p.ecosystem)=lower(?)
+                    ORDER BY a.id""",
+                    (ecosystem,),
+                )
+                if normalize_package_name(ecosystem, row["affected_name"])
+                == normalize_package_name(ecosystem, package_name)
+            ]
+        results = [
+            {
+                "id": row["id"],
+                "aliases": json.loads(row["aliases_json"]),
+                "summary": row["summary"],
+                "details": row["details"],
+                "severity": row["severity"],
+                "published": row["published"],
+                "modified": row["modified"],
+                "withdrawn": row["withdrawn"],
+                "references": json.loads(row["references_json"]),
+                "affected": json.loads(row["affected_json"]),
+                "ecosystem": row["affected_ecosystem"],
+                "source_file": row["source_file"],
+                "exploit_maturity": row["exploit_maturity"] if self._has_maturity else None,
+            }
+            for row in rows
+        ]
+        return self._known_exploited(self._severities_by_alias(results))
+
+    def _known_exploited(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Each advisory's entry in the Known Exploited Vulnerabilities catalog, found by its
+        ID or an alias (``known_exploited``: source, CVE, date added, due date, ransomware use)."""
+        if not self._has_exploited or not results:
+            return results
+        identifiers = sorted({key for item in results for key in [item["id"], *item["aliases"]]
+                              if str(key).upper().startswith("CVE-")})[:900]
+        if not identifiers:
+            return results
+        catalog = {
+            row["cve"]: dict(row) for row in self.connection.execute(
+                "SELECT cve, source, date_added, due_date, ransomware, name FROM known_exploited "
+                f"WHERE cve IN ({','.join('?' * len(identifiers))})", [key.upper() for key in identifiers],
+            )
+        }
+        for item in results:
+            entry = next((catalog[key.upper()] for key in [item["id"], *item["aliases"]] if key.upper() in catalog), None)
+            if entry is not None:
+                item["known_exploited"] = entry
+        return results
+
+    def known_exploited_count(self) -> int:
+        if not self._has_exploited:
+            return 0
+        return self.connection.execute("SELECT COUNT(*) FROM known_exploited").fetchone()[0]
+
+    def _severities_by_alias(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """An advisory without a severity takes the severity of an imported record it aliases
+        (an OSV record without CVSS, and the NVD record of its CVE)."""
+        aliases = sorted({alias for item in results if item["severity"] == "UNKNOWN" for alias in item["aliases"]})[:500]
+        if not aliases:
+            return results
+        known = dict(self.connection.execute(
+            f"SELECT id, severity FROM advisories WHERE severity != 'UNKNOWN' AND id IN ({','.join('?' * len(aliases))})",
+            aliases,
+        ).fetchall())
+        for item in results:
+            if item["severity"] == "UNKNOWN":
+                source = next((alias for alias in item["aliases"] if alias in known), None)
+                if source is not None:
+                    item["severity"], item["severity_source"] = known[source], source
+        return results
+
+    def status(self) -> dict[str, Any]:
+        advisory_count = self.connection.execute(
+            "SELECT COUNT(*) FROM advisories"
+        ).fetchone()[0]
+        affected_count = self.connection.execute(
+            "SELECT COUNT(*) FROM affected_packages"
+        ).fetchone()[0]
+        ecosystem_rows = self.connection.execute(
+            "SELECT ecosystem, COUNT(DISTINCT advisory_id) FROM affected_packages GROUP BY ecosystem ORDER BY ecosystem"
+        ).fetchall()
+        metadata = {
+            row["key"]: row["value"]
+            for row in self.connection.execute("SELECT key, value FROM metadata")
+        }
+        result = {
+            "database": str(self.path),
+            "advisory_count": advisory_count,
+            "affected_package_records": affected_count,
+            "ecosystems": {row[0]: row[1] for row in ecosystem_rows},
+            "indexed_lookup": self._has_keys,
+            "known_exploited_count": self.known_exploited_count(),
+            **metadata,
+        }
+        imported_at = metadata.get("last_imported_at")
+        if imported_at:
+            try:
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(imported_at)
+                result["snapshot_age_days"] = max(0, age.days)
+                # Advisories published since the import are missing from a stale snapshot.
+                result["stale_after_days"] = STALE_SNAPSHOT_DAYS
+                result["stale"] = result["snapshot_age_days"] > STALE_SNAPSHOT_DAYS
+            except ValueError:
+                pass
+        return result
+
+    def covers(self, ecosystem: str) -> bool:
+        """Whether the snapshot holds any advisory for this ecosystem."""
+        row = self.connection.execute(
+            "SELECT 1 FROM affected_packages WHERE ecosystem = ? LIMIT 1", (ecosystem,),
+        ).fetchone()
+        return row is not None

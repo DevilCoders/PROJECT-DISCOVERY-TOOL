@@ -1,0 +1,492 @@
+"""Static dependency manifest analysis; declarations are not treated as installed packages."""
+from __future__ import annotations
+
+import configparser
+import json
+import re
+import tomllib
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any
+
+from ...core.limits import AnalyzerLimits, over_limit
+from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
+from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
+from ...models import FileRecord, Finding
+from ..base import Analyzer
+
+_REQUIREMENT = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
+# A module path starts with a letter or digit: a "// Web stack" comment is not a module.
+_GO_REQUIRE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._~+/-]*+)\s+(v?[^\s]+)")
+# Another field of a Cabal stanza ("hs-source-dirs:") ends a build-depends continuation.
+_CABAL_FIELD = re.compile(r"^\s+[A-Za-z][A-Za-z0-9-]*+\s*:")
+
+
+def _table(data: Any, key: str) -> dict:
+    """``data[key]`` when it is a table; {} for a missing or empty section (``dev_dependencies:``)."""
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _array(data: Any, key: str) -> list:
+    value = data.get(key) if isinstance(data, dict) else None
+    return value if isinstance(value, list) else []
+
+
+def _constraint(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        version = value.get("version")
+        if version is not None:
+            return str(version)
+        if "git" in value:
+            return "git=" + str(value["git"])
+        if "path" in value:
+            return "path=" + str(value["path"])
+        return "table declaration"
+    return str(value)
+
+
+def _python_requirement(value: str) -> tuple[str, str] | None:
+    text = value.strip()
+    if not text or text.startswith("#"):
+        return None
+    text = text.removesuffix("\\").strip()  # pip-compile ``pkg==1.0 \`` hash continuations
+    if text.startswith(("-e ", "--editable ")):
+        text = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
+    if "#egg=" in text:
+        name = text.split("#egg=", 1)[1].split("&", 1)[0]
+        return (name, "direct URL") if name else None
+    if not text or text.startswith("-"):
+        return None
+    match = _REQUIREMENT.match(text)
+    if not match:
+        return None
+    rest = text[match.end():].strip()
+    if rest.startswith("@"):  # PEP 508 ``name @ https://...`` direct reference
+        return match.group(1), "direct URL"
+    return match.group(1), rest or "unspecified"
+
+
+_MAX_DEPENDENCY_MANIFEST_BYTES = 32 * 1024 * 1024
+
+
+def _requirements_file(path: str) -> bool:
+    """requirements*.txt anywhere, and every .txt under a requirements/ directory."""
+    parts = path.replace("\\", "/").lower().split("/")
+    return parts[-1].startswith("requirements") or (len(parts) > 1 and parts[-2] == "requirements")
+
+
+
+_REBAR_DEPS = re.compile(r"\{\s*deps\s*,\s*\[")
+_REBAR_DEPS_END = re.compile(r"\]\s*\}")
+_ROCKSPEC_DEPENDENCIES = re.compile(r"dependencies\s*=\s*\{")
+_CLOSE_BRACE = re.compile(r"\}")
+
+
+def _delimited(source: str, head: re.Pattern[str], close: re.Pattern[str]) -> str | None:
+    """The text between the first ``head`` and the next ``close``, in linear time.
+
+    ``head(.*?)close`` with DOTALL rescanned to the end of the file from every head that
+    nothing closes, which is quadratic. If the first head has no close after it, no later
+    head has one either.
+    """
+    start = head.search(source)
+    if start is None:
+        return None
+    end = close.search(source, start.end())
+    return None if end is None else source[start.end():end.start()]
+
+class DependencyManifestAnalyzer(Analyzer):
+    """Extract explicitly declared dependencies from common project manifests."""
+
+    name = "dependency-manifests"
+    limits = AnalyzerLimits(
+        _MAX_DEPENDENCY_MANIFEST_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth, read or parse failure",
+    )
+    domains = ("dependency_manifests",)
+    _supported_names = {
+        "pyproject.toml", "cargo.toml", "go.mod", "package.json", "composer.json",
+        "pom.xml", "build.gradle", "build.gradle.kts", "package.swift",
+        "pubspec.yaml", "pubspec.yml", "gemfile", "mix.exs", "rebar.config",
+        "pipfile", "project.toml", "deps.edn", "project.clj", "build.sbt",
+        "cpanfile", "cmakelists.txt", "conanfile.txt", "conanfile.py",
+        "platformio.ini", "description", "package.xml", "vcpkg.json",
+        "dub.json", "haxelib.json", "shard.yml", "fpm.toml",
+        "packages.config", "directory.packages.props",
+    }
+
+    def supports(self, record: FileRecord) -> bool:
+        name = Path(record.path).name.lower()
+        return record.error is None and (
+            name in self._supported_names
+            or (_requirements_file(record.path) and record.extension == ".txt")
+            or name.endswith((".csproj", ".fsproj", ".vbproj", ".gemspec", ".cabal", ".opam", ".nimble", ".rockspec"))
+        )
+
+    def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        if over_limit(record.size_bytes, _MAX_DEPENDENCY_MANIFEST_BYTES):
+            return [Finding(
+                "configuration",
+                f"Dependency manifest resource limit: {record.path}",
+                f"File size {record.size_bytes:,} bytes exceeds the dependency-manifest "
+                f"{_MAX_DEPENDENCY_MANIFEST_BYTES:,}-byte content budget.",
+                confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
+        try:
+            content = read_text_bounded(
+                path, _MAX_DEPENDENCY_MANIFEST_BYTES,
+                expected_identity=record.analysis_identity,
+            )
+            declarations = self._extract(path, record, content)
+        except SourceBudgetExceeded as exc:
+            return [Finding(
+                "configuration", f"Dependency manifest resource limit: {record.path}",
+                str(exc), confidence="UNKNOWN", evidence=[record.path],
+                analyzer=self.name, severity="LOW",
+            )]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, ET.ParseError, configparser.Error, ValueError) as exc:
+            return [Finding(
+                "configuration",
+                "Dependency manifest parse error",
+                describe_error(exc),
+                confidence="UNKNOWN", severity="LOW",
+                evidence=[record.path],
+                analyzer=self.name,
+            )]
+
+        return [
+            Finding(
+                "dependency",
+                f"Declared dependency: {name}",
+                f"Manifest declaration in {group}; constraint: {constraint}. "
+                "This confirms declaration only, not installation or runtime use.",
+                confidence="CONFIRMED",
+                evidence=[record.path],
+                analyzer=self.name,
+            )
+            for name, constraint, group in declarations
+        ]
+
+    def _extract(
+        self, path: Path, record: FileRecord, content: str
+    ) -> list[tuple[str, str, str]]:
+        name = Path(record.path).name.lower()
+        declarations: list[tuple[str, str, str]] = []
+
+        def add(dep_name: str, constraint: Any, group: str) -> None:
+            declarations.append((dep_name, _constraint(constraint), group))
+
+        if name == "pyproject.toml":
+            data = tomllib.loads(content)
+            project = _table(data, "project")
+            for item in _array(project, "dependencies"):
+                parsed = _python_requirement(item) if isinstance(item, str) else None
+                if parsed:
+                    add(parsed[0], parsed[1], "project.dependencies")
+            for group, items in _table(project, "optional-dependencies").items():
+                for item in items if isinstance(items, list) else []:
+                    parsed = _python_requirement(item) if isinstance(item, str) else None
+                    if parsed:
+                        add(parsed[0], parsed[1], f"project.optional-dependencies.{group}")
+            # PEP 735 dependency groups; an {include-group = ...} entry names another group.
+            for group, items in _table(data, "dependency-groups").items():
+                for item in items if isinstance(items, list) else []:
+                    parsed = _python_requirement(item) if isinstance(item, str) else None
+                    if parsed:
+                        add(parsed[0], parsed[1], f"dependency-groups.{group}")
+            poetry = _table(_table(data, "tool"), "poetry")
+            for group, key in (("poetry.dependencies", "dependencies"), ("poetry.dev-dependencies", "dev-dependencies")):
+                for dep_name, constraint in _table(poetry, key).items():
+                    if dep_name.lower() != "python":
+                        add(dep_name, constraint, group)
+            for group_name, group_data in _table(poetry, "group").items():
+                for dep_name, constraint in _table(group_data, "dependencies").items():
+                    add(dep_name, constraint, f"tool.poetry.group.{group_name}")
+        elif _requirements_file(record.path) and path.suffix.lower() == ".txt":
+            for line in content.splitlines():
+                parsed = _python_requirement(line.split(" #", 1)[0])
+                if parsed:
+                    add(parsed[0], parsed[1], "requirements")
+        elif name in {"package.json", "composer.json"}:
+            data = json.loads(content)
+            groups = (
+                ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+                if name == "package.json" else ("require", "require-dev")
+            )
+            for group in groups:
+                for dep_name, constraint in _table(data, group).items():
+                    add(dep_name, constraint, group)
+        elif name == "cargo.toml":
+            data = tomllib.loads(content)
+            for group in ("dependencies", "dev-dependencies", "build-dependencies"):
+                for dep_name, constraint in _table(data, group).items():
+                    add(dep_name, constraint, group)
+            for dep_name, constraint in _table(_table(data, "workspace"), "dependencies").items():
+                add(dep_name, constraint, "workspace.dependencies")
+            for target, target_data in _table(data, "target").items():
+                for group in ("dependencies", "dev-dependencies", "build-dependencies"):
+                    for dep_name, constraint in _table(target_data, group).items():
+                        add(dep_name, constraint, f"target.{target}.{group}")
+        elif name == "go.mod":
+            lines = content.splitlines()
+            in_require_block = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("require ("):
+                    in_require_block = True
+                    continue
+                if in_require_block and stripped == ")":
+                    in_require_block = False
+                    continue
+                candidate = stripped.split("//", 1)[0].strip()
+                if not candidate:
+                    continue
+                if candidate.startswith("require "):
+                    candidate = candidate[len("require "):]
+                elif not in_require_block:
+                    continue
+                match = _GO_REQUIRE.match(candidate)
+                if match:
+                    add(match.group(1), match.group(2), "go.mod require")
+        elif name in {"pom.xml", "package.xml", "packages.config", "directory.packages.props"} or name.endswith((".csproj", ".fsproj", ".vbproj")):
+            root = safe_xml_fromstring(content)
+            for element in root.iter():
+                tag = element.tag.rsplit("}", 1)[-1].lower()
+                if tag == "dependency" and name == "pom.xml":
+                    fields = {
+                        child.tag.rsplit("}", 1)[-1].lower(): (child.text or "").strip()
+                        for child in element
+                    }
+                    artifact = fields.get("artifactid")
+                    if artifact:
+                        group_id = fields.get("groupid", "")
+                        add(f"{group_id}:{artifact}" if group_id else artifact,
+                            fields.get("version") or "managed/unspecified",
+                            f"pom.xml dependency ({fields.get('scope', 'compile')})")
+                elif tag in {"packagereference", "packageversion"}:
+                    attributes = {
+                        key.rsplit("}", 1)[-1].lower(): value
+                        for key, value in element.attrib.items()
+                    }
+                    dep_name = attributes.get("include") or attributes.get("update")
+                    version = attributes.get("version")
+                    for child in element:
+                        if child.tag.rsplit("}", 1)[-1].lower() == "version":
+                            version = (child.text or "").strip()
+                    if dep_name:
+                        add(dep_name, version or "central/unspecified", tag)
+                elif tag == "package" and name == "packages.config":
+                    attributes = {
+                        key.rsplit("}", 1)[-1].lower(): value
+                        for key, value in element.attrib.items()
+                    }
+                    dep_name = attributes.get("id")
+                    if dep_name:
+                        add(dep_name, attributes.get("version", "unspecified"), "packages.config")
+                elif tag in {"depend", "build_depend", "buildtool_depend", "exec_depend", "test_depend"} and name == "package.xml":
+                    if element.text and element.text.strip():
+                        add(element.text.strip(), "unspecified", f"ROS {tag}")
+        elif name in {"build.gradle", "build.gradle.kts"}:
+            pattern = re.compile(
+                r"""(?m)^[ \t]*(implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|classpath|kapt|annotationProcessor|debugImplementation|releaseImplementation)\s*(?:\(\s*)?["']([^"']+)["']"""
+            )
+            for group, coordinate in pattern.findall(content):
+                parts = coordinate.split(":")
+                if len(parts) >= 2:
+                    add(f"{parts[0]}:{parts[1]}", parts[2] if len(parts) > 2 else "unspecified", f"Gradle {group}")
+        elif name == "package.swift":
+            source = content
+            pattern = re.compile(
+                r"""\.package\s*\(\s*(?:name\s*:\s*["']([^"']+)["']\s*,\s*)?url\s*:\s*["']([^"']+)["']\s*,\s*(?:from|exact|branch|revision)\s*:\s*["']([^"']+)["']"""
+            )
+            for explicit_name, url, constraint in pattern.findall(source):
+                dep_name = explicit_name or url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+                add(dep_name, constraint, "Package.swift")
+        elif name == "gemfile":
+            pattern = re.compile(r"""(?m)^[ \t]*gem\s+["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
+            for dep_name, constraint in pattern.findall(content):
+                add(dep_name, constraint or "unspecified", "Gemfile")
+        elif name.endswith(".gemspec"):
+            pattern = re.compile(r"""(?m)\.add_(?:development_)?dependency\s*(?:\(\s*)?["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
+            for dep_name, constraint in pattern.findall(content):
+                add(dep_name, constraint or "unspecified", "Ruby gemspec")
+        elif name == "mix.exs":
+            pattern = re.compile(r"""\{\s*:([A-Za-z0-9_]+)\s*,\s*["']([^"']+)["']""")
+            for dep_name, constraint in pattern.findall(content):
+                add(dep_name, constraint, "mix.exs deps")
+        elif name in {"pubspec.yaml", "pubspec.yml", "shard.yml"}:
+            try:
+                import yaml
+            except ImportError:
+                source = content
+                pattern = re.compile(r"""(?m)^[ \t]{2}([A-Za-z0-9_.-]+):\s*([^\s#]+)\s*$""")
+                for dep_name, constraint in pattern.findall(source):
+                    add(dep_name, constraint, "YAML dependencies")
+            else:
+                try:
+                    data = safe_yaml_load(content) or {}
+                except yaml.YAMLError as exc:
+                    raise ValueError(f"YAML dependency manifest parse error: {exc}") from exc
+                groups = (
+                    ("dependencies", "dependencies"),
+                    ("dev_dependencies", "dev_dependencies"),
+                    ("dependency_overrides", "dependency_overrides"),
+                )
+                for group, key in groups:
+                    for dep_name, constraint in _table(data, key).items():
+                        if dep_name not in {"flutter", "sdk"}:
+                            add(dep_name, constraint, group)
+        elif name == "pipfile":
+            data = tomllib.loads(content)
+            for group in ("packages", "dev-packages"):
+                for dep_name, constraint in _table(data, group).items():
+                    add(dep_name, constraint, f"Pipfile [{group}]")
+        elif name == "project.toml":
+            data = tomllib.loads(content)
+            dependencies = _table(data, "deps")
+            compatibility = _table(data, "compat")
+            for dep_name, uuid in dependencies.items():
+                add(dep_name, compatibility.get(dep_name, f"uuid:{uuid}"), "Julia Project.toml [deps]")
+        elif name == "description":
+            fields: dict[str, list[str]] = {}
+            current = None
+            for line in content.splitlines():
+                if line and not line[0].isspace() and ":" in line:
+                    current, value = line.split(":", 1)
+                    if current in {"Imports", "Depends", "Suggests", "LinkingTo", "Enhances"}:
+                        fields.setdefault(current, []).append(value.strip())
+                    else:
+                        current = None
+                elif current and line.strip():
+                    fields[current].append(line.strip())
+            for group, values in fields.items():
+                for item in ",".join(values).split(","):
+                    match = re.match(r"\s*([A-Za-z][A-Za-z0-9.]*)", item)
+                    if match and match.group(1) != "R":
+                        add(match.group(1), item[match.end():].strip() or "unspecified", f"R DESCRIPTION {group}")
+        elif name == "cmakelists.txt":
+            source = content
+            for dep_name, version in re.findall(
+                r"""(?im)^[ \t]*find_package\s*\(\s*([A-Za-z0-9_.+-]+)(?:\s+([0-9][^\s)]+))?""",
+                source,
+            ):
+                add(dep_name, version or "unspecified", "CMake find_package")
+            for dep_name in re.findall(
+                r"""(?im)^[ \t]*FetchContent_Declare\s*\(\s*([A-Za-z0-9_.+-]+)""",
+                source,
+            ):
+                add(dep_name, "FetchContent declaration", "CMake FetchContent")
+        elif name in {"conanfile.txt", "conanfile.py"}:
+            source = content
+            for dep_name, version in re.findall(
+                r"""(?im)^[ \t]*([A-Za-z0-9_.+-]+)/([A-Za-z0-9.*+_-]+)\s*$""", source
+            ):
+                add(dep_name, version, "Conan [requires]")
+            for coordinate in re.findall(
+                r"""(?:requires\s*=\s*["']|self\.requires\s*\(\s*["'])([^"']+)""",
+                source,
+            ):
+                if "/" in coordinate:
+                    dep_name, version = coordinate.split("/", 1)
+                    add(dep_name, version, "Conan requires")
+        elif name == "deps.edn":
+            pattern = re.compile(
+                r"""(?<![A-Za-z0-9_./-])([A-Za-z0-9_.-]++/[A-Za-z0-9_.-]++)\s+\{\s*:mvn/version\s+["']([^"']+)["']"""
+            )
+            for dep_name, constraint in pattern.findall(content):
+                add(dep_name, constraint, "Clojure deps.edn")
+        elif name == "project.clj":
+            pattern = re.compile(r"""\[([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+["']([^"']+)["']\]""")
+            for dep_name, constraint in pattern.findall(content):
+                add(dep_name, constraint, "Leiningen project.clj")
+        elif name == "build.sbt":
+            pattern = re.compile(
+                r"""["']([^"']+)["']\s*(?:%%|%)\s*["']([^"']+)["']\s*%\s*["']([^"']+)["']"""
+            )
+            for group_id, artifact, constraint in pattern.findall(content):
+                add(f"{group_id}:{artifact}", constraint, "sbt libraryDependencies")
+        elif name == "cpanfile":
+            pattern = re.compile(r"""(?im)^[ \t]*requires\s+["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?""")
+            for dep_name, constraint in pattern.findall(content):
+                add(dep_name, constraint or "unspecified", "cpanfile requires")
+        elif name.endswith(".cabal"):
+            active = False
+            for line in content.splitlines():
+                if re.match(r"^\s*(?:build-depends|library|executable|test-suite)\s*:", line, re.I):
+                    active = True
+                    value = line.split(":", 1)[1]
+                elif active and line[:1].isspace() and not _CABAL_FIELD.match(line):
+                    value = line.strip()
+                else:
+                    active = False
+                    continue
+                for item in value.split(","):
+                    match = re.match(r"\s*([A-Za-z][A-Za-z0-9-]*)", item)
+                    if match:
+                        add(match.group(1), item[match.end():].strip() or "unspecified", "Cabal build-depends")
+        elif name.endswith(".opam"):
+            source = content
+            for dep_name, constraint in re.findall(
+                r"""["']([A-Za-z0-9_.+-]+)["']\s*\{\s*([<>=!~]+\s*["'][^"']+["'])""",
+                source,
+            ):
+                add(dep_name, constraint, "opam depends")
+        elif name.endswith(".nimble"):
+            pattern = re.compile(r"""(?im)^[ \t]*requires\s+["']([^"']+)["'](?:\s*,\s*["']([^"']+)["'])?""")
+            for dep_name, constraint in pattern.findall(content):
+                add(dep_name, constraint or "unspecified", "Nimble requires")
+        elif name == "vcpkg.json":
+            data = json.loads(content)
+            for dependency in _array(data, "dependencies"):
+                if isinstance(dependency, str):
+                    add(dependency, "baseline/unspecified", "vcpkg dependencies")
+                elif isinstance(dependency, dict) and dependency.get("name"):
+                    add(dependency["name"], dependency.get("version>=", dependency.get("version", "unspecified")), "vcpkg dependencies")
+        elif name == "dub.json":
+            data = json.loads(content)
+            for dep_name, constraint in _table(data, "dependencies").items():
+                add(dep_name, constraint, "DUB dependencies")
+        elif name == "haxelib.json":
+            data = json.loads(content)
+            for dep_name, constraint in _table(data, "dependencies").items():
+                add(dep_name, constraint, "Haxelib dependencies")
+        elif name == "fpm.toml":
+            data = tomllib.loads(content)
+            for dep_name, constraint in _table(data, "dependencies").items():
+                add(dep_name, constraint, "Fortran fpm dependencies")
+        elif name == "rebar.config":
+            source = content
+            block = _delimited(source, _REBAR_DEPS, _REBAR_DEPS_END)
+            if block is not None:
+                for dep_name, constraint in re.findall(
+                    r"""\{\s*([A-Za-z0-9_]+)\s*,\s*["']([^"']+)["']\s*\}""",
+                    block,
+                ):
+                    add(dep_name, constraint, "rebar.config deps")
+        elif name == "platformio.ini":
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read_string(content)
+            for section in parser.sections():
+                if parser.has_option(section, "lib_deps"):
+                    for line in parser.get(section, "lib_deps").splitlines():
+                        item = line.strip()
+                        if not item or item.startswith(";"):
+                            continue
+                        coordinate, separator, version = item.partition("@")
+                        add(coordinate.strip(), version.strip() if separator else "unspecified",
+                            f"PlatformIO {section} lib_deps")
+        elif name.endswith(".rockspec"):
+            source = content
+            block = _delimited(source, _ROCKSPEC_DEPENDENCIES, _CLOSE_BRACE)
+            if block is not None:
+                for item in re.findall(r"""["']([^"']+)["']""", block):
+                    match = re.match(r"([A-Za-z0-9_.-]+)\s*(.*)", item)
+                    if match:
+                        add(match.group(1), match.group(2).strip() or "unspecified",
+                            "Lua rockspec dependencies")
+        return sorted(set(declarations), key=lambda item: (item[2], item[0].lower(), item[1]))
