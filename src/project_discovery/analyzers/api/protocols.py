@@ -39,6 +39,7 @@ from ...core.source_utils import (
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
 from ..base import Analyzer
+from .contracts import _OPENAPI_NAMES, _flatten_openapi, emit_openapi_operations, openapi_base
 from .integration import _normalize_url
 from .rpc import _Lines
 
@@ -62,7 +63,7 @@ _DATA = frozenset({".json", ".yaml", ".yml"})
 
 # --------------------------------------------------------------------------- contracts
 
-_CONTRACT_KEY = re.compile(r'''(?:^|[{,\n])[ \t]*+["']?(asyncapi|openrpc|openapi)["']?[ \t]*+:[ \t]*+["']?(\d[\w.-]{0,20})''')
+_CONTRACT_KEY = re.compile(r'''(?:^|[{,\n])[ \t]*+["']?(asyncapi|openrpc|openapi|swagger)["']?[ \t]*+:[ \t]*+["']?(\d[\w.-]{0,20})''')
 _SERVERLESS_NAMES = frozenset({"serverless.yml", "serverless.yaml"})
 # serverless.yml event types that are message-driven endpoints, with the key that names them.
 _SERVERLESS_EVENTS = {"sqs": "arn", "sns": "topicName", "kafka": "topic", "msk": "topic", "stream": "arn",
@@ -911,8 +912,9 @@ class ProtocolEndpointAnalyzer(Analyzer):
                             confidence="UNKNOWN", severity="LOW", evidence=[record.path], analyzer=self.name)]
         try:
             text = read_text_bounded(path, MAX_PROTOCOL_BYTES, errors="replace", expected_identity=record.analysis_identity)
-            if contract and contract.group(1) == "openapi" and "webhooks" not in text:
-                return []  # api-contracts reads the routes of OpenAPI documents
+            if contract and contract.group(1) in {"openapi", "swagger"} and name in _OPENAPI_NAMES and \
+                    "webhooks" not in text:
+                return []  # api-contracts reads the operations of documents with these names
             data = json.loads(text) if record.extension == ".json" else safe_yaml_load(text, allow_unknown_tags=True)
         except ImportError:
             return [Finding("api", f"API document unavailable: {record.path}",
@@ -932,9 +934,22 @@ class ProtocolEndpointAnalyzer(Analyzer):
             return self._asyncapi(record, *asyncapi_channels(data))
         if kind == "openrpc" and "openrpc" in data:
             return self._openrpc(record, str(data.get("openrpc")), openrpc_methods(data))
-        if kind == "openapi" and "openapi" in data:
-            return self._webhooks(record, openapi_webhooks(data))
+        if kind in {"openapi", "swagger"} and kind in data:
+            findings = self._webhooks(record, openapi_webhooks(data))
+            return findings if name in _OPENAPI_NAMES else findings + self._openapi(record, kind, data)
         return []
+
+    def _openapi(self, record: FileRecord, kind: str, data: dict) -> list[Finding]:
+        """An OpenAPI or Swagger document api-contracts does not read by name: its operations."""
+        routes, schemas = _flatten_openapi(data)
+        emit_openapi_operations(routes, openapi_base(data))
+        return [Finding(
+            "api", f"OpenAPI operations: {record.path}",
+            f"{'Swagger' if kind == 'swagger' else 'OpenAPI'} {data.get(kind)}: {len(routes)} HTTP operation(s) and "
+            f"{len(schemas)} component schema(s), in a document recognized by its content.",
+            confidence="CONFIRMED", analyzer=self.name,
+            evidence=[f"{method} {route}" for method, route in routes[:MAX_PROTOCOL_EVIDENCE]] or [record.path],
+        )]
 
     def _asyncapi(self, record: FileRecord, version: str, servers: list[dict], channels: list[dict]) -> list[Finding]:
         protocols = sorted({server["protocol"] for server in servers if server["protocol"]})

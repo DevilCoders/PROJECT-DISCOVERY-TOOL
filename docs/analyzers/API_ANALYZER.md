@@ -12,6 +12,8 @@ PDT inventories APIs from three directions, with GraphQL, RPC and other protocol
 
 **Protocol endpoints** (`api-protocols`): JSON-RPC, SOAP, WebSocket, Server-Sent Events, webhook, MQTT and message-driven endpoints in code, and AsyncAPI, OpenRPC and OpenAPI webhook documents recognized by content ([Protocol endpoints](#protocol-endpoints)).
 
+**Generated clients** (`api-clients`): the code OpenAPI code generators write, with the operations it calls; the code index cross-references contracts, routes, generated clients and HTTP calls ([Contracts, routes and generated clients](#contracts-routes-and-generated-clients)).
+
 **Limits.** Contracts and route declarations are static evidence. PDT does not make network requests or claim that an API is deployed, reachable, authorized or behaviorally correct. Route prefixes added at run time, middleware, dynamic registration, compatibility analysis between contract versions and security testing are not covered.
 
 ## Endpoint adapters
@@ -151,6 +153,24 @@ The code index's `protocols` pass (`metrics.code_index.protocols`) counts endpoi
 - POST, PUT and catch-all routes whose path names a webhook, hook or callback, with the signature checks in their files: "Webhook routes without a signature check in their file" (`LOW`; the check may be in middleware).
 
 Each comparison runs only when the scan has both sides. Each file is read with a 16 MiB budget; a larger document is an `UNKNOWN` finding.
+
+## Contracts, routes and generated clients
+
+The code index's `contract_links` pass (`metrics.code_index.contract_links`) cross-references every OpenAPI and Swagger operation with the routes that serve it, the generated clients that call it and the HTTP calls code makes, by method and path template (`{petId}`, `<int:id>`, `:id` and `${id}` are the same parameter):
+
+- **Contract operations** come from `api-contracts` (documents named `openapi.*` and `swagger.*`) and `api-protocols` (any other YAML or JSON document whose top-level `openapi` or `swagger` key holds a version: an "OpenAPI operations" finding), each with its operationId and base path (Swagger's `basePath`, or the path of OpenAPI's first `servers` URL). An operation matches routes with or without its base path, and routes under a longer mount prefix.
+- **Routes** are the endpoints pass's routes, mounts resolved ([Route structure](#route-structure)), with the file and line of their declaration: for decorated handlers (Flask, FastAPI, Spring, NestJS and the like) the handler's line.
+- **Generated clients** are found by the `api-clients` analyzer from the generator's mark in a source file's first 8 KiB: openapi-generator, swagger-codegen, swagger-typescript-api, NSwag, Kiota, AutoRest, oapi-codegen, ogen, orval, openapi-typescript, @hey-api/openapi-ts and openapi-typescript-codegen ("Generated API client" finding). The operations a client calls are its path literals (template literals, NSwag's `Operation Path` comments and Kiota's `{+baseurl}` URL templates included; RFC 6570 query expressions dropped), each with the HTTP method written nearest it, 400 characters before to 1,500 after (`method: 'GET'`, `HttpMethod.Get`, `http.MethodGet`, `"POST"`, `axios.get(`).
+- **HTTP calls** are the integration analyzer's call sites ([CODE_INTELLIGENCE.md](../architecture/CODE_INTELLIGENCE.md)).
+
+| Finding | What it reports |
+|---|---|
+| API contracts and code | Each operation with its operationId, the route that serves it (file and line, framework), the generated client that calls it and the number of call sites |
+| Contract operations no route serves | Operations of a contract whose other operations the scan serves (a contract of an API the project only calls is not compared) |
+| Routes no contract declares | Routes in none of the scan's contracts, when the scan serves a contract |
+| Generated client operations no contract declares | A client generated from one of the scan's contracts (it calls some of its operations) that calls operations the contract no longer declares: regenerate it |
+
+gRPC services are tied to their generated code, servers and clients by the `rpc` pass ([RPC services](#rpc-services)), and GraphQL operations to schema fields and resolvers by the `graphql` pass ([GraphQL](#graphql)). The handler's symbol (its function or method name) is not recorded yet: the endpoint catalog will add it.
 
 ## Route structure
 

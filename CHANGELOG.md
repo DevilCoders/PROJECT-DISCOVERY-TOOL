@@ -228,6 +228,17 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: routes, API contracts and generated clients cross-referenced
+- `api-clients`: generated OpenAPI clients by generator mark (openapi-generator, swagger-codegen,
+  swagger-typescript-api, NSwag, Kiota, AutoRest, oapi-codegen, ogen, orval, openapi-typescript,
+  @hey-api/openapi-ts, openapi-typescript-codegen), with the operation paths they call and the HTTP
+  method written nearest each.
+- `api-contracts` records every OpenAPI operation with its operationId and base path; `api-protocols`
+  reads OpenAPI and Swagger documents with other names by content ("OpenAPI operations").
+- The code index's `contract_links` pass matches operations with the routes that serve them, the
+  generated clients that call them and HTTP call sites: operations no route serves, routes no contract
+  declares, and generated clients that call operations their contract no longer declares.
+
 ### Added: JSON-RPC, SOAP, WebSocket, SSE, webhook, MQTT and message-driven endpoints
 - `api-protocols`: endpoints in code by protocol and framework: JSON-RPC methods and request literals; SOAP
   services, operations and clients (JAX-WS, Spring-WS, WCF, CoreWCF, ASMX, spyne, zeep, PHP, node-soap,

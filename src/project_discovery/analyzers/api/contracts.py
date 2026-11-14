@@ -88,6 +88,30 @@ def _flatten_openapi(data: Any) -> tuple[list[tuple[str, str]], list[str]]:
     return paths, schemas
 
 
+def openapi_base(data: Any) -> str:
+    """The path every operation of an OpenAPI or Swagger document is served under: Swagger 2.0's
+    ``basePath``, or the path of the first of OpenAPI 3's ``servers``."""
+    if not isinstance(data, dict):
+        return ""
+    if isinstance(data.get("basePath"), str):
+        return data["basePath"].rstrip("/")
+    servers = data.get("servers")
+    if isinstance(servers, list) and servers and isinstance(servers[0], dict) and isinstance(servers[0].get("url"), str):
+        url = servers[0]["url"]
+        path = _URL_AUTHORITY.sub("", url, count=1)
+        return path.split("?", 1)[0].rstrip("/") if path.startswith("/") else ""
+    return ""
+
+
+def emit_openapi_operations(routes: list[tuple[str, str]], base: str) -> None:
+    """``openapi_operation`` facts for the code index: "METHOD /path" with the operationId."""
+    for method, route in routes[:MAX_OPENAPI_OPERATION_FACTS]:
+        path, _, operation = route.partition(" (")
+        code_facts.emit_fact("openapi_operation", f"{method} {path}", operation_id=operation.rstrip(")"), base=base)
+
+
+_URL_AUTHORITY = re.compile(r"^[A-Za-z][\w+.-]{0,20}+://[^/]{0,253}+")
+MAX_OPENAPI_OPERATION_FACTS = 2000
 _MAX_API_CONTRACT_BYTES = 16 * 1024 * 1024
 
 
@@ -164,6 +188,7 @@ class APIContractAnalyzer(Analyzer):
     def _openapi(
         self, path: Path, record: FileRecord, content: str
     ) -> list[Finding]:
+        data: Any = None
         if record.extension == ".json":
             data = json.loads(content)
             routes, schemas = _flatten_openapi(data)
@@ -193,6 +218,7 @@ class APIContractAnalyzer(Analyzer):
             else:
                 data = safe_yaml_load(content)
                 routes, schemas = _flatten_openapi(data)
+        emit_openapi_operations(routes, openapi_base(data))
         return [Finding(
             "api",
             f"OpenAPI contract: {record.path}",

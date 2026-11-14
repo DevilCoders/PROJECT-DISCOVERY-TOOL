@@ -2135,6 +2135,152 @@ def _protocols(context: _Context) -> tuple[dict, list[Finding]]:
     return value, findings
 
 
+MAX_CONTRACT_LINK_ITEMS = 5000
+
+
+def _contract_links(context: _Context) -> tuple[dict, list[Finding]]:
+    """OpenAPI operations cross-referenced with the routes that serve them, the generated clients
+    that call them and the HTTP calls code makes, by method and path template."""
+    from ..analyzers.api.integration import EndpointIndex, normalize_route
+
+    db = context.db
+    operations: dict[tuple[str, str], dict] = {}
+    for name, path, values in _fact_rows(db, "openapi_operation", ordered=True):
+        method, _, route = name.partition(" ")
+        base = str(values.get("base", "") or "")
+        for template in dict.fromkeys((normalize_route(route), normalize_route(base + route) if base else "")):
+            if template and (method, template) not in operations and len(operations) < MAX_CONTRACT_LINK_ITEMS:
+                operations[(method, template)] = {
+                    "method": method, "path": route, "operation_id": str(values.get("operation_id", "")), "file": path,
+                    "routes": [], "clients": [], "calls": 0}
+    served = context.endpoint_routes if context.endpoint_routes is not None else [
+        {"method": name.partition(" ")[0], "path": name.partition(" ")[2], "file": path, "line": values.get("line"),
+         "framework": str(values.get("framework", ""))} for name, path, values in _fact_rows(db, "api_endpoint", ordered=True)]
+    clients: dict[str, dict] = {}
+    for name, path, _ in _fact_rows(db, "api_client", ordered=True):
+        if len(clients) < MAX_CONTRACT_LINK_ITEMS:
+            clients.setdefault(path, {"file": path, "generator": name, "operations": 0, "matched": 0, "unmatched": []})
+    value = {"operations": len({(item["method"], item["path"], item["file"]) for item in operations.values()}),
+             "routes": len(served), "generated_clients": len(clients)}
+    if not operations and not clients:
+        return value, []
+    index = EndpointIndex(operations)
+    undeclared = []
+    contract_files_served: set[str] = set()
+    for route in served:
+        hit = index.match(str(route.get("method", "")), normalize_route(str(route.get("path", ""))))
+        if hit is None:
+            undeclared.append(route)
+            continue
+        operation = operations[(hit[0], hit[1])]
+        contract_files_served.add(operation["file"])
+        if len(operation["routes"]) < 5:
+            operation["routes"].append({"method": route.get("method"), "path": route.get("path"), "file": route["file"],
+                                        "line": route.get("line"), "framework": route.get("framework", ""),
+                                        "match": hit[2]})
+    for name, path, values in _fact_rows(db, "api_client_operation", ordered=True):
+        method, _, route = name.partition(" ")
+        client = clients.setdefault(path, {"file": path, "generator": str(values.get("generator", "")), "operations": 0,
+                                           "matched": 0, "unmatched": []})
+        client["operations"] += 1
+        hit = index.match("" if method == "?" else method, normalize_route(route))
+        if hit is None:
+            if len(client["unmatched"]) < MAX_LISTED:
+                client["unmatched"].append({"method": method, "path": route, "line": values.get("line")})
+            continue
+        client["matched"] += 1
+        operation = operations[(hit[0], hit[1])]
+        if path not in operation["clients"] and len(operation["clients"]) < 5:
+            operation["clients"].append(path)
+    calls = 0
+    for name, _, _ in itertools.islice(_fact_rows(db, "http_call"), MAX_CONTRACT_LINK_ITEMS * 10):
+        method, _, route = name.partition(" ")
+        hit = index.match(method, route)
+        if hit is not None:
+            operations[(hit[0], hit[1])]["calls"] += 1
+            calls += 1
+    # Each operation once: an operation indexed with and without its base path is merged.
+    groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for item in operations.values():
+        groups[(item["method"], item["path"], item["file"])].append(item)
+    listed = []
+    for item, *twins in groups.values():
+        for twin in twins:
+            item["routes"] += [route for route in twin["routes"] if route not in item["routes"]][:max(0, 5 - len(item["routes"]))]
+            item["clients"] += [client for client in twin["clients"] if client not in item["clients"]][
+                :max(0, 5 - len(item["clients"]))]
+            item["calls"] += twin["calls"]
+        listed.append(item)
+    # Operations no route serves, in contracts the scan serves other operations of (a contract of
+    # an API the project only calls is not compared).
+    unimplemented = [item for item in listed if item["file"] in contract_files_served and not item["routes"]]
+    # Routes no contract declares, when the scan serves a contract.
+    undeclared = undeclared[:MAX_CONTRACT_LINK_ITEMS] if contract_files_served else []
+    # Generated clients' operations no contract declares, for clients generated from a scanned contract.
+    stale = [client for client in clients.values() if client["matched"] and client["unmatched"]]
+    value.update({
+        "implemented": sum(1 for item in listed if item["routes"]),
+        "called_by_clients": sum(1 for item in listed if item["clients"]), "calls_matched": calls,
+        "links": [{key: item[key] for key in ("method", "path", "operation_id", "file", "routes", "clients", "calls")}
+                  for item in listed[:MAX_LISTED * 10]],
+        "unimplemented": [{"method": item["method"], "path": item["path"], "operation_id": item["operation_id"],
+                           "file": item["file"]} for item in unimplemented[:MAX_CONTRACT_LINK_ITEMS]],
+        "undeclared_routes": [{"method": item.get("method"), "path": item.get("path"), "file": item["file"],
+                               "line": item.get("line")} for item in undeclared],
+        "clients": sorted(clients.values(), key=lambda client: client["file"])[:MAX_LISTED * 10],
+    })
+    parts = []
+    if listed:
+        parts.append(f"{len(listed):,} contract operation(s), {value['implemented']:,} served by routes in code")
+    if clients:
+        parts.append(f"{len(clients):,} generated client(s) ({', '.join(sorted({client['generator'] for client in clients.values()}))}) "
+                     f"calling {value['called_by_clients']:,} contract operation(s)")
+    if calls:
+        parts.append(f"{calls:,} HTTP call site(s) matching contract operations")
+    evidence = []
+    for item in listed[:MAX_LISTED]:
+        line = f"{item['method']} {item['path']}" + (f" ({item['operation_id']})" if item["operation_id"] else "") \
+            + f": {item['file']}"
+        if item["routes"]:
+            route = item["routes"][0]
+            line += f"; route {route['file']}" + (f":{route['line']}" if route["line"] else "") \
+                + (f" ({route['framework']})" if route["framework"] else "")
+        if item["clients"]:
+            line += f"; client {item['clients'][0]}"
+        evidence.append(line)
+    findings = [Finding("api", "API contracts and code", "; ".join(parts) + ". Operations are matched by method and "
+                        "path template, with base paths and mount prefixes.", confidence="INFERRED", analyzer="code-index",
+                        evidence=evidence or [client["file"] for client in list(clients.values())[:MAX_LISTED]])]
+    if unimplemented:
+        findings.append(Finding(
+            "api", "Contract operations no route serves",
+            f"{len(unimplemented):,} operation(s) of contracts whose other operations the scan serves have no route in "
+            "code: not implemented yet, served by another service, or declared in a form the scan does not read.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{item['method']} {item['path']}" + (f" ({item['operation_id']})" if item["operation_id"] else "")
+                      + f": {item['file']}" for item in unimplemented[:MAX_LISTED]],
+        ))
+    if undeclared:
+        findings.append(Finding(
+            "api", "Routes no contract declares",
+            f"{len(undeclared):,} route(s) in code are in none of the scan's API contracts, which describe the routes "
+            "the scan serves: the contract is behind the code, or the routes are internal.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{item.get('method')} {item.get('path')}: {item['file']}" + (f":{item['line']}" if item.get("line") else "")
+                      for item in undeclared[:MAX_LISTED]],
+        ))
+    if stale:
+        findings.append(Finding(
+            "api", "Generated client operations no contract declares",
+            f"{len(stale):,} generated client(s) call operations the contracts they match no longer declare: the "
+            "client is older than its contract and should be regenerated.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{client['file']} ({client['generator']}): " + ", ".join(
+                f"{item['method']} {item['path']}" for item in client["unmatched"][:8]) for client in stale[:MAX_LISTED]],
+        ))
+    return value, findings
+
+
 MAX_INTEGRATION_ITEMS = 5000
 MAX_INTEGRATION_PACKAGES = 500
 
@@ -2735,6 +2881,7 @@ _PASSES = (
     ("graphql", _graphql),
     ("rpc", _rpc),
     ("protocols", _protocols),
+    ("contract_links", _contract_links),
     ("integration", _integration),
     ("network_services", _network_services),
 )
