@@ -15,6 +15,7 @@ from ...vulnerabilities.database import VulnerabilityDatabase
 from ...vulnerabilities.adapters import cpe_attributes_match, cpe_fields
 from ...vulnerabilities.versions import comparator_for, compare_vendor, compare_versions, go_pseudo_version
 from ...vulnerabilities.vex import CLEARING, VexStatement, vex_statement
+from .dependency_graph import DependencyGraph
 from ..base import Analyzer
 from .lockfile_parsers import (
     LOCKFILE_ECOSYSTEMS,
@@ -250,12 +251,14 @@ def advisory_findings(
     analyzer: str = LOCAL_ANALYZER_NAME,
     source_label: str = "local advisory",
     vex: Sequence[VexStatement] = (),
+    graph: DependencyGraph | None = None,
 ) -> list[Finding]:
     """One finding per group of advisories that describe the same vulnerability.
 
     Shared by the offline database matcher and the opt-in online lookup so both report
     the same fields; ``source_label`` and ``analyzer`` record where the advisory came from,
-    and ``vex`` holds the operator's VEX statements (pdt scan --vex).
+    ``vex`` holds the operator's VEX statements (pdt scan --vex) and ``graph`` the lockfile's
+    dependency graph (how the package entered the project).
     """
     if not matches:
         return []
@@ -268,7 +271,7 @@ def advisory_findings(
     return [
         _advisory_group_finding(
             lockfile_path, package, [row for item in group for row in rows_by_id[item["id"]]],
-            analyzer=analyzer, source_label=source_label, vex=vex,
+            analyzer=analyzer, source_label=source_label, vex=vex, graph=graph,
         )
         for group in _alias_groups([rows[0][0] for rows in rows_by_id.values()])
     ]
@@ -286,6 +289,7 @@ def _advisory_group_finding(
     analyzer: str,
     source_label: str,
     vex: Sequence[VexStatement] = (),
+    graph: DependencyGraph | None = None,
 ) -> Finding:
     primary, confirmed, reason = next(
         (item for item in group if item[1]), group[0],
@@ -390,6 +394,17 @@ def _advisory_group_finding(
         evidence.append(f"known_exploited: {exploited['source']} {exploited['cve']} {exploited.get('date_added') or ''}".rstrip())
     if maturity:
         evidence.append(f"exploit_maturity: {maturity}")
+    # How the package entered the project: direct, or the path from a direct dependency.
+    path = graph.path(package.name, package.version) if graph is not None and graph.edges_known else None
+    if graph is not None:
+        evidence.extend(graph.describe(package.name, package.version))
+    if path is not None and len(path) > 1 and not graph.is_direct(package.name):
+        top = f"{path[0][0]}@{path[0][1]}"
+        detail += (f"It is a transitive dependency, brought in through "
+                   f"{' > '.join(f'{name}@{version}' for name, version in path)}. ")
+        if confirmed and recommendation:
+            recommendation += (f" {package.name} comes in through {top}: upgrading {path[0][0]} may be the way "
+                               f"to a patched {package.name}, or pin {package.name} with an override.")
     seen = set(evidence)
     for advisory, _, _ in group:
         for line in advisory.get("evidence_extra", ()):
@@ -505,9 +520,10 @@ class LocalVulnerabilityAnalyzer(Analyzer):
                         confidence="UNKNOWN", evidence=[record.path, f"ecosystem: {ecosystem}"],
                         analyzer=self.name, severity="LOW",
                     ))
+                graph = getattr(packages, "graph", None)
                 for package in packages:
                     if package.ecosystem not in uncovered:
-                        findings.extend(self._package_findings(database, record, package))
+                        findings.extend(self._package_findings(database, record, package, graph))
         except (OSError, ValueError, sqlite3.Error) as exc:
             return [Finding(
                 "vulnerabilities", "Local advisory database unavailable",
@@ -519,6 +535,7 @@ class LocalVulnerabilityAnalyzer(Analyzer):
 
     def _package_findings(
         self, database: VulnerabilityDatabase, record: FileRecord, package: ResolvedPackage,
+        graph: DependencyGraph | None = None,
     ) -> list[Finding]:
         matches = match_advisories(package, database.query(package.ecosystem, package.name))
-        return advisory_findings(record.path, package, matches, vex=self.vex)
+        return advisory_findings(record.path, package, matches, vex=self.vex, graph=graph)

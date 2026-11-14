@@ -43,6 +43,23 @@ Aliases resolve to the real package: yarn `alias@npm:real@range`, npm `npm:real@
 
 **Registries.** Where a format records where its packages came from, the inventory finding names the registry hosts with their package counts ("Resolved from: registry.npmjs.org (812), npm.example.com (4)"), and the code index's [provenance graph](VCS_ANALYZER.md#provenance-graph) links them to the project. Only the host is kept, never the URL, which can carry credentials and private paths. The hosts come from npm `resolved` URLs, Yarn v1 `resolved` lines, pnpm `tarball` URLs (pnpm does not record the default registry), Bun registry URLs, Cargo `registry+`/`sparse+` sources (crates.io's index, wherever it is served, is `crates.io`), uv `registry` sources, Poetry `[package.source]` URLs (a package without one comes from PyPI), Pipfile.lock `_meta.sources` and each package's `index`, PEP 751 `index` values, Composer `dist` and `source` URLs, Gemfile.lock `GEM` remotes, Hex for `mix.lock` and `rebar.lock`, SwiftPM package locations, pub `description.url`, CocoaPods `SPEC REPOS` (trunk is the CocoaPods CDN), renv repositories, Hackage for Cabal and Stack, CPAN for Carton, the git hosts of Crystal shards and the DUB registry. Yarn Berry, pdm, Go, NuGet, Gradle, Conan, vcpkg, Deno and Julia lockfiles do not record it.
 
+## Dependency graphs
+
+Where a lockfile records them, PDT reads each package's dependencies (by exact version where the format resolves one, by name otherwise) and the project's direct dependencies:
+
+| Records | Formats |
+|---|---|
+| Edges and direct dependencies | `package-lock.json` and `npm-shrinkwrap.json` v2/v3 (the root's and workspace members' dependencies, resolved as Node resolves them, nested `node_modules` first), Yarn Berry (workspace entries), `pnpm-lock.yaml` (importers; v5's top-level dependencies), `Cargo.lock` (the project's own crates), `uv.lock` (the virtual or editable root), `Gemfile.lock` (`DEPENDENCIES` and PATH gems), `packages.lock.json` (`Direct` and `Transitive`), `Podfile.lock` (`DEPENDENCIES`), `bun.lock` (workspaces), `deno.lock` (workspace dependencies or specifiers) |
+| Edges only | `package-lock.json` v1, Yarn v1, `poetry.lock`, `pdm.lock`, `composer.lock`, vcpkg's status database, `renv.lock` (`Requirements`), Julia manifests |
+| Direct dependencies only | `pubspec.lock` (`direct` or `transitive`), `rebar.lock` (level 0) |
+| Neither | the other formats, installed OS package databases and SBOMs |
+
+The graph gives each package the shortest path from a direct dependency. When the lockfile names no direct dependencies, the path starts from a package that nothing else depends on.
+
+A vulnerability finding says whether the package is a direct dependency. If it is transitive, the finding also names the path that brings it in, for example `dependency_path: express@4.17.1 > body-parser@1.19.0 > qs@6.9.0`. It then suggests upgrading the direct dependency, or pinning the package with an override. A package that the graph does not reach is reported as such, and so is a graph cut at its 2,000,000-edge limit.
+
+The inventory finding counts direct and transitive dependencies, and how many packages the graph reaches. The graph says what the lockfile resolved, not what is loaded at runtime.
+
 ## Installed OS packages and SBOMs
 
 A scanned tree that holds a root file system (an unpacked container image, an appliance image, a chroot) names its installed packages in the package manager's database. These databases and SBOM files are read like lockfiles:

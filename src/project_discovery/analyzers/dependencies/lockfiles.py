@@ -100,6 +100,17 @@ class LockfileAnalyzer(Analyzer):
             detail += " Resolved from: " + ", ".join(
                 f"{host} ({count:,})" for host, count in list(registries.items())[:10]) + (
                 f" and {len(registries) - 10:,} more registries" if len(registries) > 10 else "") + "."
+        graph = getattr(packages, "graph", None)
+        if graph is not None and packages:
+            direct = sum(1 for item in packages if graph.is_direct(item.name))
+            if graph.direct_known:
+                detail += f" Direct dependencies: {direct:,}; transitive: {len(packages) - direct:,}."
+            if graph.edges_known:
+                reached = sum(1 for item in packages if graph.path(item.name, item.version) is not None)
+                detail += (f" The lockfile records the dependency graph: {reached:,} of {len(packages):,} packages "
+                           "are reached from " + ("a direct dependency." if graph.direct_known else
+                                                  "a package nothing else depends on.")
+                           + (" The graph was truncated at its edge limit." if graph.truncated else ""))
         findings = [Finding(
             "dependency",
             f"Resolved dependency inventory: {record.path}",

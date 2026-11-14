@@ -251,7 +251,11 @@ The baseline is not production-ready:
   - **Exploit maturity.** The CISA KEV catalog raises confirmed findings to at least HIGH, and the CVSS `E` metric is reported.
   - **CVSS.** v2 and v3.x vectors are scored. v4.0 vectors are not; the advisory's own severity label is used for them.
   - **VEX.** `pdt scan --vex` applies OpenVEX, CycloneDX VEX and CSAF VEX statements to local and online findings.
-- [ ] Resolve direct/transitive dependency graphs and retain parent path/provenance for vulnerable packages.
+- [x] Resolve direct/transitive dependency graphs and retain parent path/provenance for vulnerable packages ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#dependency-graphs)):
+  - Edges and direct dependencies are read from the lockfiles that record them: npm, Yarn, pnpm, Cargo, uv, Poetry, pdm, Composer, Bundler, NuGet, CocoaPods, Bun, Deno, vcpkg, renv and Julia. pub and rebar3 record direct dependencies only.
+  - Local and online vulnerability findings name the package's direct or transitive status and its shortest path from a direct dependency, with tests per format.
+  - Inventory findings count direct and transitive dependencies.
+  - Formats that record no graph (go.sum, Pipfile.lock, Gradle, SwiftPM, mix.lock and others) give no path.
 - [ ] Add static dependency reachability evidence where symbol/call graphs support it; never claim exploitability from version matching alone.
 - [ ] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping.
 - [ ] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds.

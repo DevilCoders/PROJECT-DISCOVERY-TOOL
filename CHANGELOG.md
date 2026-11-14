@@ -228,6 +228,17 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: dependency graphs and the path to each vulnerable package
+- Lockfiles' dependency edges and direct dependencies are read where the format records them.
+  Formats with both: npm v2/v3 (resolved as Node resolves them), Yarn Berry, pnpm, Cargo, uv,
+  Bundler, NuGet, CocoaPods, Bun and Deno. Edges only: npm v1, Yarn v1, Poetry, pdm, Composer,
+  vcpkg, renv and Julia. Direct dependencies only: pub and rebar3.
+- Vulnerability findings, local and online, say whether the package is direct. A transitive
+  one names its dependency path (`express@4.17.1 > body-parser@1.19.0 > qs@6.9.0`), and the
+  recommendation points at the direct dependency that brings it in.
+- Inventory findings count direct and transitive dependencies, and the packages the graph
+  reaches.
+
 ### Added: CPE matching, superseded advisories, exploit maturity and VEX
 - SBOM components without a package URL are matched by their CPE (CycloneDX `cpe`, SPDX
   `cpe23Type`) against NVD criteria. The match uses the version bounds and the other CPE

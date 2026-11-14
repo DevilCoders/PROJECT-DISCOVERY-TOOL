@@ -233,6 +233,8 @@ class OnlineVulnerabilityLookup:
         findings: list[Finding] = []
         diagnostics: list[str] = []
         paths_by_package: dict[PackageQuery, list[str]] = defaultdict(list)
+        # Each lockfile's dependency graph (how a package entered the project), when it records one.
+        graphs: dict[str, Any] = {}
         parse_failures: list[tuple[str, str]] = []
         # Packages of ecosystems OSV.dev has no advisories for: never sent, reported as not checked.
         unsupported: Counter = Counter()
@@ -249,6 +251,8 @@ class OnlineVulnerabilityLookup:
                     RecursionError, MemoryError) as exc:
                 parse_failures.append((source.path, redact_source_excerpt(f"{type(exc).__name__}: {exc}")))
                 continue
+            if getattr(packages, "graph", None) is not None:
+                graphs[source.path] = packages.graph
             for package in packages:
                 # Defense in depth: only plain registry versions leave the machine or reach
                 # the response cache; source specifiers can hold credentials and paths.
@@ -373,6 +377,7 @@ class OnlineVulnerabilityLookup:
                 for finding in advisory_findings(
                     lockfile, package, matches,
                     analyzer=ONLINE_ANALYZER_NAME, source_label="OSV.dev advisory", vex=self.vex,
+                    graph=graphs.get(lockfile),
                 ):
                     finding.evidence.append(
                         f"source: OSV.dev ({urllib.parse.urlsplit(options.osv_url).hostname}), "

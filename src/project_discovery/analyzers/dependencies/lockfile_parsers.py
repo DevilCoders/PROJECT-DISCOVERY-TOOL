@@ -13,7 +13,9 @@ import urllib.parse
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
+
 from ...core.limits import limit_reached
+from .dependency_graph import MAX_GRAPH_EDGES, DependencyGraph
 
 MAX_LOCKFILE_BYTES = 128 * 1024 * 1024
 MAX_LOCKFILE_PACKAGE_ENTRIES = 250_000
@@ -184,6 +186,9 @@ class ParsedLockfile(list):
     # it (npm and Yarn v1 download URLs, pnpm tarballs, Cargo sources, uv and Poetry indexes,
     # Pipfile.lock sources, Composer dists, Gemfile.lock remotes, Hex, SwiftPM and pub).
     registries: dict[str, int]
+    # The recorded dependency graph (direct dependencies, parent paths), or None when the
+    # format records neither edges nor direct dependencies.
+    graph: DependencyGraph | None = None
 
 
 class _Collector:
@@ -196,6 +201,36 @@ class _Collector:
         self.registries: Counter[str] = Counter()
         # The registry of packages that name none, where the format implies one (Poetry: PyPI).
         self.default_registry: str | None = None
+        # The dependency graph, where the format records one (see dependency_graph): each
+        # package's dependencies, (name, version) or (name, "") when only named, and the
+        # project's direct dependencies.
+        self.edges: dict[tuple[str, str], set[tuple[str, str]]] = {}
+        self.edge_count = 0
+        self.edges_known = False
+        self.direct: set[str] = set()
+        self.direct_known = False
+        self.graph_truncated = False
+
+    def depends(self, parent_name: Any, parent_version: Any, child_name: Any, child_version: Any = "") -> None:
+        """Record that a locked package depends on another (by version when the format resolves it)."""
+        self.edges_known = True
+        if not parent_name or not parent_version or not child_name:
+            return
+        if self.edge_count >= MAX_GRAPH_EDGES:
+            self.graph_truncated = True
+            return
+        parent = (str(parent_name).strip(), normalize_version(parent_version))
+        child = (str(child_name).strip(), normalize_version(child_version) if child_version else "")
+        children = self.edges.setdefault(parent, set())
+        if child not in children:
+            children.add(child)
+            self.edge_count += 1
+
+    def direct_dependency(self, name: Any) -> None:
+        """Record one of the project's direct dependencies (by name)."""
+        self.direct_known = True
+        if name and len(self.direct) < self.max_entries:
+            self.direct.add(str(name).strip())
 
     def count_registry(self, value: Any, number: int = 1) -> None:
         host = value if value in self.registries else registry_host(value)
@@ -248,11 +283,37 @@ class _Collector:
             self.non_registry.add(str(name).strip())
 
 
+def _npm_resolve(packages: dict, from_path: str, name: str) -> str | None:
+    """The path of the package ``name`` that the package at ``from_path`` loads, as Node finds
+    it: in its own node_modules, then in each enclosing one."""
+    base = from_path
+    while True:
+        candidate = f"{base}/node_modules/{name}" if base else f"node_modules/{name}"
+        if candidate in packages:
+            return candidate
+        if not base:
+            return None
+        cut = base.rfind("/node_modules/")
+        base = base[:cut] if cut >= 0 else ""
+
+
+def _npm_locked(name: Any, version: Any) -> tuple[str, str]:
+    """(name, version) of a lockfile entry as the collector records it (an npm alias's version
+    "npm:real@1.2.3" names the real package)."""
+    text = normalize_version(version or "")
+    if text[:4].lower() == "npm:":
+        real, _, aliased = text[4:].rpartition("@")
+        if real and aliased:
+            return real, aliased
+    return str(name).strip(), text
+
+
 def _npm_lock(data: Any, out: _Collector) -> None:
     if not isinstance(data, dict):
         return
     packages = data.get("packages")
     if isinstance(packages, dict):
+        locked: dict[str, tuple[str, str]] = {}
         for item_path, item in packages.items():
             if not isinstance(item, dict):
                 continue
@@ -263,38 +324,87 @@ def _npm_lock(data: Any, out: _Collector) -> None:
                 out.local(name or item_path)
                 continue
             out.add(name, item.get("version"), item.get("resolved"))
+            key = _npm_locked(name, item.get("version"))
+            if ResolvedPackage(out.ecosystem, *key) in out.packages:
+                locked[item_path] = key
+        # The graph: the root's and workspace members' dependencies are the direct ones.
+        for item_path, item in packages.items():
+            own = isinstance(item, dict) and (not item_path or "node_modules/" not in item_path)
+            parent = locked.get(item_path)
+            if not own and parent is None:
+                continue
+            groups = ("dependencies", "optionalDependencies", "peerDependencies") + (("devDependencies",) if own else ())
+            for group in groups:
+                for dependency in item.get(group) or {} if isinstance(item.get(group), dict) else {}:
+                    target = _npm_resolve(packages, item_path, dependency)
+                    child = locked.get(target) if target else None
+                    if own:
+                        out.direct_dependency(child[0] if child else dependency)
+                    elif child is not None:
+                        out.depends(parent[0], parent[1], child[0], child[1])
     if out.packages or not isinstance(data.get("dependencies"), dict):
         return
-    stack = [iter(data["dependencies"].items())]
+    # Lockfile v1: a nested tree. A package's "requires" resolve in its own nested
+    # dependencies, then in each enclosing level's.
+    stack: list[tuple[list[dict], Any]] = [([data["dependencies"]], iter(data["dependencies"].items()))]
     while stack:
+        chain, entries = stack[-1]
         try:
-            name, item = next(stack[-1])
+            name, item = next(entries)
         except StopIteration:
             stack.pop()
             continue
-        if isinstance(item, dict):
-            out.add(name, item.get("version"), item.get("resolved"))
-            nested = item.get("dependencies")
-            if isinstance(nested, dict) and nested:
-                stack.append(iter(nested.items()))
+        if not isinstance(item, dict):
+            continue
+        out.add(name, item.get("version"), item.get("resolved"))
+        nested = item.get("dependencies") if isinstance(item.get("dependencies"), dict) else {}
+        scopes = [nested, *chain] if nested else chain
+        parent = _npm_locked(name, item.get("version"))
+        for dependency in item.get("requires") or {} if isinstance(item.get("requires"), dict) else {}:
+            target = next((scope[dependency] for scope in scopes if isinstance(scope.get(dependency), dict)), None)
+            if target is not None:
+                out.depends(*parent, *_npm_locked(dependency, target.get("version")))
+        if nested:
+            stack.append((scopes, iter(nested.items())))
 
 
 _YARN_SELECTOR = re.compile(r"^(@[^/@]+/[^@]+|[^@]+)@(.+)$")
 _YARN_VERSION = re.compile(r"""^\s+version:?\s+["']?([^"'\s]+)""")
 
 
+def _yarn_dependency(line: str) -> tuple[str, str] | None:
+    """(name, range) of a dependency line: v1 ``name "^1.0.0"``, Berry ``name: "npm:^1.0.0"``."""
+    text = line.strip()
+    if text.startswith('"'):
+        end = text.find('"', 1)
+        if end <= 1:
+            return None
+        name, rest = text[1:end], text[end + 1:]
+    else:
+        name, _, rest = text.partition(" ")
+    name = name.rstrip(":")
+    rest = rest.strip().lstrip(":").strip().strip("\"'")
+    return (name, rest) if name and rest else None
+
+
 def _yarn_lock(source: str, out: _Collector) -> None:
     """Parse Yarn v1 and Berry (v2+) lockfiles without a YAML dependency."""
-    names: list[str] = []
-    added = 0  # the packages of the last entry, for its v1 "resolved" download URL
+    # Each entry: its selectors with the package each names (None: a workspace or local
+    # package), its version, its v1 download URL and its dependencies.
+    entries: list[dict[str, Any]] = []
+    entry: dict[str, Any] | None = None
+    block = ""
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if not line or line.lstrip().startswith("#"):
             continue
         if not line[0].isspace() and line.endswith(":"):
-            names = []
+            entry = {"selectors": [], "version": None, "resolved": None, "dependencies": []}
+            entries.append(entry)
+            block = ""
             for selector in line[:-1].split(","):
-                match = _YARN_SELECTOR.match(selector.strip().strip("\"'"))
+                selector = selector.strip().strip("\"'")
+                match = _YARN_SELECTOR.match(selector)
                 if not match:
                     continue
                 name, specifier = match.group(1), match.group(2)
@@ -304,19 +414,46 @@ def _yarn_lock(source: str, out: _Collector) -> None:
                     name = real or name
                 elif specifier.split(":", 1)[0] in {"workspace", "portal", "link", "file"}:
                     out.local(name)   # a Berry workspace member or local package
+                    entry["selectors"].append((selector, None))
                     continue
-                names.append(name)
+                entry["selectors"].append((selector, name))
             continue
-        if names:
-            match = _YARN_VERSION.match(line)
-            if match:
-                added = sum(out.add(name, match.group(1)) for name in names)
-                names = []
-                continue
+        if entry is None:
+            continue
+        indent = len(line) - len(line.lstrip(" "))
         stripped = line.strip()
-        if added and stripped.startswith("resolved "):
-            out.count_registry(stripped[9:].strip().strip("\"'"), added)
-            added = 0
+        if indent <= 2:
+            block = stripped[:-1] if stripped.endswith(":") else ""
+            match = _YARN_VERSION.match(line)
+            if match and entry["version"] is None:
+                entry["version"] = match.group(1)
+            elif stripped.startswith("resolved ") and entry["resolved"] is None:
+                entry["resolved"] = stripped[9:].strip().strip("\"'")
+        elif indent == 4 and block in {"dependencies", "optionalDependencies"}:
+            dependency = _yarn_dependency(stripped)
+            if dependency is not None:
+                entry["dependencies"].append(dependency)
+    locked: dict[str, tuple[str, str]] = {}
+    for item in entries:
+        names = [name for _, name in item["selectors"] if name]
+        if not item["version"] or not names:
+            continue
+        added = sum(out.add(name, item["version"]) for name in names)
+        if added and item["resolved"]:
+            out.count_registry(item["resolved"], added)
+        for selector, name in item["selectors"]:
+            key = (name, normalize_version(item["version"]))
+            if name and ResolvedPackage(out.ecosystem, *key) in out.packages:
+                locked[selector] = key
+    for item in entries:
+        parents = [locked[selector] for selector, name in item["selectors"] if name and selector in locked]
+        own = any(name is None for _, name in item["selectors"])
+        for name, specifier in item["dependencies"]:
+            child = locked.get(f"{name}@{specifier}") or locked.get(f"{name}@npm:{specifier}")
+            if own:
+                out.direct_dependency(child[0] if child else name)
+            for parent in dict.fromkeys(parents):
+                out.depends(*parent, *(child or (name, "")))
 
 
 _PNPM_KEY = re.compile(r"""^ {2}(?P<key>['"]?[^\s'":][^'":]*['"]?):\s*$""")
@@ -339,20 +476,70 @@ def _pnpm_package_key(key: str) -> tuple[str, str] | None:
     return name, version
 
 
+_PNPM_DEPENDENCY_BLOCKS = frozenset({"dependencies", "optionalDependencies", "devDependencies"})
+
+
+def _pnpm_name(text: str) -> str:
+    """The key of a YAML mapping line ("lodash: 4.17.21", "'@scope/x':")."""
+    if text[:1] in {"'", '"'}:
+        end = text.find(text[0], 1)
+        return text[1:end] if end > 0 else ""
+    return text.partition(":")[0].strip()
+
+
+def _pnpm_dependency(name: str, value: str) -> tuple[str, str] | None:
+    """(name, version) a package's dependency entry resolves to: "1.2.3", "1.2.3(react@18.2.0)"
+    (peers), v5 "1.2.3_react@18.2.0" or "/name/1.2.3", or an alias "real@1.2.3"."""
+    text = value.strip().strip("'\"").split("(", 1)[0]
+    if not text or text.startswith(("link:", "file:", "workspace:")):
+        return None
+    if text.startswith("/"):
+        return _pnpm_package_key(text)
+    if text[:1].isdigit():
+        return name, text.split("_", 1)[0]  # a version, with v5's "_peer@1.0.0" suffix cut
+    if "@" in text.lstrip("@"):
+        real, _, version = text.rpartition("@")
+        return (real, version.split("_", 1)[0]) if real and version[:1].isdigit() else None
+    return None
+
+
 def _pnpm_lock(source: str, out: _Collector) -> None:
-    section, added = None, False
+    section, added, current, block = None, False, None, ""
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
-        if line and not line[0].isspace():
-            section = line.rstrip(":").strip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            section, current, block = line.rstrip(":").strip(), None, ""
+            continue
+        stripped = line.strip()
+        if section in _PNPM_DEPENDENCY_BLOCKS and indent == 2:
+            out.direct_dependency(_pnpm_name(stripped))  # lockfile v5 of a single project
+            continue
+        if section == "importers":
+            # importers: each project ("." and workspace members), its dependency blocks.
+            if indent == 4:
+                block = stripped.rstrip(":")
+            elif indent == 6 and block in _PNPM_DEPENDENCY_BLOCKS:
+                out.direct_dependency(_pnpm_name(stripped))
             continue
         if section not in {"packages", "snapshots"}:
             continue
-        match = _PNPM_KEY.match(line)
-        if match:
-            parsed = _pnpm_package_key(match.group("key"))
-            added = bool(parsed) and out.add(*parsed)
+        if indent == 2:
+            match = _PNPM_KEY.match(line)
+            if match:
+                current = _pnpm_package_key(match.group("key"))
+                added = bool(current) and out.add(*current)
+                block = ""
             continue
+        if indent == 4:
+            block = stripped[:-1] if stripped.endswith(":") else ""
+        elif indent == 6 and current and block in {"dependencies", "optionalDependencies"}:
+            name = _pnpm_name(stripped)
+            child = _pnpm_dependency(name, stripped[len(stripped.partition(":")[0]) + 1:] if name else "")
+            if child is not None:
+                out.depends(*current, *child)
         # A package from another registry or a URL records its tarball; the default registry
         # (from .npmrc) is not in the lockfile.
         at = line.find("tarball:")
@@ -361,20 +548,53 @@ def _pnpm_lock(source: str, out: _Collector) -> None:
             added = False
 
 
+_PEP508_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
+
+
+def _toml_dependencies(item: dict) -> list[tuple[str, str]]:
+    """(name, version or "") of a [[package]]'s dependencies: Cargo "name [version] [(source)]"
+    strings, uv tables (and its optional and dev groups), pdm requirement strings, Poetry's
+    [package.dependencies] table."""
+    found: list[tuple[str, str]] = []
+    groups: list[Any] = [item.get("dependencies")]
+    for extra in ("optional-dependencies", "dev-dependencies"):
+        if isinstance(item.get(extra), dict):
+            groups += list(item[extra].values())
+    for group in groups:
+        if isinstance(group, dict):  # Poetry: name = spec
+            found += [(str(name), "") for name in group]
+            continue
+        for entry in group if isinstance(group, list) else ():
+            if isinstance(entry, dict) and entry.get("name"):  # uv
+                found.append((str(entry["name"]), str(entry.get("version") or "")))
+            elif isinstance(entry, str):
+                parts = entry.split()
+                if len(parts) >= 2 and parts[1][:1].isdigit():  # Cargo "name version (source)"
+                    found.append((parts[0], parts[1]))
+                else:
+                    match = _PEP508_NAME.match(entry.strip())  # Cargo "name", pdm "name>=1.0"
+                    if match:
+                        found.append((match.group(0), ""))
+    return found
+
+
 def _toml_packages(source: str, out: _Collector, *, cargo: bool = False) -> None:
     data = tomllib.loads(source)
+    graph: list[tuple[tuple[str, str] | None, list[tuple[str, str]]]] = []
     for item in data.get("package", []):
         registry = None
         if not isinstance(item, dict):
             continue
+        dependencies = _toml_dependencies(item)
         origin = item.get("source")
+        local = False
         if isinstance(origin, str) or cargo:
             # Cargo: crates.io and other registries are registry+/sparse+; no source is
             # the project's own crate or a workspace or path member.
             if not origin:
                 out.local(item.get("name"))
-                continue
-            if not origin.startswith(("registry+", "sparse+")):
+                local = True
+            elif not origin.startswith(("registry+", "sparse+")):
                 out.remote(item.get("name"))
                 continue
             registry = origin
@@ -384,18 +604,29 @@ def _toml_packages(source: str, out: _Collector, *, cargo: bool = False) -> None
             kind = origin.get("type") or next(iter(origin), "")
             if kind in {"editable", "virtual", "path", "directory", "file"}:
                 out.local(item.get("name"))
-                continue
-            if kind in {"git", "url"}:
+                local = True
+            elif kind in {"git", "url"}:
                 out.remote(item.get("name"))
                 continue
             registry = origin.get("registry") or origin.get("url")
         elif item.get("path") or item.get("editable"):
             out.local(item.get("name"))   # pdm: a local or editable package
-            continue
+            local = True
         elif item.get("git") or item.get("url"):
             out.remote(item.get("name"))
             continue
+        if local:
+            # The project's own crates and packages: what they depend on is direct.
+            graph.append((None, dependencies))
+            continue
         out.add(item.get("name"), item.get("version"), registry)
+        graph.append(((str(item.get("name") or "").strip(), normalize_version(item.get("version") or "")), dependencies))
+    for parent, dependencies in graph:
+        for name, version in dependencies:
+            if parent is None:
+                out.direct_dependency(name)
+            else:
+                out.depends(*parent, name, version)
 
 
 def _composer_lock(data: Any, out: _Collector) -> None:
@@ -409,6 +640,10 @@ def _composer_lock(data: Any, out: _Collector) -> None:
                 continue
             origin = item.get("source") if isinstance(item.get("source"), dict) else {}
             out.add(item.get("name"), item.get("version"), dist.get("url") or origin.get("url"))
+            # Requirements other than packages (php, ext-*, lib-*, composer-*) are the platform.
+            for dependency in item.get("require") or {} if isinstance(item.get("require"), dict) else {}:
+                if "/" in str(dependency):
+                    out.depends(item.get("name"), item.get("version"), dependency)
 
 
 def _pipfile_lock(data: Any, out: _Collector) -> None:
@@ -431,29 +666,45 @@ def _pipfile_lock(data: Any, out: _Collector) -> None:
 
 
 _GEM_SPEC = re.compile(r"^ {4}([A-Za-z0-9_.-]+) \(([^)]+)\)\s*$")
+# A gem's dependency (6 spaces) and a DEPENDENCIES entry (2 spaces): "name", "name (>= 1.0)", "name!".
+_GEM_REQUIREMENT = re.compile(r"^ {2}(?: {4})?([A-Za-z0-9_.-]+)!?(?: \([^)]*\))?\s*$")
 
 
 def _gemfile_lock(source: str, out: _Collector) -> None:
-    in_specs, section, remote = False, "", None
+    in_specs, section, remote, current = False, "", None, None
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if line.strip() == "specs:":
             in_specs = True
             continue
         if line and not line.startswith(" "):
-            in_specs, section, remote = False, line.strip(), None
+            in_specs, section, remote, current = False, line.strip(), None, None
         if section == "GEM" and line.startswith("  remote:"):
             remote = line.split(":", 1)[1].strip()
+            continue
+        if section == "DEPENDENCIES" and line.startswith("  ") and not line.startswith("   "):
+            requirement = _GEM_REQUIREMENT.match(line)
+            if requirement:
+                out.direct_dependency(requirement.group(1))
             continue
         if in_specs:
             match = _GEM_SPEC.match(line)
             if match and section == "PATH":
                 out.local(match.group(1))     # a gem from the project's own tree
+                current = ("", "")            # its dependencies are direct ones
             elif match and section == "GIT":
                 out.remote(match.group(1))
+                current = None
             elif match:
                 # Platform gems are locked as "1.15.4-x86_64-linux"; gem versions never contain "-".
-                out.add(match.group(1), match.group(2).split("-", 1)[0], remote)
+                current = (match.group(1), match.group(2).split("-", 1)[0])
+                out.add(*current, remote)
+            elif current and line.startswith("      ") and not line.startswith("       "):
+                requirement = _GEM_REQUIREMENT.match(line)
+                if requirement and current[0]:
+                    out.depends(*current, requirement.group(1))
+                elif requirement:
+                    out.direct_dependency(requirement.group(1))
 
 
 _GO_SUM = re.compile(r"^(\S+)\s+(v\S+?)(/go\.mod)?\s+h\d+:")
@@ -513,12 +764,21 @@ def _nuget_lock(data: Any, out: _Collector) -> None:
                 continue
             if item.get("type") == "Project":
                 out.local(name)   # a project reference in the same solution
-            else:
-                out.add(name, item.get("resolved"))
+                continue
+            out.add(name, item.get("resolved"))
+            # "Direct" packages are the project's own references; "Transitive" ones are not.
+            if item.get("type") == "Direct":
+                out.direct_dependency(name)
+            elif item.get("type") in {"Transitive", "CentralTransitive"}:
+                out.direct_known = True
+            for dependency in item.get("dependencies") or {} if isinstance(item.get("dependencies"), dict) else {}:
+                out.depends(name, item.get("resolved"), dependency)
 
 
 _PUB_PACKAGE = re.compile(r"^ {2}([A-Za-z0-9_]+):\s*$")
 _PUB_VERSION = re.compile(r"""^ {4}version:\s*["']?([^"'\s]+)""")
+# "direct main", "direct dev", "direct overridden" or "transitive" (pubspec.lock records no edges).
+_PUB_DEPENDENCY = re.compile(r"""^ {4}dependency:\s*["']?(direct|transitive)""")
 _PUB_SOURCE = re.compile(r"""^ {4}source:\s*["']?(\w+)""")
 _PUB_URL = re.compile(r"""^ {6}url:\s*["']?([^"'\s]+)""")
 
@@ -543,6 +803,13 @@ def _pubspec_lock(source: str, out: _Collector) -> None:
         source_line = _PUB_SOURCE.match(line)
         if current and source_line:
             origin = source_line.group(1)
+            continue
+        dependency = _PUB_DEPENDENCY.match(line)
+        if current and dependency:
+            if dependency.group(1) == "direct":
+                out.direct_dependency(current)
+            else:
+                out.direct_known = True
             continue
         version = _PUB_VERSION.match(line)
         if current and version:
@@ -577,6 +844,7 @@ def _podfile_lock(source: str, out: _Collector) -> None:
     pods: list[tuple[str, str]] = []
     external: dict[str, str] = {}
     repositories: dict[str, str] = {}
+    requirements: list[tuple[tuple[str, str], str]] = []  # (pod, version) -> a pod it depends on
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
         if not line.strip():
@@ -590,6 +858,12 @@ def _podfile_lock(source: str, out: _Collector) -> None:
             entry = stripped[2:].strip().rstrip(":").strip("\"'")
             name, _, rest = entry.partition(" (")
             pods.append((name.split("/", 1)[0].strip(), rest.rstrip(")").strip()))
+        elif section == "PODS" and indent == 4 and stripped.startswith("- ") and pods:
+            dependency = stripped[2:].strip().strip("\"'").partition(" (")[0].split("/", 1)[0].strip()
+            if dependency and dependency != pods[-1][0]:  # a pod's own subspecs are the pod
+                requirements.append((pods[-1], dependency))
+        elif section == "DEPENDENCIES" and indent == 2 and stripped.startswith("- "):
+            out.direct_dependency(stripped[2:].strip().strip("\"'").partition(" (")[0].split("/", 1)[0].strip())
         elif section in {"EXTERNAL SOURCES", "SPEC REPOS"} and indent == 2 and stripped.endswith(":"):
             heading = stripped[:-1].strip("\"'")
         elif section == "EXTERNAL SOURCES" and heading and indent >= 4 and stripped.startswith(":"):
@@ -609,6 +883,8 @@ def _podfile_lock(source: str, out: _Collector) -> None:
         else:
             repository = repositories.get(name, "trunk")
             out.add(name, version, "https://cdn.cocoapods.org/" if repository == "trunk" else repository)
+    for (name, version), dependency in requirements:
+        out.depends(name, version, dependency)
 
 
 def _gradle_lockfile(source: str, out: _Collector) -> None:
@@ -658,7 +934,13 @@ def _vcpkg_status(source: str, out: _Collector) -> None:
         if (fields.get("Package") and fields.get("Version") and "Feature" not in fields
                 and "install ok installed" in fields.get("Status", "")):
             port = fields.get("Port-Version", "0")
-            out.add(fields["Package"], fields["Version"] + (f"#{port}" if port not in {"", "0"} else ""))
+            version = fields["Version"] + (f"#{port}" if port not in {"", "0"} else "")
+            out.add(fields["Package"], version)
+            # "Depends: zlib, openssl:x64-windows, curl[ssl]": ports, with a triplet or features.
+            for dependency in fields.get("Depends", "").split(","):
+                port_name = dependency.strip().split("[", 1)[0].split(":", 1)[0].strip()
+                if port_name:
+                    out.depends(fields["Package"], version, port_name)
 
     for raw_line in io.StringIO(source, newline=None):
         line = raw_line.rstrip("\r\n")
@@ -717,6 +999,17 @@ def _bun_lock(data: Any, out: _Collector) -> None:
         else:
             registry = value[1] if len(value) > 1 and isinstance(value[1], str) and value[1] else None
             out.add(name, specifier, registry)
+            info = next((item for item in value[1:] if isinstance(item, dict)), {})
+            for group in ("dependencies", "optionalDependencies"):
+                for dependency in info.get(group) or {} if isinstance(info.get(group), dict) else {}:
+                    out.depends(name, specifier, dependency)
+    # The workspaces ("" is the root project) name the direct dependencies.
+    workspaces = data.get("workspaces") if isinstance(data, dict) else None
+    for workspace in workspaces.values() if isinstance(workspaces, dict) else ():
+        for group in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+            entries = workspace.get(group) if isinstance(workspace, dict) else None
+            for dependency in entries if isinstance(entries, dict) else ():
+                out.direct_dependency(dependency)
 
 
 def _deno_lock(data: Any, out: _Collector) -> None:
@@ -727,11 +1020,35 @@ def _deno_lock(data: Any, out: _Collector) -> None:
     sections = data["packages"] if isinstance(data.get("packages"), dict) else data
     for kind, ecosystem in (("npm", "npm"), ("jsr", "JSR")):
         entries = sections.get(kind)
-        for key in entries if isinstance(entries, dict) else ():
+        for key, item in entries.items() if isinstance(entries, dict) else ():
             text = str(key)
             at = text.find("@", 1)
-            if at > 0:
-                out.add(text[:at], text[at + 1:].split("_", 1)[0], None, ecosystem)
+            if at <= 0:
+                continue
+            name, version = text[:at], text[at + 1:].split("_", 1)[0]
+            out.add(name, version, None, ecosystem)
+            # Dependencies: v4 lists "name@version" keys, v3 maps names to them.
+            dependencies = item.get("dependencies") if isinstance(item, dict) else None
+            if isinstance(dependencies, dict):
+                dependencies = list(dependencies.values())
+            for target in dependencies if isinstance(dependencies, list) else ():
+                child = str(target).removeprefix("npm:").removeprefix("jsr:")
+                child_at = child.find("@", 1)
+                if child_at > 0:
+                    out.depends(name, version, child[:child_at], child[child_at + 1:].split("_", 1)[0])
+    # What the project imports: v4's workspace dependencies, v3's specifiers.
+    workspace = data.get("workspace") if isinstance(data.get("workspace"), dict) else {}
+    if isinstance(workspace.get("dependencies"), list):
+        imports = workspace["dependencies"]
+    elif isinstance(data.get("specifiers"), dict):
+        imports = list(data["specifiers"])
+    else:
+        imports = []
+    for specifier in imports:
+        text = str(specifier).split(":", 1)[-1]
+        at = text.find("@", 1)
+        if at > 0:
+            out.direct_dependency(text[:at])
     remote = data.get("remote")
     for url in remote if isinstance(remote, dict) else ():
         out.remote(_url_name(url))
@@ -758,6 +1075,10 @@ def _renv_lock(data: Any, out: _Collector) -> None:
             out.add(name, item.get("Version"), None, "Bioconductor")
         else:
             out.add(name, item.get("Version"), repositories.get(str(item.get("Repository") or "CRAN")))
+        if source not in {"Local", "Cellar", "GitHub", "GitLab", "Bitbucket", "git", "URL"}:
+            # renv 1.0 records each package's requirements (base R packages are not locked).
+            for dependency in item.get("Requirements") or [] if isinstance(item.get("Requirements"), list) else []:
+                out.depends(name, item.get("Version"), dependency)
 
 
 def _julia_manifest(data: Any, out: _Collector) -> None:
@@ -780,6 +1101,10 @@ def _julia_manifest(data: Any, out: _Collector) -> None:
                 out.remote(name)
             elif item.get("version"):
                 out.add(name, item["version"])
+                # deps = ["A", "B"], or a table of names to UUIDs.
+                dependencies = item.get("deps")
+                for dependency in dependencies if isinstance(dependencies, (list, dict)) else ():
+                    out.depends(name, item["version"], dependency)
 
 
 _CABAL_CONSTRAINT = re.compile(r"\bany\.([A-Za-z0-9][A-Za-z0-9-]{0,100}) ==([0-9][0-9.]{0,50})")
@@ -806,14 +1131,21 @@ def _stack_lock(source: str, out: _Collector) -> None:
             out.remote(_url_name(value))
 
 
-_REBAR_PACKAGE = re.compile(r'\{<<"([^"\n]{1,200})">>,\s*+\{pkg,\s*+<<"([^"\n]{1,200})">>,\s*+<<"([^"\n]{1,100})">>')
+_REBAR_PACKAGE = re.compile(
+    r'\{<<"([^"\n]{1,200})">>,\s*+\{pkg,\s*+<<"([^"\n]{1,200})">>,\s*+<<"([^"\n]{1,100})">>'
+    r'(?:[^}\n]{0,400}+\}(?:,\s*+(\d{1,4}+)\s*+\})?)?')
 _REBAR_SOURCE = re.compile(r'\{<<"([^"\n]{1,200})">>,\s*+\{(?:git|git_subdir|raw)\b')
 
 
 def _rebar_lock(source: str, out: _Collector) -> None:
-    """rebar3 lockfiles: Hex packages ({pkg, Name, Version}) and git dependencies."""
+    """rebar3 lockfiles: Hex packages ({pkg, Name, Version}) and git dependencies. Each entry
+    ends with its level: 0 for the project's direct dependencies (the lock records no edges)."""
     for match in _REBAR_PACKAGE.finditer(source):
         out.add(match.group(2), match.group(3), "https://repo.hex.pm")
+        if match.group(4) == "0":
+            out.direct_dependency(match.group(2))
+        elif match.group(4):
+            out.direct_known = True
     for match in _REBAR_SOURCE.finditer(source):
         out.remote(match.group(1))
 
@@ -1013,4 +1345,8 @@ def parse_lockfile(
     result.local = sorted(out.local_names - registry_names)
     result.non_registry = sorted(out.non_registry - registry_names - out.local_names)
     result.registries = dict(sorted(out.registries.items(), key=lambda item: (-item[1], item[0])))
+    result.graph = DependencyGraph(
+        ((package.name, package.version) for package in out.packages), out.edges, out.direct - out.local_names,
+        direct_known=out.direct_known, edges_known=out.edges_known, truncated=out.graph_truncated,
+    ) if out.edges_known or out.direct_known else None
     return result
