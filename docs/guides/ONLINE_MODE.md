@@ -54,14 +54,14 @@ After the URL a line may carry `ref=NAME` and `vcs=BACKEND` options and a traili
 
 ### Backends
 
-The VCS prefix of a URL selects the backend; without a prefix, `svn://`, `bzr://` and `pserver://` URLs select their own backend and everything else is treated as Git. `--vcs` (or `vcs=`) forces a backend. The backend's command-line client must be installed; `pdt capabilities --json` reports which clients are present.
+The VCS prefix of a URL selects the backend; without a prefix, `svn://`, `bzr://` and `pserver://` URLs select their own backend and everything else is treated as Git. `--vcs` (or `vcs=`) forces a backend. The backend's command-line client must be installed; `pdt capabilities --json` reports which clients are present. A repository of another VCS on a host no provider fingerprint names is reported with its server as the provider (`Mercurial server`, `Subversion server`, `Bazaar server` and so on).
 
 | Backend | URL forms | Client | What is analyzed | Ref (`--ref`) |
 |---|---|---|---|---|
 | Git (GitHub, GitLab, Bitbucket, Azure Repos, CodeCommit, SourceHut, Gitea/Forgejo and other hosts) | `https://`, `ssh://`, `user@host:path`, `git://` | `git` | The tree of one commit, streamed from the object database (no checkout) | Branch, tag or full 40/64-hex commit ID |
 | Mercurial | `hg+https://`, `hg+ssh://`, `hg+http://` | `hg` | `hg archive` of one revision | Branch, tag, bookmark or changeset ID |
 | Subversion | `svn+https://`, `svn+ssh://`, `svn://`, `svn+http://` | `svn` | `svn export` of one revision, externals excluded | Revision number |
-| Bazaar / Breezy | `bzr+https://`, `bzr+ssh://`, `bzr://` | `brz` or `bzr` | `brz export` of one revision | Revision spec |
+| Bazaar / Breezy | `bzr+https://`, `bzr+ssh://`, `bzr://` | `brz` or `bzr` | `brz export` of the revision `brz revno` reports (its revision number is recorded; revision IDs, which hold the committer's email, are not) | Revision spec |
 | Darcs | `darcs+https://`, `darcs+ssh://`, `darcs+http://` | `darcs` | Working tree of a lazy clone | Tag |
 | Jujutsu (Git-backed) | `jj+https://`, `jj+ssh://`, `jj+git://`, `user@host:path` | `jj` | Working tree of `jj git clone` | Not supported |
 | Pijul | `pijul+https://`, `pijul+ssh://`, `pijul+http://` | `pijul` | Working tree of one channel | Channel |
@@ -69,7 +69,7 @@ The VCS prefix of a URL selects the backend; without a prefix, `svn://`, `bzr://
 | Perforce | `p4+ssl://host:port/depot/path`, `p4+tcp://` | `p4` | `p4 print` of the live head revisions | Label or changelist |
 | Fossil | `fossil+https://`, `fossil+ssh://`, `fossil+http://` | `fossil` | One checkout opened without autosync | Check-in, tag or branch |
 
-**Verification status.** The Git path is tested end to end on Windows and Linux against a real Git server on the loopback interface (clone, tree streaming, tags, commit IDs, URL batches, reports). The other backends are tested with recorded client invocations; they have not been run against live servers in this project's test environments, because those clients are not installed there.
+**Verification status.** The Git path is tested end to end on Windows and Linux against a real Git server on the loopback interface (clone, tree streaming, tags, commit IDs, URL batches, reports). Mercurial, Subversion, Bazaar/Breezy, Fossil and Git-backed Jujutsu are tested end to end against their own servers on the loopback interface (`tests/online/test_remote_scm_live.py`: `hg serve`, `svnserve`, `brz serve`, `fossil server`, and `git daemon` for Jujutsu), scanning the default head, then a branch, tag or pinned revision, and checking the files, the revision recorded and that no VCS metadata reaches the report; each test skips where its client is not installed (they ran on Linux with Mercurial 7.2, Subversion 1.15, Breezy 3.3, Fossil 2.28 and Jujutsu 0.45). Darcs, CVS, Pijul and Perforce are tested with recorded client invocations only: Darcs and CVS clients were not installable in the test environments without administrator rights, Pijul has no standalone server (its HTTP remotes speak the Nest's protocol), and the Perforce server needs its license accepted.
 
 ### Security model
 
@@ -290,6 +290,6 @@ The cache stores public advisory data and the looked-up coordinates (owner-only 
 - Only one revision is analyzed; repository history is not imported, and Git clones are shallow (depth 1).
 - Git submodules, Git LFS objects and Subversion externals are inventoried but not fetched.
 - Jujutsu support covers Git-backed repositories, and `ref` selection is not supported for it.
-- Backends other than Git have not been verified against live servers (see *Verification status*).
+- Darcs, CVS, Pijul and Perforce have not been verified against live servers (see *Verification status*).
 - `--no-download` supports Git hosting APIs only (GitHub, GitLab, Bitbucket Cloud and Data Center/Server, Gitea/Forgejo); the native VCS backends need the download mode. It runs third-party plugins only with `--no-download-plugins`, on a transient copy of each file, and `--resume` is not available.
 - Anonymous provider API limits are low (GitHub: 60 requests per hour); use a token for anything beyond small public repositories.

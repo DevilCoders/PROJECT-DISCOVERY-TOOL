@@ -228,6 +228,14 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Fixed: remote scans of non-Git repositories
+- A Mercurial, Subversion, Bazaar, Darcs, Pijul, CVS or Perforce repository on a host no provider fingerprint
+  names is reported with its server as the provider ("Mercurial server"), not "Git-compatible host".
+- Bazaar/Breezy scans record the revision number they analyzed (`brz revno`), and export exactly that revision,
+  instead of recording nothing for the branch tip.
+- Live end-to-end tests (`tests/online/test_remote_scm_live.py`) scan Mercurial, Subversion, Bazaar/Breezy, Fossil and Git-backed Jujutsu repositories
+  served on the loopback interface by their own servers; they skip where a client is not installed.
+
 ### Added: the endpoint catalog
 - `api-endpoints` records the handler each route declaration names (the function a decorator, annotation or
   attribute is on, a Python route's `def`, a registration call's handler argument, Rails, Laravel and

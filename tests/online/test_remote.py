@@ -77,13 +77,13 @@ from project_discovery.online.repositories import RemoteScanError
         ),
         (
             "hg+https://hg.example.net/team/project",
-            "Git-compatible host",
+            "Mercurial server",
             "https://hg.example.net/team/project",
             "hg",
         ),
         (
             "svn+https://svn.example.net/repos/project/trunk",
-            "Git-compatible host",
+            "Subversion server",
             "https://svn.example.net/repos/project/trunk",
             "svn",
         ),
@@ -519,8 +519,10 @@ def test_bzr_checkout_exports_remote_branch_without_working_copy_metadata(
 
     def fake_run(command, **kwargs):
         commands.append(command)
-        Path(command[4]).mkdir()
-        (Path(command[4]) / "main.py").write_text("print('bzr')\n", encoding="utf-8")
+        if command[1] == "revno":
+            return SimpleNamespace(stdout=b"7\n")
+        Path(command[6]).mkdir()
+        (Path(command[6]) / "main.py").write_text("print('bzr')\n", encoding="utf-8")
         return SimpleNamespace(stdout=b"")
 
     monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/bin/brz")
@@ -528,8 +530,10 @@ def test_bzr_checkout_exports_remote_branch_without_working_copy_metadata(
     metadata = remote._bzr_checkout(target, checkout, temporary, timeout=30)
 
     assert (checkout / "main.py").is_file()
-    assert commands[0][1:4] == ["export", "--quiet", "--format=dir"]
-    assert metadata["vcs"] == "bzr"
+    # The tip's revision number is looked up first, then exactly that revision is exported.
+    assert commands[0] == ["/usr/bin/brz", "revno", target.clone_url]
+    assert commands[1][1:6] == ["export", "--quiet", "--format=dir", "-r", "7"]
+    assert (metadata["vcs"], metadata["revision"]) == ("bzr", "7")
 
 
 @pytest.mark.parametrize(

@@ -256,7 +256,13 @@ def _provider(host: str) -> str:
         return "Gerrit"
     if "gitolite" in normalized:
         return "Gitolite"
-    return "Git-compatible host"
+    return _GIT_COMPATIBLE
+
+
+_GIT_COMPATIBLE = "Git-compatible host"
+# The provider of a non-Git repository on a host no fingerprint names.
+_SERVER_LABELS = {"hg": "Mercurial server", "svn": "Subversion server", "bzr": "Bazaar server", "darcs": "Darcs server",
+                  "pijul": "Pijul server", "cvs": "CVS server", "p4": "Perforce server"}
 
 
 def _server_repository_parts(parts: list[str]) -> list[str] | None:
@@ -453,7 +459,11 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto", ref: str | None = No
         elif selected_vcs == "fossil":
             provider = "Fossil server"
         else:
+            # A known hosting provider keeps its name; another host is a server of the VCS (an hg
+            # server on an unknown host is not a "Git-compatible host").
             provider = _provider(host)
+            if provider == _GIT_COMPATIBLE and selected_vcs in _SERVER_LABELS:
+                provider = _SERVER_LABELS[selected_vcs]
         if selected_vcs in {"cvs", "p4"}:
             parts = [part for part in path.split("/") if part]
             if len(parts) < 2:
@@ -1538,9 +1548,16 @@ def _bzr_checkout(
         # Disable user and site plugins; core transports remain available.
         BRZ_PLUGIN_PATH="-site:-user", BZR_PLUGIN_PATH="-site:-user",
     )
-    command = [executable, "export", "--quiet", "--format=dir", str(checkout), target.clone_url]
-    if target.ref is not None:
-        command += ["-r", target.ref]
+    # The revision number of the branch tip (or of --ref), so the report names what was analyzed;
+    # revision IDs embed the committer's email address, so they are not recorded.
+    lookup = [executable, "revno", *(["-r", target.ref] if target.ref is not None else []), target.clone_url]
+    revision = _run(
+        lookup, timeout=timeout, env=environment, label="Bazaar/Breezy revision lookup",
+    ).stdout.decode("utf-8", errors="replace").strip()
+    if not revision or not all(part.isdigit() for part in revision.split(".")):
+        raise RemoteScanError("Bazaar/Breezy did not report a revision number.")
+    # Export exactly the looked-up revision, not a later tip.
+    command = [executable, "export", "--quiet", "--format=dir", "-r", revision, str(checkout), target.clone_url]
     _run(
         command, timeout=timeout, env=environment, label="Bazaar/Breezy source export",
         disk_guard=(temporary, limits.min_free_bytes),
@@ -1548,7 +1565,7 @@ def _bzr_checkout(
     return {
         "mode": "remote", "vcs": "bzr", "provider": target.provider,
         "url": target.clone_url, "repository": target.repository_name,
-        "revision": target.ref, "branch": None, "history_complete": False,
+        "revision": revision, "branch": None, "history_complete": False,
         "coverage": [],
         "warnings": ["Bazaar/Breezy export contains the committed source tree; history metadata is not retained."],
     }
