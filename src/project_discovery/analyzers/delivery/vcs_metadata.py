@@ -15,13 +15,10 @@ import sqlite3
 import struct
 from urllib.parse import urlsplit, urlunsplit
 
-from ...core.limits import limit_reached
+# MAX_SQLITE_VALUE_BYTES and _sql_words are re-exported: the VCS analyzer and tests import them here.
+from ...core.safe_sqlite import MAX_SQLITE_STEPS, MAX_SQLITE_VALUE_BYTES, plain_tables, untrusted_database  # noqa: F401
+from ...core.safe_sqlite import sql_words as _sql_words  # noqa: F401
 
-# SQLite virtual-machine steps a working-copy database's queries may take.
-MAX_SQLITE_STEPS = 50_000_000
-_STEP_INTERVAL = 1000
-# The longest string, blob or row SQLite builds while the queries run.
-MAX_SQLITE_VALUE_BYTES = 16 * 1024 * 1024
 # The working-copy tables the queries read.
 _SVN_TABLES = ("REPOSITORY", "NODES", "ACTUAL_NODE", "LOCK", "EXTERNALS", "WORK_QUEUE", "WC_LOCK", "PRISTINE")
 _NULL_NODE = b"\0" * 20
@@ -58,30 +55,6 @@ def _number(value: object) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def _sql_words(sql: str, count: int) -> list[str]:
-    """The first words of an SQL statement in upper case, its comments skipped: SQLite reads
-    "CREATE/**/VIRTUAL TABLE" as a virtual table, so its text is not compared as written."""
-    words: list[str] = []
-    position, length = 0, len(sql)
-    while position < length and len(words) < count:
-        if sql.startswith("/*", position):
-            end = sql.find("*/", position + 2)
-            position = length if end < 0 else end + 2
-        elif sql.startswith("--", position):
-            end = sql.find("\n", position)
-            position = length if end < 0 else end + 1
-        elif sql[position].isspace():
-            position += 1
-        else:
-            start = position
-            while position < length and (sql[position].isalnum() or sql[position] == "_"):
-                position += 1
-            if position == start:  # punctuation is a word of its own
-                position += 1
-            words.append(sql[start:position].upper())
-    return words
-
-
 def branch_kind(path: str) -> str:
     """trunk, branch or tag, by the conventional layout of a repository path; or ""."""
     parts = path.strip("/").split("/")
@@ -95,56 +68,15 @@ def branch_kind(path: str) -> str:
 
 
 def svn_wc_db(data: bytes, max_steps: int = MAX_SQLITE_STEPS) -> dict:
-    """What a Subversion working-copy database says, from its bytes."""
-    # The file header; SQLite is not handed anything else.
-    if len(data) < 512 or not data.startswith(b"SQLite format 3\x00"):
-        raise ValueError("not a SQLite database")
-    db = sqlite3.connect(":memory:")
-    try:
-        deserialize = getattr(db, "deserialize", None)
-        if deserialize is None:  # an SQLite library built without it
-            raise ValueError("this Python's SQLite cannot read a database from memory")
-        try:
-            deserialize(data)
-        except (sqlite3.DatabaseError, OverflowError, MemoryError) as exc:
-            raise ValueError(f"not a SQLite database: {exc}") from exc
+    """What a Subversion working-copy database says, from its bytes (core.safe_sqlite)."""
+    with untrusted_database(data, max_steps=max_steps, label="working-copy database") as db:
         del data  # SQLite holds its own copy
-        steps = [0]
-
-        def budget() -> int:
-            steps[0] += _STEP_INTERVAL
-            return 1 if steps[0] > max_steps else 0
-
-        db.set_progress_handler(budget, _STEP_INTERVAL)
-        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_SQLITE_VALUE_BYTES)
-        db.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
-        for pragma in ("query_only = ON", "trusted_schema = OFF", "cell_size_check = ON", "temp_store = MEMORY"):
-            db.execute(f"PRAGMA {pragma}")
-        try:
-            return _svn_queries(db)
-        except sqlite3.OperationalError as exc:
-            if steps[0] > max_steps:
-                limit_reached("steps", max_steps, steps[0])
-                raise ValueError(f"working-copy database queries exceeded the {max_steps:,}-step budget") from exc
-            raise ValueError(f"unreadable working-copy database: {exc}") from exc
-        except sqlite3.DatabaseError as exc:
-            raise ValueError(f"unreadable working-copy database: {exc}") from exc
-    finally:
-        db.close()
+        return _svn_queries(db)
 
 
 def _svn_queries(db: sqlite3.Connection) -> dict:
-    schema = {str(name).upper(): str(sql or "") for name, sql in db.execute(
-        "SELECT name, sql FROM sqlite_master WHERE type = 'table' LIMIT 10000")}
-    tables = set(schema)
-    if not {"REPOSITORY", "NODES"} <= tables:
-        raise ValueError("not a Subversion working-copy database (no REPOSITORY and NODES tables)")
-    for table in _SVN_TABLES:
-        # Subversion's tables are plain: a table that computes values as it is read (a virtual
-        # table, a virtual generated column) is not one of its.
-        if table in tables and (_sql_words(schema[table], 2) != ["CREATE", "TABLE"]
-                                or any(row[6] in (1, 2) for row in db.execute(f"PRAGMA table_xinfo({table})"))):
-            raise ValueError(f"not a Subversion working-copy database ({table} computes its values)")
+    # Subversion's tables are plain: one that computes values as it is read is not one of its.
+    tables = plain_tables(db, ("REPOSITORY", "NODES"), _SVN_TABLES, label="Subversion working-copy database")
 
     def columns(table: str) -> set[str]:
         return {row[1] for row in db.execute(f"PRAGMA table_info({table})")}

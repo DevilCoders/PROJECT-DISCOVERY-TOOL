@@ -193,6 +193,166 @@ def compare_pep440(left: str, right: str) -> int | None:
         return None
 
 
+# ---------------------------------------------------------------------------------------------
+# Distribution package versions
+
+
+def _dpkg_order(char: str) -> int:
+    """dpkg's character order: "~" before the end of a part, the end before letters, letters
+    before other characters (digits are compared as numbers elsewhere)."""
+    if not char:
+        return 0
+    if char == "~":
+        return -1
+    if char.isascii() and char.isalpha():
+        return ord(char)
+    return ord(char) + 256
+
+
+def _dpkg_part(left: str, right: str) -> int:
+    """dpkg's verrevcmp: alternate non-digit runs (by _dpkg_order) and digit runs (as numbers)."""
+    i = j = 0
+    while i < len(left) or j < len(right):
+        while (i < len(left) and not left[i].isdigit()) or (j < len(right) and not right[j].isdigit()):
+            a = _dpkg_order(left[i] if i < len(left) else "")
+            b = _dpkg_order(right[j] if j < len(right) else "")
+            if a != b:
+                return _cmp(a, b)
+            i, j = i + 1, j + 1
+        start_i, start_j = i, j
+        while i < len(left) and left[i].isdigit():
+            i += 1
+        while j < len(right) and right[j].isdigit():
+            j += 1
+        a, b = int(left[start_i:i] or 0), int(right[start_j:j] or 0)
+        if a != b:
+            return _cmp(a, b)
+    return 0
+
+
+def _dpkg_split(value: str) -> tuple[int, str, str] | None:
+    epoch, colon, rest = value.strip().partition(":")
+    if not colon:
+        epoch, rest = "0", value.strip()
+    if not epoch.isdigit() or not rest:
+        return None
+    upstream, dash, revision = rest.rpartition("-")
+    if not dash:
+        upstream, revision = rest, ""
+    if not upstream or not upstream[0].isdigit():
+        return None
+    return int(epoch), upstream, revision
+
+
+def compare_dpkg(left: str, right: str) -> int | None:
+    """Debian (and Ubuntu) package versions: [epoch:]upstream[-revision], as dpkg orders them."""
+    a, b = _dpkg_split(left), _dpkg_split(right)
+    if a is None or b is None:
+        return None
+    return _cmp(a[0], b[0]) or _dpkg_part(a[1], b[1]) or _dpkg_part(a[2], b[2])
+
+
+_APK_SUFFIXES = {"alpha": -4, "beta": -3, "pre": -2, "rc": -1, "cvs": 1, "svn": 2, "git": 3, "hg": 4, "p": 5}
+_APK_VERSION = re.compile(r"(\d{1,30}(?:\.\d{1,30}){0,30})([a-z]?)((?:_[a-z]{1,8}\d{0,30}){0,20})(?:-r(\d{1,30}))?")
+
+
+def _apk_key(value: str):
+    match = _APK_VERSION.fullmatch(value.strip())
+    if not match:
+        return None
+    numbers, letter, suffixes, revision = match.groups()
+    parsed = []
+    for suffix in suffixes.split("_")[1:]:
+        name = suffix.rstrip("0123456789")
+        if name not in _APK_SUFFIXES:
+            return None
+        parsed.append((_APK_SUFFIXES[name], int(suffix[len(name):] or 0)))
+    # No suffix ranks between the pre-release and the post-release suffixes.
+    return (tuple(int(part) for part in numbers.split(".")), letter, tuple(parsed) + ((0, 0),), int(revision or 0))
+
+
+def compare_apk(left: str, right: str) -> int | None:
+    """Alpine package versions: numbers, a letter, _alpha/_beta/_pre/_rc (before the release) and
+    _cvs/_svn/_git/_hg/_p (after it) suffixes, and the -rN package revision."""
+    a, b = _apk_key(left), _apk_key(right)
+    if a is None or b is None:
+        return None
+    return _cmp(a, b)
+
+
+def _rpm_segments(left: str, right: str) -> int:
+    """rpmvercmp: alphanumeric segments, numbers above letters, "~" below everything and "^"
+    below everything but the end."""
+    i = j = 0
+    while i < len(left) or j < len(right):
+        while i < len(left) and not left[i].isalnum() and left[i] not in "~^":
+            i += 1
+        while j < len(right) and not right[j].isalnum() and right[j] not in "~^":
+            j += 1
+        a = left[i] if i < len(left) else ""
+        b = right[j] if j < len(right) else ""
+        if a == "~" or b == "~":
+            if a != "~":
+                return 1
+            if b != "~":
+                return -1
+            i, j = i + 1, j + 1
+            continue
+        if a == "^" or b == "^":
+            if not a:
+                return -1
+            if not b:
+                return 1
+            if a != "^":
+                return 1
+            if b != "^":
+                return -1
+            i, j = i + 1, j + 1
+            continue
+        if not a or not b:
+            break
+        numeric = a.isdigit()
+        start_i, start_j = i, j
+        test = str.isdigit if numeric else (lambda char: char.isascii() and char.isalpha())
+        while i < len(left) and test(left[i]):
+            i += 1
+        while j < len(right) and test(right[j]):
+            j += 1
+        first, second = left[start_i:i], right[start_j:j]
+        if not second:  # a number against letters: the number is newer
+            return 1 if numeric else -1
+        if numeric:
+            first, second = first.lstrip("0"), second.lstrip("0")
+            if len(first) != len(second):
+                return _cmp(len(first), len(second))
+        if first != second:
+            return _cmp(first, second)
+    a = i < len(left)
+    b = j < len(right)
+    return 0 if a == b else (1 if a else -1)
+
+
+def _rpm_split(value: str) -> tuple[int, str, str] | None:
+    epoch, colon, rest = value.strip().partition(":")
+    if not colon:
+        epoch, rest = "0", value.strip()
+    if not epoch.isdigit() or not rest:
+        return None
+    version, _, release = rest.partition("-")
+    return int(epoch), version, release
+
+
+def compare_rpm(left: str, right: str) -> int | None:
+    """RPM versions: [epoch:]version[-release], as rpm orders them (a missing release matches any)."""
+    a, b = _rpm_split(left), _rpm_split(right)
+    if a is None or b is None:
+        return None
+    result = _cmp(a[0], b[0]) or _rpm_segments(a[1], b[1])
+    if result or not a[2] or not b[2]:
+        return result
+    return _rpm_segments(a[2], b[2])
+
+
 _ECOSYSTEM_COMPARATORS: dict[str, Comparator] = {
     "pypi": compare_pep440,
     "rubygems": compare_rubygems,
@@ -204,6 +364,21 @@ _ECOSYSTEM_COMPARATORS: dict[str, Comparator] = {
     "hex": compare_semver,
     "swifturl": compare_semver,
     "pub": compare_semver,
+    # Distributions: OSV names them "Debian:12", "Alpine:v3.19" and so on.
+    "debian": compare_dpkg,
+    "ubuntu": compare_dpkg,
+    "alpine": compare_apk,
+    "wolfi": compare_apk,
+    "chainguard": compare_apk,
+    "red hat": compare_rpm,
+    "almalinux": compare_rpm,
+    "rocky linux": compare_rpm,
+    "fedora": compare_rpm,
+    "opensuse": compare_rpm,
+    "suse": compare_rpm,
+    "mageia": compare_rpm,
+    "openeuler": compare_rpm,
+    "photon os": compare_rpm,
 }
 
 

@@ -23,8 +23,10 @@ from .lockfile_parsers import (
     ResolvedPackage,
     lockfile_key,
     normalize_version,
+    osv_covers,
     parse_lockfile,
 )
+from .os_packages import read_lockfile
 
 _LOCK_NAMES = LOCKFILE_NAMES
 _MAX_LOCKFILE_BYTES = MAX_LOCKFILE_BYTES
@@ -362,14 +364,10 @@ class LocalVulnerabilityAnalyzer(Analyzer):
                 confidence="UNKNOWN", evidence=[str(self.database_path)],
                 analyzer=self.name, severity="LOW",
             )]
+        key = lockfile_key(record.path) or Path(record.path).name.lower()
         try:
-            source = read_text_bounded(
-                path, _MAX_LOCKFILE_BYTES, expected_identity=record.analysis_identity,
-            )
-            packages = parse_lockfile(
-                lockfile_key(record.path) or Path(record.path).name, source,
-                max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES,
-            )
+            source, context = read_lockfile(path, key, _MAX_LOCKFILE_BYTES, record.analysis_identity)
+            packages = parse_lockfile(key, source, max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES, context=context)
         except (SourceBudgetExceeded, LockfileEntryBudgetExceeded) as exc:
             return [Finding(
                 "vulnerabilities",
@@ -398,8 +396,8 @@ class LocalVulnerabilityAnalyzer(Analyzer):
                         f"Ecosystem not covered by the local advisory snapshot: {record.path}",
                         f"The local advisory database holds no {ecosystem} advisories, so the "
                         f"{counts[ecosystem]:,} {ecosystem} packages of this lockfile were not checked. "
-                        + ("Import an OSV snapshot that includes this ecosystem." if ecosystem in OSV_ECOSYSTEMS
-                           else f"OSV publishes no {ecosystem} advisories."),
+                        + ("Import an advisory snapshot that includes this ecosystem." if osv_covers(ecosystem)
+                           or ecosystem.partition(":")[0] in OSV_ECOSYSTEMS else f"OSV publishes no {ecosystem} advisories."),
                         confidence="UNKNOWN", evidence=[record.path, f"ecosystem: {ecosystem}"],
                         analyzer=self.name, severity="LOW",
                     ))

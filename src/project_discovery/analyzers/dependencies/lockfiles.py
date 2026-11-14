@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...core.limits import AnalyzerLimits, over_limit
-from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
+from ...core.source_utils import SourceBudgetExceeded, describe_error, redact_source_excerpt
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
 from ..base import Analyzer
@@ -17,6 +17,7 @@ from .lockfile_parsers import (
     lockfile_key,
     parse_lockfile,
 )
+from .os_packages import read_lockfile
 
 _MAX_LOCKFILE_INVENTORY_BYTES = MAX_LOCKFILE_BYTES
 _MAX_LOCKFILE_PACKAGE_ENTRIES = MAX_LOCKFILE_PACKAGE_ENTRIES
@@ -57,15 +58,10 @@ class LockfileAnalyzer(Analyzer):
                 confidence="UNKNOWN", evidence=[record.path],
                 analyzer=self.name, severity="LOW",
             )]
+        key = lockfile_key(record.path) or Path(record.path).name.lower()
         try:
-            content = read_text_bounded(
-                path, _MAX_LOCKFILE_INVENTORY_BYTES,
-                expected_identity=record.analysis_identity,
-            )
-            packages = parse_lockfile(
-                lockfile_key(record.path) or Path(record.path).name, content,
-                max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES,
-            )
+            content, context = read_lockfile(path, key, _MAX_LOCKFILE_INVENTORY_BYTES, record.analysis_identity)
+            packages = parse_lockfile(key, content, max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES, context=context)
         except (SourceBudgetExceeded, LockfileEntryBudgetExceeded) as exc:
             return [Finding(
                 "dependency", f"Lockfile inventory resource limit: {record.path}",

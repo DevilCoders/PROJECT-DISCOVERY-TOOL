@@ -228,6 +228,24 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: advisory formats, installed OS packages and SBOMs
+- `pdt vuln-db import` reads, besides OSV records, NVD CVE JSON (API 2.0 responses, 2.0 and 1.1
+  feeds), GitHub advisory exports, the Debian security tracker JSON, Alpine secdb, CSAF 2.0
+  advisories and CycloneDX vulnerability BOMs, as `.json` or `.json.gz`. The format is detected from
+  the content. Files in no known format are skipped and reported, as are corrupt compressed files
+  and archive members. The summary counts records per format.
+- NVD records name products by CPE. Their CVSS vectors also give a severity to aliased advisories
+  that have none of their own.
+- Installed packages are inventoried and matched from dpkg's `status` (by source package), apk's
+  `installed` (by origin) and rpm's `rpmdb.sqlite`. rpm's database is read in memory through a
+  shared hardened SQLite opener that Subversion's working-copy decoder now uses too.
+- Each package's ecosystem is the release named in the root's `os-release` (`Debian:12`,
+  `Ubuntu:22.04:LTS`, `Alpine:v3.19`).
+- CycloneDX and SPDX JSON SBOM components are matched by package URL, including the `distro` and
+  `upstream` qualifiers.
+- Debian (dpkg), Alpine (apk) and RPM version ordering.
+- `--vuln-online` sends distribution packages only when they carry their release.
+
 ### Added: seventeen more lockfile formats
 - CocoaPods `Podfile.lock`, Gradle dependency locks, Conan 1 and 2 `conan.lock`, vcpkg's installed-port
   database, `bun.lock`, `deno.lock` (npm and JSR), `renv.lock` (CRAN and Bioconductor), Julia manifests,

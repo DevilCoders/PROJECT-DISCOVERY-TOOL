@@ -229,9 +229,21 @@ The baseline is not production-ready:
 - [x] Treat unsupported range schemes, unreadable/malformed lockfiles, missing versions, 128 MiB input limits and 250,000-package extraction limits as UNKNOWN; do not label them clean.
 - [x] Add dedicated JSON/Markdown/HTML vulnerability sections and CLI database import/status.
 - [x] Extend resolved lockfile coverage for all catalogued language ecosystems and package managers: 33 formats ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md)), adding CocoaPods, Gradle, Conan, vcpkg (its installed-port database: vcpkg has no lockfile), Bun, Deno (npm and JSR), renv, Julia, Cabal, Stack, rebar3, Carton, Crystal shards, DUB, NuGet `packages.config`, PEP 751 and Carthage; the catalogued manifests whose ecosystems have no lockfile format (Maven POM, sbt, Clojure, Haxe, fpm, PlatformIO, CMake) are named there. Ecosystems OSV.dev does not cover are reported as not checked, locally and online.
-- [ ] Add adapters for local NVD JSON feeds, GHSA exports, distro advisories (Debian, Ubuntu, Alpine, Red Hat), OS package DBs, container/SBOM advisories and vendor bulletins.
-- [ ] Add ecosystem-native comparators for PEP 440, SemVer, Maven, NuGet, Go pseudo-versions, RubyGems, Debian, RPM and vendor-specific versions. PEP 440, SemVer (npm, crates.io, Go, Hex, SwiftPM, Pub), RubyGems, Composer and NuGet orderings exist with tests; Maven, Debian, RPM and vendor orderings do not, and Go pseudo-versions are compared as SemVer prereleases.
-- [ ] Support CPE/purl matching, duplicate/alias resolution, withdrawn/superseded advisories, exploit maturity, CVSS vector parsing and VEX status. Implemented: CVSS v2/v3 vector severity and alias merging, both with tests. Withdrawn advisories are skipped, but no test covers this. Missing: CPE/purl matching, superseded advisories, exploit maturity and VEX.
+- [x] Add adapters for local NVD JSON feeds, GHSA exports, distro advisories (Debian, Ubuntu, Alpine, Red Hat), OS package DBs, container/SBOM advisories and vendor bulletins. `pdt vuln-db import` detects and converts these formats, plain or gzip ([CLI_REFERENCE.md](../guides/CLI_REFERENCE.md#pdt-vuln-db-import)):
+  - NVD CVE JSON: API 2.0 responses and the 2.0 and 1.1 feeds. Products are named by CPE; their CVSS vectors also give a severity to advisories that alias the CVE.
+  - GitHub REST advisory exports.
+  - The Debian security tracker JSON and Alpine secdb. Ubuntu publishes OSV records, which import as they are.
+  - CSAF 2.0: Red Hat's and other vendors' bulletins.
+  - CycloneDX VDR and VEX BOMs.
+
+  Installed packages are read from dpkg `status`, apk `installed` and `rpmdb.sqlite`, each in the release its `os-release` names. CycloneDX and SPDX SBOM components are matched by package URL ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#installed-os-packages-and-sboms)). An end-to-end test matches Debian, Ubuntu, Alpine, Red Hat and SBOM packages.
+- [ ] Add ecosystem-native comparators for PEP 440, SemVer, Maven, NuGet, Go pseudo-versions, RubyGems, Debian, RPM and vendor-specific versions.
+  - With tests: PEP 440, SemVer (npm, crates.io, Go, Hex, SwiftPM, Pub), RubyGems, Composer, NuGet, Debian (dpkg), Alpine (apk) and RPM orderings.
+  - Missing: Maven and vendor orderings. Go pseudo-versions are compared as SemVer prereleases.
+- [ ] Support CPE/purl matching, duplicate/alias resolution, withdrawn/superseded advisories, exploit maturity, CVSS vector parsing and VEX status.
+  - With tests: CVSS v2/v3 vector severity, alias merging (including severities taken from aliased NVD records) and package URLs mapped to OSV ecosystems. CycloneDX VEX `not_affected`, `false_positive` and `resolved` statements are left out at import.
+  - Withdrawn advisories are skipped, but no test covers this.
+  - Missing: matching NVD CPE criteria against inventories, superseded advisories, exploit maturity, and VEX applied to scan findings.
 - [ ] Resolve direct/transitive dependency graphs and retain parent path/provenance for vulnerable packages.
 - [ ] Add static dependency reachability evidence where symbol/call graphs support it; never claim exploitability from version matching alone.
 - [ ] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping.

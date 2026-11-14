@@ -1,23 +1,31 @@
-"""Local-only OSV advisory database import and query helpers."""
+"""Local-only advisory database: import (OSV records and the formats ``adapters`` converts)
+and query helpers."""
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
 import re
 import sqlite3
 import zipfile
+import zlib
 from urllib.parse import quote
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
 from typing import Any, Iterator
 
+from .adapters import convert
 from .cvss import base_score, qualitative_severity
 
 SCHEMA_VERSION = 2
 _MAX_ZIP_MEMBERS = 5_000_000
 _MAX_ZIP_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
 _IMPORT_BATCH = 500
+# One advisory document: an OSV record keeps its own budget; a feed (NVD, the Debian tracker,
+# a GitHub export, Alpine secdb, CSAF) holds many records in one file.
+MAX_DOCUMENT_BYTES = 1024 * 1024 * 1024
+_ADVISORY_SUFFIXES = (".json", ".json.gz")
 
 _SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -145,7 +153,7 @@ def osv_record_to_advisories(
 
 def _advisory_files(source: Path) -> Iterator[tuple[Path, str]]:
     if source.is_file():
-        if source.suffix.lower() == ".json":
+        if source.name.lower().endswith(_ADVISORY_SUFFIXES):
             yield source, source.name
         return
     if not source.is_dir():
@@ -157,8 +165,14 @@ def _advisory_files(source: Path) -> Iterator[tuple[Path, str]]:
         )
         for name in sorted(names):
             path = Path(current) / name
-            if name.lower().endswith(".json") and not path.is_symlink():
+            if name.lower().endswith(_ADVISORY_SUFFIXES) and not path.is_symlink():
                 yield path, path.relative_to(source).as_posix()
+
+
+def _read_bounded(stream, limit: int) -> bytes | None:
+    """At most ``limit`` bytes of a stream, or None when it holds more."""
+    data = stream.read(limit + 1)
+    return None if len(data) > limit else data
 
 
 def _file_sha256(path: Path) -> str:
@@ -303,7 +317,7 @@ class VulnerabilityDatabase:
                         f"advisory archive has {len(members):,} members; limit is {_MAX_ZIP_MEMBERS:,}"
                     )
                 for info in members:
-                    if not info.filename.lower().endswith(".json"):
+                    if not info.filename.lower().endswith(_ADVISORY_SUFFIXES):
                         continue
                     if info.file_size > max_record_bytes:
                         yield info.filename, None, (
@@ -313,13 +327,27 @@ class VulnerabilityDatabase:
                     total += info.file_size
                     if total > _MAX_ZIP_TOTAL_BYTES:
                         raise ValueError("advisory archive exceeds the total uncompressed import budget")
-                    with archive.open(info) as stream:
-                        data = stream.read(max_record_bytes + 1)
-                    if len(data) > max_record_bytes:
+                    try:
+                        with archive.open(info) as stream:
+                            if info.filename.lower().endswith(".gz"):
+                                with gzip.GzipFile(fileobj=stream) as unpacked:
+                                    data = _read_bounded(unpacked, max_record_bytes)
+                            else:
+                                data = _read_bounded(stream, max_record_bytes)
+                    except (OSError, EOFError, zlib.error, zipfile.BadZipFile) as exc:
+                        # A corrupt member (a bad CRC, a broken gzip stream) fails alone.
+                        yield info.filename, None, f"{type(exc).__name__}: {exc}"
+                        continue
+                    if data is None:
                         yield info.filename, None, (
                             f"record exceeds {max_record_bytes} byte import budget"
                         )
                         continue
+                    if info.filename.lower().endswith(".gz"):
+                        # The archive's budget counts what its compressed members unpack to.
+                        total += len(data) - info.file_size
+                        if total > _MAX_ZIP_TOTAL_BYTES:
+                            raise ValueError("advisory archive exceeds the total uncompressed import budget")
                     yield info.filename, data, None
             return
         for path, relative in _advisory_files(source):
@@ -327,61 +355,89 @@ class VulnerabilityDatabase:
                 if path.stat().st_size > max_record_bytes:
                     yield relative, None, f"record exceeds {max_record_bytes} byte import budget"
                     continue
+                if path.name.lower().endswith(".gz"):
+                    with gzip.open(path, "rb") as unpacked:
+                        data = _read_bounded(unpacked, max_record_bytes)
+                    if data is None:
+                        yield relative, None, f"record exceeds {max_record_bytes} byte import budget once decompressed"
+                        continue
+                    yield relative, data, None
+                    continue
                 yield relative, path.read_bytes(), None
-            except OSError as exc:
+            except (OSError, EOFError, zlib.error) as exc:
                 yield relative, None, f"{type(exc).__name__}: {exc}"
 
-    def import_osv(self, source: Path, *, max_record_bytes: int = 8 * 1024 * 1024) -> dict[str, Any]:
-        """Import OSV JSON from a local file, directory tree or OSV ``all.zip`` archive.
+    def import_osv(self, source: Path, *, max_record_bytes: int = 8 * 1024 * 1024,
+                   max_document_bytes: int = MAX_DOCUMENT_BYTES) -> dict[str, Any]:
+        """Import advisories from a local file, directory tree or OSV ``all.zip`` archive: OSV
+        records and the formats ``adapters`` converts (NVD, GitHub exports, the Debian tracker,
+        Alpine secdb, CSAF, CycloneDX), as ``.json`` or ``.json.gz``.
 
-        Each advisory is applied atomically (SAVEPOINT); commits are batched for speed.
+        Each advisory is applied atomically (SAVEPOINT); commits are batched for speed. An OSV
+        record keeps the ``max_record_bytes`` budget; a feed document may be ``max_document_bytes``.
         """
         if self.read_only:
             raise PermissionError("advisory database was opened read-only")
         source = source.expanduser().resolve(strict=True)
-        if source.is_file() and source.suffix.lower() not in {".json", ".zip"}:
+        if source.is_file() and not source.name.lower().endswith((*_ADVISORY_SUFFIXES, ".zip")):
             # Anything else would import nothing yet look like a successful refresh.
-            raise ValueError(f"Unsupported advisory source (expected a .json file, an OSV .zip or a directory): {source}")
+            raise ValueError("Unsupported advisory source (expected a .json or .json.gz file, an OSV .zip or a "
+                             f"directory): {source}")
         imported = 0
         skipped = 0
         errors: list[str] = []
         affected_count = 0
         pending = 0
+        formats: dict[str, int] = {}
 
         self.connection.execute("BEGIN")
         try:
-            for relative, raw, error in self._iter_source_records(source, max_record_bytes):
+            for relative, raw, error in self._iter_source_records(source, max(max_record_bytes, max_document_bytes)):
                 if error is not None:
                     skipped += 1
                     errors.append(f"{relative}: {error}")
                     continue
                 try:
-                    data = json.loads(raw.decode("utf-8"))
+                    document = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
                     skipped += 1
                     errors.append(f"{relative}: {type(exc).__name__}: {exc}")
                     continue
-                if not isinstance(data, dict) or not data.get("id") or not isinstance(data.get("affected"), list):
+                kind, records = convert(document)
+                if kind == "unknown":
                     skipped += 1
-                    errors.append(f"{relative}: not a supported OSV vulnerability record")
+                    errors.append(f"{relative}: not a supported advisory record or feed")
                     continue
-                malformed = [entry for entry in data["affected"] if _malformed_affected(entry)]
-                if malformed:
-                    # Matching would raise on these; the record's valid entries still count.
-                    errors.append(f"{relative}: {len(malformed)} malformed affected entr"
-                                  f"{'y' if len(malformed) == 1 else 'ies'} skipped")
-                    data = {**data, "affected": [entry for entry in data["affected"] if not _malformed_affected(entry)]}
-                try:
-                    affected_count += self._store_advisory(data, relative)
-                    imported += 1
-                except sqlite3.Error as exc:
+                if kind == "osv" and len(raw) > max_record_bytes:
                     skipped += 1
-                    errors.append(f"{relative}: {type(exc).__name__}: {exc}")
-                pending += 1
-                if pending >= _IMPORT_BATCH:
-                    self.connection.execute("COMMIT")
-                    self.connection.execute("BEGIN")
-                    pending = 0
+                    errors.append(f"{relative}: record exceeds {max_record_bytes} byte import budget")
+                    continue
+                stored = 0
+                for data in records:
+                    if not isinstance(data, dict) or not data.get("id") or not isinstance(data.get("affected"), list):
+                        skipped += 1
+                        errors.append(f"{relative}: not a supported OSV vulnerability record")
+                        continue
+                    malformed = [entry for entry in data["affected"] if _malformed_affected(entry)]
+                    if malformed:
+                        # Matching would raise on these; the record's valid entries still count.
+                        errors.append(f"{relative}: {len(malformed)} malformed affected entr"
+                                      f"{'y' if len(malformed) == 1 else 'ies'} skipped")
+                        data = {**data, "affected": [entry for entry in data["affected"] if not _malformed_affected(entry)]}
+                    try:
+                        affected_count += self._store_advisory(data, relative)
+                        imported += 1
+                        stored += 1
+                    except sqlite3.Error as exc:
+                        skipped += 1
+                        errors.append(f"{relative}: {type(exc).__name__}: {exc}")
+                    pending += 1
+                    if pending >= _IMPORT_BATCH:
+                        self.connection.execute("COMMIT")
+                        self.connection.execute("BEGIN")
+                        pending = 0
+                if stored:
+                    formats[kind.split("-", 1)[0]] = formats.get(kind.split("-", 1)[0], 0) + stored
             if imported:
                 # A no-op import must not refresh the snapshot's provenance and age.
                 self._write_import_metadata(source, imported)
@@ -393,6 +449,7 @@ class VulnerabilityDatabase:
         return {
             "imported_advisories": imported,
             "affected_package_records": affected_count,
+            "formats": dict(sorted(formats.items())),
             "skipped_records": skipped,
             "errors": errors[:200],
             "database": str(self.path),
@@ -493,7 +550,7 @@ class VulnerabilityDatabase:
                 if normalize_package_name(ecosystem, row["affected_name"])
                 == normalize_package_name(ecosystem, package_name)
             ]
-        return [
+        results = [
             {
                 "id": row["id"],
                 "aliases": json.loads(row["aliases_json"]),
@@ -510,6 +567,24 @@ class VulnerabilityDatabase:
             }
             for row in rows
         ]
+        return self._severities_by_alias(results)
+
+    def _severities_by_alias(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """An advisory without a severity takes the severity of an imported record it aliases
+        (an OSV record without CVSS, and the NVD record of its CVE)."""
+        aliases = sorted({alias for item in results if item["severity"] == "UNKNOWN" for alias in item["aliases"]})[:500]
+        if not aliases:
+            return results
+        known = dict(self.connection.execute(
+            f"SELECT id, severity FROM advisories WHERE severity != 'UNKNOWN' AND id IN ({','.join('?' * len(aliases))})",
+            aliases,
+        ).fetchall())
+        for item in results:
+            if item["severity"] == "UNKNOWN":
+                source = next((alias for alias in item["aliases"] if alias in known), None)
+                if source is not None:
+                    item["severity"], item["severity_source"] = known[source], source
+        return results
 
     def status(self) -> dict[str, Any]:
         advisory_count = self.connection.execute(

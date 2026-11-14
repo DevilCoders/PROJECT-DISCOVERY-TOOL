@@ -27,12 +27,13 @@ from .analyzers import load_analyzers
 from .analyzers.code.tree_sitter_syntax import GRAMMARS, parser_capabilities
 from .analyzers.content.archives import ArchiveIntelligenceAnalyzer, parse_archive_limits
 from .analyzers.dependencies.lockfile_parsers import MAX_LOCKFILE_BYTES, lockfile_key
+from .analyzers.dependencies.os_packages import OS_DATABASES, os_release_text, read_lockfile
 from .analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
 from .catalog.domains import analyzer_domain_catalog, analyzer_domain_count
 from .catalog.hosting import ProviderMap, configure_provider_map, configured_provider_map, load_provider_map
 from .catalog.languages import language_catalog, recognized_language_count
 from .core.output_lock import output_lock
-from .core.source_utils import neutralize_controls, read_text_bounded
+from .core.source_utils import neutralize_controls
 from .engine.executor import (
     BATCH_MAX_BYTES,
     BATCH_MAX_FILES,
@@ -583,11 +584,12 @@ def _lockfile_sources(root: Path, records, skipped: list[str], memory_source=Non
                 raise OSError(error)
             yield LockfileSource(record.path, unreadable)
             continue
+        key = lockfile_key(record.path)
         yield LockfileSource(
             record.path,
-            lambda record=record: read_text_bounded(
-                root / record.path, MAX_LOCKFILE_BYTES, expected_identity=record.analysis_identity,
-            ),
+            lambda record=record, key=key: read_lockfile(
+                root / record.path, key, MAX_LOCKFILE_BYTES, record.analysis_identity)[0],
+            {"os_release": os_release_text(root / record.path, key)} if key in OS_DATABASES else None,
         )
 
 
@@ -2266,9 +2268,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vuln_actions = vuln_db.add_subparsers(dest="vuln_action", required=True)
     vuln_import = vuln_actions.add_parser(
-        "import", help="Import local OSV JSON records without network access"
+        "import", help="Import local advisories (OSV, NVD, GitHub, Debian, Alpine, CSAF, CycloneDX) without network access"
     )
-    vuln_import.add_argument("source", type=Path, help="Local OSV JSON file or directory tree")
+    vuln_import.add_argument(
+        "source", type=Path,
+        help="Local advisory file (.json, .json.gz), directory tree or OSV .zip: OSV records, NVD CVE JSON (API 2.0 "
+             "and 2.0/1.1 feeds), GitHub advisory exports, the Debian security tracker JSON, Alpine secdb, CSAF 2.0 "
+             "(Red Hat and other vendors) and CycloneDX vulnerabilities",
+    )
     vuln_import.add_argument("--db", type=Path, default=default_database_path(), help="Advisory database (default: ~/.pdt/vulnerability-advisories.sqlite3)")
     vuln_status = vuln_actions.add_parser(
         "status", help="Show local advisory database coverage"
@@ -2297,6 +2304,9 @@ def main() -> None:
                     f"{imported['affected_package_records']} affected package record(s); "
                     f"{imported['skipped_records']} skipped."
                 )
+                if imported.get("formats"):
+                    print("[ INFO ] Records by source format: " + ", ".join(
+                        f"{kind} {count:,}" for kind, count in sorted(imported["formats"].items())))
                 for error in imported["errors"][:20]:
                     print("[ WARNING ] " + error)
                 if not imported["imported_advisories"]:

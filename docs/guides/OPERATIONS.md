@@ -438,9 +438,19 @@ The terminal summary also prints phase timings, including report writing.
 
 ```bash
 pdt vuln-db import /data/osv/all.zip --db ~/.pdt/advisories.sqlite3   # OSV bundle, offline
+pdt vuln-db import /data/nvd --db ~/.pdt/advisories.sqlite3            # nvdcve-2.0-*.json.gz feeds
+pdt vuln-db import /data/debian-tracker.json --db ~/.pdt/advisories.sqlite3
 pdt vuln-db status --db ~/.pdt/advisories.sqlite3
 pdt scan /src --output /reports/src --vuln-db ~/.pdt/advisories.sqlite3
 ```
+
+One database can hold every source: OSV records, NVD feeds, GitHub advisory exports, the Debian
+security tracker's JSON, Alpine secdb files, CSAF advisories (Red Hat's among them) and CycloneDX
+vulnerability BOMs. PDT downloads none of them; fetch them with your own mirror or proxy.
+
+A scan of an unpacked container image or root file system matches the installed packages that dpkg,
+apk or rpm records against the advisories of the release its `os-release` names. See
+[LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#installed-os-packages-and-sboms).
 
 The database is opened read-only during scans. Refresh it by importing a newer snapshot;
 `status` reports the snapshot age. Databases created by 0.1.0 are migrated to indexed lookups

@@ -10,7 +10,7 @@ Every `pdt` command and option, with examples. `pdt --help` lists the commands a
 | [`pdt capabilities`](#pdt-capabilities) | Show the native backends, optional integrations and analyzers on this host |
 | [`pdt plugin-check`](#pdt-plugin-check) | Test a third-party analyzer plugin the way scans load it |
 | [`pdt catalog-add`](#pdt-catalog-add), [`catalog-list`](#pdt-catalog-list), [`catalog-remove`](#pdt-catalog-remove), [`catalog-compare`](#pdt-catalog-compare) | Keep a local catalog of project reports |
-| [`pdt vuln-db`](#pdt-vuln-db) | Import and inspect the local OSV advisory database |
+| [`pdt vuln-db`](#pdt-vuln-db) | Import and inspect the local advisory database (OSV, NVD, GitHub, Debian, Alpine, CSAF, CycloneDX) |
 
 `pdt --version` prints the version.
 
@@ -109,7 +109,7 @@ pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color
 
 | Option | Default | Description |
 |---|---|---|
-| `--vuln-db FILE` | none | Match lockfile packages against a local OSV snapshot imported with `pdt vuln-db import`. No network access. The file must be outside the scanned project. |
+| `--vuln-db FILE` | none | Match lockfile packages, installed OS packages (dpkg, apk, rpm) and SBOM components against a local advisory snapshot imported with `pdt vuln-db import`. No network access. The file must be outside the scanned project. |
 | `--vuln-online` | off | Look lockfile packages up in OSV.dev. Only the ecosystem, package name and version are sent, never file contents or paths. Failures are `UNKNOWN` coverage findings. |
 | `--vuln-enrich SOURCES` | none | With `--vuln-online`: add CVSS and CWE details from `nvd` (NVD CVE API 2.0) and/or `ghsa` (GitHub Advisory Database), comma-separated. Keys come from `NVD_API_KEY` and `GITHUB_TOKEN`. |
 | `--vuln-cache FILE` | `~/.pdt/online-vulnerability-cache.sqlite3` | With `--vuln-online`: the response cache, outside the scanned project. |
@@ -374,11 +374,23 @@ The local advisory database used by `pdt scan --vuln-db`. Neither action contact
 pdt vuln-db import SOURCE [--db FILE]
 ```
 
-Imports OSV JSON records from a local file or directory tree into the database, creating it when needed. Exit 0 when every record imported, 1 when some were skipped (each is reported), and 2 when none could be imported (the database's snapshot provenance is then unchanged).
+Imports advisories from a local file, directory tree or OSV `all.zip` into the database, creating it when needed. Files may be `.json` or `.json.gz`. Each file's format is detected from its content and converted to OSV records:
+
+| Format | What becomes an affected package |
+|---|---|
+| OSV records (one record, a list, an OSV `.zip`) | as written, including Ubuntu's and other distributions' OSV records |
+| NVD CVE JSON: API 2.0 responses, 2.0 yearly feeds, retired 1.1 feeds | each vulnerable CPE as `vendor:product` in the `CPE` ecosystem. No inventory names CPEs yet, so these records are not matched against packages. Their CVSS vectors give a severity to OSV advisories that alias the CVE and have none of their own. |
+| GitHub advisory exports (the REST API's `ghsa_id` and `vulnerabilities` form) | each package, with the vulnerable range turned into OSV events. A range that cannot be expressed that way (`> 1.0`, for example) is kept as an unsupported range and matches as `UNKNOWN`. |
+| The Debian security tracker JSON | each source package per release (`Debian:12`). Open issues have no fixed version, and `0` fixes (never affected) are left out. |
+| Alpine secdb | each origin package per branch (`Alpine:v3.19`) |
+| CSAF 2.0 (Red Hat and other vendors) | each product with a package URL: fixed products give the fixed version, and known-affected products give exact versions |
+| CycloneDX vulnerabilities (VDR and VEX BOMs) | each affected component's package URL. VEX analyses that say `not_affected`, `false_positive` or `resolved` are left out. |
+
+A file in no known format is skipped and reported, as is a corrupt compressed file or archive member. Exit 0 when every record imported, 1 when some were skipped (each is reported), and 2 when none could be imported (the database's snapshot provenance is then unchanged). The summary counts the records from each format.
 
 | Option | Default | Description |
 |---|---|---|
-| `SOURCE` | — | A local OSV JSON file or directory tree. |
+| `SOURCE` | — | A local advisory file (`.json`, `.json.gz`), directory tree or OSV `.zip`. Nothing is downloaded: fetch the feeds yourself. |
 | `--db FILE` | `~/.pdt/vulnerability-advisories.sqlite3` | The advisory database. |
 
 ### `pdt vuln-db status`

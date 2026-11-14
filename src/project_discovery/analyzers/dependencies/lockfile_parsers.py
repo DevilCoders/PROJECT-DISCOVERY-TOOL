@@ -56,14 +56,29 @@ LOCKFILE_ECOSYSTEMS = {
     "packages.config": "NuGet",
     "pylock.toml": "PyPI",
     "cartfile.resolved": "Carthage",
+    # Installed packages and SBOM components (see os_packages): each package carries its own
+    # ecosystem (the distribution release, a purl's ecosystem); these are the defaults.
+    "dpkg-status": "Debian",
+    "apk-installed": "Alpine",
+    "rpmdb-sqlite": "RPM",
+    "sbom-json": "SBOM",
 }
 LOCKFILE_NAMES = frozenset(name for name in LOCKFILE_ECOSYSTEMS if "." in name)
 # The ecosystems OSV.dev has advisories for, of those the lockfiles name. The others (CocoaPods,
 # vcpkg, JSR, Julia, CPAN, Crystal, DUB, Carthage) cannot be checked online.
 OSV_ECOSYSTEMS = frozenset({
     "npm", "PyPI", "crates.io", "Packagist", "RubyGems", "Go", "Hex", "SwiftURL", "NuGet", "Pub", "Maven",
-    "ConanCenter", "CRAN", "Bioconductor", "Hackage",
+    "ConanCenter", "CRAN", "Bioconductor", "Hackage", "Debian", "Ubuntu", "Alpine", "AlmaLinux", "Rocky Linux",
+    "Wolfi",
 })
+# OSV names these distributions with their release ("Debian:12"): without one, nothing matches.
+_RELEASED_ECOSYSTEMS = frozenset({"Debian", "Ubuntu", "Alpine", "AlmaLinux", "Rocky Linux"})
+
+
+def osv_covers(ecosystem: str) -> bool:
+    """Whether OSV.dev publishes advisories for this (OSV-named) ecosystem."""
+    base, separator, _ = ecosystem.partition(":")
+    return base in OSV_ECOSYSTEMS and (bool(separator) or base not in _RELEASED_ECOSYSTEMS)
 
 
 def lockfile_key(path: str) -> str | None:
@@ -76,8 +91,17 @@ def lockfile_key(path: str) -> str | None:
         return name
     if name.startswith("pylock.") and name.endswith(".toml") and name.count(".") == 2:
         return "pylock.toml"
-    if name == "status" and normalized.casefold().endswith(("vcpkg_installed/vcpkg/status", "installed/vcpkg/status")):
+    lowered = normalized.casefold()
+    if name == "status" and lowered.endswith(("vcpkg_installed/vcpkg/status", "installed/vcpkg/status")):
         return "vcpkg-status"
+    if lowered.endswith("var/lib/dpkg/status"):
+        return "dpkg-status"
+    if lowered.endswith("lib/apk/db/installed"):
+        return "apk-installed"
+    if lowered.endswith(("var/lib/rpm/rpmdb.sqlite", "usr/lib/sysimage/rpm/rpmdb.sqlite")):
+        return "rpmdb-sqlite"
+    if name in {"bom.json", "sbom.json"} or name.endswith((".cdx.json", ".cyclonedx.json", ".spdx.json")):
+        return "sbom-json"
     return None
 
 
@@ -886,7 +910,8 @@ def _cartfile_resolved(source: str, out: _Collector) -> None:
 
 
 def parse_lockfile(
-    filename: str, source: str, *, max_entries: int = MAX_LOCKFILE_PACKAGE_ENTRIES,
+    filename: str, source: str | bytes, *, max_entries: int = MAX_LOCKFILE_PACKAGE_ENTRIES,
+    context: dict | None = None,
 ) -> ParsedLockfile:
     """Return de-duplicated resolved registry packages in deterministic order.
 
@@ -962,6 +987,22 @@ def parse_lockfile(
         _pylock(tomllib.loads(source), out)
     elif name == "cartfile.resolved":
         _cartfile_resolved(source, out)
+    elif name in {"dpkg-status", "apk-installed", "rpmdb-sqlite"}:
+        from . import os_packages
+
+        # The distribution release from the root's os-release: "Debian:12", "Alpine:v3.19".
+        ecosystem = os_packages.os_ecosystem((context or {}).get("os_release", ""), out.ecosystem)
+        if name == "dpkg-status":
+            os_packages.dpkg_status(source, out, ecosystem)
+        elif name == "apk-installed":
+            os_packages.apk_installed(source, out, ecosystem)
+        else:
+            os_packages.rpmdb(source if isinstance(source, bytes) else source.encode("utf-8", "surrogateescape"),
+                              out, ecosystem)
+    elif name == "sbom-json":
+        from . import os_packages
+
+        os_packages.sbom(json.loads(source), out)
     result = ParsedLockfile(sorted(out.packages, key=lambda p: (p.name.casefold(), p.name, p.version)))
     registry_names = {package.name for package in out.packages}
     result.local = sorted(out.local_names - registry_names)

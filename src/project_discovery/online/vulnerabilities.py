@@ -29,7 +29,7 @@ from ..analyzers.dependencies.lockfile_parsers import (
     ResolvedPackage,
     parse_lockfile,
 )
-from ..analyzers.dependencies.lockfile_parsers import OSV_ECOSYSTEMS, lockfile_key
+from ..analyzers.dependencies.lockfile_parsers import lockfile_key, osv_covers
 from ..analyzers.dependencies.vulnerabilities import _affected_version, advisory_findings
 from ..core.source_utils import SourceBudgetExceeded, redact_source_excerpt
 from ..models import Finding
@@ -137,7 +137,9 @@ class LockfileSource:
     """A lockfile path (as reported) and a callable returning its bounded text."""
 
     path: str
-    read: Callable[[], str]
+    read: Callable[[], str | bytes]
+    # What the parser needs besides the content (an OS package database's os-release).
+    context: dict | None = None
 
 
 @dataclass(slots=True)
@@ -238,7 +240,7 @@ class OnlineVulnerabilityLookup:
             try:
                 packages = parse_lockfile(
                     lockfile_key(source.path) or PurePosixPath(source.path).name, source.read(),
-                    max_entries=MAX_LOCKFILE_PACKAGE_ENTRIES,
+                    max_entries=MAX_LOCKFILE_PACKAGE_ENTRIES, context=source.context,
                 )
             except (SourceBudgetExceeded, LockfileEntryBudgetExceeded, OSError, ValueError,
                     RecursionError, MemoryError) as exc:
@@ -249,7 +251,7 @@ class OnlineVulnerabilityLookup:
                 # the response cache; source specifiers can hold credentials and paths.
                 if not _PLAIN_VERSION.match(package.version):
                     continue
-                if package.ecosystem not in OSV_ECOSYSTEMS:
+                if not osv_covers(package.ecosystem):
                     unsupported[package.ecosystem] += 1
                     if len(unsupported_paths[package.ecosystem]) < _MAX_EVIDENCE_LOCKFILES:
                         unsupported_paths[package.ecosystem].add(source.path)
@@ -407,9 +409,10 @@ class OnlineVulnerabilityLookup:
             ))
         if unsupported:
             message = (
-                "OSV.dev publishes no advisories for " + ", ".join(
+                "OSV.dev cannot be asked about " + ", ".join(
                     f"{ecosystem} ({count:,} package(s))" for ecosystem, count in sorted(unsupported.items()))
-                + "; these packages were not checked"
+                + " (an ecosystem it publishes no advisories for, or a distribution without its release); these "
+                "packages were not checked"
             )
             diagnostics.append(message)
             findings.append(_coverage_finding(

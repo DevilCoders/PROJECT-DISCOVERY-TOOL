@@ -21,7 +21,7 @@ PDT scans a local directory or a remote repository, inventories every file, dire
 | Inventory | Files, directories, symlinks and special entries with sizes, permissions, owners, Windows attributes and macOS file flags, file types and MIME types from content signatures (apart from what names suggest), hidden entries, development and cache trees (with their ecosystem and how sure each marker is), explicit prunes and `--exclude-profile` presets, and `--development-trees` modes, in a resumable SQLite store; `--security-metadata` adds Windows security descriptors or POSIX ACLs |
 | Code intelligence | A shared code model (Python syntax tree; a structural lexer for about 25 brace languages, refined by Tree-sitter grammars where provisioned), symbol index, call graph, recursion, unreferenced code, test links and module graph, queried with `pdt query` |
 | Security | Secrets in 30+ provider formats, secure-code rules, Python AST checks, and taint from untrusted input to injection, path, SSRF, XSS and redirect sinks (Python across modules); identity and privacy indicators |
-| Dependencies | Manifests, lockfiles and licenses; vulnerability matching against a local OSV snapshot (`--vuln-db`) or OSV.dev (`--vuln-online`) |
+| Dependencies | Manifests, lockfiles, installed OS packages (dpkg, apk, rpm), SBOMs and licenses; vulnerability matching against a local advisory snapshot (`--vuln-db`: OSV, NVD, GitHub, Debian, Alpine, CSAF, CycloneDX) or OSV.dev (`--vuln-online`) |
 | Services and delivery | API contracts and routes, SQL/NoSQL/ORM schemas and migrations, configuration, network indicators, builds, tests, coverage, CI/CD, containers and deployment |
 | Domains | Embedded and firmware, HDL/FPGA with an elaborated design hierarchy, shaders, frontend components, AI/ML including notebooks, ROS, mobile, game engines, accessibility, localization and archives |
 | Multi-project | Report comparison, integration maps and a local project catalog |
@@ -116,7 +116,7 @@ src/project_discovery/
   engine/            bounded process/thread executor, native backends, runtime telemetry
   analyzers/         built-in analyzers by domain, the plugin base class and the registry
   intelligence/      shared code model, code facts, cross-file code index, project graphs
-  vulnerabilities/   local OSV advisory database, ecosystem version ordering, CVSS
+  vulnerabilities/   local advisory database, format adapters, ecosystem version ordering, CVSS
   plugins/           plugin isolation policy, sandboxed hosts and their protocol
   online/            URL targets, read-only checkouts, provider APIs, online advisory sources
   reporting/         JSON, Markdown and HTML writers; the offline HTML client in web/

@@ -10,7 +10,7 @@ Nothing switches PDT into online mode implicitly. A local `pdt scan PATH` never 
 | Command | What PDT does | Network use |
 |---|---|---|
 | `pdt scan PATH` | Analyzes a local directory | None |
-| `pdt scan PATH --vuln-db FILE` | Adds offline advisory matching from an imported OSV snapshot | None |
+| `pdt scan PATH --vuln-db FILE` | Adds offline advisory matching from an imported advisory snapshot | None |
 | `pdt scan PATH --vuln-online` | Adds online advisory matching for the project's lockfile packages | Package coordinates are sent to OSV.dev (and, with `--vuln-enrich`, advisory IDs to NVD/GitHub) |
 | `pdt scan URL` | Downloads one repository into a temporary directory, analyzes it, deletes the copy | The VCS client fetches the repository |
 | `pdt scan --url FILE` | Same as above for every repository listed in `FILE`, one report directory each | The VCS client fetches each repository |
