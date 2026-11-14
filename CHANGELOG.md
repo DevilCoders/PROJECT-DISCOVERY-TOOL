@@ -228,6 +228,19 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: endpoint adapters across languages
+- `api-endpoints` reads each language with its own adapters (by file extension): framework forms for
+  Python (Litestar, Bottle, BlackSheep, aiohttp, Starlette, Falcon, Pyramid, Tornado and more, from the
+  syntax tree), JavaScript/TypeScript, Go, the JVM languages, C#, Visual Basic, PHP, Ruby, Rust, Swift,
+  Dart, C, C++, Elixir, Clojure, Crystal, Perl, Lua, Haskell, Nim, F#, Erlang, Julia, R, OCaml, D and
+  Pascal, and the file-system routers of Next.js, SvelteKit, Nuxt and Dart Frog.
+- A form that is not distinctive alone counts only in a file importing its framework, so HTTP client
+  calls (`axios.get('/x')`, `$client->get(...)`, `cli.Get(...)`) are not served endpoints.
+- Declarations wrapped over several lines and fluent chains continued on `.` lines are read joined; each
+  route keeps its own line. Spring mappings take their arguments in any order.
+- `api_endpoint` facts name the framework. Django `path()` routes are recorded with the method `ANY`
+  (was the pseudo-method `DJANGO`), and only in a file importing Django or a `urls.py`.
+
 ### Added: passive network discovery, enforced
 - `tests/test_passive_network.py`: no module outside Online Mode (`online/`) and the plugin sandbox imports a
   network client, a resolver or `subprocess` (each exception named with its reason), and an audit hook

@@ -44,7 +44,7 @@ The NoSQL analyzer now recognizes additional vector/search and multi-model datas
 
 ## Expanded source-language matrix for API, database and migration analyzers
 
-The source-level API endpoint analyzer and NoSQL/vector datastore analyzer now use the central source-language extension catalog instead of a hard-coded short list. Their static pattern checks therefore run across every source family recognized by PDT, while language-specific semantic extraction remains explicitly bounded by implemented rules.
+The source-level API endpoint analyzer and NoSQL/vector datastore analyzer now use the central source-language extension catalog instead of a hard-coded short list. The datastore analyzer's static pattern checks run across every source family recognized by PDT; the endpoint analyzer reads each language with that language's adapters ([Endpoint adapters](../analyzers/API_ANALYZER.md#endpoint-adapters)), so a language without adapters reports no endpoint declarations. Language-specific semantic extraction remains explicitly bounded by implemented rules.
 
 Migration discovery likewise accepts migration scripts written in any recognized source language and adds explicit framework identification for Goose, Atlas, Dbmate, Drizzle ORM, Diesel, SeaORM and SQLx. A recognized migration file is not evidence that it has been applied to a database.
 

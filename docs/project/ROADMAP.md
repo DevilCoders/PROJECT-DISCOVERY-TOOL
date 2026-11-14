@@ -185,7 +185,7 @@ The baseline is not production-ready:
 - [x] API-style classification for REST, GraphQL, gRPC/protobuf, JSON-RPC, SOAP/WSDL, WebSocket, event-driven APIs and webhooks.
 - [x] Contract inventory for selected OpenAPI, GraphQL, protobuf, Thrift and API schema formats.
 - [x] Initial source endpoint recognition in selected frameworks/languages.
-- [ ] Expand endpoint adapters across Python, JS/TS, Go, Java/Kotlin, C#, PHP, Ruby, Rust, Swift, Dart and other supported languages. Python routes come from the syntax tree, and lexical patterns cover Express-style routers, Laravel, Spring, JAX-RS, ASP.NET, Sinatra-style Ruby, Rust route attributes, Go `HandleFunc` and Crow. Tests cover Python, TypeScript, Java, Go, Ruby, C# and C++ only.
+- [x] Expand endpoint adapters across Python, JS/TS, Go, Java/Kotlin, C#, PHP, Ruby, Rust, Swift, Dart and other supported languages: per-language adapter families with framework markers that keep HTTP client calls out, wrapped declarations and fluent chains read across lines, and file-system routers (Next.js, SvelteKit, Nuxt, Dart Frog), covering the frameworks listed in [API_ANALYZER.md](../analyzers/API_ANALYZER.md#endpoint-adapters) for Python, JavaScript/TypeScript, Go, Java, Kotlin, Scala, Groovy, C#, Visual Basic, PHP, Ruby, Rust, Swift, Dart, C, C++, Elixir, Clojure, Crystal, Perl, Lua, Haskell, Nim, F#, Erlang, Julia, R, OCaml, D and Pascal, with tests for every language.
 - [ ] Resolve REST method/path/decorator/annotation/attribute and framework router registration patterns.
 - [ ] Discover GraphQL schemas, operations, resolvers, directives, federation and subscriptions.
 - [ ] Discover gRPC services, methods, protobuf messages, RPC frameworks and generated clients.
