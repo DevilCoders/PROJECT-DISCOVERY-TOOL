@@ -143,6 +143,8 @@ class _Context:
         # Served routes with the prefixes of routers mounted from other files (the endpoints
         # pass), for the integration summary.
         self.endpoint_routes: list[dict] | None = None
+        # (file, line, method) of a route -> the contract operation it serves (the contract_links pass).
+        self.route_contracts: dict[tuple, str] | None = None
 
     @property
     def ambiguous(self) -> dict[str, list[str]]:
@@ -1606,7 +1608,8 @@ def _endpoint_routes(context: _Context) -> tuple[dict, list[Finding]]:
         if len(routes) < MAX_ENDPOINT_ROUTES:
             method, _, route = name.partition(" ")
             routes.append({"method": method, "path": route, "file": path, "line": values.get("line"),
-                           "framework": str(values.get("framework", "")), "receiver": str(values.get("receiver", ""))})
+                           "framework": str(values.get("framework", "")), "receiver": str(values.get("receiver", "")),
+                           "handler": str(values.get("handler", ""))})
     modules: dict[str, str] = {}
     for path, module in db.execute("SELECT path, module FROM files WHERE module IS NOT NULL ORDER BY path"):
         modules.setdefault(module, path)
@@ -2174,6 +2177,9 @@ def _contract_links(context: _Context) -> tuple[dict, list[Finding]]:
             continue
         operation = operations[(hit[0], hit[1])]
         contract_files_served.add(operation["file"])
+        context.route_contracts = context.route_contracts or {}
+        context.route_contracts[(route["file"], route.get("line"), route.get("method"))] = \
+            f"{operation['operation_id'] or operation['method'] + ' ' + operation['path']} ({operation['file']})"
         if len(operation["routes"]) < 5:
             operation["routes"].append({"method": route.get("method"), "path": route.get("path"), "file": route["file"],
                                         "line": route.get("line"), "framework": route.get("framework", ""),
@@ -2337,6 +2343,108 @@ def _policies(context: _Context) -> tuple[dict, list[Finding]]:
                if declared_versions else "") + ".",
             confidence="INFERRED", analyzer="code-index",
             evidence=[f"{version}: {count:,} route(s)" for version, count in sorted(versions.items())][:MAX_LISTED]))
+    return value, findings
+
+
+MAX_CATALOG_ITEMS = 5000
+# How many lines from a route a route-scoped policy (a decorator, annotation or attribute) may be.
+_POLICY_LINES = 12
+_CATALOG_CATEGORIES = ("auth", "rate_limit", "validation")
+
+
+def _endpoint_catalog(context: _Context) -> tuple[dict, list[Finding]]:
+    """Every route the scan declares, with its method, full path, framework, handler, contract
+    operation, the authentication, rate-limit and validation declarations that apply to it as
+    written, its source evidence and the confidence of the declaration. Nothing in it says that
+    a route is deployed or reachable."""
+    db = context.db
+    served = context.endpoint_routes if context.endpoint_routes is not None else [
+        {"method": name.partition(" ")[0], "path": name.partition(" ")[2], "file": path, "line": values.get("line"),
+         "framework": str(values.get("framework", "")), "handler": str(values.get("handler", ""))}
+        for name, path, values in _fact_rows(db, "api_endpoint", ordered=True)]
+    catalog = []
+    by_file: dict[str, list[dict]] = defaultdict(list)
+    for route in served[:MAX_CATALOG_ITEMS]:
+        entry = {"method": route.get("method", ""), "path": route.get("path", ""), "framework": route.get("framework", ""),
+                 "handler": route.get("handler", ""), "file": route["file"], "line": route.get("line"),
+                 "contract": (context.route_contracts or {}).get((route["file"], route.get("line"), route.get("method")), ""),
+                 "auth": [], "rate_limit": [], "validation": [], "exemptions": [],
+                 # The declaration is in the file as written; a prefix mounted from another file is inferred.
+                 "confidence": "INFERRED" if route.get("mounted_at") else "CONFIRMED"}
+        catalog.append(entry)
+        by_file[entry["file"]].append(entry)
+    for entries in by_file.values():
+        entries.sort(key=lambda item: item["line"] or 0)
+    global_policies: dict[str, list[str]] = defaultdict(list)
+    for _, path, values in _fact_rows(db, "api_policy", ordered=True):
+        category, scope = str(values.get("category", "")), str(values.get("scope", ""))
+        detail, framework = str(values.get("detail", "")), str(values.get("framework", ""))
+        label = f"{framework}: {detail}" if detail else framework
+        if scope == "global":
+            if len(global_policies[category]) < MAX_LISTED:
+                global_policies[category].append(f"{label} ({path})")
+            continue
+        entries = by_file.get(path)
+        if not entries or (category not in _CATALOG_CATEGORIES and scope != "exemption") or scope == "model":
+            continue
+        if scope in {"route", "exemption"}:
+            # The nearest route of the file, a few lines from the declaration.
+            line = values.get("line") or 0
+            nearest = min(entries, key=lambda item: abs((item["line"] or 0) - line))
+            if abs((nearest["line"] or 0) - line) <= _POLICY_LINES:
+                nearest["exemptions" if scope == "exemption" else category].append(label)
+            continue
+        for entry in entries:  # a class, router or controller declaration: every route of its file
+            if category in _CATALOG_CATEGORIES and len(entry[category]) < 10:
+                entry[category].append(f"{label} ({scope})")
+    counts = {category: sum(1 for entry in catalog if entry[category]) for category in _CATALOG_CATEGORIES}
+    value = {"count": len(served), "truncated": max(0, len(served) - len(catalog)),
+             "with_handler": sum(1 for entry in catalog if entry["handler"]),
+             "with_contract": sum(1 for entry in catalog if entry["contract"]),
+             **{f"with_{category}": count for category, count in counts.items()},
+             "global_policies": {category: labels for category, labels in sorted(global_policies.items())},
+             "endpoints": catalog[:MAX_LISTED * 10]}
+    if not catalog:
+        return value, []
+    frameworks = Counter(entry["framework"] for entry in catalog)
+
+    def describe(entry: dict) -> str:
+        line = f"{entry['method']} {entry['path']} -> {entry['handler'] or '?'} ({entry['framework']}) {entry['file']}" \
+            + (f":{entry['line']}" if entry["line"] else "")
+        if entry["contract"]:
+            line += f"; contract {entry['contract']}"
+        for category, name in (("auth", "auth"), ("rate_limit", "rate limit"), ("validation", "validation")):
+            if entry[category]:
+                line += f"; {name} " + ", ".join(entry[category][:3])
+        if entry["exemptions"]:
+            line += "; exempt " + ", ".join(entry["exemptions"][:3])
+        return line + (" [mount prefix inferred]" if entry["confidence"] == "INFERRED" else "")
+
+    findings = [Finding(
+        "api", "Endpoint catalog",
+        f"{len(served):,} route(s) declared in {len(by_file):,} file(s) (" + ", ".join(
+            f"{name} {count:,}" for name, count in frameworks.most_common(8)) + f"): {value['with_handler']:,} with a named "
+        f"handler, {value['with_contract']:,} matched to a contract operation, {counts['auth']:,} with an authentication "
+        f"declaration on the route, its class or its router, {counts['rate_limit']:,} with a rate limit and "
+        f"{counts['validation']:,} with request validation"
+        + ("; global policies: " + ", ".join(f"{_POLICY_LABELS.get(category, category)} ({len(labels)})"
+                                             for category, labels in sorted(global_policies.items())) if global_policies else "")
+        + ". The catalog lists declarations: it does not say that a route is deployed, mounted, enabled or reachable.",
+        confidence="INFERRED", analyzer="code-index", evidence=[describe(entry) for entry in catalog[:MAX_LISTED]],
+    )]
+    # Routes no authentication declaration covers, in a project that declares authentication per
+    # route, class or router and has no global authentication policy.
+    if counts["auth"] and not global_policies.get("auth"):
+        uncovered = [entry for entry in catalog if not entry["auth"] and not entry["exemptions"]]
+        if uncovered:
+            findings.append(Finding(
+                "api", "Routes without an authentication declaration",
+                f"{len(uncovered):,} route(s) have no authentication declaration on the route, its class or its router, "
+                f"while {counts['auth']:,} other route(s) do and no global policy is declared. They may be public by "
+                "design, or protected where the scan cannot see (a gateway, middleware in another file).",
+                confidence="INFERRED", severity="LOW", analyzer="code-index",
+                evidence=[describe(entry) for entry in uncovered[:MAX_LISTED]],
+            ))
     return value, findings
 
 
@@ -2942,6 +3050,7 @@ _PASSES = (
     ("protocols", _protocols),
     ("contract_links", _contract_links),
     ("policies", _policies),
+    ("endpoint_catalog", _endpoint_catalog),
     ("integration", _integration),
     ("network_services", _network_services),
 )

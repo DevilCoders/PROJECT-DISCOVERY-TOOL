@@ -228,6 +228,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: the endpoint catalog
+- `api-endpoints` records the handler each route declaration names (the function a decorator, annotation or
+  attribute is on, a Python route's `def`, a registration call's handler argument, Rails, Laravel and
+  Phoenix actions, or `(inline)`), in `analyzers/api/handlers.py`.
+- The code index's `endpoint_catalog` pass lists every route with its method, full path, framework,
+  handler, contract operation, the authentication, rate-limit and validation declarations that apply as
+  written, source evidence and confidence, and reports routes no authentication declaration covers. It
+  lists declarations, never reachability.
+
 ### Added: authentication, authorization, versioning, rate-limit and validation declarations
 - `api-policies`: the declarations code makes, each with its category, framework, scope (global, router,
   class, route, model or exemption) and detail: guards, roles, auth middleware, Spring Security rules and

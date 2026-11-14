@@ -16,6 +16,8 @@ PDT inventories APIs from three directions, with GraphQL, RPC and other protocol
 
 **Policies** (`api-policies`): authentication and authorization, versioning, rate-limit and validation declarations, with their scope and framework ([Policy declarations](#policy-declarations)).
 
+**Endpoint catalog**: every route with its handler, contract operation, policies, source evidence and confidence ([Endpoint catalog](#endpoint-catalog)).
+
 **Limits.** Contracts and route declarations are static evidence. PDT does not make network requests or claim that an API is deployed, reachable, authorized or behaviorally correct. Route prefixes added at run time, middleware, dynamic registration, compatibility analysis between contract versions and security testing are not covered.
 
 ## Endpoint adapters
@@ -186,6 +188,22 @@ The `api-policies` analyzer records where code declares authentication and autho
 | Validation | Pydantic models, marshmallow schemas, Django REST framework serializers, Django forms, `jsonschema.validate`; Joi and celebrate, express-validator chains (with the field), zod, yup, Ajv, class-validator decorators, NestJS `ValidationPipe` (global or per route), Fastify route schemas; Bean Validation `@Valid`/`@Validated` and constraints; ASP.NET data annotations, `[ApiController]`, FluentValidation validators; go-playground/validator and Gin `validate:`/`binding:` tags; Laravel `$request->validate`, `Validator::make` and form requests, Symfony `#[Assert\...]`; Rails `validates` and strong parameters; Ecto `validate_*`; Rust `#[validate]` and garde |
 
 The code index's `policies` pass (`metrics.code_index.policies`) counts the declarations by category, scope and framework ("API policy declarations") and reads the API versions route paths name (`/v1/users`, `/api/v2.1/orders`), with the versioning schemes declared ("API versions"). A declaration shows that a policy is configured where it is written, not which routes it covers or that it is enforced: the endpoint catalog attaches them to routes. Each file is read with a 16 MiB budget.
+
+## Endpoint catalog
+
+The code index's `endpoint_catalog` pass (`metrics.code_index.endpoint_catalog`) lists every route the scan declares, one entry each:
+
+| Field | What it holds |
+|---|---|
+| `method`, `path` | The method and the full path template, with the prefixes of routers mounted in other files ([Route structure](#route-structure)) |
+| `framework` | The adapter family that recognized the declaration ([Endpoint adapters](#endpoint-adapters)) |
+| `handler` | The function, method or action the declaration names, read by `api-endpoints` from the source next to it: the function a decorator, annotation or attribute is on, the `def` of a Python route, a registration call's handler argument (`users.list`, `views.user_list`, `view_func=index`), `UserController@index`, `photos#index` or `UserController.index`; `(inline)` for a function written in the call or a trailing block; empty where the source does not name one |
+| `contract` | The OpenAPI operation the route serves (its operationId and document), from the `contract_links` pass ([Contracts, routes and generated clients](#contracts-routes-and-generated-clients)) |
+| `auth`, `rate_limit`, `validation`, `exemptions` | The `api-policies` declarations that apply as written ([Policy declarations](#policy-declarations)): those on the route (within 12 lines of its declaration) and those of its class, controller or router (in the same file) |
+| `file`, `line` | The source evidence: the declaration's file and line |
+| `confidence` | `CONFIRMED` for a route its file declares with its full path; `INFERRED` when a prefix mounted from another file completes it |
+
+Global policies (middleware or settings for the whole application) are listed once, under `global_policies`. The "Endpoint catalog" finding summarizes it; "Routes without an authentication declaration" (`LOW`) lists the routes no authentication declaration covers, when other routes have one and no global policy is declared. The catalog lists declarations: it never says that a route is deployed, mounted, enabled or reachable. Up to 5,000 routes are catalogued and 1,000 listed in the report; `api-endpoints` keeps 8 MiB of a streamed file's text to read handlers.
 
 ## Route structure
 

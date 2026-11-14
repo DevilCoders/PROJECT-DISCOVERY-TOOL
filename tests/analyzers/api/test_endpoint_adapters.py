@@ -517,11 +517,11 @@ def test_python_frameworks_beyond_decorators(tmp_path: Path):
     assert _routes(tmp_path, "tools/files.py", 'def path(value):\n    return value\n\npath("x", 1)\n') == []
 
 
-def test_endpoint_facts_name_the_framework_and_the_router(tmp_path: Path):
+def test_endpoint_facts_name_the_framework_the_router_and_the_handler(tmp_path: Path):
     with collecting_facts() as facts:
         _analyze(tmp_path, "server.js", 'const express = require("express");\nconst app = express();\n'
                                         'app.get("/health", ok);\n')
         _analyze(tmp_path, "main.go", 'package main\nfunc main() {\n\te.GET("/users", list)\n}\n')
     endpoints = [(name, json.loads(detail)) for kind, name, detail in facts.facts if kind == "api_endpoint"]
-    assert endpoints == [("GET /health", {"framework": "Express-style", "line": 3, "receiver": "app"}),
-                         ("GET /users", {"framework": "Gin/Echo", "line": 3, "receiver": "e"})]
+    assert endpoints == [("GET /health", {"framework": "Express-style", "handler": "ok", "line": 3, "receiver": "app"}),
+                         ("GET /users", {"framework": "Gin/Echo", "handler": "list", "line": 3, "receiver": "e"})]

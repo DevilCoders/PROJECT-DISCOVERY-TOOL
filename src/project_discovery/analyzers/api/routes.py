@@ -34,6 +34,7 @@ from ...core.source_utils import (
 from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
 from ..base import Analyzer
+from .handlers import route_handler
 from .route_structure import (
     Event,
     Layout,
@@ -52,6 +53,8 @@ MAX_PYTHON_ENDPOINT_AST_BYTES = 4 * 1024 * 1024  # the syntax-tree budget
 MAX_SOURCE_ENDPOINT_SCAN_BYTES = 32 * 1024 * 1024
 MAX_ENDPOINT_LINE_CHARS = 256 * 1024
 MAX_ENDPOINT_FACTS = 500
+# Line text kept while a file streams, to read the handler next to each route.
+MAX_HANDLER_TEXT_CHARS = 8 * 1024 * 1024
 # A declaration that spans lines is read from its first line joined with the next ones.
 MAX_JOINED_LINES = 8
 MAX_JOINED_CHARS = 2048
@@ -1348,7 +1351,8 @@ class APIEndpointAnalyzer(Analyzer):
     limits = AnalyzerLimits(
         MAX_SOURCE_ENDPOINT_SCAN_BYTES,
         "stream",
-        {"python_ast_bytes": MAX_PYTHON_ENDPOINT_AST_BYTES, "line_chars": MAX_ENDPOINT_LINE_CHARS, "facts": MAX_ENDPOINT_FACTS},
+        {"python_ast_bytes": MAX_PYTHON_ENDPOINT_AST_BYTES, "line_chars": MAX_ENDPOINT_LINE_CHARS, "facts": MAX_ENDPOINT_FACTS,
+         "handler_text_chars": MAX_HANDLER_TEXT_CHARS},
         outcome="UNKNOWN or partial finding at the byte, Python AST or fact limit",
     )
     domains = ("api_rest", "networking")
@@ -1359,6 +1363,7 @@ class APIEndpointAnalyzer(Analyzer):
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
         routes: list[tuple[str, str, int, str, str]] = []
+        lines: list[str] = []  # the source's lines, to read the handler each route names
         truncated = False
         if record.extension in {".py", ".pyi"}:
             if over_limit(record.size_bytes, MAX_PYTHON_ENDPOINT_AST_BYTES):
@@ -1378,6 +1383,7 @@ class APIEndpointAnalyzer(Analyzer):
                     expected_identity=record.analysis_identity,
                 )
                 routes, mounts = _python_routes(source, record.path)
+                lines = source.splitlines()
                 for mount in mounts:
                     code_facts.emit_fact("api_mount", str(mount.pop("prefix")), kind="python", **mount)
             except SourceBudgetExceeded as exc:
@@ -1399,6 +1405,8 @@ class APIEndpointAnalyzer(Analyzer):
             scan = _Scan(family, _file_route(record.path))
             bytes_scanned = 0
             line_number = 1
+            pending: list[str] = []
+            kept = 0
             try:
                 with open_verified_text(
                     path, encoding="utf-8", errors="replace",
@@ -1418,8 +1426,16 @@ class APIEndpointAnalyzer(Analyzer):
                             break
                         bytes_scanned += len(line.encode("utf-8", errors="replace"))
                         scan.add(line, line_number)
+                        if kept < MAX_HANDLER_TEXT_CHARS:
+                            pending.append(line)
+                            kept += len(line)
                         if line.endswith(("\n", "\r")):
                             line_number += 1
+                            if pending:
+                                lines.append("".join(pending))
+                                pending = []
+                    if pending:
+                        lines.append("".join(pending))
             except OSError as exc:
                 return [Finding(
                     "api", f"API endpoint scan unavailable: {record.path}",
@@ -1436,9 +1452,11 @@ class APIEndpointAnalyzer(Analyzer):
             first.setdefault((str(method).upper(), route, line), (framework, receiver))
         unique = sorted(first.items(), key=lambda item: (item[0][2], item[0][0], item[0][1]))
         for (method, route, line), (framework, receiver) in unique[:MAX_ENDPOINT_FACTS]:
-            # Provided endpoints, for the scan's integration summary and cross-project maps.
+            # Provided endpoints, for the scan's integration summary, cross-project maps and the
+            # endpoint catalog, with the handler the declaration names.
+            handler = route_handler(lines, line) if lines else ""
             code_facts.emit_fact("api_endpoint", f"{method} {route}", line=line, framework=framework,
-                                 **({"receiver": receiver} if receiver else {}))
+                                 **({"receiver": receiver} if receiver else {}), **({"handler": handler} if handler else {}))
         findings: list[Finding] = []
         if unique:
             frameworks = sorted({framework for _, (framework, _) in unique})
