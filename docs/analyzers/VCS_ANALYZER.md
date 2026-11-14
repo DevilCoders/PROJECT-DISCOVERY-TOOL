@@ -23,7 +23,41 @@ Each control directory gives one repository finding, from a file every repositor
 
 ### Hosting providers, CI and deployment
 
-Remote hosts are fingerprinted as GitHub, GitLab, Bitbucket, Azure Repos, AWS CodeCommit, Google Cloud Source Repositories and SourceHut, and by name as GitHub Enterprise, GitLab self-managed, Bitbucket Data Center/Server, Azure DevOps Server, Gitea, Forgejo (Codeberg included) and Gerrit; other hosts are "Self-hosted or unclassified". Locators keep the scheme, host, port and path: user information, query and fragment are removed, and scp-style addresses (`git@host:path`) become `ssh://host/path`.
+A remote host's provider comes, in this order, from:
+
+1. the provider map (`--provider-map`, [below](#provider-map)): the hosts an organization runs, named for certain;
+2. the public services' own hosts: GitHub (`github.com`), GitLab (`gitlab.com`), Bitbucket (`bitbucket.org`), Azure Repos (`dev.azure.com`, `visualstudio.com`), AWS CodeCommit (`git-codecommit.<region>.amazonaws.com`), Google Cloud Source Repositories, SourceHut (`sr.ht`), Forgejo (`codeberg.org`), the Pijul Nest and Darcs Hub, with their subdomains;
+3. a word in the host name: `github` (GitHub Enterprise), `gitlab` (GitLab self-managed), `bitbucket` (Bitbucket Data Center), `azure` (Azure DevOps Server), `codecommit`, `gitea`, `forgejo`, `gogs`, `gerrit` and `gitolite`. This is a guess: a remote finding classified this way is `INFERRED` and says so, and one the map or a public host classifies is `CONFIRMED`.
+
+Other hosts are "Self-hosted or unclassified". The same classification names the provider of remote scan targets and picks the no-download mode's API ([ONLINE_MODE.md](../guides/ONLINE_MODE.md)). Locators keep the scheme, host, port and path: user information, query and fragment are removed, and scp-style addresses (`git@host:path`) become `ssh://host/path`.
+
+#### Provider map
+
+`pdt scan --provider-map FILE` reads a TOML file of `[[provider]]` tables, one per host:
+
+```toml
+[[provider]]
+host = "code.example.com"              # one host, an IP address, or "*.example.com" for its subdomains
+kind = "github-enterprise"
+api_url = "https://code.example.com/api/v3"   # optional: the no-download mode's API base
+
+[[provider]]
+host = "octocorp.ghe.com"              # GitHub Enterprise Cloud with data residency
+kind = "github-enterprise"
+api_url = "https://api.octocorp.ghe.com"
+
+[[provider]]
+host = "*.scm.example.com"
+kind = "bitbucket-data-center"
+
+[[provider]]
+host = "github-mirror.example.com"     # a plain Git server whose name would be guessed as GitHub
+kind = "unclassified"
+```
+
+`kind` is one of `github-enterprise`, `gitlab-self-managed`, `bitbucket-data-center`, `azure-devops-server`, `gitea`, `forgejo`, `gogs`, `gerrit`, `gitolite`, `sourcehut` and `unclassified` (no provider, whatever the host name suggests). A host's own entry wins over a wildcard, and a longer wildcard over a shorter one; `*.example.com` names the subdomains of `example.com`, not `example.com` itself. Hosts compare in lower case, IP addresses in their compressed form and internationalized names in their IDNA form. `api_url` must be `https://` (`http://` only for loopback hosts), without credentials, query or fragment, and applies to the kinds the no-download mode has an API for.
+
+The file is refused with a usage error (exit 2) when it is not TOML, names an unknown key or kind, gives a host with a scheme, port, path or user, names a host twice, names a public service's host (`github.com` is GitHub, not a server of yours), or is larger than 1 MiB or 10,000 entries. Reports record the file's name (not its path), SHA-256, entry count and kinds in `metrics.provider_map` and the `scan` summary; remote findings classified by the map say so and give the entry. Analyzer worker processes receive the map when they start, and `--resume` continues only a scan made with the same map.
 
 CI definitions (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines, Jenkins, CircleCI, Buildkite, TeamCity, Travis CI, Drone, Woodpecker, AppVeyor, AWS CodeBuild and CodeDeploy) and deployment markers (AWS CDK and SAM, Serverless Framework, Google Cloud Build and App Engine, Firebase, Cloudflare Workers, Fly.io, Render, Vercel, Netlify) are reported by file; pipelines are not run and credential values are not extracted.
 
@@ -85,6 +119,7 @@ A Perforce workspace keeps its view and file state on the server; a working tree
 | Mercurial changelog index read whole | 64 MiB separate, 8 MiB inline |
 | Jujutsu checkout file | 64 KiB |
 | Entries counted in one control directory (operations, changes, shelves) | 100,000; a count that stops there is shown as `100,000+` and recorded |
+| Provider map | 1 MiB and 10,000 entries |
 
 The generated [budget table](../architecture/ANALYZER_RESOURCE_BUDGETS.md) lists the same values.
 

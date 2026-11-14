@@ -29,6 +29,7 @@ from .analyzers.content.archives import ArchiveIntelligenceAnalyzer, parse_archi
 from .analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
 from .analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
 from .catalog.domains import analyzer_domain_catalog, analyzer_domain_count
+from .catalog.hosting import ProviderMap, configure_provider_map, configured_provider_map, load_provider_map
 from .catalog.languages import language_catalog, recognized_language_count
 from .core.output_lock import output_lock
 from .core.source_utils import neutralize_controls, read_text_bounded
@@ -411,7 +412,13 @@ def _describe_inventory_options(options: dict) -> dict[str, str]:
     }
 
 
-def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict) -> dict | None:
+def _describe_analysis_settings(settings: dict | None) -> dict[str, str]:
+    """The finding-shaping settings as the command-line spellings that produce them."""
+    digest = (settings or {}).get("provider_map")
+    return {"--provider-map": f"a map with SHA-256 {digest[:12]}" if digest else "none"}
+
+
+def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict, settings: dict | None = None) -> dict | None:
     """Return the stored walk statistics when an inventory for ``root`` can be resumed.
 
     Raises ValueError when the stored inventory was made with other inventory options:
@@ -428,6 +435,7 @@ def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict) -> di
             ):
                 return None
             stored = store.get_metadata("inventory_options")
+            stored_settings = store.get_metadata("analysis_settings")
             stats = store.get_metadata("walk_stats")
     except sqlite3.DatabaseError:
         return None  # an unreadable inventory has nothing to resume; a fresh scan replaces it
@@ -435,7 +443,8 @@ def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict) -> di
         return None  # an earlier PDT version did not record its options: start fresh
     if any(stored.get(key) != options.get(key) for key in ("signature_catalog", "marker_catalog")):
         return None  # classified with another file-type catalog: start fresh, do not mix types
-    before, now = _describe_inventory_options(stored), _describe_inventory_options(options)
+    before = {**_describe_inventory_options(stored), **_describe_analysis_settings(stored_settings)}
+    now = {**_describe_inventory_options(options), **_describe_analysis_settings(settings)}
     differences = [f"{name}: stored {before[name]}, now {now[name]}" for name in now if before[name] != now[name]]
     if differences:
         raise ValueError(
@@ -660,7 +669,13 @@ def run_scan(
     development_trees: str = "deep",
     gpu: bool = False,
     gpu_min_mb: int = GPU_DEFAULT_THRESHOLD_BYTES // (1024 * 1024),
+    provider_map: ProviderMap | None = None,
 ) -> int:
+    # The hosting-provider fingerprints this scan classifies hosts with (--provider-map; None:
+    # none), in this process and in the analyzer workers, which receive the same map.
+    configure_provider_map(provider_map)
+    provider_map = configured_provider_map()
+    analysis_settings = {"provider_map": provider_map.sha256} if provider_map else {}
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
     if jobs < 0 or jobs > 64:
@@ -777,7 +792,8 @@ def run_scan(
         timer = PhaseTimer()
         inventory_path = output / ".pdt-cache" / "inventory.sqlite3"
         storage_notes: list[str] = []  # moved-aside databases and unused exclusions: run diagnostics
-        walk_stats = _resumable_walk_stats(inventory_path, root, requested_inventory) if resume else None
+        walk_stats = (_resumable_walk_stats(inventory_path, root, requested_inventory, analysis_settings)
+                      if resume else None)
         resumed = walk_stats is not None
         if resume and not resumed:
             _status(
@@ -823,6 +839,7 @@ def run_scan(
                         exclude_profiles=exclude_profiles,
                         development_trees=development_trees,
                         counters=walk_counters,
+                        analysis_settings=analysis_settings,
                     )
             phases.finish("inventory")
         phases.walked(
@@ -1232,6 +1249,8 @@ def run_scan(
             },
             "vcs_provider_signal_count": vcs_provider_signal_count,
             "vcs_provider_categories": dict(sorted(vcs_provider_categories.items())),
+            # The --provider-map the scan classified hosts with: its file name, digest and entries.
+            "provider_map": provider_map.describe() if provider_map else None,
             "native_backend": _scan_gpu_counters(native_capabilities(), gpu_baseline, worker_gpu),
             "native_extension_available": native_available(),
             # Per-analyzer time and memory budgets, what each analyzer used, and the stops.
@@ -2156,6 +2175,12 @@ def build_parser() -> argparse.ArgumentParser:
              "repeatable",
     )
     scan.add_argument(
+        "--provider-map", type=Path, default=None, metavar="FILE",
+        help="TOML file naming the self-hosted source-hosting servers (GitHub Enterprise, GitLab, Bitbucket "
+             "Data Center, Azure DevOps Server, Gitea, Forgejo, Gogs, Gerrit, Gitolite, SourceHut) by host, "
+             "for local remotes, remote targets and the no-download API",
+    )
+    scan.add_argument(
         "--archive-limit", action="append", default=[], metavar="NAME=VALUE",
         help="Override an archive inspection limit for this scan: entries, index_mb, member_sample_mb, sample_mb, "
              "wall_seconds, decompressed_mb, uncompressed_mb, ratio, nested_depth or nested_mb (byte limits in "
@@ -2465,6 +2490,14 @@ def main() -> None:
                 parser.error("--remote-max-gb must be greater than 0 and at most 1048576")
             if args.vuln_db is not None and not args.vuln_db.expanduser().is_file():
                 parser.error(f"--vuln-db is not a file: {args.vuln_db}")
+            provider_map = None
+            if args.provider_map is not None:
+                try:
+                    provider_map = load_provider_map(args.provider_map)
+                except (OSError, ValueError) as exc:
+                    parser.error(f"--provider-map {args.provider_map}: {exc}")
+            # Before the URL targets are parsed: their providers come from the map too.
+            configure_provider_map(provider_map)
             no_download_options = None
             api_options = (
                 ("--api-provider", args.api_provider != "auto"), ("--api-url", args.api_url is not None),
@@ -2589,6 +2622,7 @@ def main() -> None:
                 "archive_limits": list(args.archive_limit),
                 "domain_budgets": list(args.domain_budget),
                 "online_vulnerabilities": online_vulnerabilities,
+                "provider_map": provider_map,
             }
             if remote_scan:
                 remote_options = {
@@ -2630,6 +2664,7 @@ def main() -> None:
                 max_memory_mb=args.max_memory_mb, archive_limits=list(args.archive_limit),
                 domain_budgets=list(args.domain_budget),
                 online_vulnerabilities=online_vulnerabilities,
+                provider_map=provider_map,
             ))
 
         if not formats or formats - {"json", "markdown"}:

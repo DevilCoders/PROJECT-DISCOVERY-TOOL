@@ -37,7 +37,9 @@ from typing import Any, Literal, Sequence
 # domains, archive inspection, correlation, reporting) with their state, time and counts.
 # 1.21 added the top-level archives (each archive's inspection states, member and content
 # coverage and the limits that stopped it) and archive_members lists, and metrics.archives.
-REPORT_SCHEMA_VERSION = "1.21"
+# 1.22 added metrics.provider_map and scan.provider_map (the --provider-map file name, SHA-256,
+# entries and kinds) and provider_source to the remote source (provider-map, built-in or host-name).
+REPORT_SCHEMA_VERSION = "1.22"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

@@ -75,7 +75,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Intel HEX | firmware | inventory | — | — | — | 2 |
 | Java | source | structure | structural lexer, refined by Tree-sitter `java` | java | api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 16 |
 | JavaScript | source | structure | structural lexer, refined by Tree-sitter `javascript` | javascript | accessibility-markup, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 40 |
-| JSON | data | optional parser | — | json | ai-ml-intelligence, api-protocols, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 61 |
+| JSON | data | optional parser | — | json | ai-ml-intelligence, api-protocols, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 62 |
 | Julia | source | optional parser | — | julia | tree-sitter-polyglot | 5 |
 | Jupyter Notebook | notebook | inventory | — | — | ai-ml-intelligence, secret-patterns | 1 |
 | Kconfig | configuration | inventory | — | — | secret-patterns | 1 |
@@ -86,7 +86,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Lua | source | optional parser | — | lua | tree-sitter-polyglot | 2 |
 | LÖVE Configuration | build | inventory | — | — | secret-patterns | 0 |
 | Makefile | build | optional parser | — | make | secret-patterns, tree-sitter-polyglot | 1 |
-| Markdown | documentation | optional parser | — | markdown | markdown, secret-patterns, tree-sitter-polyglot | 32 |
+| Markdown | documentation | optional parser | — | markdown | markdown, secret-patterns, tree-sitter-polyglot | 33 |
 | Meson | build | inventory | — | — | secret-patterns | 1 |
 | Metal Shading Language | shader | structure | structural lexer | — | code-index, concurrency, dataflow, performance-hotspots, resource-management, shaders | 0 |
 | Motorola S-record | firmware | inventory | — | — | — | 1 |
@@ -106,7 +106,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | PowerShell | source | optional parser | — | powershell | tree-sitter-polyglot | 3 |
 | Prisma | schema | inventory | — | — | prisma-schema | 2 |
 | Protocol Buffers | schema | optional parser | — | proto | api-rpc, tree-sitter-polyglot | 3 |
-| Python | source | semantic | syntax tree | — | ai-ml-intelligence, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 72 |
+| Python | source | semantic | syntax tree | — | ai-ml-intelligence, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 73 |
 | R | source | optional parser | — | r | tree-sitter-polyglot | 2 |
 | ReasonML | source | inventory | — | — | — | 0 |
 | Ren'Py | game_source | inventory | — | — | game-engine-intelligence | 1 |
@@ -129,7 +129,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | SystemVerilog | source | optional parser | — | systemverilog | hdl, tree-sitter-polyglot | 2 |
 | Text | documentation | inventory | — | — | secret-patterns | 46 |
 | Thrift | schema | inventory | — | — | api-rpc | 1 |
-| TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 9 |
+| TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 11 |
 | TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 25 |
 | UF2 Firmware | firmware | inventory | — | — | — | 2 |
 | Unity Asset YAML | game_source | inventory | — | — | — | 0 |

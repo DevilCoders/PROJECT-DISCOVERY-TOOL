@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from ...catalog.hosting import classify_host
 from ...core.limits import AnalyzerLimits, limit_reached, over_limit
 from ...core.source_utils import (SourceBudgetExceeded, describe_error, open_verified_binary, read_bytes_bounded,
                                   read_text_bounded)
@@ -45,15 +46,12 @@ _CONTROL_FILES = {
     ".pijul": {"pristine/db": "marker", "config": "remotes", "config.toml": "remotes"},
     "CVS": {"Root": "marker"},
 }
-_PROVIDER_RULES = (
-    ("GitHub", re.compile(r"(^|\.)github\.com$", re.I)),
-    ("GitLab", re.compile(r"(^|\.)gitlab\.com$", re.I)),
-    ("Bitbucket", re.compile(r"(^|\.)bitbucket\.org$", re.I)),
-    ("Azure Repos", re.compile(r"(^|\.)dev\.azure\.com$|(^|\.)visualstudio\.com$", re.I)),
-    ("AWS CodeCommit", re.compile(r"(^|\.)git-codecommit\.[a-z0-9-]+\.amazonaws\.com$", re.I)),
-    ("Google Cloud Source Repositories", re.compile(r"(^|\.)source\.developers\.google\.com$", re.I)),
-    ("SourceHut", re.compile(r"(^|\.)git\.sr\.ht$", re.I)),
-)
+# How a remote's provider is known, when it is not a public service's own host.
+_PROVIDER_NOTES = {
+    "provider-map": " The provider comes from the provider map.",
+    "host-name": " The provider is guessed from a word in the host name; a provider map (--provider-map) names "
+                 "it for certain.",
+}
 _CI_FILES = {
     ".gitlab-ci.yml": "GitLab CI",
     "bitbucket-pipelines.yml": "Bitbucket Pipelines",
@@ -133,28 +131,12 @@ def _remote_host(raw: str) -> tuple[str | None, str | None]:
 
 
 def _hosting_provider(host: str | None) -> str:
+    """A remote host's provider label: the provider map's, a public service's or a guess from the
+    host name (catalog.hosting), else "Self-hosted or unclassified"."""
     if not host:
         return "unknown"
-    for provider, pattern in _PROVIDER_RULES:
-        if pattern.search(host):
-            return provider
-    if "bitbucket" in host:
-        return "Bitbucket Data Center/Server"
-    if "gitlab" in host:
-        return "GitLab self-managed"
-    if "github" in host:
-        return "GitHub Enterprise"
-    if "azure" in host:
-        return "Azure DevOps Server"
-    if "codecommit" in host:
-        return "AWS CodeCommit"
-    if "gitea" in host:
-        return "Gitea"
-    if "forgejo" in host or host == "codeberg.org" or host.endswith(".codeberg.org"):
-        return "Forgejo"
-    if "gerrit" in host:
-        return "Gerrit"
-    return "Self-hosted or unclassified"
+    provider = classify_host(host)
+    return provider.label if provider is not None else "Self-hosted or unclassified"
 
 
 def _read_text(
@@ -650,16 +632,20 @@ class VCSHostingAnalyzer(Analyzer):
                 remote_name = section[8:-1] if section.endswith('"') else section
                 raw = parser.get(section, "url", fallback="")
                 host, locator = _remote_host(raw)
-                remotes.append((remote_name, _hosting_provider(host), host, locator))
+                remotes.append((remote_name, classify_host(host), host, locator))
         findings = [
             Finding(
                 "hosting_providers",
-                f"Git remote provider: {provider}",
+                f"Git remote provider: {_hosting_provider(host)}",
                 f"Remote {remote_name!r} points to host {host or 'unresolved'}; "
                 f"sanitized locator: {locator or 'not resolved'}. Authentication material "
-                "and URL query/fragment values are removed.",
-                confidence="CONFIRMED" if host else "UNKNOWN",
-                evidence=[record.path, f"remote section: {remote_name}"],
+                "and URL query/fragment values are removed." + _PROVIDER_NOTES.get(provider.source if provider else "", ""),
+                # A provider guessed from the host name is inferred; the host itself is confirmed.
+                confidence="UNKNOWN" if not host else "INFERRED" if provider and provider.source == "host-name"
+                else "CONFIRMED",
+                evidence=[record.path, f"remote section: {remote_name}"] + (
+                    [f"provider map entry {provider.entry}: {provider.kind}"]
+                    if provider and provider.source == "provider-map" else []),
                 analyzer=self.name,
             )
             for remote_name, provider, host, locator in remotes

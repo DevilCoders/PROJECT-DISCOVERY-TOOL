@@ -39,7 +39,7 @@ _TEMPLATE_PLACEHOLDER = re.compile(r"__(ROOT|GENERATED|REPORT_JS|CSP_NONCE|MODE_
 
 # Remote-source fields repeated in the top-level "scan" summary of every report.
 _REMOTE_SUMMARY_KEYS = (
-    "acquisition", "url", "provider", "vcs", "repository", "ref", "revision", "branch",
+    "acquisition", "url", "provider", "provider_source", "vcs", "repository", "ref", "revision", "branch",
     "transport", "transport_insecure", "acquired_at", "acquisition_seconds", "history_complete",
 )
 
@@ -518,7 +518,19 @@ def scan_summary(metrics: dict[str, Any]) -> dict[str, Any]:
         "remote": remote_summary,
         "vulnerability_sources": list(sources),
         "online_vulnerability_coverage": online.get("coverage") if online else None,
+        "provider_map": metrics.get("provider_map") if isinstance(metrics.get("provider_map"), dict) else None,
     }
+
+
+# How a remote's provider is known, as the Markdown and HTML reports say it.
+PROVIDER_SOURCES = {"provider-map": "from the provider map", "host-name": "guessed from the host name"}
+
+
+def provider_map_text(provider_map: dict) -> str:
+    """"providers.toml: 3 entries (SHA-256 1a2b3c4d5e6f)"."""
+    count = int(provider_map.get("entries") or 0)
+    return (f"{provider_map.get('file') or 'provider map'}: {count:,} entr{'y' if count == 1 else 'ies'} "
+            f"(SHA-256 {str(provider_map.get('sha256') or '')[:12]})")
 
 
 def _script_json(value: Any) -> str:
@@ -1229,6 +1241,8 @@ def _write_markdown_source(line, metrics: dict[str, Any], summary: dict[str, Any
     line()
     line(f"- Mode: {summary['mode']}")
     line(f"- Network access: {_md(_network_label(summary))}")
+    if summary.get("provider_map"):
+        line(f"- Provider map: {_md(provider_map_text(summary['provider_map']))}")
     remote_metrics = (metrics.get("source") or {}).get("remote")
     remote = summary.get("remote")
     if not remote or not isinstance(remote_metrics, dict):
@@ -1237,7 +1251,8 @@ def _write_markdown_source(line, metrics: dict[str, Any], summary: dict[str, Any
         return
     line(f"- Source: remote repository ({'provider API' if remote.get('acquisition') == 'api' else 'temporary download'})")
     line(f"- URL: {_md(remote.get('url') or 'not reported')}")
-    line(f"- Provider: {_md(remote.get('provider') or 'unknown')}")
+    source = PROVIDER_SOURCES.get(str(remote.get("provider_source")))
+    line(f"- Provider: {_md(remote.get('provider') or 'unknown')}" + (f" ({source})" if source else ""))
     line(f"- VCS: {_md(remote.get('vcs') or 'unknown')}")
     line(f"- Repository: {_md(remote.get('repository') or 'unknown')}")
     line(f"- Requested ref: {_md(remote.get('ref') or 'remote default branch')}")

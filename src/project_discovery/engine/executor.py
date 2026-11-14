@@ -297,9 +297,14 @@ def _watch_coordinator() -> None:
     threading.Thread(target=watch, name="pdt-coordinator-watch", daemon=True).start()
 
 
-def _initialize_worker(vulnerability_db: str | None, plugin_setup=None, budget_policy=None, gpu=None) -> None:
+def _initialize_worker(vulnerability_db: str | None, plugin_setup=None, budget_policy=None, gpu=None,
+                       provider_map=None) -> None:
     """Load this worker process's own analyzer instances (built-ins and plugins)."""
     budgets.set_policy(budget_policy)
+    # The coordinator's --provider-map: a spawned worker starts without one.
+    from ..catalog.hosting import configure_provider_map
+
+    configure_provider_map(provider_map)
     if gpu is not None:
         # The coordinator's --gpu setting; a spawned worker starts with GPU counting off.
         from .native import configure_gpu
@@ -400,6 +405,9 @@ class AnalysisExecutor:
         from .native import gpu_settings
 
         self._gpu = gpu_settings()  # thread workers share it; process workers receive it
+        from ..catalog.hosting import configured_provider_map
+
+        self._provider_map = configured_provider_map()  # the same: the --provider-map fingerprints
         # --max-memory-mb: callers ask it for room before they queue work (make_room).
         self.scan_memory = budgets.ScanMemoryBudget(max_memory_mb, self.worker_pids)
         self._locks = {
@@ -422,7 +430,8 @@ class AnalysisExecutor:
             return ProcessPoolExecutor(
                 max_workers=self.workers,
                 initializer=_initialize_worker,
-                initargs=(self._vulnerability_db, self._plugin_setup, self._budget_policy, self._gpu),
+                initargs=(self._vulnerability_db, self._plugin_setup, self._budget_policy, self._gpu,
+                          self._provider_map),
             )
         return ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="pdt-analyzer")
 

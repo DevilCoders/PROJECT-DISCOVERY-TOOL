@@ -92,7 +92,7 @@ def test_scan_summary_for_each_mode():
     local = scan_summary(_result().metrics)
     assert local == {
         "mode": "local", "source": "local", "network_access": [], "remote": None,
-        "vulnerability_sources": [], "online_vulnerability_coverage": None,
+        "vulnerability_sources": [], "online_vulnerability_coverage": None, "provider_map": None,
     }
     offline_db = scan_summary(_result(local_db=True).metrics)
     assert offline_db["mode"] == "local" and offline_db["vulnerability_sources"] == ["local-database"]
@@ -139,7 +139,7 @@ def test_json_reports_carry_the_scan_summary(tmp_path: Path):
         "remote": _result(remote=_remote_metadata(), online=_online_status()),
     }.items():
         payload = json.loads(write_reports(result, tmp_path / name, {"json"})[0].read_text(encoding="utf-8"))
-        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.21"
+        assert payload["schema_version"] == REPORT_SCHEMA_VERSION == "1.22"
         assert payload["scan"] == scan_summary(result.metrics)
     assert payload["scan"]["remote"]["url"] == "https://github.com/acme/widgets"
     assert payload["metrics"]["vulnerability_intelligence"]["online"]["cache"]["hits"] == 2

@@ -441,6 +441,28 @@ def test_url_batch_mixes_providers_through_per_host_api_urls(tmp_path: Path, mon
     assert "not found" in summary["targets"][2]["error"]
 
 
+def test_the_provider_map_names_a_self_hosted_api(tmp_path: Path, monkeypatch):
+    # code.acme.example is a GitHub Enterprise Server only the map says so: the scan uses the
+    # GitHub API at the map's api_url, and reports where the provider came from.
+    with RunningProviders(ProviderService()) as running:
+        providers = tmp_path / "providers.toml"
+        providers.write_text('[[provider]]\nhost = "code.acme.example"\nkind = "github-enterprise"\n'
+                             f'api_url = "{running.url}/github"\n', encoding="utf-8")
+        monkeypatch.setenv("PDT_API_TOKEN_CODE_ACME_EXAMPLE", TOKEN)
+        code = _main(monkeypatch, "scan", "https://code.acme.example/acme/fixture", "--no-download",
+                     "--provider-map", str(providers), "--output", str(tmp_path / "out"), "--quiet",
+                     "--format", "json,markdown")
+    assert code == cli.EXIT_OK
+    report = _report(tmp_path / "out")
+    assert (report["scan"]["remote"]["provider"], report["scan"]["remote"]["provider_source"]) == (
+        "GitHub Enterprise", "provider-map")
+    assert report["metrics"]["source"]["remote"]["api_url"] == running.url + "/github"
+    assert report["metrics"]["source"]["remote"]["revision"] == COMMIT
+    assert report["scan"]["provider_map"]["entries"] == 1
+    markdown = (tmp_path / "out" / "discovery-report.md").read_text(encoding="utf-8")
+    assert "- Provider: GitHub Enterprise (from the provider map)" in markdown
+
+
 def test_a_malformed_provider_answer_fails_only_its_own_target(tmp_path: Path, monkeypatch):
     # Regression: a GitHub repository answer with "default_branch": 123 raised TypeError,
     # which escaped the batch loop: later repositories were skipped, no batch summary was

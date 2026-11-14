@@ -676,6 +676,7 @@ def discover_inventory(
     exclude_profiles: frozenset[str] = frozenset(),
     development_trees: str = "deep",
     counters: Counter[str] | None = None,
+    analysis_settings: dict | None = None,
 ) -> tuple[
     Sequence[FileRecord],
     Sequence[DirectoryRecord],
@@ -737,6 +738,8 @@ def discover_inventory(
                 security_metadata=security_metadata, exclude_profiles=exclude_profiles,
                 development_trees=development_trees,
             ),
+            # Settings that shape the stored findings, which --resume reuses (--provider-map).
+            "analysis_settings": dict(analysis_settings or {}),
         })
     root_directory = DirectoryRecord(
         ".", 0, permissions=root_mode, is_hidden=root_hidden,

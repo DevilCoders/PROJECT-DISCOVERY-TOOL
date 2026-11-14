@@ -29,6 +29,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from ..analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
+from ..catalog.hosting import classify_host
 from ..catalog.languages import detect_language
 from ..core.source_utils import prefetched_content
 from ..engine.executor import FileOutcome, _run_analyzers
@@ -128,7 +129,10 @@ class NoDownloadSource:
         self.provider = provider_for_host(
             api_provider_for(target.provider, options.provider), self.host, options.provider,
         )
-        self.api_url = options.api_url or (
+        # --api-url, then the provider map's api_url for the host, then PDT_API_URL_<HOST>, then
+        # the provider's standard path on the host.
+        classified = classify_host(self.host)
+        self.api_url = options.api_url or (classified.api_url if classified is not None else None) or (
             server_api_url(self.host, self.repository) if self.provider == "bitbucket-server"
             and not os.environ.get("PDT_API_URL_" + re.sub(r"[^A-Z0-9]", "_", self.host.upper()))
             else default_api_url(self.provider, self.host)
@@ -189,6 +193,7 @@ class NoDownloadSource:
             "acquisition": "api",
             "vcs": "git",
             "provider": self.target.provider,
+            "provider_source": self.target.provider_source,
             "api_provider": self.client.name,
             "api_url": self.api_url,
             "url": self.target.clone_url,

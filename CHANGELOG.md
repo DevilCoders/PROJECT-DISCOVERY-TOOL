@@ -228,6 +228,24 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: configurable provider fingerprints
+- `pdt scan --provider-map FILE` reads a TOML file naming an organization's GitHub Enterprise, self-managed
+  GitLab, Bitbucket Data Center, Azure DevOps Server, Gitea, Forgejo, Gogs, Gerrit, Gitolite and SourceHut
+  servers by host (or `*.domain`), with an optional no-download `api_url`, or marks a host `unclassified`.
+  Invalid maps are usage errors (exit 2); a map may not rename a public service's host.
+- One classifier (`catalog/hosting.py`) serves local remotes, remote targets and the no-download API: the
+  map first, then the public services' hosts, then host-name guesses. The VCS analyzer and online mode
+  had separate rules that disagreed: self-hosted Bitbucket is `Bitbucket Data Center` everywhere, Gogs,
+  Gitolite, Codeberg subdomains, the Pijul Nest and Darcs Hub are known to both.
+- Remote findings whose provider is guessed from the host name are `INFERRED` and say so; ones the map
+  classifies give the entry. Remote targets record `provider_source` (`provider-map`, `built-in` or
+  `host-name`), shown in the Markdown and HTML scan source.
+- The no-download API base is `--api-url`, then the map's `api_url`, then `PDT_API_URL_<HOST>`, then
+  the provider's standard path.
+- Analyzer worker processes receive the map; `--resume` refuses a scan made with another map.
+- Report schema 1.22: `metrics.provider_map` and `scan.provider_map` (file name, SHA-256, entries,
+  kinds) and `provider_source` on the remote source.
+
 ### Added: version-control metadata decoded without clients
 - Subversion working copies are decoded from `.svn/wc.db`, read into memory and queried by SQLite
   without opening the file: repository root (credential-free; a local `file://` root by its last

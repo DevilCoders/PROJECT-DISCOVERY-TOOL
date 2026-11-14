@@ -106,6 +106,29 @@ def test_remote_target_detects_provider_and_normalizes_browser_urls(
     assert target.output_name
 
 
+def test_provider_map_names_self_hosted_servers_and_how_each_provider_is_known():
+    from project_discovery.catalog.hosting import configure_provider_map, parse_provider_map
+
+    browse = "https://code.acme.example/team/app/tree/main/src"
+    plain = remote.parse_remote_target(browse)
+    assert (plain.provider, plain.provider_source, plain.clone_url) == ("Git-compatible host", None, browse)
+    configure_provider_map(parse_provider_map(
+        b'[[provider]]\nhost = "code.acme.example"\nkind = "github-enterprise"\n'
+        b'[[provider]]\nhost = "*.scm.acme.example"\nkind = "bitbucket-data-center"\n'))
+    # A mapped host gets its provider's URL handling: a GitHub browse URL is cut to the repository,
+    # a Bitbucket Data Center browse page becomes its clone path.
+    mapped = remote.parse_remote_target(browse)
+    assert (mapped.provider, mapped.provider_source) == ("GitHub Enterprise", "provider-map")
+    assert mapped.clone_url == "https://code.acme.example/team/app"
+    server = remote.parse_remote_target("https://git.scm.acme.example/projects/PROJ/repos/app/browse")
+    assert server.provider == "Bitbucket Data Center" and server.clone_url.endswith("/scm/PROJ/app.git")
+    assert remote.parse_remote_target("https://github.com/acme/widgets").provider_source == "built-in"
+    assert remote.parse_remote_target("https://gitlab.corp.example/g/p").provider_source == "host-name"
+    # A server of another VCS on an unknown host names no provider source.
+    hg = remote.parse_remote_target("hg+https://hg.example.net/team/project")
+    assert (hg.provider, hg.provider_source) == ("Mercurial server", None)
+
+
 def test_remote_target_preserves_ssh_user_and_case_sensitive_repository_path():
     ssh = remote.parse_remote_target("ssh://git@github.com/Acme/Project.git")
     scp = remote.parse_remote_target("git@github.com:Acme/Project.git")

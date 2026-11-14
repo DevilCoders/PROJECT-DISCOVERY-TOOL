@@ -35,6 +35,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterator
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from ..catalog.hosting import classify_host
 from ..core.secret_patterns import ANY_TOKEN
 
 MAX_URL_FILE_BYTES = 4 * 1024 * 1024
@@ -105,17 +106,6 @@ _SENSITIVE_QUERY = re.compile(
     r"(?:token|access[_-]?token|private[_-]?token|password|passwd|secret|auth)",
     re.IGNORECASE,
 )
-_PROVIDER_HOSTS = (
-    (re.compile(r"(^|\.)github\.com$", re.I), "GitHub"),
-    (re.compile(r"(^|\.)gitlab\.com$", re.I), "GitLab"),
-    (re.compile(r"(^|\.)bitbucket\.org$", re.I), "Bitbucket"),
-    (re.compile(r"(^|\.)dev\.azure\.com$|(^|\.)visualstudio\.com$|^ssh\.dev\.azure\.com$", re.I), "Azure Repos"),
-    (re.compile(r"(^|\.)git-codecommit\.[a-z0-9-]+\.amazonaws\.com$", re.I), "AWS CodeCommit"),
-    (re.compile(r"(^|\.)git\.sr\.ht$|(^|\.)sr\.ht$", re.I), "SourceHut"),
-    (re.compile(r"(^|\.)source\.developers\.google\.com$", re.I), "Google Cloud Source Repositories"),
-    (re.compile(r"(^|\.)nest\.pijul\.com$", re.I), "Pijul Nest"),
-    (re.compile(r"(^|\.)hub\.darcs\.net$", re.I), "Darcs Hub"),
-)
 # A Pijul channel state: base32, as `pijul log --state` prints it.
 _PIJUL_STATE = re.compile(r"[A-Z2-7]{40,64}")
 # Device names Windows reserves in every directory, with or without an extension.
@@ -175,6 +165,9 @@ class RemoteTarget:
     insecure_transport: bool = False
     ref: str | None = None
     transport: str = ""
+    # How the provider is known: "provider-map", "built-in" (a public service's host),
+    # "host-name" (a guess from a word in it), or None (an unknown host: a server of the VCS).
+    provider_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,29 +232,10 @@ def is_remote_target(value: str) -> bool:
 
 
 def _provider(host: str) -> str:
-    normalized = host.lower().split("%", 1)[0]
-    for pattern, name in _PROVIDER_HOSTS:
-        if pattern.search(normalized):
-            return name
-    if "github" in normalized:
-        return "GitHub Enterprise"
-    if "gitlab" in normalized:
-        return "GitLab self-managed"
-    if "bitbucket" in normalized:
-        return "Bitbucket Data Center"
-    if "azure" in normalized:
-        return "Azure DevOps Server"
-    if "gitea" in normalized:
-        return "Gitea"
-    if "forgejo" in normalized or normalized == "codeberg.org":
-        return "Forgejo"
-    if "gogs" in normalized:
-        return "Gogs"
-    if "gerrit" in normalized:
-        return "Gerrit"
-    if "gitolite" in normalized:
-        return "Gitolite"
-    return _GIT_COMPATIBLE
+    """The provider of a repository host: the provider map's, a public service's or a guess from
+    the host name (catalog.hosting), else a Git-compatible host."""
+    provider = classify_host(host)
+    return provider.label if provider is not None else _GIT_COMPATIBLE
 
 
 _GIT_COMPATIBLE = "Git-compatible host"
@@ -522,6 +496,8 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto", ref: str | None = No
         identity_source += f"|{selected_ref}"
     digest = hashlib.sha256(identity_source.encode("utf-8")).hexdigest()[:10]
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", repository_name).strip("-.")[:48] or "repository"
+    classified = classify_host(host)
+    provider_source = classified.source if classified is not None and classified.label == provider else None
     return RemoteTarget(
         input_url=raw,
         clone_url=clone_url,
@@ -533,6 +509,7 @@ def parse_remote_target(raw_url: str, *, vcs: str = "auto", ref: str | None = No
         insecure_transport=scheme in INSECURE_SCHEMES,
         ref=selected_ref,
         transport=scheme,
+        provider_source=provider_source,
     )
 
 
@@ -2037,6 +2014,7 @@ def _finalize_metadata(
         "acquisition": "download",
         "vcs": target.vcs,
         "provider": target.provider,
+        "provider_source": target.provider_source,
         "url": target.clone_url,
         "repository": target.repository_name,
         "identity": target.identity,

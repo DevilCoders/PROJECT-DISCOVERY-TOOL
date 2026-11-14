@@ -136,6 +136,10 @@ function keyValues(target,rows){
  }
 }
 const NETWORK_LABELS={"provider-api":"provider API","osv.dev":"OSV.dev","nvd":"NVD","ghsa":"GitHub Advisory Database"};
+// How a remote's provider is known (writers.PROVIDER_SOURCES), and the --provider-map used.
+const PROVIDER_SOURCES={"provider-map":" (from the provider map)","host-name":" (guessed from the host name)"};
+const providerMap=(scan.provider_map&&typeof scan.provider_map==="object")?scan.provider_map:null;
+const providerMapText=providerMap?String(providerMap.file||"provider map")+": "+Number(providerMap.entries||0)+" entries (SHA-256 "+String(providerMap.sha256||"").slice(0,12)+")":null;
 const networkUses=Array.isArray(scan.network_access)?scan.network_access:[];
 const networkText=networkUses.length?networkUses.map(function(item){return NETWORK_LABELS[item]||String(item);}).join(", "):"none";
 if(remoteSummary){
@@ -151,13 +155,14 @@ $("source-summary").textContent=remoteSummary
 keyValues($("source-details"),remoteSummary?[
  ["Mode",scan.mode],["Network access",networkText],
  ["Acquisition",remoteSummary.acquisition==="api"?"provider API; nothing written to disk":"downloaded to a temporary directory; deleted after the scan"],
- ["URL",remoteSummary.url],["Provider",remoteSummary.provider],["VCS",remoteSummary.vcs],
+ ["URL",remoteSummary.url],["Provider",remoteSummary.provider?String(remoteSummary.provider)+(PROVIDER_SOURCES[remoteSummary.provider_source]||""):null],["VCS",remoteSummary.vcs],
  ["Repository",remoteSummary.repository],["Requested ref",remoteSummary.ref||"remote default branch"],
  ["Revision",remoteSummary.revision||"not reported"],["Branch",remoteSummary.branch],
  ["Transport",String(remoteSummary.transport||"unknown")+(remoteSummary.transport_insecure?" (NOT ENCRYPTED)":" (encrypted)")],
  ["Acquired",remoteSummary.acquired_at?String(remoteSummary.acquired_at)+(remoteSummary.acquisition_seconds!==undefined&&remoteSummary.acquisition_seconds!==null?" ("+remoteSummary.acquisition_seconds+" s)":""):null],
  ["History",remoteSummary.history_complete===false?"only the analyzed revision":null],
-]:[["Mode",scan.mode],["Source","local directory"],["Network access",networkText]]);
+ ["Provider map",providerMapText],
+]:[["Mode",scan.mode],["Source","local directory"],["Network access",networkText],["Provider map",providerMapText]]);
 const coverageItems=remoteMeta&&Array.isArray(remoteMeta.coverage)?remoteMeta.coverage:[];
 const coverageList=$("source-coverage");coverageList.replaceChildren();
 for(const item of coverageItems){
