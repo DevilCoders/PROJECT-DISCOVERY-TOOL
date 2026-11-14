@@ -1913,6 +1913,228 @@ def _rpc(context: _Context) -> tuple[dict, list[Finding]]:
     return value, findings
 
 
+MAX_PROTOCOL_ITEMS = 5000
+MAX_TOPIC_COMPARISONS = 2_000_000
+# Route paths that receive webhooks: /webhook, /webhooks/stripe, /hooks/github, /api/callback.
+_WEBHOOK_ROUTE = re.compile(r"(?i)web-?hooks?|(?:^|/)(?:hooks?|callbacks?)(?:/|$)")
+_TOPIC_PARAMETER = re.compile(r"\{[^{}/]{0,100}+\}|<[^<>/]{0,100}+>|(?<=/):[A-Za-z_]\w{0,60}+|(?<![^/])\+(?![^/])")
+
+
+def _topic_levels(name: str) -> list[str]:
+    """A channel, topic or queue name as matched across contracts and code, by level: parameters
+    (``{id}``, ``<id>``, ``:id``) and MQTT's ``+`` are ``*``, a trailing MQTT ``#`` is ``**``."""
+    levels = _TOPIC_PARAMETER.sub("*", name.strip()).split("/")
+    if levels[-1] == "#":
+        levels[-1] = "**"
+    return levels
+
+
+def _levels_match(left: list[str], right: list[str]) -> bool:
+    """Whether two names cover each other, level by level (``*`` one level, ``**`` the rest)."""
+    for index in range(max(len(left), len(right))):
+        first = left[index] if index < len(left) else None
+        second = right[index] if index < len(right) else None
+        if first == "**" or second == "**":
+            return True
+        if first is None or second is None or (first != second and "*" not in (first, second)):
+            return False
+    return True
+
+
+def _soap_key(name: str) -> str:
+    """A SOAP operation's name as matched between WSDL and code: case-folded, without the
+    ``Request`` of Spring-WS payload roots or the ``Async`` of .NET methods."""
+    key = name.casefold()
+    for suffix in ("request", "async"):
+        if key.endswith(suffix) and len(key) > len(suffix):
+            key = key[:-len(suffix)]
+    return key
+
+
+def _protocols(context: _Context) -> tuple[dict, list[Finding]]:
+    """JSON-RPC, SOAP, WebSocket, SSE, webhook, MQTT and message-driven endpoints across the scan:
+    AsyncAPI channels matched to the topics code sends and receives, OpenRPC methods to the
+    methods JSON-RPC servers register, and webhook routes to the signature checks in their files."""
+    db = context.db
+    endpoints: list[dict] = []
+    counts: dict[str, Counter] = defaultdict(Counter)
+    frameworks: dict[str, set[str]] = defaultdict(set)
+    for _, path, values in _fact_rows(db, "protocol_endpoint", ordered=True):
+        protocol, role = str(values.get("protocol", "")), str(values.get("role", ""))
+        counts[protocol][role] += 1
+        frameworks[protocol].add(str(values.get("framework", "")))
+        if len(endpoints) < MAX_PROTOCOL_ITEMS:
+            endpoints.append({"protocol": protocol, "role": role, "what": str(values.get("what", "")),
+                              "name": str(values.get("target", "")), "framework": str(values.get("framework", "")),
+                              "file": path, "line": values.get("line"),
+                              **({"qos": str(values["qos"])} if values.get("qos") else {})})
+    channels = [{"address": name, "file": path, "actions": values.get("actions", []),
+                 "messages": values.get("messages", []), "protocols": values.get("protocols", [])}
+                for name, path, values in itertools.islice(_fact_rows(db, "async_channel", ordered=True), MAX_PROTOCOL_ITEMS)]
+    contract_methods: dict[str, str] = {}
+    for name, path, _ in _fact_rows(db, "jsonrpc_method", ordered=True):
+        if name not in contract_methods and len(contract_methods) < MAX_PROTOCOL_ITEMS:
+            contract_methods[name] = path
+    sent = [{"name": name, "file": path, "methods": values.get("methods", [])}
+            for name, path, values in itertools.islice(_fact_rows(db, "webhook_contract", ordered=True), MAX_PROTOCOL_ITEMS)]
+    wsdl: dict[str, tuple[str, str]] = {}  # matching key -> (operation, file)
+    for name, path, _ in _fact_rows(db, "wsdl_operation", ordered=True):
+        if len(wsdl) < MAX_PROTOCOL_ITEMS:
+            wsdl.setdefault(_soap_key(name), (name, path))
+    value = {"counts": {protocol: dict(roles) for protocol, roles in sorted(counts.items())},
+             "frameworks": {protocol: sorted(names) for protocol, names in sorted(frameworks.items())},
+             "asyncapi_channels": len(channels), "openrpc_methods": len(contract_methods), "openapi_webhooks": len(sent),
+             "wsdl_operations": len(wsdl)}
+    if not (endpoints or channels or contract_methods or sent or wsdl):
+        return value, []
+    # The topics, queues and channels code uses: this pass's message and MQTT endpoints and the
+    # integration analyzer's topics.
+    topics: dict[str, dict] = {}
+    for item in endpoints:
+        if item["protocol"] in {"MQTT", "Messaging"} and item["role"] in {"consume", "produce"} and item["name"]:
+            topics.setdefault(item["name"], item)
+    for name, path, values in _fact_rows(db, "message_topic", ordered=True):
+        if name not in topics and len(topics) < MAX_PROTOCOL_ITEMS:
+            topics[name] = {"name": name, "file": path, "line": None, "role": str(values.get("role", "")),
+                            "framework": str(values.get("system", ""))}
+    unused: list[dict] = []
+    undeclared: list[dict] = []
+    partial = False
+    if channels and topics:
+        topic_levels = [(_topic_levels(name), name) for name in topics]
+        by_name: dict[str, list[str]] = defaultdict(list)
+        for levels, name in topic_levels:
+            by_name["/".join(levels)].append(name)
+        wild_topics = [(levels, name) for levels, name in topic_levels if {"*", "**"} & set(levels)]
+        used: set[str] = set()
+        comparisons = 0
+        for channel in channels:
+            levels = _topic_levels(channel["address"])
+            hits = list(by_name.get("/".join(levels), []))
+            candidates = topic_levels if {"*", "**"} & set(levels) else wild_topics
+            if comparisons + len(candidates) > MAX_TOPIC_COMPARISONS:
+                partial = True
+            else:
+                comparisons += len(candidates)
+                hits += [name for other, name in candidates if _levels_match(levels, other)]
+            used.update(hits)
+            if not hits:
+                unused.append(channel)
+        undeclared = [topics[name] for name in sorted(topics) if name not in used]
+        if partial:  # unmatched wildcard comparisons would read as unused channels and undeclared topics
+            unused, undeclared = [], []
+    servers = {item["name"]: item for item in endpoints
+               if item["protocol"] == "JSON-RPC" and item["role"] == "server" and item["what"] == "method" and item["name"]}
+    unimplemented = sorted(name for name in contract_methods if servers and name not in servers)
+    undocumented = sorted(name for name in servers if contract_methods and name not in contract_methods)
+    operations = {}
+    for item in endpoints:
+        if item["protocol"] == "SOAP" and item["role"] == "server" and item["what"] == "operation" and item["name"]:
+            operations.setdefault(_soap_key(item["name"]), item)
+    soap_unimplemented = [wsdl[key] for key in sorted(wsdl) if operations and key not in operations]
+    soap_undeclared = [operations[key] for key in sorted(operations) if wsdl and key not in wsdl]
+    # Webhook routes (the endpoints pass's routes with mounts resolved, or the routes as declared)
+    # and the files that check a provider's signature.
+    verified = {item["file"] for item in endpoints if item["protocol"] == "Webhook" and item["role"] == "server"}
+    served = context.endpoint_routes if context.endpoint_routes is not None else [
+        {"method": name.partition(" ")[0], "path": name.partition(" ")[2], "file": path, "line": values.get("line")}
+        for name, path, values in _fact_rows(db, "api_endpoint", ordered=True)]
+    routes = [item for item in served if _WEBHOOK_ROUTE.search(str(item.get("path", "")))
+              and str(item.get("method", "")).upper() in {"POST", "PUT", "ANY", "*", "ALL"}][:MAX_PROTOCOL_ITEMS]
+    unverified = [item for item in routes if item["file"] not in verified]
+    value.update({
+        "endpoints": endpoints[:MAX_LISTED * 10],
+        "unused_channels": [{"address": item["address"], "file": item["file"]} for item in unused[:MAX_PROTOCOL_ITEMS]],
+        "undeclared_topics": [{"name": item["name"], "role": item["role"], "file": item["file"]}
+                              for item in undeclared[:MAX_PROTOCOL_ITEMS]],
+        "topic_matching": "partial" if partial else "complete",
+        "unimplemented_methods": unimplemented[:MAX_PROTOCOL_ITEMS], "undocumented_methods": undocumented[:MAX_PROTOCOL_ITEMS],
+        "unimplemented_operations": [{"operation": name, "file": path} for name, path in soap_unimplemented],
+        "undeclared_operations": [{"operation": item["name"], "file": item["file"], "line": item["line"]}
+                                  for item in soap_undeclared],
+        "webhook_routes": [{"method": item["method"], "path": item["path"], "file": item["file"],
+                            "verified": item["file"] in verified} for item in routes[:MAX_LISTED * 10]],
+        "webhooks_sent": sent[:MAX_LISTED * 10],
+    })
+    parts = [f"{protocol}: " + ", ".join(f"{count:,} {role}" for role, count in sorted(roles.items()))
+             + f" ({', '.join(sorted(frameworks[protocol])[:6])})" for protocol, roles in sorted(counts.items())]
+    if channels:
+        parts.append(f"{len(channels):,} AsyncAPI channel(s)")
+    if contract_methods:
+        parts.append(f"{len(contract_methods):,} OpenRPC method(s)")
+    if sent:
+        parts.append(f"{len(sent):,} webhook(s) OpenAPI documents send")
+    if wsdl:
+        parts.append(f"{len(wsdl):,} WSDL operation(s)")
+    if routes:
+        parts.append(f"{len(routes):,} webhook route(s), {len(routes) - len(unverified):,} in files that check a signature")
+    findings = [Finding(
+        "api", "Protocol endpoints", "; ".join(parts) + ". Declarations, not proof that an endpoint is deployed or "
+        "reachable.", confidence="INFERRED", analyzer="code-index",
+        evidence=[f"{item['protocol']} {item['role']} {item['what']}" + (f" {item['name']}" if item["name"] else "")
+                  + f": {item['file']}" + (f":{item['line']}" if item["line"] else "") + f" ({item['framework']})"
+                  for item in endpoints[:MAX_LISTED]],
+    )]
+    if unused:
+        findings.append(Finding(
+            "api", "AsyncAPI channels no code uses",
+            f"{len(unused):,} channel(s) AsyncAPI documents declare match no topic, queue or channel the scanned code "
+            "sends to or receives from (parameters and MQTT wildcards are matched by level): another service "
+            "implements them, or the code uses names the scan cannot read.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{item['address']}: {item['file']}" for item in unused[:MAX_LISTED]],
+        ))
+    if undeclared:
+        findings.append(Finding(
+            "api", "Topics no AsyncAPI document declares",
+            f"{len(undeclared):,} topic(s), queue(s) or channel(s) code uses are declared by none of the scan's AsyncAPI "
+            "documents: the contract is incomplete, or they belong to another service's contract.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{item['name']} ({item['role'] or 'used'}): {item['file']}" for item in undeclared[:MAX_LISTED]],
+        ))
+    if unimplemented:
+        findings.append(Finding(
+            "api", "OpenRPC methods no JSON-RPC server registers",
+            f"{len(unimplemented):,} method(s) OpenRPC documents declare are registered by none of the scan's JSON-RPC "
+            "servers, which register others: unimplemented, or registered in a form the scan does not recognize.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{name}: {contract_methods[name]}" for name in unimplemented[:MAX_LISTED]],
+        ))
+    if undocumented:
+        findings.append(Finding(
+            "api", "JSON-RPC methods no OpenRPC document declares",
+            f"{len(undocumented):,} method(s) JSON-RPC servers register are missing from the scan's OpenRPC documents.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{name}: {servers[name]['file']}:{servers[name]['line']}" for name in undocumented[:MAX_LISTED]],
+        ))
+    if soap_unimplemented:
+        findings.append(Finding(
+            "api", "WSDL operations no SOAP server implements",
+            f"{len(soap_unimplemented):,} operation(s) WSDL documents declare are implemented by none of the scan's SOAP "
+            "services, which implement others (names are compared case-folded, without Request and Async): another "
+            "service implements them, or the code names them differently.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{name}: {path}" for name, path in soap_unimplemented[:MAX_LISTED]],
+        ))
+    if soap_undeclared:
+        findings.append(Finding(
+            "api", "SOAP operations no WSDL declares",
+            f"{len(soap_undeclared):,} operation(s) SOAP services implement are missing from the scan's WSDL documents.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{item['name']}: {item['file']}:{item['line']}" for item in soap_undeclared[:MAX_LISTED]],
+        ))
+    if unverified:
+        findings.append(Finding(
+            "api", "Webhook routes without a signature check in their file",
+            f"{len(unverified):,} route(s) that look like webhook receivers are in files where no provider signature "
+            "check was found. The check may be in middleware or another module; without one, anyone who knows the "
+            "URL can send forged events.",
+            confidence="INFERRED", severity="LOW", analyzer="code-index",
+            evidence=[f"{item['method']} {item['path']}: {item['file']}" for item in unverified[:MAX_LISTED]],
+        ))
+    return value, findings
+
+
 MAX_INTEGRATION_ITEMS = 5000
 MAX_INTEGRATION_PACKAGES = 500
 
@@ -2512,6 +2734,7 @@ _PASSES = (
     ("endpoints", _endpoint_routes),
     ("graphql", _graphql),
     ("rpc", _rpc),
+    ("protocols", _protocols),
     ("integration", _integration),
     ("network_services", _network_services),
 )

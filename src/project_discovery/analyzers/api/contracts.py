@@ -12,6 +12,7 @@ from typing import Any
 from ...core.limits import AnalyzerLimits, over_limit
 from ...core.safe_parsers import safe_xml_fromstring, safe_yaml_load
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded
+from ...intelligence import facts as code_facts
 from ...models import FileRecord, Finding
 from ..base import Analyzer
 
@@ -341,6 +342,9 @@ class APIContractAnalyzer(Analyzer):
                 operations.add(name)
             elif tag == "binding":
                 bindings.append(name)
+        # Operations, for the code index to match with the SOAP operations code implements.
+        for name in sorted(operations)[:1000]:
+            code_facts.emit_fact("wsdl_operation", name, services=services[:20])
         evidence = (
             [f"service: {name}" for name in services[:40]]
             + [f"portType: {name}" for name in port_types[:40]]

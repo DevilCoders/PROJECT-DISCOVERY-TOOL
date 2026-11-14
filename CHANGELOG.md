@@ -228,6 +228,21 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: JSON-RPC, SOAP, WebSocket, SSE, webhook, MQTT and message-driven endpoints
+- `api-protocols`: endpoints in code by protocol and framework: JSON-RPC methods and request literals; SOAP
+  services, operations and clients (JAX-WS, Spring-WS, WCF, CoreWCF, ASMX, spyne, zeep, PHP, node-soap,
+  Savon, WashOut); WebSocket endpoints, hubs, channels, message handlers and clients in Java, Python,
+  JavaScript/TypeScript, Go, C#, Rust, Elixir, Ruby and PHP (Go and axum routes traced to the handlers that
+  upgrade); Server-Sent Events streams and clients; webhook receivers by provider signature checks and the
+  incoming-webhook services code posts to (never their URLs); MQTT topics with their QoS and brokers; and
+  message-driven listeners, tasks, jobs and serverless triggers.
+- AsyncAPI 2.x and 3.0, OpenRPC and OpenAPI 3.1 webhook documents recognized by content in any YAML or JSON
+  file; `serverless.yml` and Azure `function.json` event sources. `api-contracts` now records WSDL operations
+  as facts.
+- The code index's `protocols` pass matches AsyncAPI channels with the topics code uses (parameters and MQTT
+  wildcards by level), OpenRPC methods with JSON-RPC servers, WSDL operations with SOAP operations, and
+  webhook routes with the signature checks in their files.
+
 ### Added: gRPC, Protocol Buffers, Thrift and Avro services, RPC frameworks and generated code
 - `api-rpc`: a Protocol Buffers tokenizer and parser (syntax or edition, package, imports, options,
   messages with their fields, maps and oneofs, nested types, enums; services with request and response
