@@ -270,3 +270,34 @@ def test_git_config_valueless_keys_remote_heads_nested_files_and_codeberg(tmp_pa
     assert remote_head[0].title.startswith("Git remote default branch")
     nested = _scan(tmp_path, "vendor/lib/.gitmodules", '[submodule "x"]\n\tpath = x\n\turl = https://github.com/a/x\n')
     assert "1 submodule" in nested[0].detail
+
+
+def test_multiple_remotes_and_linked_worktrees(tmp_path: Path):
+    secret = "hunter2" + "-remote"
+    config = (
+        '[core]\n\trepositoryformatversion = 0\n'
+        '[remote "origin"]\n\turl = https://github.com/acme/app.git\n'
+        '[remote "upstream"]\n\turl = git@gitlab.com:upstream/app.git\n'
+        '[remote "mirror"]\n\turl = ssh://git@bitbucket.org/acme/app.git\n'
+        f'[remote "backup"]\n\turl = https://deployer-x9:{secret}@git.example.com/acme/app.git?token=q8Z4#part-7Q2\n'
+        '[branch "main"]\n\tremote = origin\n[branch "dev"]\n\tremote = upstream\n'
+    )
+    findings = _scan_tree(tmp_path, {".git/config": config}, ".git/config")
+    # One provider finding per remote, and one configuration finding that counts them.
+    assert sorted(item.title for item in findings if item.category == "hosting_providers") == [
+        "Git remote provider: Bitbucket", "Git remote provider: GitHub", "Git remote provider: GitLab",
+        "Git remote provider: Self-hosted or unclassified"]
+    summary = next(item for item in findings if item.title.startswith("Git repository configuration"))
+    assert "Detected 4 remote(s) and 2 local branch configuration section(s)" in summary.detail
+    backup = next(item for item in findings if "'backup'" in item.detail)
+    assert "sanitized locator: https://git.example.com/acme/app.git." in backup.detail
+    upstream = next(item for item in findings if "'upstream'" in item.detail)
+    assert "ssh://gitlab.com/upstream/app.git" in upstream.detail
+    text = repr([item.to_dict() for item in findings])
+    for private in (secret, "deployer-x9", "q8Z4", "part-7Q2"):
+        assert private not in text, private
+    # A linked worktree is named; the path its gitdir file points to is not followed or reported.
+    worktree = _scan_tree(tmp_path, {".git/worktrees/feature/gitdir": "/home/alice/src/app-feature/.git\n"},
+                          ".git/worktrees/feature/gitdir")
+    assert [item.title for item in worktree] == ["Git linked worktree: feature"]
+    assert "alice" not in repr(worktree[0].to_dict())
