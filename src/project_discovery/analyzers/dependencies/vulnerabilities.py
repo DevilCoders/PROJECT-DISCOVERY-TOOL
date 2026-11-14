@@ -11,7 +11,7 @@ from ...core.limits import AnalyzerLimits, over_limit
 from ...core.source_utils import SourceBudgetExceeded, describe_error, read_text_bounded, redact_source_excerpt
 from ...models import FileRecord, Finding
 from ...vulnerabilities.database import VulnerabilityDatabase
-from ...vulnerabilities.versions import comparator_for, compare_versions
+from ...vulnerabilities.versions import comparator_for, compare_versions, go_pseudo_version
 from ..base import Analyzer
 from .lockfile_parsers import (
     LOCKFILE_ECOSYSTEMS,
@@ -43,6 +43,26 @@ def _compare_versions(left: str, right: str, ecosystem: str | None = None) -> in
     return compare_versions(_normalise_version(left), _normalise_version(right), ecosystem)
 
 
+_CPE_BOUNDS = (
+    ("versionStartIncluding", lambda result: result >= 0),
+    ("versionStartExcluding", lambda result: result > 0),
+    ("versionEndIncluding", lambda result: result <= 0),
+    ("versionEndExcluding", lambda result: result < 0),
+)
+
+
+def _cpe_bounds_contain(version: str, bounds: dict[str, Any], comparator) -> bool | None:
+    """An NVD CPE range as NVD states it: start and end bounds, either inclusive or exclusive."""
+    for key, holds in _CPE_BOUNDS:
+        if isinstance(bounds.get(key), str):
+            result = comparator(_normalise_version(version), _normalise_version(bounds[key]))
+            if result is None:
+                return None
+            if not holds(result):
+                return False
+    return True
+
+
 def _event_range_contains(
     version: str, range_data: dict[str, Any], ecosystem: str | None = None,
 ) -> bool | None:
@@ -53,6 +73,10 @@ def _event_range_contains(
     comparator = comparator_for(ecosystem or "npm", str(range_data.get("type") or ""))
     if comparator is None:
         return None
+    bounds = range_data.get("database_specific")
+    if str(range_data.get("type")).upper() == "CPE" and isinstance(bounds, dict) and any(
+            isinstance(bounds.get(key), str) for key, _ in _CPE_BOUNDS):
+        return _cpe_bounds_contain(version, bounds, comparator)
     events = range_data.get("events", [])
     if not isinstance(events, list) or not events:
         return None
@@ -258,10 +282,18 @@ def _advisory_group_finding(
         # A confirmed match without an advisory severity is not a low-risk result.
         severity = "MEDIUM"
     related = f" Related advisories: {', '.join(ids[1:])}." if len(ids) > 1 else ""
+    pseudo = go_pseudo_version(package.version) if package.ecosystem == "Go" else None
+    pseudo_note = (
+        f"{package.version} is a Go pseudo-version: commit {pseudo[2][:12]} of "
+        f"{pseudo[1][:4]}-{pseudo[1][4:6]}-{pseudo[1][6:8]} {pseudo[1][8:10]}:{pseudo[1][10:12]}:{pseudo[1][12:]} UTC"
+        + (f", after {pseudo[0]}" if pseudo[0] else ", with no earlier tag")
+        + ". Go orders it before the next tagged release, so a fix tagged there counts as missing even "
+        "if the commit already contains it. "
+    ) if pseudo else ""
     detail = (
         f"{package.ecosystem} package {package.name}@{package.version} matched {source_label} "
         f"{primary['id']} ({reason}).{related} Aliases: {', '.join(aliases[:8]) or 'none recorded'}. "
-        f"Fixed version boundary: {fixed}. "
+        f"Fixed version boundary: {fixed}. " + pseudo_note
         + ("" if known or not confirmed else "The advisory does not record a severity. ")
         + "This is static dependency/advisory matching, not proof the package "
         "is loaded at runtime or that a vulnerable code path is reachable."

@@ -60,12 +60,32 @@ Without an os-release, a package keeps only the distribution's name (`Debian`), 
 
 A package URL gives the same information through its qualifiers. Its `distro` qualifier names the release (`distro=debian-12`, `distro=bookworm`, `distro=alpine-3.19.1`). Its `upstream` qualifier names the source package (`upstream=openssl`, or `upstream=zlib@1:1.2.13.dfsg-1` as Syft writes it).
 
-Versions are compared in each distribution's own order:
-
-- **dpkg:** epochs, and `~` sorts before everything.
-- **apk:** the `_alpha` to `_p` suffixes, then `-r` revisions.
-- **rpm:** `rpmvercmp`, including `~` and `^`.
+Versions are compared in each distribution's own order (see [Version ordering](#version-ordering)).
 
 `--vuln-online` asks OSV.dev about Debian, Ubuntu, Alpine, AlmaLinux, Rocky Linux and Wolfi packages, as long as they carry their release. Red Hat, Fedora and SUSE packages are checked only against a local snapshot; for Red Hat, import its CSAF advisories.
+
+## Version ordering
+
+An advisory's `ECOSYSTEM` range is evaluated in the ordering of the package's own ecosystem, and a `SEMVER` range in SemVer 2.0 precedence:
+
+| Ecosystem | Ordering |
+|---|---|
+| PyPI | PEP 440 |
+| npm, crates.io, Hex, SwiftURL | SemVer 2.0; build metadata is ignored |
+| Go | `golang.org/x/mod/semver`. A pseudo-version is a prerelease of the release after the tag it follows (`v1.2.4-0.20191109021931-daa7c04131f5` sorts after `v1.2.3` and before `v1.2.4-alpha`), as the go command orders it. A finding for one names its commit and time, and says that a fix tagged in the next release counts as missing even if the commit already contains it. |
+| NuGet | SemVer 2.0 with four numeric parts, labels compared without case |
+| RubyGems | `Gem::Version`: string segments mark prereleases |
+| Packagist | Composer: `dev` < `alpha` < `beta` < `RC` < stable < `patch` (`2.4.6-p3` follows `2.4.6`) |
+| Pub | `pub_semver`: as SemVer, except that a build follows its release (`1.0.0` < `1.0.0+1` < `1.0.0+2`) |
+| Maven | the [version order specification](https://maven.apache.org/pom.html#version-order-specification), as Maven's `ComparableVersion` implements it and checked against its test vectors: `1-alpha-1` < `1-beta` < `1-rc` < `1-SNAPSHOT` < `1` = `1.0` = `1-ga` < `1-sp` < `1-jre` < `1-1` < `1.1` |
+| Hackage | the Haskell PVP: lists of numbers, so `1.0` < `1.0.0` |
+| CRAN, Bioconductor | R's `package_version`: numbers separated by `.` or `-` (`1.2-3` is `1.2.3`) |
+| ConanCenter | Conan 2's `Version`: trailing zeros ignored, a prerelease after the last `-`, a build after the last `+` |
+| Debian, Ubuntu | dpkg: epochs, and `~` sorts before everything |
+| Alpine, Wolfi, Chainguard | apk-tools: `_alpha` to `_rc` sort before the release. After the release come `-r` revisions, then `_cvs` to `_p`, then a letter (`1.2.3-r10` < `1.2.3_p1` < `1.2.3a`). |
+| Red Hat, AlmaLinux, Rocky Linux, Fedora, openSUSE, SUSE, Mageia, openEuler, Photon OS | rpm's `rpmvercmp`, including `~` and `^`. A version without a release matches every release. |
+| NVD CPE bounds | NVD defines no order for vendor product versions, so PDT uses its own. Versions are runs of digits and letters, with separators ignored. `dev`, `alpha`, `beta`, `milestone`, `pre`/`preview` and `rc` sort before their release. Any other word or letter sorts after the release but before the next number (`1.0.2` < `1.0.2k` < `1.0.3`, `15.2(4)M3` < `15.2(4)M10`). NVD's exclusive start bounds are evaluated as written. |
+
+A version that the ordering cannot read leaves the match `UNKNOWN`. So does a range in a scheme PDT has no ordering for (`GIT`, or an ecosystem such as GitHub Actions). Neither is reported as clean.
 
 Lockfile entries are evidence of a recorded dependency resolution, not proof that the packages are installed or that the lockfile matches the current manifest. Full resolver semantics, workspace and monorepo constraints, lockfile-to-manifest consistency and transitive license checks remain future work. Lockfile analysis contacts no package registry.

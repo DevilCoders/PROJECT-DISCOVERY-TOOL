@@ -228,6 +228,17 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: Maven, Go, Pub, Hackage, R, Conan and vendor version ordering
+- Maven `ECOSYSTEM` ranges were `UNKNOWN` for every Gradle-locked package; they are now
+  evaluated in Maven's version order. The ordering is checked against `ComparableVersion`'s own
+  test vectors.
+- Go uses `golang.org/x/mod/semver`. A finding for a pseudo-version names its commit and time,
+  and says that a fix tagged in the next release counts as missing even if the commit has it.
+- Pub orders builds after their release. Hackage, CRAN and Bioconductor compare number lists,
+  and ConanCenter uses Conan 2's `Version`.
+- NVD CPE bounds, exclusive starts included, are evaluated in a documented vendor order.
+- Debian, Alpine and RPM orderings gained their own tests.
+
 ### Added: advisory formats, installed OS packages and SBOMs
 - `pdt vuln-db import` reads, besides OSV records, NVD CVE JSON (API 2.0 responses, 2.0 and 1.1
   feeds), GitHub advisory exports, the Debian security tracker JSON, Alpine secdb, CSAF 2.0

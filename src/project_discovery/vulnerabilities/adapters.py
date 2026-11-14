@@ -177,13 +177,14 @@ def _cpe_affected(match: dict) -> dict | None:
     entry: dict[str, Any] = {"package": {"ecosystem": "CPE", "name": f"{vendor}:{product}"},
                              "database_specific": {"cpe": criteria, **bounds}}
     if bounds:
-        # OSV events cannot say "excluding" for a start: the CPE matcher reads the bounds kept above.
+        # OSV events cannot say "excluding" for a start: the range keeps NVD's bounds, which
+        # the matcher evaluates (in the vendor order) instead of the events.
         events = [{"introduced": bounds.get("versionStartIncluding") or bounds.get("versionStartExcluding") or "0"}]
         if "versionEndExcluding" in bounds:
             events.append({"fixed": bounds["versionEndExcluding"]})
         elif "versionEndIncluding" in bounds:
             events.append({"last_affected": bounds["versionEndIncluding"]})
-        entry["ranges"] = [{"type": "CPE", "events": events}]
+        entry["ranges"] = [{"type": "CPE", "events": events, "database_specific": dict(bounds)}]
     elif version not in {"*", "-", ""}:
         entry["versions"] = [version]
     else:

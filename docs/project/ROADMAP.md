@@ -237,12 +237,17 @@ The baseline is not production-ready:
   - CycloneDX VDR and VEX BOMs.
 
   Installed packages are read from dpkg `status`, apk `installed` and `rpmdb.sqlite`, each in the release its `os-release` names. CycloneDX and SPDX SBOM components are matched by package URL ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#installed-os-packages-and-sboms)). An end-to-end test matches Debian, Ubuntu, Alpine, Red Hat and SBOM packages.
-- [ ] Add ecosystem-native comparators for PEP 440, SemVer, Maven, NuGet, Go pseudo-versions, RubyGems, Debian, RPM and vendor-specific versions.
-  - With tests: PEP 440, SemVer (npm, crates.io, Go, Hex, SwiftPM, Pub), RubyGems, Composer, NuGet, Debian (dpkg), Alpine (apk) and RPM orderings.
-  - Missing: Maven and vendor orderings. Go pseudo-versions are compared as SemVer prereleases.
+- [x] Add ecosystem-native comparators for PEP 440, SemVer, Maven, NuGet, Go pseudo-versions, RubyGems, Debian, RPM and vendor-specific versions. Every ecosystem OSV covers now has its own ordering, with tests ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#version-ordering)):
+  - PEP 440, SemVer (npm, crates.io, Hex, SwiftURL), RubyGems, Composer and NuGet.
+  - Maven's version order specification, checked against `ComparableVersion`'s test vectors.
+  - Go's `golang.org/x/mod/semver`. Findings explain pseudo-versions.
+  - `pub_semver`, the Haskell PVP, R's `package_version` (CRAN, Bioconductor) and Conan 2.
+  - dpkg, apk and rpm.
+  - A documented vendor order for NVD CPE bounds, including exclusive starts.
 - [ ] Support CPE/purl matching, duplicate/alias resolution, withdrawn/superseded advisories, exploit maturity, CVSS vector parsing and VEX status.
   - With tests: CVSS v2/v3 vector severity, alias merging (including severities taken from aliased NVD records) and package URLs mapped to OSV ecosystems. CycloneDX VEX `not_affected`, `false_positive` and `resolved` statements are left out at import.
   - Withdrawn advisories are skipped, but no test covers this.
+  - NVD CPE ranges are evaluated from their bounds in a vendor order, but no inventory names CPEs yet.
   - Missing: matching NVD CPE criteria against inventories, superseded advisories, exploit maturity, and VEX applied to scan findings.
 - [ ] Resolve direct/transitive dependency graphs and retain parent path/provenance for vulnerable packages.
 - [ ] Add static dependency reachability evidence where symbol/call graphs support it; never claim exploitability from version matching alone.
