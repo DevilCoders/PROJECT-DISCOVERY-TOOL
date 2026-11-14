@@ -1,10 +1,12 @@
 # API Contract Intelligence
 
-PDT inventories APIs from three directions.
+PDT inventories APIs from three directions, and GraphQL in depth ([GraphQL](#graphql)).
 
 **Contracts** (`api-contracts`): OpenAPI/Swagger JSON and YAML (HTTP operations and component schemas), AsyncAPI (channels and publish/subscribe operations), OpenRPC, WSDL (services, port types, bindings and operations), RAML, GraphQL schema definitions and named query/mutation/subscription operations, Protocol Buffers messages, enums, services and RPCs, Thrift services, structs, exceptions, enums and typedefs, and Postman collections (request grouping only; request secrets are not reported). JSON is parsed with the standard library; YAML uses PyYAML when installed, otherwise a deliberately shallow line-based fallback inventories common paths, methods and operation IDs. Each contract is read with a 16 MiB budget.
 
 **Source declarations** (`api-endpoints`): framework route declarations found statically in source code, with the method, the path as written, the line and the framework (see [Endpoint adapters](#endpoint-adapters)). Retrofit and Feign interfaces declare calls a client makes, so they are not served endpoints. The first 500 endpoints of a file feed the integration summary; more are reported as an `UNKNOWN` finding. The API-style classifier (`api-type-classifier`) adds REST, GraphQL, gRPC, JSON-RPC, SOAP, WebSocket and event-driven markers. Outbound HTTP calls and served endpoints also feed the scan's integration summary and the cross-project integration map in `pdt compare` (see [CODE_INTELLIGENCE.md](../architecture/CODE_INTELLIGENCE.md)).
+
+**GraphQL** (`api-graphql`): schemas, operations, resolvers, directives, federation and subscriptions, in GraphQL files and in code ([GraphQL](#graphql)).
 
 **Limits.** Contracts and route declarations are static evidence. PDT does not make network requests or claim that an API is deployed, reachable, authorized or behaviorally correct. Route prefixes added at run time, middleware, dynamic registration, compatibility analysis between contract versions and security testing are not covered.
 
@@ -28,6 +30,33 @@ Python routes come from the syntax tree, the file's imports deciding which frame
 | Haskell, Nim, F#, Erlang, Julia, R, OCaml, D, Pascal | Scotty and Servant API types; Jester; Giraffe, Saturn and Falco; Cowboy dispatch rules; Genie, Oxygen and `HTTP.register!`; plumber; Dream; vibe.d; Horse |
 
 Methods are upper-case HTTP methods, `ANY` where the declaration names none (Django's `path()`, `@RequestMapping` without a method, catch-all handlers), and `WEBSOCKET` for WebSocket routes. A route's path includes the prefixes its file declares for it ([Route structure](#route-structure)); a route with none is reported as written.
+
+## GraphQL
+
+The `api-graphql` analyzer reads GraphQL with a tokenizer and parser of its own (block strings, strings and comments skipped, every character read once): schemas and documents in `.graphql`, `.gql` and `.graphqls` files, and GraphQL embedded in code (`gql` and `graphql` template tags, `/* GraphQL */` templates and `buildSchema` in JavaScript and TypeScript, `gql(...)` and `type_defs = ...` triple-quoted strings in Python, `AddDocumentFromString(@"...")` in C#). Nothing is executed or introspected.
+
+| Finding | What it reports |
+|---|---|
+| GraphQL schema | The root operation types (`schema { query: ... }` or the default names) and their fields, extensions included: the queries, mutations and subscriptions a service serves; every type by kind; directive definitions and the directives the schema uses |
+| GraphQL subscriptions | The subscription root's fields |
+| GraphQL federation | An Apollo Federation subgraph schema: its version (from `@link(url: ".../federation/v2.x")`, or 1 when `@key` and friends appear without one), its entities (types with `@key`, `extend type` included) and their keys, and the federation directives it uses |
+| GraphQL operations | Each client operation's kind, name and root fields (aliases resolved, fragments and inline fragments skipped), and fragments |
+| GraphQL resolvers | The code behind fields, by framework (below) |
+| GraphQL federation in code | Code that builds a subgraph (`@apollo/subgraph`, `graphene_federation`, `strawberry.federation`, Ariadne federation, DGS entity fetchers, Hot Chocolate `AddApolloFederation`) or a gateway (`@apollo/gateway`, `IntrospectAndCompose`, schema stitching) |
+| GraphQL subscription transport | `graphql-ws`, `subscriptions-transport-ws`, `graphql-sse` and `PubSub` iterators |
+
+Resolvers are found per framework, with field names as each framework derives them (Strawberry's `user_by_id` is `userById`; Hot Chocolate's `GetBookAsync` is `book`):
+
+| Language | Frameworks and forms |
+|---|---|
+| JavaScript, TypeScript | Apollo and graphql-tools resolver maps (`Query: { user: ..., async search() {} }`), NestJS and TypeGraphQL `@Query`, `@Mutation`, `@Subscription`, `@ResolveField` (with a `name` option), Pothos and Nexus `queryField`/`mutationField`/`subscriptionField` |
+| Python | Strawberry (`@strawberry.type` classes, `@strawberry.field`/`mutation`/`subscription`, `strawberry.field(resolver=)`), Graphene (`ObjectType` fields and `resolve_*` methods), Ariadne (`QueryType`, `ObjectType("User")` with `@x.field("...")` and `@x.source`) |
+| Go | gqlgen's resolver methods (`func (r *queryResolver) Todos(...)`) |
+| Java, Kotlin, Scala, Groovy | Spring for GraphQL `@QueryMapping`, `@MutationMapping`, `@SubscriptionMapping`, `@SchemaMapping`, `@BatchMapping`; Netflix DGS `@DgsQuery`, `@DgsMutation`, `@DgsSubscription`, `@DgsData` |
+| C# | Hot Chocolate (`Query`/`Mutation`/`Subscription` classes, `[QueryType]`, `[ExtendObjectType(...)]`), GraphQL.NET (`Field<T>("name")` in an `ObjectGraphType`) |
+| Ruby, Rust, Elixir | graphql-ruby (`field :name` in a `QueryType`), async-graphql and juniper (`#[Object]`/`#[graphql_object]` impls), Absinthe (`query do field :name ...`) |
+
+The code index's `graphql` pass matches the scan's schema root fields, resolvers and client operations by type and field name (`metrics.code_index.graphql`): a "GraphQL API" summary, fields a schema declares that no resolver answers (on root types that have resolvers in the scan), resolvers for root fields no schema declares (on root types that have a schema in the scan, so code-first projects are not compared), and client operations that select root fields the scan's schemas do not declare. Each GraphQL file is read with a 16 MiB budget; a larger schema file is an `UNKNOWN` finding.
 
 ## Route structure
 

@@ -36,6 +36,7 @@ class AnalyzerLoadResult:
 def builtin_analyzers() -> list[Analyzer]:
     """Instantiate PDT's own analyzers in their deterministic execution order."""
     from .api.contracts import APIContractAnalyzer
+    from .api.graphql import GraphQLAnalyzer
     from .api.integration import IntegrationAnalyzer
     from .api.messaging import MessagingIntelligenceAnalyzer
     from .api.routes import APIEndpointAnalyzer
@@ -117,6 +118,7 @@ def builtin_analyzers() -> list[Analyzer]:
         CoverageArtifactAnalyzer(),
         APIContractAnalyzer(),
         APIEndpointAnalyzer(),
+        GraphQLAnalyzer(),
         AccessibilityAnalyzer(),
         SQLSchemaAnalyzer(),
         MigrationIntelligenceAnalyzer(),

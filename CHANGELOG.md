@@ -228,6 +228,17 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: GraphQL schemas, operations, resolvers, federation and subscriptions
+- `api-graphql`: a GraphQL tokenizer and parser for `.graphql`, `.gql` and `.graphqls` files and GraphQL
+  embedded in code (`gql` tags, `buildSchema`, Python `gql(...)`, C# `AddDocumentFromString`): root fields
+  by operation type, types, directive definitions and uses, Apollo Federation (version, entities and
+  keys), subscriptions, and client operations with the root fields they select.
+- Resolvers by framework: Apollo and graphql-tools maps, NestJS, TypeGraphQL, Pothos, Nexus, Strawberry,
+  Graphene, Ariadne, gqlgen, Spring for GraphQL, Netflix DGS, Hot Chocolate, GraphQL.NET, graphql-ruby,
+  async-graphql, juniper and Absinthe; federation subgraph and gateway code and subscription transports.
+- The code index's `graphql` pass matches schema fields, resolvers and operations: fields without a
+  resolver, resolvers without a schema field, operations calling fields no schema declares.
+
 ### Added: route prefixes, groups, mounts and resources
 - `api-endpoints` resolves each route's full path from its file (`analyzers/api/route_structure.py`):
   class-level mappings (Spring, JAX-RS, NestJS, Micronaut, ASP.NET with `[controller]`, Symfony), brace

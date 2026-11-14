@@ -1674,6 +1674,107 @@ def _endpoint_routes(context: _Context) -> tuple[dict, list[Finding]]:
     )]
 
 
+MAX_GRAPHQL_ITEMS = 5000
+_GRAPHQL_ROOTS = {"query": "Query", "mutation": "Mutation", "subscription": "Subscription"}
+
+
+def _graphql(context: _Context) -> tuple[dict, list[Finding]]:
+    """GraphQL across the scan: the root fields schemas declare, the resolvers code declares
+    and the root fields client operations call, matched by type and field name."""
+    db = context.db
+    fields: dict[str, dict] = {}  # "Query.user" -> where a schema declares it
+    for name, path, values in _fact_rows(db, "graphql_field", ordered=True):
+        if name in fields or len(fields) < MAX_GRAPHQL_ITEMS:
+            fields.setdefault(name, {"kind": str(values.get("kind", "")), "file": path, "line": values.get("line")})
+    resolvers: dict[str, list[dict]] = defaultdict(list)
+    for name, path, values in _fact_rows(db, "graphql_resolver", ordered=True):
+        if (name in resolvers or len(resolvers) < MAX_GRAPHQL_ITEMS) and len(resolvers[name]) < 5:
+            resolvers[name].append({"file": path, "line": values.get("line"), "framework": str(values.get("framework", ""))})
+    operations: list[dict] = []
+    for name, path, values in _fact_rows(db, "graphql_operation", ordered=True):
+        if len(operations) < MAX_GRAPHQL_ITEMS:
+            kind, _, operation = name.partition(" ")
+            called = values.get("fields")
+            operations.append({"kind": kind, "name": operation, "file": path, "line": values.get("line"),
+                               "fields": [str(item) for item in called] if isinstance(called, list) else []})
+    entities = [{"name": name, "file": path, "keys": values.get("keys", [])}
+                for name, path, values in itertools.islice(_fact_rows(db, "graphql_entity", ordered=True), MAX_GRAPHQL_ITEMS)]
+    value = {"schema_fields": len(fields), "resolvers": sum(len(items) for items in resolvers.values()),
+             "operations": len(operations), "entities": entities}
+    if not (fields or resolvers or operations):
+        return value, []
+    schema_roots = {name.split(".", 1)[0] for name in fields}
+    resolver_roots = {name.split(".", 1)[0] for name in resolvers}
+    # A schema field no resolver answers, on a root type the scan has resolvers for (with none
+    # at all, the resolvers are not in the scan or come from a framework not recognized).
+    unresolved = [name for name in sorted(fields) if name.split(".", 1)[0] in resolver_roots and name not in resolvers]
+    # A resolver for a root field no schema declares, on a root type the scan has a schema for
+    # (code-first frameworks have no schema file, so their resolvers are not compared).
+    orphans = [name for name in sorted(resolvers) if name.split(".", 1)[0] in schema_roots & set(_GRAPHQL_ROOTS.values())
+               and name not in fields]
+    # Client operations calling root fields the scan's schemas do not declare.
+    unknown = []
+    for operation in operations:
+        root = _GRAPHQL_ROOTS.get(operation["kind"])
+        absent = [item for item in operation["fields"] if root in schema_roots and f"{root}.{item}" not in fields
+                  and not item.startswith("__")]
+        if absent:
+            unknown.append({**operation, "missing": absent})
+    kinds = Counter(field["kind"] for field in fields.values())
+    frameworks = Counter(item["framework"] for items in resolvers.values() for item in items)
+    value.update({
+        "fields": {kind: sorted(name.split(".", 1)[1] for name, field in fields.items() if field["kind"] == kind)[:MAX_LISTED * 10]
+                   for kind in _GRAPHQL_ROOTS},
+        "resolver_frameworks": dict(frameworks), "unresolved_fields": unresolved[:MAX_GRAPHQL_ITEMS],
+        "orphan_resolvers": orphans[:MAX_GRAPHQL_ITEMS], "unknown_operation_fields": unknown[:MAX_LISTED * 10],
+    })
+    parts = []
+    if fields:
+        parts.append(f"{len(fields):,} root field(s) in schemas ("
+                     + ", ".join(f"{kinds[kind]:,} {kind}" for kind in _GRAPHQL_ROOTS if kinds[kind]) + ")")
+    if resolvers:
+        parts.append(f"{value['resolvers']:,} resolver(s) in code (" + ", ".join(sorted(frameworks)) + ")")
+    if operations:
+        parts.append(f"{len(operations):,} client operation(s)")
+    if entities:
+        parts.append(f"{len(entities):,} federation entit(ies)")
+    evidence = []
+    for name in sorted(fields)[:MAX_LISTED]:
+        field = fields[name]
+        answered = resolvers.get(name, [])
+        evidence.append(f"{name}: schema {field['file']}:{field['line']}" + (
+            f"; resolver {answered[0]['file']}:{answered[0]['line']} ({answered[0]['framework']})" if answered else ""))
+    findings = [Finding("api", "GraphQL API", "; ".join(parts) + ". Fields are matched by type and name across every "
+                        "scanned file.", confidence="INFERRED", analyzer="code-index", evidence=evidence)]
+    if unresolved:
+        findings.append(Finding(
+            "api", "GraphQL fields without a resolver",
+            f"{len(unresolved):,} root field(s) a schema declares have no resolver in code, on root types that have "
+            "resolvers: the field is unimplemented, answered by a default resolver, or implemented in code the "
+            "scan does not recognize.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{name}: {fields[name]['file']}:{fields[name]['line']}" for name in unresolved[:MAX_LISTED]],
+        ))
+    if orphans:
+        findings.append(Finding(
+            "api", "GraphQL resolvers for fields no schema declares",
+            f"{len(orphans):,} resolver(s) answer root fields the scan's schemas do not declare: a field removed from "
+            "the schema, a misspelled name, or a schema built elsewhere.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{name}: {resolvers[name][0]['file']}:{resolvers[name][0]['line']}" for name in orphans[:MAX_LISTED]],
+        ))
+    if unknown:
+        findings.append(Finding(
+            "api", "GraphQL operations calling fields no schema declares",
+            f"{len(unknown):,} client operation(s) select root fields the scan's schemas do not declare: they call "
+            "another service's API, or the schema no longer has the field.",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{item['file']}:{item['line']} {item['kind']} {item['name'] or '(anonymous)'}: "
+                      f"{', '.join(item['missing'][:8])}" for item in unknown[:MAX_LISTED]],
+        ))
+    return value, findings
+
+
 MAX_INTEGRATION_ITEMS = 5000
 MAX_INTEGRATION_PACKAGES = 500
 
@@ -2271,6 +2372,7 @@ _PASSES = (
     ("shaders", _shader_inventory),
     ("frontend", _component_graph),
     ("endpoints", _endpoint_routes),
+    ("graphql", _graphql),
     ("integration", _integration),
     ("network_services", _network_services),
 )
