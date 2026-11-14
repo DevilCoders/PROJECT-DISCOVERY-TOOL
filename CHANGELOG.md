@@ -228,6 +228,29 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: version-control metadata decoded without clients
+- Subversion working copies are decoded from `.svn/wc.db`, read into memory and queried by SQLite
+  without opening the file: repository root (credential-free; a local `file://` root by its last
+  component), UUID, checked-out path and revision, branch or tag, files, directories and symlinks,
+  mixed revisions, scheduled changes, switched and sparse nodes, changelists, locks, externals and the
+  pristine store, with LOW findings for conflicts and for interrupted operations that need
+  `svn cleanup`. Queries run read-only with a step budget (recorded as a new `steps` limit kind), a
+  16 MiB value limit and cell-size checks; virtual tables and virtual generated columns are refused.
+- Mercurial: changeset count, tip and heads from the whole changelog index (64 MiB separate, 8 MiB
+  inline), working-directory parents and uncommitted merges from dirstate v1 and v2, branch, bookmarks,
+  phase roots, shelves, and largefiles, LFS, narrow, sparse and tree-manifest repositories; share-safe
+  store requirements are read, and shared or linked stores are not followed.
+- Jujutsu: backend, colocated or internal Git store, recorded operations, concurrent operation heads and
+  the workspace name of every workspace (`working_copy/checkout`). Pijul: recorded changes and declared
+  hooks.
+- Perforce: P4CONFIG and P4ENVIRO files at any depth report their settings by name only; a `P4PASSWD`
+  value and ticket files (never read) are HIGH `secrets` findings; trust and ignore files are markers.
+- No directory inside a control directory that is a link or junction is entered.
+- Jujutsu (`.jj`) and Pijul (`.pijul`) control directories are version-control trees in the inventory, like
+  `.git` and `.hg`: `--exclude-profile vcs` prunes them and `--development-trees` applies to them. The
+  marker catalog version is 2, so an inventory stored by an earlier version is not resumed.
+- [docs/analyzers/VCS_ANALYZER.md](docs/analyzers/VCS_ANALYZER.md) documents the analyzer.
+
 ### Fixed: remote scans of non-Git repositories
 - A Mercurial, Subversion, Bazaar, Darcs, Pijul, CVS or Perforce repository on a host no provider fingerprint
   names is reported with its server as the provider ("Mercurial server"), not "Git-compatible host".

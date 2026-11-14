@@ -23,6 +23,7 @@
 - [ROS](analyzers/ROS_ANALYZER.md): ROS 1 and ROS 2 packages, nodes and interfaces.
 - [AI/ML and robotics](analyzers/AI_ML_AND_ROBOTICS.md): ML frameworks, model artifacts and robotics.
 - [Tests and builds](analyzers/TEST_BUILD_ANALYZERS.md): test discovery and build manifests.
+- [Version control and delivery providers](analyzers/VCS_ANALYZER.md): VCS metadata decoded without clients (Subversion working copies, Mercurial changelogs, Jujutsu, Pijul, Perforce), hosting, CI and deployment providers.
 - [Security analysis](analyzers/SECURITY_ANALYZERS.md): the security analyzers and how to read their findings.
 - [Secret scanning](analyzers/SECURITY_ANALYZER.md): credential formats, redaction and budgets.
 

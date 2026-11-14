@@ -94,7 +94,7 @@ Each built-in analyzer declares the limits it applies to one file in its `limits
 | `test-discovery` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth or read failure |
 | `tree-sitter-polyglot` | whole | 16 MiB | error_locations 10,000 | UNKNOWN finding on oversize, growth, read or parser failure |
 | `type-systems` | whole | 2 MiB | — | UNKNOWN finding for a file past the budget |
-| `vcs-hosting-intelligence` | whole | 2 MiB | — | An unreadable or over-budget file contributes no signals; the limit reached is recorded |
+| `vcs-hosting-intelligence` | whole | 2 MiB | wc_db_bytes 256 MiB; sqlite_steps 50,000,000; sqlite_value_bytes 16 MiB; hg_index_bytes 64 MiB; hg_inline_index_bytes 8 MiB; jj_checkout_bytes 64 KiB; listed_entries 100,000 | An unreadable or over-budget file contributes no signals; the limit reached is recorded |
 
 Read modes:
 

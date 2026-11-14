@@ -17,7 +17,7 @@ class AnalyzerDomain:
 
 
 _DOMAINS = (
-    AnalyzerDomain("vcs", "Version Control Intelligence", "Git, Mercurial, Subversion, Bazaar, Darcs, Jujutsu, Pijul, CVS, Perforce, clones, remotes, worktrees, submodules and LFS.", "partial"),
+    AnalyzerDomain("vcs", "Version Control Intelligence", "Git, Mercurial, Subversion, Bazaar, Darcs, Jujutsu, Pijul, CVS, Fossil and Perforce: clones, remotes, worktrees, submodules, LFS, and decoded Subversion working copies, Mercurial changelogs, Jujutsu and Pijul layouts and Perforce workspace files.", "partial"),
     AnalyzerDomain("hosting_providers", "Source Hosting Intelligence", "GitHub, GitLab, Bitbucket, Azure Repos, AWS CodeCommit, SourceHut, Gitea, Forgejo, Gerrit and self-hosted hosts.", "partial"),
     AnalyzerDomain("source_structure", "Source Structure", "Files, declarations, scopes, namespaces and source organization.", "partial"),
     AnalyzerDomain("symbol_index", "Symbol Index", "Python definitions from the syntax tree and about 25 brace languages from PDT's structural lexer: classes, functions, methods, types, fields and macros; `pdt query` lookups.", "partial"),

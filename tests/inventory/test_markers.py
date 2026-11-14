@@ -73,6 +73,9 @@ CASES = [
     (".clangd", (), (), ".clangd", "cache", "clangd (language server)", "name"),
     (".metals", (), (), ".metals", "cache", "Metals (Scala language server)", "name"),
     (".git", ("HEAD",), (), ".git", "vcs", "Git", "confirmed"),
+    (".jj", ("repo",), (), ".jj", "vcs", "Jujutsu", "confirmed"),
+    (".jj", (), (), ".jj", "vcs", "Jujutsu", "name"),
+    (".pijul", ("pristine",), (), ".pijul", "vcs", "Pijul", "confirmed"),
     ("foo.egg-info", (), (), "*.egg-info", "build", "setuptools metadata", "name"),
 ]
 

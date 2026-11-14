@@ -29,7 +29,7 @@ READS = {
 }
 
 # Kinds of limit a call can reach (``limit_reached``): what the limit counts.
-LIMIT_KINDS = ("bytes", "chars", "lines", "entries", "findings", "indicators", "pages", "wall_time")
+LIMIT_KINDS = ("bytes", "chars", "lines", "entries", "findings", "indicators", "pages", "steps", "wall_time")
 
 
 @dataclass(frozen=True, slots=True)

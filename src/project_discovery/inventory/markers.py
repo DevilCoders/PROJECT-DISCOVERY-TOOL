@@ -19,8 +19,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-# A stored inventory marked with another catalog version is not resumed.
-CATALOG_VERSION = 1
+# A stored inventory marked with another catalog version is not resumed. 2: Jujutsu and Pijul.
+CATALOG_VERSION = 2
 CONFIDENCES = ("confirmed", "name", "possible")
 # Markers that presets and development-tree modes act on.
 ACTIONABLE = frozenset({"confirmed", "name"})
@@ -87,6 +87,8 @@ SPECS: tuple[_Spec, ...] = (
     _s(".svn", "vcs", "Subversion", inside=("wc.db", "entries")),
     _s(".bzr", "vcs", "Bazaar", inside=("branch-format",)),
     _s("_darcs", "vcs", "Darcs", inside=("format",)),
+    _s(".jj", "vcs", "Jujutsu", inside=("repo", "working_copy")),
+    _s(".pijul", "vcs", "Pijul", inside=("pristine", "changes")),
     _s("cvs", "vcs", "CVS", inside=("Root", "Entries"), strength="possible"),
     # Installed dependencies and environments
     _s("node_modules", "dependencies", "npm/pnpm/Yarn/Bun",
