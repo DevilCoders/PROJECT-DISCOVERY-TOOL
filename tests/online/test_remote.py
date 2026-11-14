@@ -587,6 +587,10 @@ def test_native_vcs_checkouts_exclude_control_metadata(
             return SimpleNamespace(stdout=b"jj-revision")
         if backend == "pijul" and command[1] == "log":
             return SimpleNamespace(stdout=b'[{"hash": "CHANGE", "state": "D224YNVCF542WHB53NWBAG6YT5MX6GKUHVWQKKMOJV62NHXL6CNAC", "authors": ["key"]}]')
+        if backend == "darcs" and command[1] == "log":
+            return SimpleNamespace(stdout=(
+                b"<changelog>\n<patch author='Ann &lt;ann@example.invalid&gt;' date='20261114122154' "
+                b"inverted='False' hash='ca05f04a8cfe39257044ec9f42b78e87d98471b1'>\n<name>two</name>\n"))
         repository = Path(command[-1])
         repository.mkdir(parents=True, exist_ok=True)
         (repository / metadata_directory).mkdir()
@@ -609,6 +613,10 @@ def test_native_vcs_checkouts_exclude_control_metadata(
         # The channel state is the revision; it is read before the metadata is removed.
         assert metadata["revision"] == "D224YNVCF542WHB53NWBAG6YT5MX6GKUHVWQKKMOJV62NHXL6CNAC"
         assert commands[1][:2] == ["pijul", "log"] and "--state" in commands[1]
+    if backend == "darcs":
+        # The last patch's hash is the revision; its author is not recorded.
+        assert metadata["revision"] == "ca05f04a8cfe39257044ec9f42b78e87d98471b1"
+        assert commands[1][:2] == ["darcs", "log"] and "ann@example.invalid" not in repr(metadata)
 
 
 def test_cvs_checkout_uses_noninteractive_native_checkout_and_strips_CVS_metadata(

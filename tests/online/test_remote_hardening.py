@@ -897,6 +897,8 @@ def test_native_working_copy_symlinks_survive_metadata_removal(tmp_path: Path, m
 
     def fake_run(command, **kwargs):
         commands.append(command)
+        if command[1] == "log":  # the revision lookup after the clone
+            return SimpleNamespace(stdout=b"")
         repository = Path(command[-1])
         (repository / "_darcs").mkdir(parents=True)
         (repository / "main.hs").write_text("main = pure ()\n", encoding="utf-8")

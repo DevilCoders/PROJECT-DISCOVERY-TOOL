@@ -127,7 +127,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Svelte | source | structure | structural lexer | — | accessibility-markup, code-index, concurrency, dataflow, frontend, performance-hotspots, resource-management, type-systems | 1 |
 | Swift | source | structure | structural lexer, refined by Tree-sitter `swift` | swift | api-clients, api-graphql, api-rpc, code-index, concurrency, mobile-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 8 |
 | SystemVerilog | source | optional parser | — | systemverilog | hdl, tree-sitter-polyglot | 2 |
-| Text | documentation | inventory | — | — | secret-patterns | 46 |
+| Text | documentation | inventory | — | — | secret-patterns | 47 |
 | Thrift | schema | inventory | — | — | api-rpc | 1 |
 | TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 11 |
 | TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 25 |

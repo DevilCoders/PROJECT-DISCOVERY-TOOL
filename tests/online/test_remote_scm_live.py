@@ -15,6 +15,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -270,3 +271,124 @@ def test_pijul_repository_on_the_nest(tmp_path: Path, monkeypatch):
     files = _files(report)
     assert {"README.md", "book.toml"} <= files
     assert not any(".pijul" in path.split("/") for path in files)
+
+
+def _darcs_head(repository: Path, env: dict) -> str:
+    log = _run("darcs", "log", "--last", "1", "--xml-output", cwd=repository, env=env)
+    return log.split(" hash='", 1)[1][:40]
+
+
+@contextlib.contextmanager
+def _static_http(directory: Path):
+    """Serve ``directory`` over plain HTTP on the loopback interface (a Darcs repository needs
+    nothing else)."""
+    import functools
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+    class Quiet(SimpleHTTPRequestHandler):
+        def log_message(self, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(directory)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(10)
+
+
+@pytest.mark.skipif(shutil.which("darcs") is None, reason="the Darcs client is not installed")
+def test_darcs_repository_over_http(tmp_path: Path, monkeypatch):
+    env = {**os.environ, "DARCS_DONT_COLOR": "1"}
+    author = "PDT Test <pdt-test@example.invalid>"
+    repository = tmp_path / "served" / "repo"
+    repository.mkdir(parents=True)
+    _run("darcs", "init", "--quiet", cwd=repository, env=env)
+    _seed(repository)
+    _run("darcs", "add", "--quiet", "-r", "src", "README.md", cwd=repository, env=env)
+    _run("darcs", "record", "--quiet", "-a", "-m", "initial", "--author", author, cwd=repository, env=env)
+    _run("darcs", "tag", "--quiet", "v1", "--author", author, cwd=repository, env=env)
+    tagged_head = _darcs_head(repository, env)
+    (repository / "later.txt").write_text("later\n", encoding="utf-8")
+    _run("darcs", "add", "--quiet", "later.txt", cwd=repository, env=env)
+    _run("darcs", "record", "--quiet", "-a", "-m", "later", "--author", author, cwd=repository, env=env)
+    head = _darcs_head(repository, env)
+    with _static_http(tmp_path / "served") as port:
+        latest = _scan(monkeypatch, tmp_path / "latest", f"darcs+http://127.0.0.1:{port}/repo")
+        tagged = _scan(monkeypatch, tmp_path / "tagged", f"darcs+http://127.0.0.1:{port}/repo", "--ref", "v1")
+    assert {"README.md", "src/app.py", "later.txt"} <= _files(latest)
+    assert (_remote(latest)["revision"], _remote(latest)["provider"]) == (head, "Darcs server")
+    assert "later.txt" not in _files(tagged) and "src/app.py" in _files(tagged)
+    assert _remote(tagged)["revision"] == tagged_head
+    for report in (latest, tagged):
+        assert not any(path.startswith("_darcs") for path in _files(report))
+        assert "pdt-test@example.invalid" not in json.dumps(report)  # patch authors are not recorded
+
+
+@contextlib.contextmanager
+def _cvs_pserver(cvsroot: Path):
+    """A CVS pserver on the loopback interface, run as this user: an inetd-style listener that
+    starts ``cvs pserver`` for each connection."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    listener.settimeout(0.5)
+    stop = threading.Event()
+
+    def serve(connection: socket.socket) -> None:
+        with connection:
+            connection.setblocking(True)
+            subprocess.run(["cvs", "-f", f"--allow-root={cvsroot}", "pserver"], stdin=connection.fileno(),
+                           stdout=connection.fileno(), stderr=subprocess.DEVNULL, timeout=120, check=False)
+
+    def accept() -> None:
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=serve, args=(connection,), daemon=True).start()
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        stop.set()
+        listener.close()
+        thread.join(10)
+
+
+@pytest.mark.skipif(shutil.which("cvs") is None or os.name == "nt", reason="the CVS client is not installed")
+def test_cvs_repository_over_pserver(tmp_path: Path, monkeypatch):
+    import getpass
+
+    env = {**os.environ, "CVS_PASSFILE": str(tmp_path / "cvspass")}
+    monkeypatch.setenv("CVS_PASSFILE", str(tmp_path / "cvspass"))
+    cvsroot = tmp_path / "cvsroot"
+    _run("cvs", "-d", str(cvsroot), "init", cwd=tmp_path, env=env)
+    # An account without a password, mapped to the user the server runs as.
+    (cvsroot / "CVSROOT" / "passwd").write_text(f"anonymous::{getpass.getuser()}\n", encoding="utf-8")
+    source = tmp_path / "import"
+    _seed(source)
+    _run("cvs", "-Q", "-d", str(cvsroot), "import", "-m", "initial", "project", "vendor", "start", cwd=source, env=env)
+    _run("cvs", "-Q", "-d", str(cvsroot), "checkout", "-d", "work", "project", cwd=tmp_path, env=env)
+    work = tmp_path / "work"
+    _run("cvs", "-Q", "tag", "release-1", cwd=work, env=env)
+    (work / "later.txt").write_text("later\n", encoding="utf-8")
+    _run("cvs", "-Q", "add", "later.txt", cwd=work, env=env)
+    _run("cvs", "-Q", "commit", "-m", "later", cwd=work, env=env)
+    with _cvs_pserver(cvsroot) as port:
+        url = f"cvs+pserver://anonymous@127.0.0.1:{port}{cvsroot.as_posix()}/project"
+        latest = _scan(monkeypatch, tmp_path / "latest", url)
+        tagged = _scan(monkeypatch, tmp_path / "tagged", url, "--ref", "release-1")
+    assert {"README.md", "src/app.py", "later.txt"} <= _files(latest)
+    assert (_remote(latest)["revision"], _remote(latest)["provider"]) == (None, "CVS server")
+    assert "later.txt" not in _files(tagged) and _remote(tagged)["revision"] == "release-1"
+    for report in (latest, tagged):
+        assert not any(path == "CVS" or path.startswith("CVS/") or "/CVS/" in path for path in _files(report))

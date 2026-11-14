@@ -108,6 +108,8 @@ _SENSITIVE_QUERY = re.compile(
 )
 # A Pijul channel state: base32, as `pijul log --state` prints it.
 _PIJUL_STATE = re.compile(r"[A-Z2-7]{40,64}")
+# A Darcs patch hash, as `darcs log --xml-output` prints it.
+_DARCS_HASH = re.compile(r"[0-9a-f]{40}")
 # Device names Windows reserves in every directory, with or without an extension.
 _WINDOWS_RESERVED = re.compile(
     r"^(?:CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³]|CONIN\$|CONOUT\$)"
@@ -1572,12 +1574,23 @@ def _darcs_checkout(
         command, timeout=timeout, env=environment, label="Darcs clone",
         disk_guard=(temporary, limits.min_free_bytes),
     )
+    # The last patch's hash identifies the state cloned: the report's revision. Patch authors
+    # (often e-mail addresses) are not recorded.
+    log = _run(
+        ["darcs", "log", "--last", "1", "--xml-output", "--repodir", str(repository)],
+        timeout=timeout, env=environment, label="Darcs revision lookup", check=False,
+    ).stdout.decode("utf-8", errors="replace")[:65536]
+    start = log.find("<patch ")
+    end = log.find(">", start) if start >= 0 else -1
+    attributes = log[start:end] if end > start else ""
+    at = attributes.find(" hash='")
+    revision = attributes[at + 7:at + 47] if at >= 0 else ""
     _strip_metadata(repository, ("_darcs",))
     _replace_directory(repository, checkout)
     return {
         "mode": "remote", "vcs": "darcs", "provider": target.provider,
         "url": target.clone_url, "repository": target.repository_name,
-        "revision": None, "branch": None, "history_complete": False,
+        "revision": revision if _DARCS_HASH.fullmatch(revision) else None, "branch": None, "history_complete": False,
         "coverage": [],
         "warnings": ["Darcs source was materialized from a lazy clone; repository metadata was excluded."],
     }

@@ -288,8 +288,10 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
 - Pijul scans record the channel's state (`pijul log --state`) as the revision; nest.pijul.com is reported as the
   `Pijul Nest` and hub.darcs.net as `Darcs Hub`. An opt-in test (`PDT_LIVE_NETWORK_TESTS=1`) scans a public
   repository on the Nest.
-- Live end-to-end tests (`tests/online/test_remote_scm_live.py`) scan Mercurial, Subversion, Bazaar/Breezy, Fossil and Git-backed Jujutsu repositories
-  served on the loopback interface by their own servers; they skip where a client is not installed.
+- Darcs scans record the last patch's hash (`darcs log --last 1`) as the revision; patch authors are not recorded.
+- Live end-to-end tests (`tests/online/test_remote_scm_live.py`) scan Mercurial, Subversion, Bazaar/Breezy, Darcs,
+  CVS, Fossil and Git-backed Jujutsu repositories served on the loopback interface by real servers (Darcs over
+  static HTTP, CVS through `cvs pserver`); they skip where a client is not installed.
 
 ### Added: the endpoint catalog
 - `api-endpoints` records the handler each route declaration names (the function a decorator, annotation or
