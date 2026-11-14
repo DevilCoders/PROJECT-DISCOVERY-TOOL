@@ -47,6 +47,7 @@ Each built-in analyzer declares the limits it applies to one file in its `limits
 | `api-contracts` | whole | 16 MiB | — | UNKNOWN finding on oversize, growth, read or parse failure |
 | `api-endpoints` | stream | 32 MiB | python_ast_bytes 4 MiB; line_chars 262,144; facts 500 | UNKNOWN or partial finding at the byte, Python AST or fact limit |
 | `api-graphql` | whole | 16 MiB | evidence_lines 100 | UNKNOWN finding for a GraphQL file past the budget |
+| `api-policies` | whole | 16 MiB | evidence_lines 100 | no finding past the budget |
 | `api-protocols` | whole | 16 MiB | head_bytes 8 KiB; evidence_lines 100 | UNKNOWN finding for a contract past the budget |
 | `api-rpc` | whole | 16 MiB | evidence_lines 100 | UNKNOWN finding for an IDL file past the budget |
 | `api-type-classifier` | stream | 32 MiB | line_bytes 256 KiB; evidence_per_style 20 | UNKNOWN or partial finding at the byte limit |

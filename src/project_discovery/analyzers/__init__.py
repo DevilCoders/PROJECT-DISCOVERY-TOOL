@@ -40,6 +40,7 @@ def builtin_analyzers() -> list[Analyzer]:
     from .api.graphql import GraphQLAnalyzer
     from .api.integration import IntegrationAnalyzer
     from .api.messaging import MessagingIntelligenceAnalyzer
+    from .api.policies import PolicyAnalyzer
     from .api.protocols import ProtocolEndpointAnalyzer
     from .api.routes import APIEndpointAnalyzer
     from .api.rpc import RPCAnalyzer
@@ -125,6 +126,7 @@ def builtin_analyzers() -> list[Analyzer]:
         RPCAnalyzer(),
         ProtocolEndpointAnalyzer(),
         GeneratedClientAnalyzer(),
+        PolicyAnalyzer(),
         AccessibilityAnalyzer(),
         SQLSchemaAnalyzer(),
         MigrationIntelligenceAnalyzer(),

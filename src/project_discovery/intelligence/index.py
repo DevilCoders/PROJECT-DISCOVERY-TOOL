@@ -2281,6 +2281,65 @@ def _contract_links(context: _Context) -> tuple[dict, list[Finding]]:
     return value, findings
 
 
+_VERSION_SEGMENT = re.compile(r"(?i)v\d{1,3}(?:\.\d{1,3})?")
+_POLICY_LABELS = {"auth": "authentication and authorization", "versioning": "versioning", "rate_limit": "rate limiting",
+                  "validation": "validation"}
+
+
+def _policies(context: _Context) -> tuple[dict, list[Finding]]:
+    """Authentication, authorization, versioning, rate-limit and validation declarations across the
+    scan, and the API versions the routes' paths name."""
+    db = context.db
+    counts: dict[str, Counter] = defaultdict(Counter)
+    frameworks: dict[str, set[str]] = defaultdict(set)
+    files: dict[str, set[str]] = defaultdict(set)
+    declared_versions: Counter = Counter()
+    examples: dict[str, list[str]] = defaultdict(list)
+    for _, path, values in _fact_rows(db, "api_policy", ordered=True):
+        category, scope = str(values.get("category", "")), str(values.get("scope", ""))
+        counts[category][scope] += 1
+        frameworks[category].add(str(values.get("framework", "")))
+        files[category].add(path)
+        detail = str(values.get("detail", ""))
+        if category == "versioning" and detail:
+            declared_versions[detail] += 1
+        if len(examples[category]) < 10:
+            examples[category].append(f"{path}:{values.get('line')} {scope} {values.get('framework', '')}"
+                                      + (f": {detail}" if detail else ""))
+    served = context.endpoint_routes if context.endpoint_routes is not None else [
+        {"path": name.partition(" ")[2]} for name, _, _ in _fact_rows(db, "api_endpoint")]
+    versions: Counter = Counter()
+    for route in served:
+        for segment in str(route.get("path", "")).split("/"):
+            if _VERSION_SEGMENT.fullmatch(segment):
+                versions[segment.lower()] += 1
+                break
+    value = {"counts": {category: dict(scopes) for category, scopes in sorted(counts.items())},
+             "frameworks": {category: sorted(names) for category, names in sorted(frameworks.items())},
+             "files": {category: len(paths) for category, paths in sorted(files.items())},
+             "route_versions": dict(sorted(versions.items())), "declared_versions": dict(declared_versions.most_common(50))}
+    if not (counts or versions):
+        return value, []
+    findings = []
+    if counts:
+        parts = [f"{_POLICY_LABELS.get(category, category)}: {sum(scopes.values()):,} declaration(s) in {len(files[category]):,} "
+                 f"file(s) (" + ", ".join(sorted(frameworks[category])[:6]) + ")" for category, scopes in sorted(counts.items())]
+        findings.append(Finding(
+            "api", "API policy declarations", "; ".join(parts) + ". Declarations show where policies are configured; which "
+            "routes they cover is not established by them alone.", confidence="INFERRED", analyzer="code-index",
+            evidence=[line for category in sorted(examples) for line in examples[category]][:MAX_LISTED]))
+    if versions or declared_versions:
+        findings.append(Finding(
+            "api", "API versions",
+            ("Route paths name " + ", ".join(f"{version} ({count:,} route(s))" for version, count in sorted(versions.items()))
+             if versions else "No route path names a version")
+            + (("; versioning declared as " + ", ".join(f"{name} ({count:,})" for name, count in declared_versions.most_common(8)))
+               if declared_versions else "") + ".",
+            confidence="INFERRED", analyzer="code-index",
+            evidence=[f"{version}: {count:,} route(s)" for version, count in sorted(versions.items())][:MAX_LISTED]))
+    return value, findings
+
+
 MAX_INTEGRATION_ITEMS = 5000
 MAX_INTEGRATION_PACKAGES = 500
 
@@ -2882,6 +2941,7 @@ _PASSES = (
     ("rpc", _rpc),
     ("protocols", _protocols),
     ("contract_links", _contract_links),
+    ("policies", _policies),
     ("integration", _integration),
     ("network_services", _network_services),
 )

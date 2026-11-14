@@ -228,6 +228,13 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: authentication, authorization, versioning, rate-limit and validation declarations
+- `api-policies`: the declarations code makes, each with its category, framework, scope (global, router,
+  class, route, model or exemption) and detail: guards, roles, auth middleware, Spring Security rules and
+  ASP.NET authorization; API versioning schemes; rate limits; request validators and validation models,
+  across Python, JavaScript/TypeScript, JVM, C#, Go, Ruby, PHP, Elixir and Rust frameworks.
+- The code index's `policies` pass counts them and reads the API versions route paths name.
+
 ### Added: routes, API contracts and generated clients cross-referenced
 - `api-clients`: generated OpenAPI clients by generator mark (openapi-generator, swagger-codegen,
   swagger-typescript-api, NSwag, Kiota, AutoRest, oapi-codegen, ogen, orval, openapi-typescript,
