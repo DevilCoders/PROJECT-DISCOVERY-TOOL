@@ -36,8 +36,49 @@ LOCKFILE_ECOSYSTEMS = {
     "package.resolved": "SwiftURL",
     "packages.lock.json": "NuGet",
     "pubspec.lock": "Pub",
+    "podfile.lock": "CocoaPods",
+    "gradle.lockfile": "Maven",
+    "buildscript-gradle.lockfile": "Maven",
+    "settings-gradle.lockfile": "Maven",
+    "conan.lock": "ConanCenter",
+    "vcpkg-status": "vcpkg",  # vcpkg_installed/vcpkg/status (see lockfile_key)
+    "bun.lock": "npm",
+    "deno.lock": "npm",
+    "renv.lock": "CRAN",
+    "manifest.toml": "Julia",
+    "juliamanifest.toml": "Julia",
+    "cabal.project.freeze": "Hackage",
+    "stack.yaml.lock": "Hackage",
+    "rebar.lock": "Hex",
+    "cpanfile.snapshot": "CPAN",
+    "shard.lock": "Crystal",
+    "dub.selections.json": "DUB",
+    "packages.config": "NuGet",
+    "pylock.toml": "PyPI",
+    "cartfile.resolved": "Carthage",
 }
-LOCKFILE_NAMES = frozenset(LOCKFILE_ECOSYSTEMS)
+LOCKFILE_NAMES = frozenset(name for name in LOCKFILE_ECOSYSTEMS if "." in name)
+# The ecosystems OSV.dev has advisories for, of those the lockfiles name. The others (CocoaPods,
+# vcpkg, JSR, Julia, CPAN, Crystal, DUB, Carthage) cannot be checked online.
+OSV_ECOSYSTEMS = frozenset({
+    "npm", "PyPI", "crates.io", "Packagist", "RubyGems", "Go", "Hex", "SwiftURL", "NuGet", "Pub", "Maven",
+    "ConanCenter", "CRAN", "Bioconductor", "Hackage",
+})
+
+
+def lockfile_key(path: str) -> str | None:
+    """The lockfile format of a path, as LOCKFILE_ECOSYSTEMS keys it; None for other files.
+    Most formats are a file name; vcpkg's installed database is a path
+    (``vcpkg_installed/vcpkg/status``), and PEP 751 also allows ``pylock.<name>.toml``."""
+    normalized = str(path).replace("\\", "/")
+    name = normalized.rsplit("/", 1)[-1].casefold()
+    if name in LOCKFILE_ECOSYSTEMS and name != "vcpkg-status":
+        return name
+    if name.startswith("pylock.") and name.endswith(".toml") and name.count(".") == 2:
+        return "pylock.toml"
+    if name == "status" and normalized.casefold().endswith(("vcpkg_installed/vcpkg/status", "installed/vcpkg/status")):
+        return "vcpkg-status"
+    return None
 
 
 class LockfileEntryBudgetExceeded(ValueError):
@@ -134,8 +175,9 @@ class _Collector:
         if host and number > 0 and (host in self.registries or len(self.registries) < MAX_REGISTRY_HOSTS):
             self.registries[host] += number
 
-    def add(self, name: Any, version: Any, registry: Any = None) -> bool:
-        """Record one registry package; True when it is new (``registry``: where it came from)."""
+    def add(self, name: Any, version: Any, registry: Any = None, ecosystem: str | None = None) -> bool:
+        """Record one registry package; True when it is new (``registry``: where it came from;
+        ``ecosystem``: another than the lockfile's, as in a Deno lockfile's JSR packages)."""
         if not name or not version:
             return False
         name, text = str(name).strip(), normalize_version(version)
@@ -151,7 +193,7 @@ class _Collector:
         if _REMOTE_SPECIFIER.search(text):
             self.remote(name)
             return False
-        package = ResolvedPackage(self.ecosystem, name, text)
+        package = ResolvedPackage(ecosystem or self.ecosystem, name, text)
         if not package.name or not package.version or package in self.packages:
             return False
         if len(self.packages) >= self.max_entries:
@@ -484,6 +526,365 @@ def _pubspec_lock(source: str, out: _Collector) -> None:
             current = None
 
 
+def _url_name(url: Any) -> str:
+    """A URL dependency as a name: its host and path, without user information, query or
+    fragment (they can carry credentials)."""
+    text = str(url).strip()
+    try:
+        parts = urllib.parse.urlsplit(text)
+        host = parts.hostname or ""
+    except ValueError:
+        host = ""
+    if host:
+        return (host + parts.path)[:200]
+    return text.split("?", 1)[0].split("#", 1)[0].rsplit("@", 1)[-1][:200]
+
+
+def _podfile_lock(source: str, out: _Collector) -> None:
+    """CocoaPods: the PODS entries ("Name (1.2.3)"; subspecs "Name/Sub" are the pod "Name"), with
+    EXTERNAL SOURCES (a path is the project's own pod, git or a URL a pod outside a spec repo) and
+    the SPEC REPOS each pod came from (trunk is the CocoaPods CDN)."""
+    section, heading = "", ""
+    pods: list[tuple[str, str]] = []
+    external: dict[str, str] = {}
+    repositories: dict[str, str] = {}
+    for raw_line in io.StringIO(source, newline=None):
+        line = raw_line.rstrip("\r\n")
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            section, heading = line.split(":", 1)[0].strip(), ""
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if section == "PODS" and indent == 2 and stripped.startswith("- "):
+            entry = stripped[2:].strip().rstrip(":").strip("\"'")
+            name, _, rest = entry.partition(" (")
+            pods.append((name.split("/", 1)[0].strip(), rest.rstrip(")").strip()))
+        elif section in {"EXTERNAL SOURCES", "SPEC REPOS"} and indent == 2 and stripped.endswith(":"):
+            heading = stripped[:-1].strip("\"'")
+        elif section == "EXTERNAL SOURCES" and heading and indent >= 4 and stripped.startswith(":"):
+            key = stripped.split(":", 2)[1]
+            if key == "path":
+                external[heading] = "path"
+            elif key in {"git", "http", "podspec"}:
+                external.setdefault(heading, "remote")
+        elif section == "SPEC REPOS" and heading and indent >= 4 and stripped.startswith("- "):
+            repositories[stripped[2:].strip().strip("\"'")] = heading
+    for name, version in pods:
+        origin = external.get(name)
+        if origin == "path":
+            out.local(name)
+        elif origin == "remote":
+            out.remote(name)
+        else:
+            repository = repositories.get(name, "trunk")
+            out.add(name, version, "https://cdn.cocoapods.org/" if repository == "trunk" else repository)
+
+
+def _gradle_lockfile(source: str, out: _Collector) -> None:
+    """Gradle dependency locking: "group:artifact:version=configurations" lines (Maven names)."""
+    for raw_line in io.StringIO(source, newline=None):
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("empty="):
+            continue
+        parts = line.split("=", 1)[0].split(":")
+        if len(parts) >= 3:
+            out.add(f"{parts[0]}:{parts[1]}", parts[2])
+
+
+def _conan_reference(reference: Any) -> tuple[str, str] | None:
+    """(name, version) of a Conan reference "name/version[@user/channel][#revision][%time]"."""
+    if not isinstance(reference, str):
+        return None
+    name, slash, version = reference.split("#", 1)[0].split("@", 1)[0].strip().partition("/")
+    return (name, version) if slash and name and version else None
+
+
+def _conan_lock(data: Any, out: _Collector) -> None:
+    """Conan 2 lockfiles (requires, build_requires, python_requires) and Conan 1 graph locks."""
+    if not isinstance(data, dict):
+        return
+    references: list[Any] = []
+    for key in ("requires", "build_requires", "python_requires", "config_requires"):
+        references.extend(data.get(key) or [])
+    graph = data.get("graph_lock") if isinstance(data.get("graph_lock"), dict) else {}
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), dict) else {}
+    for node in nodes.values():
+        if isinstance(node, dict) and not node.get("path"):  # a node with a path is the consumer
+            references.append(node.get("ref") or node.get("pref"))
+    for reference in references:
+        parsed = _conan_reference(reference)
+        if parsed:
+            out.add(*parsed)
+
+
+def _vcpkg_status(source: str, out: _Collector) -> None:
+    """vcpkg's database of installed ports (vcpkg_installed/vcpkg/status): one paragraph per
+    installed port; feature paragraphs repeat the port and are skipped. A port version is
+    written ``1.3.1#2``, as vcpkg names it."""
+    fields: dict[str, str] = {}
+
+    def flush() -> None:
+        if (fields.get("Package") and fields.get("Version") and "Feature" not in fields
+                and "install ok installed" in fields.get("Status", "")):
+            port = fields.get("Port-Version", "0")
+            out.add(fields["Package"], fields["Version"] + (f"#{port}" if port not in {"", "0"} else ""))
+
+    for raw_line in io.StringIO(source, newline=None):
+        line = raw_line.rstrip("\r\n")
+        if not line.strip():
+            flush()
+            fields = {}
+        elif not line[0].isspace():
+            key, separator, value = line.partition(":")
+            if separator:
+                fields[key.strip()] = value.strip()
+    flush()
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """JSON with trailing commas (bun.lock is JSONC) as strict JSON: a comma followed only by
+    white space and a closing bracket is dropped; strings are left alone."""
+    result: list[str] = []
+    in_string = escaped = False
+    pending = -1  # the index of a comma that only white space follows so far
+    for char in text:
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char in "}]" and pending >= 0:
+            result[pending] = ""
+        if char == ",":
+            pending = len(result)
+        elif not char.isspace():
+            pending = -1
+            in_string = char == '"'
+        result.append(char)
+    return "".join(result)
+
+
+def _bun_lock(data: Any, out: _Collector) -> None:
+    """Bun's text lockfile: each package is ["name@version", registry, ...]."""
+    packages = data.get("packages") if isinstance(data, dict) else None
+    for value in packages.values() if isinstance(packages, dict) else ():
+        if not isinstance(value, list) or not value or not isinstance(value[0], str):
+            continue
+        ident = value[0]
+        at = ident.find("@", 1)
+        if at <= 0:
+            continue
+        name, specifier = ident[:at], ident[at + 1:]
+        if specifier.startswith(("workspace:", "link:", "file:", "./", "../")):
+            out.local(name)
+        elif specifier.startswith(("github:", "git+", "git:", "http:", "https:")) or "/" in specifier:
+            out.remote(name)
+        else:
+            registry = value[1] if len(value) > 1 and isinstance(value[1], str) and value[1] else None
+            out.add(name, specifier, registry)
+
+
+def _deno_lock(data: Any, out: _Collector) -> None:
+    """Deno lockfiles (v3 nests the sections under "packages"): npm and JSR packages
+    ("name@version", a peer suffix after "_"), and remote modules imported by URL."""
+    if not isinstance(data, dict):
+        return
+    sections = data["packages"] if isinstance(data.get("packages"), dict) else data
+    for kind, ecosystem in (("npm", "npm"), ("jsr", "JSR")):
+        entries = sections.get(kind)
+        for key in entries if isinstance(entries, dict) else ():
+            text = str(key)
+            at = text.find("@", 1)
+            if at > 0:
+                out.add(text[:at], text[at + 1:].split("_", 1)[0], None, ecosystem)
+    remote = data.get("remote")
+    for url in remote if isinstance(remote, dict) else ():
+        out.remote(_url_name(url))
+
+
+def _renv_lock(data: Any, out: _Collector) -> None:
+    """renv lockfiles: CRAN and other repository packages, Bioconductor packages, and packages
+    from GitHub, GitLab, Bitbucket, git or a URL (outside a repository) or the local tree."""
+    if not isinstance(data, dict):
+        return
+    settings = data.get("R") if isinstance(data.get("R"), dict) else {}
+    repositories = {str(item.get("Name")): item.get("URL") for item in settings.get("Repositories") or []
+                    if isinstance(item, dict)}
+    packages = data.get("Packages") if isinstance(data.get("Packages"), dict) else {}
+    for key, item in packages.items():
+        if not isinstance(item, dict):
+            continue
+        name, source = item.get("Package") or key, str(item.get("Source") or "Repository")
+        if source in {"Local", "Cellar"}:
+            out.local(name)
+        elif source in {"GitHub", "GitLab", "Bitbucket", "git", "URL"}:
+            out.remote(name)
+        elif source == "Bioconductor":
+            out.add(name, item.get("Version"), None, "Bioconductor")
+        else:
+            out.add(name, item.get("Version"), repositories.get(str(item.get("Repository") or "CRAN")))
+
+
+def _julia_manifest(data: Any, out: _Collector) -> None:
+    """Julia manifests: format 2 ([[deps.Name]]) and format 1 ([[Name]] at the top). A package
+    without a version ships with Julia (a standard library); a path or repo-url is the
+    project's own package or one outside the registry."""
+    if not isinstance(data, dict):
+        return
+    if "manifest_format" in data:
+        deps = data.get("deps") if isinstance(data.get("deps"), dict) else {}
+    else:
+        deps = {key: value for key, value in data.items() if isinstance(value, list)}
+    for name, entries in deps.items():
+        for item in entries if isinstance(entries, list) else ():
+            if not isinstance(item, dict) or "uuid" not in item:
+                continue
+            if item.get("path"):
+                out.local(name)
+            elif item.get("repo-url"):
+                out.remote(name)
+            elif item.get("version"):
+                out.add(name, item["version"])
+
+
+_CABAL_CONSTRAINT = re.compile(r"\bany\.([A-Za-z0-9][A-Za-z0-9-]{0,100}) ==([0-9][0-9.]{0,50})")
+
+
+def _cabal_freeze(source: str, out: _Collector) -> None:
+    """cabal.project.freeze: "any.name ==version" constraints (installed GHC packages have none)."""
+    for match in _CABAL_CONSTRAINT.finditer(source):
+        out.add(match.group(1), match.group(2).rstrip("."), "https://hackage.haskell.org/")
+
+
+def _stack_lock(source: str, out: _Collector) -> None:
+    """stack.yaml.lock: Hackage packages ("hackage: name-1.2.3@sha256:...") and git or archive
+    packages, which are outside the registry."""
+    for raw_line in io.StringIO(source, newline=None):
+        key, _, value = raw_line.strip().lstrip("- ").partition(":")
+        value = value.strip()
+        if key == "hackage":
+            package = value.split("@", 1)[0]
+            name, dash, version = package.rpartition("-")
+            if dash and name and version[:1].isdigit():
+                out.add(name, version, "https://hackage.haskell.org/")
+        elif key in {"git", "url", "archive"} and value:
+            out.remote(_url_name(value))
+
+
+_REBAR_PACKAGE = re.compile(r'\{<<"([^"\n]{1,200})">>,\s*+\{pkg,\s*+<<"([^"\n]{1,200})">>,\s*+<<"([^"\n]{1,100})">>')
+_REBAR_SOURCE = re.compile(r'\{<<"([^"\n]{1,200})">>,\s*+\{(?:git|git_subdir|raw)\b')
+
+
+def _rebar_lock(source: str, out: _Collector) -> None:
+    """rebar3 lockfiles: Hex packages ({pkg, Name, Version}) and git dependencies."""
+    for match in _REBAR_PACKAGE.finditer(source):
+        out.add(match.group(2), match.group(3), "https://repo.hex.pm")
+    for match in _REBAR_SOURCE.finditer(source):
+        out.remote(match.group(1))
+
+
+def _carton_snapshot(source: str, out: _Collector) -> None:
+    """Carton's cpanfile.snapshot: the DISTRIBUTIONS, each "Name-Version" (from CPAN)."""
+    in_distributions = False
+    for raw_line in io.StringIO(source, newline=None):
+        line = raw_line.rstrip("\r\n")
+        if line and not line[0].isspace():
+            in_distributions = line.strip() == "DISTRIBUTIONS"
+            continue
+        if in_distributions and line.startswith("  ") and not line.startswith("   "):
+            name, dash, version = line.strip().rpartition("-")
+            if dash and name and (version[:1].isdigit() or (version[:1] == "v" and version[1:2].isdigit())):
+                out.add(name, version, "https://cpan.metacpan.org/")
+
+
+def _shard_lock(source: str, out: _Collector) -> None:
+    """Crystal shard.lock: each shard's version and the git host it is fetched from."""
+    in_shards, current, origin = False, None, None
+    hosts = {"github": "https://github.com/", "gitlab": "https://gitlab.com/", "bitbucket": "https://bitbucket.org/",
+             "codeberg": "https://codeberg.org/"}
+    for raw_line in io.StringIO(source, newline=None):
+        line = raw_line.rstrip("\r\n")
+        if line and not line[0].isspace():
+            in_shards, current = line.strip() == "shards:", None
+            continue
+        if not in_shards or not line.strip():
+            continue
+        if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+            current, origin = line.strip()[:-1], None
+            continue
+        key, _, value = line.strip().partition(":")
+        value = value.strip().strip("\"'")
+        if not current:
+            continue
+        if key in {"git", "hg", "fossil"}:
+            origin = value
+        elif key in hosts:
+            origin = hosts[key] + value
+        elif key == "path":
+            out.local(current)
+            current = None
+        elif key == "version":
+            out.add(current, value, origin)
+            current = None
+
+
+def _dub_selections(data: Any, out: _Collector) -> None:
+    """DUB's dub.selections.json: registry versions, paths and repositories."""
+    versions = data.get("versions") if isinstance(data, dict) else None
+    for name, value in versions.items() if isinstance(versions, dict) else ():
+        if isinstance(value, str):
+            out.add(name, value, "https://code.dlang.org/")
+        elif isinstance(value, dict) and value.get("path"):
+            out.local(name)
+        elif isinstance(value, dict) and value.get("repository"):
+            out.remote(name)
+        elif isinstance(value, dict) and isinstance(value.get("version"), str):
+            out.add(name, value["version"], "https://code.dlang.org/")
+
+
+_PACKAGE_TAG = re.compile(r"<package\b([^<>]{0,4000})>")
+_XML_ATTRIBUTE = re.compile(r'\b([A-Za-z]{1,40})\s*+=\s*+"([^"]{0,400})"')
+
+
+def _packages_config(source: str, out: _Collector) -> None:
+    """NuGet packages.config: each <package id="..." version="..."> is an installed version.
+    Read with patterns, not an XML parser: no entity or DTD is ever expanded."""
+    for tag in _PACKAGE_TAG.finditer(source):
+        attributes = {key.lower(): value for key, value in _XML_ATTRIBUTE.findall(tag.group(1))}
+        if attributes.get("id") and attributes.get("version"):
+            out.add(attributes["id"], attributes["version"])
+
+
+def _pylock(data: Any, out: _Collector) -> None:
+    """PEP 751 pylock.toml: packages from an index, a directory (the project's own) or a VCS
+    or archive URL (outside a registry)."""
+    for item in data.get("packages", []) if isinstance(data, dict) else ():
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if item.get("directory"):
+            out.local(name)
+        elif item.get("vcs") or item.get("archive"):
+            out.remote(name)
+        else:
+            out.add(name, item.get("version"), item.get("index"))
+
+
+def _cartfile_resolved(source: str, out: _Collector) -> None:
+    """Carthage's Cartfile.resolved: every dependency is a git repository or a binary URL, so
+    every one is outside a registry."""
+    for raw_line in io.StringIO(source, newline=None):
+        parts = raw_line.strip().split('"')
+        if len(parts) >= 4 and parts[0].strip() in {"github", "git", "binary"}:
+            out.remote(parts[1][:200] if parts[0].strip() == "github" else _url_name(parts[1]))
+
+
 def parse_lockfile(
     filename: str, source: str, *, max_entries: int = MAX_LOCKFILE_PACKAGE_ENTRIES,
 ) -> ParsedLockfile:
@@ -496,7 +897,7 @@ def parse_lockfile(
     Raises ValueError subclasses (including JSON/TOML decode errors and
     LockfileEntryBudgetExceeded) for malformed or over-budget input.
     """
-    name = filename.casefold()
+    name = lockfile_key(filename) or filename.casefold()
     ecosystem = LOCKFILE_ECOSYSTEMS.get(name)
     if ecosystem is None:
         raise ValueError(f"unsupported lockfile format: {filename}")
@@ -527,6 +928,40 @@ def parse_lockfile(
         _nuget_lock(json.loads(source), out)
     elif name == "pubspec.lock":
         _pubspec_lock(source, out)
+    elif name == "podfile.lock":
+        _podfile_lock(source, out)
+    elif name in {"gradle.lockfile", "buildscript-gradle.lockfile", "settings-gradle.lockfile"}:
+        _gradle_lockfile(source, out)
+    elif name == "conan.lock":
+        _conan_lock(json.loads(source), out)
+    elif name == "vcpkg-status":
+        _vcpkg_status(source, out)
+    elif name == "bun.lock":
+        _bun_lock(json.loads(_strip_trailing_commas(source)), out)
+    elif name == "deno.lock":
+        _deno_lock(json.loads(source), out)
+    elif name == "renv.lock":
+        _renv_lock(json.loads(source), out)
+    elif name in {"manifest.toml", "juliamanifest.toml"}:
+        _julia_manifest(tomllib.loads(source), out)
+    elif name == "cabal.project.freeze":
+        _cabal_freeze(source, out)
+    elif name == "stack.yaml.lock":
+        _stack_lock(source, out)
+    elif name == "rebar.lock":
+        _rebar_lock(source, out)
+    elif name == "cpanfile.snapshot":
+        _carton_snapshot(source, out)
+    elif name == "shard.lock":
+        _shard_lock(source, out)
+    elif name == "dub.selections.json":
+        _dub_selections(json.loads(source), out)
+    elif name == "packages.config":
+        _packages_config(source, out)
+    elif name == "pylock.toml":
+        _pylock(tomllib.loads(source), out)
+    elif name == "cartfile.resolved":
+        _cartfile_resolved(source, out)
     result = ParsedLockfile(sorted(out.packages, key=lambda p: (p.name.casefold(), p.name, p.version)))
     registry_names = {package.name for package in out.packages}
     result.local = sorted(out.local_names - registry_names)

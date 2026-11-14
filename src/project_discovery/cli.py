@@ -26,7 +26,7 @@ from . import __version__
 from .analyzers import load_analyzers
 from .analyzers.code.tree_sitter_syntax import GRAMMARS, parser_capabilities
 from .analyzers.content.archives import ArchiveIntelligenceAnalyzer, parse_archive_limits
-from .analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
+from .analyzers.dependencies.lockfile_parsers import MAX_LOCKFILE_BYTES, lockfile_key
 from .analyzers.dependencies.vulnerabilities import LocalVulnerabilityAnalyzer
 from .catalog.domains import analyzer_domain_catalog, analyzer_domain_count
 from .catalog.hosting import ProviderMap, configure_provider_map, configured_provider_map, load_provider_map
@@ -567,7 +567,7 @@ def _lockfile_sources(root: Path, records, skipped: list[str], memory_source=Non
     fetched (budget, rate limit) is reported as unreadable with that reason.
     """
     for record in records:
-        if Path(record.path).name.lower() not in LOCKFILE_NAMES:
+        if lockfile_key(record.path) is None:
             continue
         if record.content_skipped_reason and record.content_skipped_reason.startswith("Explicit --skip"):
             skipped.append(record.path)
@@ -1169,7 +1169,7 @@ def run_scan(
                     # A count and the first paths as evidence: a tree can hold any number.
                     skipped_lockfiles, skipped_lockfile_count = [], 0
                     for record in records:
-                        if record.content_skipped_reason and Path(record.path).name.lower() in LOCKFILE_NAMES:
+                        if record.content_skipped_reason and lockfile_key(record.path) is not None:
                             skipped_lockfile_count += 1
                             if len(skipped_lockfiles) < 20:
                                 skipped_lockfiles.append(record.path)

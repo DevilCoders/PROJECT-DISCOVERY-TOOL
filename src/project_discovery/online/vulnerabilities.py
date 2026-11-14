@@ -29,6 +29,7 @@ from ..analyzers.dependencies.lockfile_parsers import (
     ResolvedPackage,
     parse_lockfile,
 )
+from ..analyzers.dependencies.lockfile_parsers import OSV_ECOSYSTEMS, lockfile_key
 from ..analyzers.dependencies.vulnerabilities import _affected_version, advisory_findings
 from ..core.source_utils import SourceBudgetExceeded, redact_source_excerpt
 from ..models import Finding
@@ -228,12 +229,15 @@ class OnlineVulnerabilityLookup:
         diagnostics: list[str] = []
         paths_by_package: dict[PackageQuery, list[str]] = defaultdict(list)
         parse_failures: list[tuple[str, str]] = []
+        # Packages of ecosystems OSV.dev has no advisories for: never sent, reported as not checked.
+        unsupported: Counter = Counter()
+        unsupported_paths: dict[str, set[str]] = defaultdict(set)
         lockfile_count = 0
         for source in lockfiles:
             lockfile_count += 1
             try:
                 packages = parse_lockfile(
-                    PurePosixPath(source.path).name, source.read(),
+                    lockfile_key(source.path) or PurePosixPath(source.path).name, source.read(),
                     max_entries=MAX_LOCKFILE_PACKAGE_ENTRIES,
                 )
             except (SourceBudgetExceeded, LockfileEntryBudgetExceeded, OSError, ValueError,
@@ -244,6 +248,11 @@ class OnlineVulnerabilityLookup:
                 # Defense in depth: only plain registry versions leave the machine or reach
                 # the response cache; source specifiers can hold credentials and paths.
                 if not _PLAIN_VERSION.match(package.version):
+                    continue
+                if package.ecosystem not in OSV_ECOSYSTEMS:
+                    unsupported[package.ecosystem] += 1
+                    if len(unsupported_paths[package.ecosystem]) < _MAX_EVIDENCE_LOCKFILES:
+                        unsupported_paths[package.ecosystem].add(source.path)
                     continue
                 paths = paths_by_package[PackageQuery(package.ecosystem, package.name, package.version)]
                 if source.path not in paths:
@@ -262,6 +271,7 @@ class OnlineVulnerabilityLookup:
             "packages_queried": 0,
             "packages_failed": 0,
             "packages_not_queried": len(over_limit),
+            "packages_unsupported": dict(sorted(unsupported.items())),
             "vulnerable_packages": 0,
             "advisories": 0,
             "advisory_details_unavailable": 0,
@@ -394,6 +404,17 @@ class OnlineVulnerabilityLookup:
             findings.append(_coverage_finding(
                 "Online vulnerability lookup limit reached", message + ".",
                 sorted({path for item in over_limit[:1000] for path in paths_by_package[item]})[:_MAX_EVIDENCE_LOCKFILES],
+            ))
+        if unsupported:
+            message = (
+                "OSV.dev publishes no advisories for " + ", ".join(
+                    f"{ecosystem} ({count:,} package(s))" for ecosystem, count in sorted(unsupported.items()))
+                + "; these packages were not checked"
+            )
+            diagnostics.append(message)
+            findings.append(_coverage_finding(
+                "Packages of ecosystems OSV.dev does not cover", message + ".",
+                sorted({path for paths in unsupported_paths.values() for path in paths})[:_MAX_EVIDENCE_LOCKFILES],
             ))
         if parse_failures:
             message = (

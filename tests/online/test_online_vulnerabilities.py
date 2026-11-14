@@ -347,6 +347,22 @@ def test_unreadable_lockfiles_are_reported(tmp_path: Path):
     assert result.diagnostics
 
 
+def test_ecosystems_osv_does_not_cover_are_not_sent_and_are_reported(tmp_path: Path):
+    podfile = "PODS:\n  - Alamofire (5.8.1)\n\nCOCOAPODS: 1.14.3\n"
+    lock = json.dumps({"packages": {"": {"name": "web"}, "node_modules/lodash": {"version": "4.17.20"}}})
+    with RunningService(_service()) as running:
+        result = OnlineVulnerabilityLookup(_options(running, tmp_path)).run([
+            LockfileSource("ios/Podfile.lock", lambda: podfile),
+            LockfileSource("web/package-lock.json", lambda: lock),
+        ])
+        sent = json.dumps(list(running.service.requests))
+    assert "Alamofire" not in sent and "lodash" in sent
+    assert result.status["packages_unsupported"] == {"CocoaPods": 1}
+    gap = next(item for item in result.findings if item.title == "Packages of ecosystems OSV.dev does not cover")
+    assert gap.confidence == "UNKNOWN" and gap.evidence == ["ios/Podfile.lock"]
+    assert "CocoaPods (1 package(s))" in gap.detail
+
+
 def test_lookup_without_lockfiles_is_not_applicable(tmp_path: Path):
     with RunningService(_service()) as running:
         result = OnlineVulnerabilityLookup(_options(running, tmp_path)).run([])

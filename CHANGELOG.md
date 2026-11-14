@@ -228,6 +228,16 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: seventeen more lockfile formats
+- CocoaPods `Podfile.lock`, Gradle dependency locks, Conan 1 and 2 `conan.lock`, vcpkg's installed-port
+  database, `bun.lock`, `deno.lock` (npm and JSR), `renv.lock` (CRAN and Bioconductor), Julia manifests,
+  `cabal.project.freeze`, `stack.yaml.lock`, `rebar.lock`, Carton's `cpanfile.snapshot`, Crystal
+  `shard.lock`, `dub.selections.json`, NuGet `packages.config`, PEP 751 `pylock.toml` and Carthage's
+  `Cartfile.resolved`: 33 formats in all, with their local, outside-registry and registry-host records.
+- A lockfile can hold several ecosystems; the local advisory check reports each uncovered ecosystem.
+- `--vuln-online` sends only the ecosystems OSV.dev publishes advisories for and reports the others
+  (CocoaPods, vcpkg, JSR, Julia, CPAN, Crystal, DUB, Carthage) as not checked.
+
 ### Fixed: URL user names in source excerpts
 - The source lines quoted as evidence of secret and data-exposure findings kept a URL's user name
   (`https://user:[REDACTED]@host`), and a URL whose user name is the token (`https://<token>@host`) was not

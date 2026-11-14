@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import functools
 import sqlite3
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,10 @@ from .lockfile_parsers import (
     LOCKFILE_NAMES,
     MAX_LOCKFILE_BYTES,
     MAX_LOCKFILE_PACKAGE_ENTRIES,
+    OSV_ECOSYSTEMS,
     LockfileEntryBudgetExceeded,
     ResolvedPackage,
+    lockfile_key,
     normalize_version,
     parse_lockfile,
 )
@@ -338,7 +341,7 @@ class LocalVulnerabilityAnalyzer(Analyzer):
         return (
             record.error is None
             and record.content_skipped_reason is None
-            and Path(record.path).name.lower() in _LOCK_NAMES
+            and lockfile_key(record.path) is not None
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
@@ -364,7 +367,8 @@ class LocalVulnerabilityAnalyzer(Analyzer):
                 path, _MAX_LOCKFILE_BYTES, expected_identity=record.analysis_identity,
             )
             packages = parse_lockfile(
-                Path(record.path).name, source, max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES,
+                lockfile_key(record.path) or Path(record.path).name, source,
+                max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES,
             )
         except (SourceBudgetExceeded, LockfileEntryBudgetExceeded) as exc:
             return [Finding(
@@ -384,20 +388,24 @@ class LocalVulnerabilityAnalyzer(Analyzer):
         findings = []
         try:
             with VulnerabilityDatabase(self.database_path, read_only=True) as database:
-                ecosystem = packages[0].ecosystem if packages else None
-                if ecosystem is not None and not database.covers(ecosystem):
-                    # An npm-only snapshot cannot clear a PyPI lockfile: no match is no evidence.
-                    return [Finding(
+                counts = Counter(package.ecosystem for package in packages)
+                # An npm-only snapshot cannot clear a PyPI lockfile: no match is no evidence. One
+                # lockfile can hold several ecosystems (a Deno lockfile's npm and JSR packages).
+                uncovered = {ecosystem for ecosystem in counts if not database.covers(ecosystem)}
+                for ecosystem in sorted(uncovered):
+                    findings.append(Finding(
                         "vulnerabilities",
                         f"Ecosystem not covered by the local advisory snapshot: {record.path}",
                         f"The local advisory database holds no {ecosystem} advisories, so the "
-                        f"{len(packages):,} {ecosystem} packages of this lockfile were not checked. "
-                        "Import an OSV snapshot that includes this ecosystem.",
+                        f"{counts[ecosystem]:,} {ecosystem} packages of this lockfile were not checked. "
+                        + ("Import an OSV snapshot that includes this ecosystem." if ecosystem in OSV_ECOSYSTEMS
+                           else f"OSV publishes no {ecosystem} advisories."),
                         confidence="UNKNOWN", evidence=[record.path, f"ecosystem: {ecosystem}"],
                         analyzer=self.name, severity="LOW",
-                    )]
+                    ))
                 for package in packages:
-                    findings.extend(self._package_findings(database, record, package))
+                    if package.ecosystem not in uncovered:
+                        findings.extend(self._package_findings(database, record, package))
         except (OSError, ValueError, sqlite3.Error) as exc:
             return [Finding(
                 "vulnerabilities", "Local advisory database unavailable",

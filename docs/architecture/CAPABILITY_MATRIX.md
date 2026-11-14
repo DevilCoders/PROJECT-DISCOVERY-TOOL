@@ -38,7 +38,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Clojure | source | optional parser | — | clojure | tree-sitter-polyglot | 4 |
 | CMake | build | optional parser | — | cmake | secret-patterns, tree-sitter-polyglot | 2 |
 | COBOL | source | optional parser | — | cobol | tree-sitter-polyglot | 3 |
-| Crystal | source | optional parser | — | crystal | tree-sitter-polyglot | 1 |
+| Crystal | source | optional parser | — | crystal | dependency-lockfiles, tree-sitter-polyglot | 1 |
 | CSS | stylesheet | optional parser | — | css | secret-patterns, tree-sitter-polyglot | 1 |
 | CUDA | gpu | structure | structural lexer, refined by Tree-sitter `cuda` | cuda | code-index, concurrency, dataflow, performance-hotspots, resource-management, tree-sitter-polyglot | 5 |
 | D | source | optional parser | — | d | tree-sitter-polyglot | 1 |
@@ -75,8 +75,8 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Intel HEX | firmware | inventory | — | — | — | 2 |
 | Java | source | structure | structural lexer, refined by Tree-sitter `java` | java | api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 16 |
 | JavaScript | source | structure | structural lexer, refined by Tree-sitter `javascript` | javascript | accessibility-markup, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 40 |
-| JSON | data | optional parser | — | json | ai-ml-intelligence, api-protocols, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 65 |
-| Julia | source | optional parser | — | julia | tree-sitter-polyglot | 5 |
+| JSON | data | optional parser | — | json | ai-ml-intelligence, api-protocols, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 66 |
+| Julia | source | optional parser | — | julia | dependency-lockfiles, tree-sitter-polyglot | 5 |
 | Jupyter Notebook | notebook | inventory | — | — | ai-ml-intelligence, secret-patterns | 1 |
 | Kconfig | configuration | inventory | — | — | secret-patterns | 1 |
 | Kotlin | source | structure | structural lexer, refined by Tree-sitter `kotlin` | kotlin | api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, mobile-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 10 |
@@ -100,13 +100,13 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | OpenCL | gpu | structure | structural lexer | — | code-index, concurrency, dataflow, performance-hotspots, resource-management | 0 |
 | Pascal | source | optional parser | — | pascal | tree-sitter-polyglot | 1 |
 | PDF | document | inventory | — | — | — | 4 |
-| Perl | source | optional parser | — | perl | tree-sitter-polyglot | 3 |
+| Perl | source | optional parser | — | perl | tree-sitter-polyglot | 4 |
 | PHP | source | structure | structural lexer, refined by Tree-sitter `php` | php | api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot | 11 |
 | PL/SQL | source | inventory | — | — | — | 0 |
 | PowerShell | source | optional parser | — | powershell | tree-sitter-polyglot | 3 |
 | Prisma | schema | inventory | — | — | prisma-schema | 2 |
 | Protocol Buffers | schema | optional parser | — | proto | api-rpc, tree-sitter-polyglot | 3 |
-| Python | source | semantic | syntax tree | — | ai-ml-intelligence, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 75 |
+| Python | source | semantic | syntax tree | — | ai-ml-intelligence, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, python-ast, resource-management, ros-intelligence, type-systems | 76 |
 | R | source | optional parser | — | r | tree-sitter-polyglot | 2 |
 | ReasonML | source | inventory | — | — | — | 0 |
 | Ren'Py | game_source | inventory | — | — | game-engine-intelligence | 1 |
@@ -127,9 +127,9 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | Svelte | source | structure | structural lexer | — | accessibility-markup, code-index, concurrency, dataflow, frontend, performance-hotspots, resource-management, type-systems | 1 |
 | Swift | source | structure | structural lexer, refined by Tree-sitter `swift` | swift | api-clients, api-graphql, api-rpc, code-index, concurrency, mobile-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 8 |
 | SystemVerilog | source | optional parser | — | systemverilog | hdl, tree-sitter-polyglot | 2 |
-| Text | documentation | inventory | — | — | secret-patterns | 48 |
+| Text | documentation | inventory | — | — | secret-patterns | 49 |
 | Thrift | schema | inventory | — | — | api-rpc | 1 |
-| TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 12 |
+| TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 13 |
 | TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 26 |
 | UF2 Firmware | firmware | inventory | — | — | — | 2 |
 | Unity Asset YAML | game_source | inventory | — | — | — | 0 |

@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
-from ..analyzers.dependencies.lockfile_parsers import LOCKFILE_NAMES, MAX_LOCKFILE_BYTES
+from ..analyzers.dependencies.lockfile_parsers import MAX_LOCKFILE_BYTES, lockfile_key
 from ..catalog.hosting import classify_host
 from ..catalog.languages import detect_language
 from ..core.source_utils import prefetched_content
@@ -538,7 +538,7 @@ class NoDownloadSource:
                 if record.extension in {".py", ".pyi"} and len(content) <= MAX_GRAPH_AST_FILE_BYTES:
                     self.python_imports[record.path] = parse_python_imports(self.virtual_root, record)
             outcome.facts = facts or None
-            if PurePosixPath(record.path).name.lower() in LOCKFILE_NAMES and len(content) <= MAX_LOCKFILE_BYTES:
+            if lockfile_key(record.path) is not None and len(content) <= MAX_LOCKFILE_BYTES:
                 with self._lock:
                     if self._kept_lockfile_bytes + len(content) <= MAX_KEPT_LOCKFILE_BYTES:
                         self._kept_lockfile_bytes += len(content)

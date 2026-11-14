@@ -14,6 +14,7 @@ from .lockfile_parsers import (
     MAX_LOCKFILE_BYTES,
     MAX_LOCKFILE_PACKAGE_ENTRIES,
     LockfileEntryBudgetExceeded,
+    lockfile_key,
     parse_lockfile,
 )
 
@@ -43,7 +44,7 @@ class LockfileAnalyzer(Analyzer):
         return (
             record.error is None
             and record.content_skipped_reason is None
-            and Path(record.path).name.lower() in _LOCK_NAMES
+            and lockfile_key(record.path) is not None
         )
 
     def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
@@ -62,7 +63,8 @@ class LockfileAnalyzer(Analyzer):
                 expected_identity=record.analysis_identity,
             )
             packages = parse_lockfile(
-                Path(record.path).name, content, max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES,
+                lockfile_key(record.path) or Path(record.path).name, content,
+                max_entries=_MAX_LOCKFILE_PACKAGE_ENTRIES,
             )
         except (SourceBudgetExceeded, LockfileEntryBudgetExceeded) as exc:
             return [Finding(
@@ -81,13 +83,13 @@ class LockfileAnalyzer(Analyzer):
                 severity="LOW",
             )]
 
-        ecosystem = LOCKFILE_ECOSYSTEMS[Path(record.path).name.lower()]
+        ecosystem = LOCKFILE_ECOSYSTEMS[lockfile_key(record.path) or Path(record.path).name.lower()]
         registries = getattr(packages, "registries", {})
         for host, count in list(registries.items())[:100]:
             # Where the packages came from, for the code index's provenance graph.
             code_facts.emit_fact("package_registry", host, ecosystem=ecosystem, packages=count)
         for item in packages[:MAX_RESOLVED_FACTS]:
-            code_facts.emit_fact("resolved_package", item.name, version=item.version, ecosystem=ecosystem)
+            code_facts.emit_fact("resolved_package", item.name, version=item.version, ecosystem=item.ecosystem)
         if len(packages) > MAX_RESOLVED_FACTS:
             code_facts.emit_fact("resolved_packages_truncated", ecosystem, omitted=len(packages) - MAX_RESOLVED_FACTS)
         omitted = max(0, len(packages) - _MAX_INVENTORY_EVIDENCE)
