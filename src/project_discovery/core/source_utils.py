@@ -137,7 +137,23 @@ _IDENTITY_ASSIGNMENT = re.compile(
     )
     + ASSIGNMENT_OPERATOR + ")" + _ASSIGNED_VALUE
 )
-_CREDENTIAL_URL = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]{0,31}://[^:/@\s]+:)[^@\s/]+(@)")
+# A URL in a line of text, to the first space, quote or angle bracket.
+_URL_IN_TEXT = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,31}+://[^\s\"'<>`]{1,4096}+")
+
+
+def _redact_url(match: re.Match) -> str:
+    """A URL without its userinfo (a user name can itself be a token), query and fragment;
+    the scheme, host, port and path stay, so the line still says where it points."""
+    scheme, _, rest = match.group(0).partition("://")
+    ends = [index for index in (rest.find("/"), rest.find("?"), rest.find("#")) if index >= 0]
+    authority, tail = (rest[:min(ends)], rest[min(ends):]) if ends else (rest, "")
+    if "@" in authority:
+        authority = "[REDACTED]@" + authority.rpartition("@")[2]
+    marks = [index for index in (tail.find("?"), tail.find("#")) if index >= 0]
+    path = tail[:min(marks)] if marks else tail
+    query = "?[REDACTED]" if "?" in tail else ""
+    fragment = "#[REDACTED]" if "#" in tail else ""
+    return f"{scheme}://{authority}{path}{query}{fragment}"
 # A quoted or subscripted header key ("Authorization": "Bearer ...", headers['authorization']
 # = ...) as well as Authorization: Basic ...
 _AUTHORIZATION_HEADER = re.compile(
@@ -178,12 +194,13 @@ def neutralize_controls(text: str) -> str:
 def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     """Return a bounded source line with credentials and direct identifiers removed."""
     value = source_line.rstrip("\r\n")
+    # URLs first: their userinfo, query and fragment go whatever their keys are named.
+    value = _URL_IN_TEXT.sub(_redact_url, value)
     value = _PRIVATE_KEY_BODY.sub("[REDACTED PRIVATE KEY MATERIAL]", value)
     value = _PRIVATE_KEY_MATERIAL_LINE.sub(r"\1[REDACTED PRIVATE KEY MATERIAL]\2", value)
     value = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", value)
     value = _SECRET_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _IDENTITY_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
-    value = _CREDENTIAL_URL.sub(r"\1[REDACTED]\2", value)
     # The shared registry guarantees every detected format is also redacted.
     value = ANY_TOKEN.sub("[REDACTED_TOKEN]", value)
     value = _TOKEN.sub("[REDACTED_TOKEN]", value)

@@ -228,6 +228,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Fixed: URL user names in source excerpts
+- The source lines quoted as evidence of secret and data-exposure findings kept a URL's user name
+  (`https://user:[REDACTED]@host`), and a URL whose user name is the token (`https://<token>@host`) was not
+  redacted at all. A URL in an excerpt now loses its whole user information, its query and its fragment,
+  whatever their keys are named; plugin findings go through the same redaction.
+- `tests/test_redaction.py` seeds canary credentials, queries and fragments into every kind of file PDT
+  reads URLs from and checks that none reaches any report format, the terminal, the scan's SQLite stores,
+  comparison reports, plugin findings, remote-target errors or batch summaries.
+
 ### Added: the provenance graph
 - The code index's `provenance` pass correlates remotes, submodules, package registries, CI workflows (their
   actions, publish and deploy steps), container image registries and deployment targets into one graph in

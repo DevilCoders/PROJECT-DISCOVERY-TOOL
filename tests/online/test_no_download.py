@@ -10,6 +10,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -138,6 +139,12 @@ def test_no_download_scan_end_to_end_for_each_provider(provider, tmp_path: Path,
     # Nothing about the repository's content or the token reaches the reports.
     everything = "\n".join(path.read_text(encoding="utf-8") for path in output.glob("discovery-report.*"))
     assert TOKEN not in everything and MARKER.decode() not in everything
+    # Nor the scan's stores (inventory, findings, code facts, caches) in the output directory.
+    for database in (output / ".pdt-cache").glob("*.sqlite3"):
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+            for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+                for row in db.execute(f'SELECT * FROM "{table}"'):
+                    assert not any(isinstance(value, str) and TOKEN in value for value in row), (database.name, table)
     markdown = (output / "discovery-report.md").read_text(encoding="utf-8")
     assert "read through the provider API, not downloaded" in markdown
     for request in service.requests:
