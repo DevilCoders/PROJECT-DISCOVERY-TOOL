@@ -24,19 +24,36 @@ _RESERVED_EMAIL_TLDS = frozenset({"example", "test", "invalid", "localhost"})
 # character or a camelCase boundary; the right edge ends the identifier.
 _L = r"(?:(?<![A-Za-z0-9])|(?<=[a-z0-9])(?-i:(?=[A-Z])))"
 _R = r"(?![A-Za-z0-9_])"
+# Words join with nothing, "_", "-" or "." (first_name, firstName, first-name in HTML forms
+# and kebab-case keys, first.name in Java properties); _R ends the identifier, so a further
+# word (first_name_label) is another field.
+_J = r"[_.-]?"
 _PII_FIELDS = {
-    "first_name": re.compile(rf"(?i){_L}(?:first_?name|given_?name|forename){_R}"),
-    "middle_name": re.compile(rf"(?i){_L}middle_?name{_R}"),
-    "last_name": re.compile(rf"(?i){_L}(?:last_?name|surname|family_?name){_R}"),
-    "username": re.compile(rf"(?i){_L}(?:user_?name|login_?name|account_?name){_R}"),
-    "email": re.compile(rf"(?i){_L}(?:e-?mail|email_?address|mail_?address){_R}"),
+    "first_name": re.compile(rf"(?i){_L}(?:first{_J}name|given{_J}name|forename|fore{_J}name){_R}"),
+    "middle_name": re.compile(rf"(?i){_L}(?:middle{_J}name|middle{_J}initial){_R}"),
+    "last_name": re.compile(rf"(?i){_L}(?:last{_J}name|surname|family{_J}name|maiden{_J}name){_R}"),
+    "full_name": re.compile(rf"(?i){_L}(?:full{_J}name|legal{_J}name){_R}"),
+    "username": re.compile(rf"(?i){_L}(?:user{_J}name|login{_J}name|account{_J}name|screen{_J}name){_R}"),
+    "email": re.compile(rf"(?i){_L}(?:e-?mail|email{_J}address|mail{_J}address){_R}"),
     # A bare "mobile" names a platform far more often than a phone number.
     "phone": re.compile(
-        rf"(?i){_L}(?:phone(?:_?(?:number|no))?|telephone|mobile_?(?:phone|number|no)|cell_?(?:phone|number)){_R}"
+        rf"(?i){_L}(?:phone(?:{_J}(?:number|no))?|telephone|mobile{_J}(?:phone|number|no)|cell{_J}(?:phone|number)"
+        rf"|msisdn){_R}"
     ),
-    "address": re.compile(rf"(?i){_L}(?:street_?address|postal_?address|home_?address){_R}"),
-    "date_of_birth": re.compile(rf"(?i){_L}(?:date_?of_?birth|birth_?date|dob){_R}"),
-    "government_id": re.compile(rf"(?i){_L}(?:ssn|social_?security|passport_?number|national_?id){_R}"),
+    # A bare "address" is as often an IP or memory address.
+    "address": re.compile(
+        rf"(?i){_L}(?:(?:street|postal|home|mailing|billing|shipping|residential){_J}address|address{_J}line{_J}?[12]"
+        rf"|postal{_J}code|zip{_J}code|post{_J}code){_R}"
+    ),
+    "date_of_birth": re.compile(rf"(?i){_L}(?:date{_J}of{_J}birth|birth{_J}date|dob|birthday){_R}"),
+    "government_id": re.compile(
+        rf"(?i){_L}(?:ssn|social{_J}security(?:{_J}number)?|passport{_J}(?:number|no)|national{_J}id|tax{_J}id"
+        rf"|driver'?s?{_J}licen[cs]e(?:{_J}(?:number|no))?|national{_J}insurance{_J}number){_R}"
+    ),
+    # Account identifiers that point at one person: bank accounts, IBANs, account numbers.
+    "account_id": re.compile(
+        rf"(?i){_L}(?:account{_J}(?:id|number|no)|bank{_J}account(?:{_J}(?:number|no))?|iban|customer{_J}number){_R}"
+    ),
 }
 # One pass per line: a named-group alternation reports which PII categories appear.
 _PII_ANY = re.compile(

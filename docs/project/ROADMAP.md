@@ -297,7 +297,10 @@ The baseline is not production-ready:
   - YAML block scalars, triple-quoted literals and multiline quoted values.
 
   The redactor had let XML element values, key/value attribute pairs and triple-quoted literals through; it now hides them.
-- [ ] Extend PII field/value detectors for firstname, first_name, givenName, middleName, lastname, surname, username, user_name, email, phone, address, account ID and related schemas in 40+ language syntaxes and data formats.
+- [x] Extend PII field/value detectors for firstname, first_name, givenName, middleName, lastname, surname, username, user_name, email, phone, address, account ID and related schemas in 40+ language syntaxes and data formats ([SECURITY_ANALYZERS.md](../analyzers/SECURITY_ANALYZERS.md)):
+  - Names are matched in snake, camel, Pascal, kebab and dotted forms.
+  - New categories and names: full name, postal and zip codes, more address kinds, birthdays, tax IDs, driver's licences and national insurance numbers, and account identifiers (account ID or number, bank account, IBAN, customer number).
+  - 44 syntaxes and data formats are tested, and so are the names that must not count.
 - [x] Distinguish key-name evidence, placeholder/example values and likely non-placeholder values. Never label a field name alone as an exposed credential.
 - [ ] Add optional local keyed HMAC fingerprints to correlate repeated values without exposing reversible data; store no raw match in cache.
 - [ ] Add strict redaction tests for JSON/HTML/Markdown/terminal/exception logs and archive member findings.

@@ -228,6 +228,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: personal-data field names in more forms and categories
+- Field names match with `-` and `.` between words too (`first-name` in HTML forms and kebab-case
+  keys, `first.name` in properties), alongside snake_case, camelCase and PascalCase.
+- New: a `full_name` category, more address kinds and postal codes, birthdays, tax IDs, driver's
+  licences, national insurance numbers and MSISDNs, and an `account_id` category (account ID or
+  number, bank account, IBAN, customer number).
+- Tests cover 44 languages, schemas, markup and configuration formats, and the names that must
+  not count (`ip_address`, `first_name_label`, a bare `mobile`).
+
 ### Added: credential assignments in every configuration syntax
 - The secret scanner finds passwords and secrets in more syntaxes: XML elements, `.NET`
   key/value pairs (`<add key="DbPassword" value="…"/>`), HCL variable defaults, YAML block
