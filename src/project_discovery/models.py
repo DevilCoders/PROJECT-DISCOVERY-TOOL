@@ -41,7 +41,9 @@ from typing import Any, Literal, Sequence
 # entries and kinds) and provider_source to the remote source (provider-map, built-in or host-name).
 # 1.23 added metrics.vulnerability_intelligence.vex (the --vex documents, statement count by
 # status and SHA-256).
-REPORT_SCHEMA_VERSION = "1.23"
+# 1.24 added metrics.vulnerability_intelligence.triage (the --triage files, decisions, expired
+# and unused counts, the date they were judged on and SHA-256).
+REPORT_SCHEMA_VERSION = "1.24"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

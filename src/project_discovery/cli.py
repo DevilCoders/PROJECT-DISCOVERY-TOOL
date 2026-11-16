@@ -122,7 +122,8 @@ from .reporting.writers import (
     gpu_status_text, tree_mode_summary, type_summary,
     write_remote_batch_summary, write_reports,
 )
-from .vulnerabilities.database import VulnerabilityDatabase, default_database_path
+from .vulnerabilities.database import VulnerabilityDatabase, default_database_path, read_only_uri
+from .vulnerabilities.triage import TriageDecisions, load_triage
 from .vulnerabilities.vex import VexDocuments, load_vex
 
 
@@ -419,8 +420,10 @@ def _describe_analysis_settings(settings: dict | None) -> dict[str, str]:
     """The finding-shaping settings as the command-line spellings that produce them."""
     digest = (settings or {}).get("provider_map")
     vex = (settings or {}).get("vex")
+    triage = (settings or {}).get("triage")
     return {"--provider-map": f"a map with SHA-256 {digest[:12]}" if digest else "none",
-            "--vex": f"documents with SHA-256 {vex[:12]}" if vex else "none"}
+            "--vex": f"documents with SHA-256 {vex[:12]}" if vex else "none",
+            "--triage": f"decisions with SHA-256 {triage[:12]} (files and date)" if triage else "none"}
 
 
 def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict, settings: dict | None = None) -> dict | None:
@@ -597,9 +600,36 @@ def _lockfile_sources(root: Path, records, skipped: list[str], memory_source=Non
         )
 
 
+def _unused_triage_decisions(inventory_path: Path, triage: TriageDecisions) -> list:
+    """The triage decisions no vulnerability finding matched (the analyzers and the online
+    lookup record each match as a ``triage_match`` code fact)."""
+    connection = sqlite3.connect(read_only_uri(inventory_path), uri=True)
+    try:
+        matched = {name for (name,) in connection.execute(
+            "SELECT DISTINCT name FROM code_facts WHERE kind = 'triage_match'")}
+    except sqlite3.Error:
+        matched = set()
+    finally:
+        connection.close()
+    return [decision for decision in triage.decisions if decision.key not in matched]
+
+
+def _unused_triage_finding(unused: list) -> Finding:
+    return Finding(
+        "vulnerabilities", f"Triage decisions that matched no finding: {len(unused):,}",
+        f"{len(unused):,} decision(s) in the triage file(s) matched no vulnerability finding of this scan. The "
+        "advisory may no longer affect the resolved version, the package may be gone, or the decision may name "
+        "it differently. Remove or correct them so the file records only live decisions.",
+        confidence="CONFIRMED", analyzer="vulnerability-triage", severity="INFO",
+        evidence=[f"{decision.key}: {decision.advisory}"
+                  + (f" {decision.package}" if decision.package else "")
+                  + (f"@{decision.version}" if decision.version else "") for decision in unused[:50]],
+    )
+
+
 def _run_online_vulnerability_lookup(
     console: Console, options: OnlineVulnerabilityOptions, root: Path, records,
-    finding_store, *, inventory_only: bool, memory_source=None, vex=(),
+    finding_store, *, inventory_only: bool, memory_source=None, vex=(), triage=None,
 ) -> dict:
     """Run the opt-in OSV.dev lookup in the coordinator and persist its findings."""
     if inventory_only:
@@ -611,7 +641,7 @@ def _run_online_vulnerability_lookup(
         + " (sends package ecosystem, name and version only)", "cyan",
     )
     skipped: list[str] = []
-    result = OnlineVulnerabilityLookup(options, vex).run(
+    result = OnlineVulnerabilityLookup(options, vex, triage).run(
         _lockfile_sources(root, records, skipped, memory_source),
     )
     finding_store.extend_findings(result.findings)
@@ -683,6 +713,7 @@ def run_scan(
     gpu_min_mb: int = GPU_DEFAULT_THRESHOLD_BYTES // (1024 * 1024),
     provider_map: ProviderMap | None = None,
     vex: VexDocuments | None = None,
+    triage: TriageDecisions | None = None,
 ) -> int:
     # The hosting-provider fingerprints this scan classifies hosts with (--provider-map; None:
     # none), in this process and in the analyzer workers, which receive the same map.
@@ -692,6 +723,8 @@ def run_scan(
     if vex is not None:
         # VEX statements shape the vulnerability findings: --resume must not mix two sets.
         analysis_settings["vex"] = vex.sha256
+    if triage is not None:
+        analysis_settings["triage"] = triage.sha256  # the files and the date (expiry depends on it)
     vex_statements = vex.statements if vex is not None else ()
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -776,6 +809,8 @@ def run_scan(
         )
         if vex is not None:
             vulnerability_db_status["vex"] = vex.describe()
+        if triage is not None:
+            vulnerability_db_status["triage"] = triage.describe()
         if online_vulnerabilities is not None and online_vulnerabilities.cache_path is not None:
             cache_location = online_vulnerabilities.cache_path.expanduser().resolve()
             if cache_location == root or root in cache_location.parents:
@@ -920,7 +955,7 @@ def run_scan(
                 memory_source.staged_plugins = sorted(plugin_names)
         try:
             if vulnerability_db is not None:
-                analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db, vex_statements))
+                analyzers.append(LocalVulnerabilityAnalyzer(vulnerability_db, vex_statements, triage))
             # The worker pool serves both per-file analysis and import-graph parsing.
             engine = AnalysisExecutor(
                 executor, worker_count, analyzers,
@@ -1210,6 +1245,7 @@ def run_scan(
                     vulnerability_db_status["online"] = _run_online_vulnerability_lookup(
                         console, online_vulnerabilities, root, records, finding_store,
                         inventory_only=inventory_only, memory_source=memory_source, vex=vex_statements,
+                        triage=triage,
                     )
                     timer.lap("online_vulnerabilities")
                 if inventory_only:
@@ -1240,6 +1276,11 @@ def run_scan(
                     phases.step("correlation", "code_index")
                     code_index, index_findings = analyze_code_index(inventory_path, records)
                     finding_store.extend_findings(index_findings)
+                    if triage is not None and triage.decisions:
+                        unused = _unused_triage_decisions(inventory_path, triage)
+                        vulnerability_db_status["triage"]["unused"] = len(unused)
+                        if unused:
+                            finding_store.append_finding(_unused_triage_finding(unused))
                 timer.lap("code_index")
                 phases.finish("correlation")
         except BaseException:
@@ -2087,6 +2128,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use a local OSV advisory SQLite database; scanning performs no network access",
     )
     scan.add_argument(
+        "--triage", type=Path, action="append", default=[], metavar="FILE",
+        help="Apply a TOML triage file of decisions (accepted, false_positive, mitigated), each with "
+             "its reason and, for accepted risks, an expiry date (repeatable): active decisions turn "
+             "matching findings into INFO findings that say why. Needs --vuln-db or --vuln-online",
+    )
+    scan.add_argument(
         "--vex", type=Path, action="append", default=[], metavar="FILE",
         help="Apply an OpenVEX, CycloneDX VEX or CSAF VEX document to the vulnerability findings "
              "(repeatable): not_affected and fixed statements turn matching findings into INFO "
@@ -2550,6 +2597,14 @@ def main() -> None:
                     vex_documents = load_vex(args.vex)
                 except ValueError as exc:
                     parser.error(str(exc))
+            triage_decisions = None
+            if args.triage:
+                if args.vuln_db is None and not args.vuln_online:
+                    parser.error("--triage needs --vuln-db or --vuln-online: its decisions apply to vulnerability findings")
+                try:
+                    triage_decisions = load_triage(args.triage)
+                except ValueError as exc:
+                    parser.error(str(exc))
             no_download_options = None
             api_options = (
                 ("--api-provider", args.api_provider != "auto"), ("--api-url", args.api_url is not None),
@@ -2651,6 +2706,7 @@ def main() -> None:
                 "ignores": set(args.exclude_dir),
                 "vulnerability_db": args.vuln_db,
                 "vex": vex_documents,
+                "triage": triage_decisions,
                 "jobs": args.jobs,
                 "fail_on": args.fail_on,
                 "strict": args.strict,
@@ -2719,6 +2775,7 @@ def main() -> None:
                 online_vulnerabilities=online_vulnerabilities,
                 provider_map=provider_map,
                 vex=vex_documents,
+                triage=triage_decisions,
             ))
 
         if not formats or formats - {"json", "markdown"}:

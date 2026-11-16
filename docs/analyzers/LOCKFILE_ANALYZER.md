@@ -68,6 +68,28 @@ An advisory that records no fixed version is named, not guessed at. Advisories a
 
 A lockfile with two or more vulnerable packages also gets an `INFO` "Remediation plan" finding. It lists each upgrade with the advisories it fixes and their highest severity (`upgrade: lodash 4.17.20 -> 4.17.23 (fixes GHSA-…; HIGH)`). Transitive packages are grouped under the direct dependency that brings them in (`upgrade through express@4.17.1: qs 6.7.0 -> 6.7.3`), and packages without a recorded fix are listed last.
 
+## Triage
+
+`pdt scan --triage triage.toml` applies the team's own decisions about vulnerability findings, kept in the repository or elsewhere and reviewed like code:
+
+```toml
+[[decision]]
+advisory = "CVE-2021-23337"           # an advisory ID or one of its aliases
+package = "lodash"                    # optional, as are ecosystem, version and lockfile
+status = "accepted"                   # accepted, false_positive or mitigated
+reason = "Templates are constants; no request data reaches _.template."
+expires = 2027-01-31                  # required for accepted risks
+reviewer = "appsec"                   # optional
+```
+
+The most specific decision applies: a lockfile first, then a package and version, then a package, then the advisory alone.
+
+- **Active decision.** It turns the finding into an INFO finding titled "Accepted risk", "False positive" or "Mitigated". The finding keeps its evidence, adds `triage: accepted until 2027-01-31 (triage.toml#1)` and the reason, and leaves the remediation plan.
+- **Expired decision.** It leaves the finding as it was, with a note that the decision lapsed, so an accepted risk cannot quietly outlive its review date.
+- **Unused decisions.** Decisions that match no finding of the scan are listed in an INFO "Triage decisions that matched no finding" finding.
+
+`metrics.vulnerability_intelligence.triage` records the files, the decision, expired and unused counts, and the date the decisions were judged on. VEX statements (`--vex`) state a product's status as its supplier sees it. Triage decisions record the scanning team's own judgement. Both can be used together; VEX is applied first.
+
 ## Reachability evidence
 
 A version match says nothing about whether the vulnerable code runs. For each package an advisory confirms, locally or through `--vuln-online`, the code index's reachability pass looks for static evidence in the scanned code. It reports one `INFERRED`, `INFO` finding per package, under the `dependency-reachability` analyzer:

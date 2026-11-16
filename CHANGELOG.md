@@ -228,6 +228,16 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: triage files with accepted-risk rationale
+- `pdt scan --triage FILE` reads TOML decisions: an advisory or alias, optionally narrowed to an
+  ecosystem, package, version or lockfile, with a status (`accepted`, `false_positive`,
+  `mitigated`), a required reason, an expiry (required for accepted risks) and a reviewer.
+- An active decision turns matching findings, local and online, into INFO findings with the
+  reason and expiry, and takes them out of the remediation plan. An expired decision leaves the
+  finding as it was and says it lapsed. Decisions that match nothing get a finding of their own.
+- `--resume` refuses other files or another day.
+- Report schema 1.24: `metrics.vulnerability_intelligence.triage`.
+
 ### Added: fixed-version suggestions and remediation plans
 - Each confirmed vulnerability finding names the lowest release that none of the package's known
   advisories affects (`suggested_upgrade`). The search follows each advisory's recorded fixes,

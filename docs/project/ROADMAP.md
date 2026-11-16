@@ -260,9 +260,10 @@ The baseline is not production-ready:
   - It reports whether the scanned code imports the package, whether it calls the functions the advisory names (Go vulndb, RustSec, GitHub `vulnerable_functions`), whether the dependency that brings the package in is imported, or that neither is.
   - Imports are mapped for npm, Pub, Go, crates.io, NuGet, PyPI, Maven, Packagist, RubyGems and Hex.
   - The findings are `INFERRED` and `INFO`, and state that they do not establish exploitability.
-- [ ] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping.
-  - Done, with tests: fixed-version suggestions (the lowest release no known advisory affects) and per-lockfile remediation plans grouped by direct dependency ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#remediation)).
-  - Missing: triage files (allowlists) with accepted-risk rationale and expiry.
+- [x] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping, with tests:
+  - Triage files (`pdt scan --triage`, TOML) record accepted, false-positive and mitigated decisions with a required reason, an expiry for accepted risks, and the reviewer. Expired and unused decisions are reported ([Triage](../analyzers/LOCKFILE_ANALYZER.md#triage)).
+  - Fixed-version suggestions are the lowest release no known advisory affects.
+  - Per-lockfile remediation plans group transitive packages by the direct dependency that brings them in ([Remediation](../analyzers/LOCKFILE_ANALYZER.md#remediation)).
 - [ ] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds.
 - [x] Include advisory snapshot provenance, import timestamp, source identity/hash, ecosystem coverage and freshness warning in reports.
 

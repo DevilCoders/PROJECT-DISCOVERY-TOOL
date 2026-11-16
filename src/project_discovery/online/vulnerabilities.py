@@ -230,10 +230,13 @@ def _placeholder_advisory(identifier: str, query: PackageQuery, summary: str) ->
 class OnlineVulnerabilityLookup:
     """Run one online lookup for a set of lockfiles and build findings and provenance."""
 
-    def __init__(self, options: OnlineVulnerabilityOptions, vex: Sequence[VexStatement] = ()) -> None:
+    def __init__(self, options: OnlineVulnerabilityOptions, vex: Sequence[VexStatement] = (),
+                 triage: Any = None) -> None:
         self.options = options
-        # The operator's VEX statements (pdt scan --vex), applied as offline.
+        # The operator's VEX statements (pdt scan --vex) and triage decisions (--triage),
+        # applied as offline.
         self.vex = tuple(vex)
+        self.triage = triage
 
     def run(self, lockfiles: Iterable[LockfileSource]) -> OnlineLookupResult:
         options = self.options
@@ -385,9 +388,11 @@ class OnlineVulnerabilityLookup:
             status["advisories"] += len(advisories)
             # Every lockfile gets its findings, as offline (the cap is for evidence lists).
             for lockfile in sorted(paths_by_package[query]):
-                item = remediation_item(package, matches, graphs.get(lockfile), vex=self.vex)
+                item = remediation_item(package, matches, graphs.get(lockfile), vex=self.vex, triage=self.triage,
+                                        lockfile=lockfile)
                 if item is not None:
                     plans.setdefault(lockfile, []).append(item)
+                triage_matched: set[str] = set()
                 fact = vulnerable_package_fact(package, matches, graphs.get(lockfile))
                 if fact is not None:
                     facts_by_lockfile.setdefault(lockfile, []).append((
@@ -397,12 +402,16 @@ class OnlineVulnerabilityLookup:
                     lockfile, package, matches,
                     analyzer=ONLINE_ANALYZER_NAME, source_label="OSV.dev advisory", vex=self.vex,
                     graph=graphs.get(lockfile), suggestion=item["suggestion"] if item else None,
+                    triage=self.triage, triage_matches=triage_matched,
                 ):
                     finding.evidence.append(
                         f"source: OSV.dev ({urllib.parse.urlsplit(options.osv_url).hostname}), "
                         f"queried {started_at}"
                     )
                     findings.append(finding)
+                # The decisions that matched, for the report of decisions that match nothing.
+                facts_by_lockfile.setdefault(lockfile, []).extend(
+                    ("triage_match", key, "{}") for key in sorted(triage_matched))
         # One remediation plan per lockfile, from OSV.dev's matches (it returns only the
         # advisories that affect the resolved version, so suggestions are checked against those).
         for lockfile, items in sorted(plans.items()):

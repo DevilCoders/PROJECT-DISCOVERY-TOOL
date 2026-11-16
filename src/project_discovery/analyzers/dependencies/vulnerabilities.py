@@ -15,6 +15,8 @@ from ...models import FileRecord, Finding
 from ...vulnerabilities.database import VulnerabilityDatabase
 from ...vulnerabilities.adapters import cpe_attributes_match, cpe_fields
 from ...vulnerabilities.versions import comparator_for, compare_vendor, compare_versions, go_pseudo_version
+from ...vulnerabilities.triage import STATUSES as TRIAGE_STATUSES
+from ...vulnerabilities.triage import TriageDecisions, triage_decision
 from ...vulnerabilities.vex import CLEARING, VexStatement, vex_statement
 from .dependency_graph import DependencyGraph
 from .remediation import remediation_plan, suggest_upgrade
@@ -282,18 +284,23 @@ def vulnerable_package_fact(
 def remediation_item(
     package: ResolvedPackage, matches: list[tuple[dict[str, Any], bool, str]], graph: DependencyGraph | None,
     *, known: Sequence[dict[str, Any]] | None = None, vex: Sequence[VexStatement] = (),
+    triage: TriageDecisions | None = None, lockfile: str = "",
 ) -> dict[str, Any] | None:
     """A package's line in its lockfile's remediation plan: the advisories confirmed for it
-    (less those a VEX statement clears), their highest severity, the lowest release none of
-    the package's known advisories affects, and the advisories that record no fix."""
+    (less those a VEX statement clears or an active triage decision covers), their highest
+    severity, the lowest release none of the package's known advisories affects, and the
+    advisories that record no fix."""
     cleared: set[str] = set()
     confirmed = []
     for advisory, matched, _ in matches:
         if not matched:
             continue
-        statement = vex_statement(vex, [advisory["id"], *advisory.get("aliases", [])], package.ecosystem,
-                                  package.name, package.version) if vex else None
-        if statement is not None and statement.status in CLEARING:
+        identifiers = [advisory["id"], *advisory.get("aliases", [])]
+        statement = vex_statement(vex, identifiers, package.ecosystem, package.name, package.version) if vex else None
+        decision = triage_decision(triage.decisions, identifiers, package.ecosystem, package.name, package.version,
+                                   lockfile) if triage is not None and triage.decisions else None
+        if (statement is not None and statement.status in CLEARING) or (
+                decision is not None and not decision.expired(triage.today)):
             cleared.add(advisory["id"])
             continue
         confirmed.append(advisory)
@@ -318,6 +325,8 @@ def advisory_findings(
     vex: Sequence[VexStatement] = (),
     graph: DependencyGraph | None = None,
     suggestion: str | None = None,
+    triage: TriageDecisions | None = None,
+    triage_matches: set[str] | None = None,
 ) -> list[Finding]:
     """One finding per group of advisories that describe the same vulnerability.
 
@@ -338,6 +347,7 @@ def advisory_findings(
         _advisory_group_finding(
             lockfile_path, package, [row for item in group for row in rows_by_id[item["id"]]],
             analyzer=analyzer, source_label=source_label, vex=vex, graph=graph, suggestion=suggestion,
+            triage=triage, triage_matches=triage_matches,
         )
         for group in _alias_groups([rows[0][0] for rows in rows_by_id.values()])
     ]
@@ -357,6 +367,8 @@ def _advisory_group_finding(
     vex: Sequence[VexStatement] = (),
     graph: DependencyGraph | None = None,
     suggestion: str | None = None,
+    triage: TriageDecisions | None = None,
+    triage_matches: set[str] | None = None,
 ) -> Finding:
     primary, confirmed, reason = next(
         (item for item in group if item[1]), group[0],
@@ -499,6 +511,33 @@ def _advisory_group_finding(
             recommendation = ("Keep the VEX statement current: review it when this package, its version or the "
                               "code that uses it changes, and remove it once the package is upgraded.")
         detail = note + detail
+    decision = triage_decision(triage.decisions, [*ids, *aliases], package.ecosystem, package.name, package.version,
+                               lockfile_path) if triage is not None and triage.decisions else None
+    if decision is not None:
+        if triage_matches is not None:
+            triage_matches.add(decision.key)
+        label = TRIAGE_STATUSES[decision.status]
+        if statement is not None and statement.status in CLEARING:
+            # VEX comes first and already reports the finding for the record.
+            evidence.append(f"triage: {decision.status} ({decision.key}; the VEX statement already applies)")
+        elif decision.expired(triage.today):
+            evidence.append(f"triage: {decision.status} expired {decision.expires} ({decision.key})")
+            detail = (f"The triage decision {decision.key} ({label.lower()}) expired on {decision.expires}: review "
+                      "it, or upgrade the package. ") + detail
+        else:
+            until = f" until {decision.expires}" if decision.expires else ""
+            evidence.append(f"triage: {decision.status}{until} ({decision.key})")
+            severity = "INFO"
+            title = f"{label}: {title}"
+            detail = (f"Triage decision ({decision.key}): {label.lower()}{until}"
+                      + (f", reviewed by {decision.reviewer}" if decision.reviewer else "") + f". {decision.reason} "
+                      "PDT matched the advisory; the decision records why it is not acted on, so this is reported "
+                      "for the record. ") + detail
+            recommendation = (
+                f"Review the decision before it expires on {decision.expires}, or upgrade the package before then."
+                if decision.expires else
+                "Keep the triage decision current: review it when this package, its version or the code that uses "
+                "it changes, and remove it once the package is upgraded.")
     return Finding(
         "vulnerabilities",
         title,
@@ -525,10 +564,12 @@ class LocalVulnerabilityAnalyzer(Analyzer):
     domains = ("vulnerabilities", "dependency_resolution", "supply_chain")
     languages = tuple(sorted(set(LOCKFILE_ECOSYSTEMS.values())))
 
-    def __init__(self, database_path: Path, vex: Sequence[VexStatement] = ()):
+    def __init__(self, database_path: Path, vex: Sequence[VexStatement] = (), triage: TriageDecisions | None = None):
         self.database_path = database_path.expanduser()
-        # The operator's VEX statements (pdt scan --vex), applied to every finding.
+        # The operator's VEX statements (pdt scan --vex) and triage decisions (--triage),
+        # applied to every finding.
         self.vex = tuple(vex)
+        self.triage = triage
 
     def supports(self, record: FileRecord) -> bool:
         return (
@@ -618,8 +659,15 @@ class LocalVulnerabilityAnalyzer(Analyzer):
         if fact is not None:
             code_facts.emit_fact("vulnerable_package", package.name, **fact)
         # The suggestion must clear every known advisory of the package, not only today's matches.
-        item = remediation_item(package, matches, graph, known=known, vex=self.vex)
+        triage = getattr(self, "triage", None)
+        item = remediation_item(package, matches, graph, known=known, vex=self.vex, triage=triage,
+                                lockfile=record.path)
         if item is not None and plan is not None:
             plan.append(item)
-        return advisory_findings(record.path, package, matches, vex=self.vex, graph=graph,
-                                 suggestion=item["suggestion"] if item else None)
+        matched: set[str] = set()
+        findings = advisory_findings(record.path, package, matches, vex=self.vex, graph=graph,
+                                     suggestion=item["suggestion"] if item else None, triage=triage,
+                                     triage_matches=matched)
+        for key in sorted(matched):
+            code_facts.emit_fact("triage_match", key)  # for the report of decisions that match nothing
+        return findings
