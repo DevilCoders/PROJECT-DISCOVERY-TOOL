@@ -261,6 +261,8 @@ The baseline is not production-ready:
   - Imports are mapped for npm, Pub, Go, crates.io, NuGet, PyPI, Maven, Packagist, RubyGems and Hex.
   - The findings are `INFERRED` and `INFO`, and state that they do not establish exploitability.
 - [ ] Add offline allowlists/triage, accepted-risk rationale, fixed-version suggestions and remediation grouping.
+  - Done, with tests: fixed-version suggestions (the lowest release no known advisory affects) and per-lockfile remediation plans grouped by direct dependency ([LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#remediation)).
+  - Missing: triage files (allowlists) with accepted-risk rationale and expiry.
 - [ ] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds.
 - [x] Include advisory snapshot provenance, import timestamp, source identity/hash, ecosystem coverage and freshness warning in reports.
 

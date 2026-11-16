@@ -31,7 +31,13 @@ from ..analyzers.dependencies.lockfile_parsers import (
     parse_lockfile,
 )
 from ..analyzers.dependencies.lockfile_parsers import lockfile_key, osv_covers
-from ..analyzers.dependencies.vulnerabilities import _affected_version, advisory_findings, vulnerable_package_fact
+from ..analyzers.dependencies.remediation import remediation_plan
+from ..analyzers.dependencies.vulnerabilities import (
+    _affected_version,
+    advisory_findings,
+    remediation_item,
+    vulnerable_package_fact,
+)
 from ..core.source_utils import SourceBudgetExceeded, redact_source_excerpt
 from ..models import Finding
 from ..vulnerabilities.database import osv_record_to_advisories
@@ -239,6 +245,7 @@ class OnlineVulnerabilityLookup:
         # Each lockfile's dependency graph (how a package entered the project), when it records one.
         graphs: dict[str, Any] = {}
         facts_by_lockfile: dict[str, list[tuple[str, str, str]]] = {}
+        plans: dict[str, list[dict[str, Any]]] = {}
         parse_failures: list[tuple[str, str]] = []
         # Packages of ecosystems OSV.dev has no advisories for: never sent, reported as not checked.
         unsupported: Counter = Counter()
@@ -378,6 +385,9 @@ class OnlineVulnerabilityLookup:
             status["advisories"] += len(advisories)
             # Every lockfile gets its findings, as offline (the cap is for evidence lists).
             for lockfile in sorted(paths_by_package[query]):
+                item = remediation_item(package, matches, graphs.get(lockfile), vex=self.vex)
+                if item is not None:
+                    plans.setdefault(lockfile, []).append(item)
                 fact = vulnerable_package_fact(package, matches, graphs.get(lockfile))
                 if fact is not None:
                     facts_by_lockfile.setdefault(lockfile, []).append((
@@ -386,13 +396,19 @@ class OnlineVulnerabilityLookup:
                 for finding in advisory_findings(
                     lockfile, package, matches,
                     analyzer=ONLINE_ANALYZER_NAME, source_label="OSV.dev advisory", vex=self.vex,
-                    graph=graphs.get(lockfile),
+                    graph=graphs.get(lockfile), suggestion=item["suggestion"] if item else None,
                 ):
                     finding.evidence.append(
                         f"source: OSV.dev ({urllib.parse.urlsplit(options.osv_url).hostname}), "
                         f"queried {started_at}"
                     )
                     findings.append(finding)
+        # One remediation plan per lockfile, from OSV.dev's matches (it returns only the
+        # advisories that affect the resolved version, so suggestions are checked against those).
+        for lockfile, items in sorted(plans.items()):
+            plan = remediation_plan(lockfile, items, graphs.get(lockfile), analyzer=ONLINE_ANALYZER_NAME)
+            if plan is not None:
+                findings.append(plan)
         status["findings"] = len(findings)
         status["packages_queried"] = len(results)
         status["packages_failed"] = len(failures)

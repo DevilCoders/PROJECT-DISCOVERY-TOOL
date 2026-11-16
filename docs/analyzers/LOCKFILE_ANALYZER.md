@@ -60,6 +60,14 @@ A vulnerability finding says whether the package is a direct dependency. If it i
 
 The inventory finding counts direct and transitive dependencies, and how many packages the graph reaches. The graph says what the lockfile resolved, not what is loaded at runtime.
 
+## Remediation
+
+Each confirmed vulnerability finding names the upgrade, as `suggested_upgrade: 4.17.23` and in its recommendation. The suggestion is the lowest release that none of the package's known advisories affects, as far as their ranges record fixes. The search starts at the resolved version and moves to the next fixed version of each advisory that still affects the candidate, until none does. An advisory that matches only the candidate counts too: a fix that walks into a newer regression moves on past it.
+
+An advisory that records no fixed version is named, not guessed at. Advisories a VEX statement clears are left out. Local matches are checked against every advisory the snapshot holds for the package. `--vuln-online` matches are checked against the advisories OSV.dev returned, which only affect the resolved version.
+
+A lockfile with two or more vulnerable packages also gets an `INFO` "Remediation plan" finding. It lists each upgrade with the advisories it fixes and their highest severity (`upgrade: lodash 4.17.20 -> 4.17.23 (fixes GHSA-…; HIGH)`). Transitive packages are grouped under the direct dependency that brings them in (`upgrade through express@4.17.1: qs 6.7.0 -> 6.7.3`), and packages without a recorded fix are listed last.
+
 ## Reachability evidence
 
 A version match says nothing about whether the vulnerable code runs. For each package an advisory confirms, locally or through `--vuln-online`, the code index's reachability pass looks for static evidence in the scanned code. It reports one `INFERRED`, `INFO` finding per package, under the `dependency-reachability` analyzer:

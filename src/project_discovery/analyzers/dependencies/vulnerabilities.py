@@ -17,6 +17,7 @@ from ...vulnerabilities.adapters import cpe_attributes_match, cpe_fields
 from ...vulnerabilities.versions import comparator_for, compare_vendor, compare_versions, go_pseudo_version
 from ...vulnerabilities.vex import CLEARING, VexStatement, vex_statement
 from .dependency_graph import DependencyGraph
+from .remediation import remediation_plan, suggest_upgrade
 from ..base import Analyzer
 from .lockfile_parsers import (
     LOCKFILE_ECOSYSTEMS,
@@ -278,6 +279,35 @@ def vulnerable_package_fact(
     }
 
 
+def remediation_item(
+    package: ResolvedPackage, matches: list[tuple[dict[str, Any], bool, str]], graph: DependencyGraph | None,
+    *, known: Sequence[dict[str, Any]] | None = None, vex: Sequence[VexStatement] = (),
+) -> dict[str, Any] | None:
+    """A package's line in its lockfile's remediation plan: the advisories confirmed for it
+    (less those a VEX statement clears), their highest severity, the lowest release none of
+    the package's known advisories affects, and the advisories that record no fix."""
+    cleared: set[str] = set()
+    confirmed = []
+    for advisory, matched, _ in matches:
+        if not matched:
+            continue
+        statement = vex_statement(vex, [advisory["id"], *advisory.get("aliases", [])], package.ecosystem,
+                                  package.name, package.version) if vex else None
+        if statement is not None and statement.status in CLEARING:
+            cleared.add(advisory["id"])
+            continue
+        confirmed.append(advisory)
+    if not confirmed:
+        return None
+    candidates = [advisory for advisory in (known if known is not None else confirmed)
+                  if advisory["id"] not in cleared and not advisory.get("withdrawn")]
+    suggestion, unfixed = suggest_upgrade(package.version, candidates, package.ecosystem)
+    severity = min((advisory["severity"] for advisory in confirmed if advisory["severity"] in _SEVERITY_ORDER),
+                   key=_SEVERITY_ORDER.__getitem__, default="MEDIUM")
+    return {"package": package, "advisories": sorted({str(advisory["id"]) for advisory in confirmed}),
+            "severity": severity, "suggestion": suggestion, "unfixed": unfixed}
+
+
 def advisory_findings(
     lockfile_path: str,
     package: ResolvedPackage,
@@ -287,6 +317,7 @@ def advisory_findings(
     source_label: str = "local advisory",
     vex: Sequence[VexStatement] = (),
     graph: DependencyGraph | None = None,
+    suggestion: str | None = None,
 ) -> list[Finding]:
     """One finding per group of advisories that describe the same vulnerability.
 
@@ -306,7 +337,7 @@ def advisory_findings(
     return [
         _advisory_group_finding(
             lockfile_path, package, [row for item in group for row in rows_by_id[item["id"]]],
-            analyzer=analyzer, source_label=source_label, vex=vex, graph=graph,
+            analyzer=analyzer, source_label=source_label, vex=vex, graph=graph, suggestion=suggestion,
         )
         for group in _alias_groups([rows[0][0] for rows in rows_by_id.values()])
     ]
@@ -325,6 +356,7 @@ def _advisory_group_finding(
     source_label: str,
     vex: Sequence[VexStatement] = (),
     graph: DependencyGraph | None = None,
+    suggestion: str | None = None,
 ) -> Finding:
     primary, confirmed, reason = next(
         (item for item in group if item[1]), group[0],
@@ -401,8 +433,10 @@ def _advisory_group_finding(
             )
         )
         recommendation = (
-            f"Upgrade {package.name} from {package.version} to a patched release "
-            + (f"at or beyond {fixed}." if fix_versions else "identified by the upstream advisory.")
+            (f"Upgrade {package.name} from {package.version} to {suggestion} or later: the lowest recorded "
+             "release that none of its known advisories affects." if suggestion else
+             f"Upgrade {package.name} from {package.version} to a patched release "
+             + (f"at or beyond {fixed}." if fix_versions else "identified by the upstream advisory."))
             + " Regenerate and review the lockfile, run the project's tests, and verify "
             "that the vulnerable dependency is no longer resolved."
         )
@@ -429,6 +463,8 @@ def _advisory_group_finding(
         evidence.append(f"known_exploited: {exploited['source']} {exploited['cve']} {exploited.get('date_added') or ''}".rstrip())
     if maturity:
         evidence.append(f"exploit_maturity: {maturity}")
+    if suggestion and confirmed:
+        evidence.append(f"suggested_upgrade: {suggestion}")
     # How the package entered the project: direct, or the path from a direct dependency.
     path = graph.path(package.name, package.version) if graph is not None and graph.edges_known else None
     if graph is not None:
@@ -556,9 +592,13 @@ class LocalVulnerabilityAnalyzer(Analyzer):
                         analyzer=self.name, severity="LOW",
                     ))
                 graph = getattr(packages, "graph", None)
+                plan: list[dict[str, Any]] = []
                 for package in packages:
                     if package.ecosystem not in uncovered:
-                        findings.extend(self._package_findings(database, record, package, graph))
+                        findings.extend(self._package_findings(database, record, package, graph, plan))
+                plan_finding = remediation_plan(record.path, plan, graph)
+                if plan_finding is not None:
+                    findings.append(plan_finding)
         except (OSError, ValueError, sqlite3.Error) as exc:
             return [Finding(
                 "vulnerabilities", "Local advisory database unavailable",
@@ -570,10 +610,16 @@ class LocalVulnerabilityAnalyzer(Analyzer):
 
     def _package_findings(
         self, database: VulnerabilityDatabase, record: FileRecord, package: ResolvedPackage,
-        graph: DependencyGraph | None = None,
+        graph: DependencyGraph | None = None, plan: list[dict[str, Any]] | None = None,
     ) -> list[Finding]:
-        matches = match_advisories(package, database.query(package.ecosystem, package.name))
+        known = database.query(package.ecosystem, package.name)
+        matches = match_advisories(package, known)
         fact = vulnerable_package_fact(package, matches, graph)
         if fact is not None:
             code_facts.emit_fact("vulnerable_package", package.name, **fact)
-        return advisory_findings(record.path, package, matches, vex=self.vex, graph=graph)
+        # The suggestion must clear every known advisory of the package, not only today's matches.
+        item = remediation_item(package, matches, graph, known=known, vex=self.vex)
+        if item is not None and plan is not None:
+            plan.append(item)
+        return advisory_findings(record.path, package, matches, vex=self.vex, graph=graph,
+                                 suggestion=item["suggestion"] if item else None)

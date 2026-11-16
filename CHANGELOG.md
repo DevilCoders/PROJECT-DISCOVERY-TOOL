@@ -228,6 +228,14 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: fixed-version suggestions and remediation plans
+- Each confirmed vulnerability finding names the lowest release that none of the package's known
+  advisories affects (`suggested_upgrade`). The search follows each advisory's recorded fixes,
+  past regressions too. Advisories without a fixed version are named, not guessed at.
+- A lockfile with two or more vulnerable packages gets an `INFO` "Remediation plan" finding: the
+  upgrades with the advisories they fix, transitive packages grouped under the direct
+  dependency that brings them in, and the packages without a fix. Local and online.
+
 ### Added: static reachability evidence for vulnerable packages
 - A code index pass gives each package an advisory confirms (locally or online) one `INFERRED`,
   `INFO` finding. It says whether the scanned code imports the package and calls a function
