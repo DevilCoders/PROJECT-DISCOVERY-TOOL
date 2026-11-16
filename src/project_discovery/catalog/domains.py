@@ -1,0 +1,103 @@
+"""Coverage map for broad, polyglot project-intelligence domains.
+
+The catalog is a roadmap contract, not a claim that every analyzer is implemented.
+Only capabilities marked implemented are currently executed by built-in analyzers.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyzerDomain:
+    identifier: str
+    title: str
+    scope: str
+    status: str = "planned"
+
+
+_DOMAINS = (
+    AnalyzerDomain("vcs", "Version Control Intelligence", "Git, Mercurial, Subversion, Bazaar, Darcs, Jujutsu, Pijul, CVS, Fossil and Perforce: clones, remotes, worktrees, submodules, LFS, and decoded Subversion working copies, Mercurial changelogs, Jujutsu and Pijul layouts and Perforce workspace files.", "partial"),
+    AnalyzerDomain("hosting_providers", "Source Hosting Intelligence", "GitHub, GitLab, Bitbucket, Azure Repos, AWS CodeCommit, SourceHut, Gitea, Forgejo, Gerrit and self-hosted hosts.", "partial"),
+    AnalyzerDomain("source_structure", "Source Structure", "Files, declarations, scopes, namespaces and source organization.", "partial"),
+    AnalyzerDomain("symbol_index", "Symbol Index", "Python definitions from the syntax tree and about 25 brace languages from PDT's structural lexer: classes, functions, methods, types, fields and macros; `pdt query` lookups.", "partial"),
+    AnalyzerDomain("imports", "Import and Module Graph", "Python module graph plus JavaScript/TypeScript, C/C++, JVM, Go, Rust, PHP and Dart imports resolved to files, external packages and dependency cycles.", "partial"),
+    AnalyzerDomain("call_graph", "Call Graph", "Python calls resolved through imports, classes and module scope; lexical calls resolved by name per language group; recursion cycles; callers and callees queries.", "partial"),
+    AnalyzerDomain("type_systems", "Type Systems", "Python annotation coverage; TypeScript any, suppressions and non-null assertions; Kotlin, Swift, C#, Java and Go escape hatches; tsconfig, mypy, pyright, Flow and C# nullable strictness.", "partial"),
+    AnalyzerDomain("documentation", "Documentation Intelligence", "Markdown, HTML, PDF, office documents, references, stale claims and contradictions.", "partial"),
+    AnalyzerDomain("dependency_manifests", "Dependency Manifests", "Declared packages, versions, optional groups, workspaces and lockfiles.", "partial"),
+    AnalyzerDomain("dependency_resolution", "Dependency Resolution", "Resolved dependency trees, conflicts, version constraints and provenance.", "partial"),
+    AnalyzerDomain("licenses", "License Intelligence", "License declarations, notices, compatibility and attribution evidence.", "partial"),
+    AnalyzerDomain("secrets", "Secret Exposure", "Potential credentials, keys, tokens and sensitive material with redaction.", "partial"),
+    AnalyzerDomain("vulnerabilities", "Vulnerability Intelligence", "Local OSV advisory import, lockfile-resolved package/version matching, affected ranges, CVE/GHSA aliases, fixed-version boundaries and severity. No network updates during scanning.", "partial"),
+    AnalyzerDomain("secure_code", "Secure Code Analysis", "Static unsafe API, shell execution, deserialization, TLS, SQL construction and memory API indicators.", "partial"),
+    AnalyzerDomain("authentication", "Authentication", "Static identity-framework imports, token/session markers and credential-verification API references.", "partial"),
+    AnalyzerDomain("authorization", "Authorization", "Static route guards, role annotations and access-control marker inventory.", "partial"),
+    AnalyzerDomain("cryptography", "Cryptography", "Initial weak-hash API indicators; cryptographic design and key lifecycle analysis remain planned.", "partial"),
+    AnalyzerDomain("configuration", "Configuration Intelligence", "Environment variables, config formats, defaults, overrides and drift.", "partial"),
+    AnalyzerDomain("api_rest", "REST API Intelligence", "Routes and handlers declared in source, outbound HTTP client calls with normalized paths, and endpoint matching within and across projects.", "partial"),
+    AnalyzerDomain("api_graphql", "GraphQL Intelligence", "Schemas, resolvers, directives, operations and federation boundaries.", "partial"),
+    AnalyzerDomain("api_rpc", "RPC and Service Contracts", "gRPC services and RPCs from .proto files, generated client stubs and server registrations, Thrift contracts.", "partial"),
+    AnalyzerDomain("api_event", "Event-driven API Contracts", "AsyncAPI channels, publish/subscribe operations and message schemas.", "partial"),
+    AnalyzerDomain("api_soap", "SOAP and WSDL Contracts", "WSDL services, port types, bindings and operations.", "partial"),
+    AnalyzerDomain("api_collections", "API Collections", "Postman collections and request grouping without exposing request secrets.", "partial"),
+    AnalyzerDomain("databases_sql", "SQL Database Intelligence", "Schemas, queries, indexes, constraints, stored procedures and migrations.", "partial"),
+    AnalyzerDomain("databases_nosql", "NoSQL Intelligence", "Static client import and selected operation discovery for MongoDB, Redis, Neo4j, Elasticsearch, Cassandra and related stores.", "partial"),
+    AnalyzerDomain("orm", "ORM and Data Mapping", "Models, relations, query builders, mappings and schema drift.", "partial"),
+    AnalyzerDomain("migrations", "Data Migration Intelligence", "Flyway, Liquibase, Alembic, Django, Rails, Prisma, TypeORM, Knex, EF Core, Laravel and Ecto migration ordering, operations, rollback markers and destructive-change evidence.", "partial"),
+    AnalyzerDomain("messaging", "Messaging and Event Systems", "Kafka, RabbitMQ, NATS, MQTT, Celery, SQS/SNS, Pub/Sub and related clients, with produced and consumed topic and queue names.", "partial"),
+    AnalyzerDomain("tests", "Test Intelligence", "Test discovery, frameworks, fixtures, suites and test-to-code relationships.", "partial"),
+    AnalyzerDomain("coverage", "Coverage Intelligence", "Coverage artifacts, untested code indicators and coverage trends.", "partial"),
+    AnalyzerDomain("build_systems", "Build Systems", "Build graphs, targets, toolchains, generated code and build dependencies.", "partial"),
+    AnalyzerDomain("ci_cd", "CI/CD Intelligence", "Workflow jobs, action references, permissions and pipeline stages.", "partial"),
+    AnalyzerDomain("containers", "Container Intelligence", "Docker build instructions, Compose services, images, ports and privilege settings.", "partial"),
+    AnalyzerDomain("orchestration", "Orchestration Intelligence", "Kubernetes resources, pod containers, Helm charts and security context indicators.", "partial"),
+    AnalyzerDomain("infrastructure_as_code", "Infrastructure as Code", "Terraform block inventory and selected CloudFormation resource declarations.", "partial"),
+    AnalyzerDomain("cloud_services", "Cloud Service Intelligence", "Cloud resources, service bindings, IAM references, VCS hosting and static AWS/Azure/Bitbucket delivery-provider markers.", "partial"),
+    AnalyzerDomain("networking", "Network Architecture", "Static IPv4/IPv6, CIDR, port, URL/URI, hostname, subdomain and protocol indicator inventory.", "partial"),
+    AnalyzerDomain("performance", "Performance Hotspots", "Cyclomatic complexity, long functions, queries and HTTP calls in data-dependent loops, nested loops, sleeps, deep copies, row-wise DataFrame iteration and profiling artifacts.", "partial"),
+    AnalyzerDomain("concurrency", "Concurrency and Parallelism", "Blocking calls in async code, un-awaited coroutines and promises, locks without guaranteed release, WaitGroup misuse, double-checked locking, async void, manual Send/Sync and the concurrency model.", "partial"),
+    AnalyzerDomain("memory", "Memory and Resource Management", "Unclosed files, sockets, connections and processes; malloc/free, realloc and new[]/delete pairing; Go, JVM and C# disposal; effect cleanup; unsafe Rust inventory.", "partial"),
+    AnalyzerDomain("dataflow", "Data Flow and Taint", "Taint from web requests and sockets (stdin, argv and the environment in C/C++) to SQL, command, code, deserialization, template, path, SSRF, XSS, redirect, format-string and buffer sinks: Python inter-procedurally and across modules; JavaScript/TypeScript, PHP, Java, Kotlin, Scala, Groovy, Go, C#, Rust and the C family through same-file helpers and into other files by unambiguous function name.", "partial"),
+    AnalyzerDomain("serialization", "Serialization Intelligence", "Initial unsafe deserialization API indicators and structured artifact inventory.", "partial"),
+    AnalyzerDomain("logging", "Logging Intelligence", "Logger and logging-framework markers; levels, sensitive-data exposure and correlation identifiers remain planned.", "partial"),
+    AnalyzerDomain("observability", "Observability Intelligence", "Metrics, traces, health checks, alerts and telemetry configuration.", "partial"),
+    AnalyzerDomain("machine_learning", "Machine Learning Systems", "Framework imports, model/training/inference code markers and local model artifact inventory.", "partial"),
+    AnalyzerDomain("datasets", "Dataset Intelligence", "Dataset container inventory and source-level input pipeline markers.", "partial"),
+    AnalyzerDomain("model_artifacts", "Model Artifact Intelligence", "Checkpoint/model file inventory and selected model metadata extraction.", "partial"),
+    AnalyzerDomain("robotics_ros", "Robotics and ROS", "ROS package manifests, Python node APIs, C++ communication call sites, launch files and message/service/action interfaces.", "partial"),
+    AnalyzerDomain("embedded", "Embedded Systems", "PlatformIO, ESP-IDF, Zephyr, STM32CubeMX and Rust targets, FreeRTOS configuration, linker memory maps, device trees, RTOS and HAL usage, and interrupt-handler safety.", "partial"),
+    AnalyzerDomain("firmware", "Firmware and Binary Artifacts", "ELF and PE metadata and hardening, Intel HEX, S-record, UF2, DTB/FIT, uImage, Android boot, ESP32 images, filesystems, Cortex-M vector tables and component versions; Yocto, Buildroot, OpenWrt and ESP-IDF partitions.", "partial"),
+    AnalyzerDomain("hardware_description", "Hardware Description Languages", "Verilog, SystemVerilog and VHDL units, ports, parameters, instances, clocks and RTL lint; a design hierarchy elaborated through parameters, overrides and generate constructs; FPGA constraints (XDC, SDC, UCF, QSF, PCF, LPF, CST) and projects.", "partial"),
+    AnalyzerDomain("gpu_compute", "GPU and Compute Kernels", "Device placement calls in Python ML code and shader inventory; CUDA/OpenCL kernel and host-device boundary analysis remain planned.", "partial"),
+    AnalyzerDomain("graphics_shaders", "Graphics and Shader Systems", "GLSL, HLSL, WGSL, Metal, Godot and ShaderLab stages, entry points and resource bindings; SPIR-V, DXBC/DXIL and metallib binaries; Unity Shader Graph.", "partial"),
+    AnalyzerDomain("game_engines", "Game Engine Intelligence", "Initial Unity, Unreal, Godot, GameMaker, Defold, Bevy, Ren'Py, Roblox and web-engine project/script inventory.", "partial"),
+    AnalyzerDomain("frontend", "Frontend Application Intelligence", "React, Vue, Svelte and Angular components, children and props; rules of hooks, list keys and effects; client and file-system routes; state, data and UI libraries; bundler configuration; component graph.", "partial"),
+    AnalyzerDomain("mobile", "Mobile Application Intelligence", "Android manifests, iOS property lists and entitlements, Gradle, CocoaPods, Flutter and React Native declarations.", "partial"),
+    AnalyzerDomain("accessibility", "Accessibility", "Semantic structure, labels and accessibility metadata; keyboard navigation remains planned.", "partial"),
+    AnalyzerDomain("localization", "Localization", "Translation catalogs and missing keys; locale fallback and formatting remain planned.", "partial"),
+    AnalyzerDomain("assets", "Asset and Media Intelligence", "Initial Unity serialized asset and Unreal binary asset inventory.", "partial"),
+    AnalyzerDomain("architecture", "Architecture and Boundaries", "Layers, components, coupling, cohesion, patterns and boundary violations.", "partial"),
+    AnalyzerDomain("multi_project", "Multi-Project Intelligence", "Cross-report comparison (languages, dependencies, version conflicts, duplicate content) and integration maps from package dependencies, HTTP endpoints and calls, message topics and gRPC services.", "partial"),
+    AnalyzerDomain("supply_chain", "Software Supply Chain", "Mutable container base-image and CI action reference indicators.", "partial"),
+    AnalyzerDomain("privacy", "Privacy and Data Governance", "Mobile privacy declarations, PII field names and redacted email-shaped value indicators.", "partial"),
+    AnalyzerDomain("archives", "Archive and Container Intelligence", "ZIP/TAR member inventory, symlink/permission metadata, traversal and compression-ratio indicators.", "partial"),
+    AnalyzerDomain("filesystem_inventory", "Filesystem Intelligence", "Typed file/directory/symlink inventory, hidden entries, file signatures, size buckets and development directory markers.", "partial"),
+    AnalyzerDomain("operating_systems", "Operating System Intelligence", "Host OS metadata and static target-platform indicators from source, build and deployment manifests.", "partial"),
+)
+
+
+def analyzer_domain_catalog() -> list[dict[str, str]]:
+    return [
+        {
+            "id": item.identifier,
+            "title": item.title,
+            "scope": item.scope,
+            "status": item.status,
+        }
+        for item in _DOMAINS
+    ]
+
+
+def analyzer_domain_count() -> int:
+    return len(_DOMAINS)

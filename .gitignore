@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+.venv-*/
+dist/
+build/
+*.egg-info/
+.pdt-cache/
+.pdt-reports/
+
+# Native build outputs (extensions are rebuilt per platform/interpreter)
+*.so
+*.pyd
+*.dylib
+native/rust/target/
+
+# Coverage and test artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

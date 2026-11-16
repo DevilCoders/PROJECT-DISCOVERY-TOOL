@@ -1,0 +1,298 @@
+"""Cross-framework static database migration inventory.
+
+Migration scripts are parsed as text only. The analyzer never imports, executes,
+connects to, or modifies a database or target project.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path, PurePosixPath
+
+from ...core.limits import AnalyzerLimits
+from ...catalog.languages import source_extensions
+from ...core.source_utils import LineIndex, describe_error, read_text_bounded
+from ...models import FileRecord, Finding
+from ..base import Analyzer
+
+_MIGRATION_EXTENSIONS = source_extensions() | {".xml", ".yaml", ".yml", ".json"}
+
+_MIGRATION_DIRS = {
+    "migration", "migrations", "migrate", "versions", "changelog",
+    "changelogs", "changeset", "changesets", "flyway", "liquibase", "drizzle",
+}
+_FLYWAY_NAME = re.compile(r"^(?P<identifier>(?:V\d+|R|U\d+)__.+)\.sql$", re.I)
+# Current Alembic templates annotate: revision: str = "...", down_revision: Union[...] = "...".
+_REVISION = re.compile(r"(?m)^[ \t]*revision\s*+(?::[^=\n]{1,200}+)?=\s*['\"]([^'\"]+)['\"]")
+_PARENT_REVISION = re.compile(r"""(?m)^[ \t]*down_revision\s*+(?::[^=\n]{1,200}+)?=\s*['"]([^'"]+)['"]""")
+_CHANGESET = re.compile(r"(?i)<changeSet\b")
+_ID_ATTRIBUTE = re.compile(r"""(?i)\bid\s*=\s*['"]""")
+_ATTRIBUTE_VALUE = re.compile(r"""[^'"]+""")
+
+
+def _changeset_id(content: str) -> str | None:
+    """The id of the first Liquibase ``<changeSet ... id="...">`` tag, in linear time.
+
+    ``<changeSet\\b[^>]*\\bid=`` rescanned to the next ``>`` (or the end of the file) from
+    every ``<changeSet``, which is quadratic on tags that never close.
+    """
+    position = 0
+    while (start := _CHANGESET.search(content, position)) is not None:
+        close = content.find(">", start.end())
+        stop = len(content) if close == -1 else close
+        attribute = _ID_ATTRIBUTE.search(content, start.end(), stop)
+        if attribute:
+            value = _ATTRIBUTE_VALUE.match(content, attribute.end())
+            if value:
+                return value.group(0)
+        position = stop + 1
+    return None
+_OPERATION_PATTERNS = (
+    ("create_table", re.compile(
+        r"(?i)(?:\bCREATE\s+(?:TEMPORARY\s+)?TABLE\b|\b(?:op\.)?create_table\s*(?:\(|:)|\b(?:pgTable|mysqlTable|sqliteTable)\s*\(|"
+        r"\bSchema::create\s*\(|\bcreateTable\s*\(|\bCreateTable\s*\(|"
+        r"<\s*createTable\b|\bmigrations\.CreateModel\b)"
+    ), False),
+    ("drop_table", re.compile(
+        r"(?i)(?:\bDROP\s+TABLE\b|\b(?:op\.)?drop_table\s*(?:\(|:)|"
+        r"\bSchema::drop(?:IfExists)?\s*\(|\bdropTable\s*\(|"
+        r"\bDropTable\s*\(|<\s*dropTable\b|\bmigrations\.DeleteModel\b)"
+    ), True),
+    ("add_column", re.compile(
+        r"(?i)(?:\bADD\s+COLUMN\b|\b(?:op\.)?add_column\s*(?:\(|:)|"
+        r"\baddColumn\s*\(|\bAddColumn\s*\(|<\s*addColumn\b|"
+        r"\bmigrations\.AddField\b)"
+    ), False),
+    ("drop_column", re.compile(
+        r"(?i)(?:\bDROP\s+COLUMN\b|\b(?:op\.)?drop_column\s*\(|"
+        r"\bremove_column\s*(?:\(|:)|\b(?:dropColumn|DropColumn)\s*\(|<\s*dropColumn\b|"
+        r"\bmigrations\.RemoveField\b)"
+    ), True),
+    ("rename_column", re.compile(
+        r"(?i)(?:\bRENAME\s+COLUMN\b|\brename_column\s*(?:\(|:)|"
+        r"\brenameColumn\s*\(|\bRenameColumn\s*\(|<\s*renameColumn\b|"
+        r"\bmigrations\.RenameField\b)"
+    ), False),
+    ("create_index", re.compile(
+        r"(?i)(?:\bCREATE\s+(?:UNIQUE\s+)?INDEX\b|\b(?:create_index|add_index)\s*(?:\(|:)|"
+        r"\bcreateIndex\s*\(|\bCreateIndex\s*\(|<\s*createIndex\b)"
+    ), False),
+    ("drop_index", re.compile(
+        r"(?i)(?:\bDROP\s+INDEX\b|\b(?:drop_index|remove_index)\s*(?:\(|:)|"
+        r"\bdropIndex\s*\(|\bDropIndex\s*\(|<\s*dropIndex\b)"
+    ), True),
+    ("truncate", re.compile(r"(?i)\bTRUNCATE\s+(?:TABLE\s+)?"), True),
+    ("drop_database", re.compile(r"(?i)\bDROP\s+DATABASE\b"), True),
+    ("drop_schema", re.compile(r"(?i)\bDROP\s+SCHEMA\b"), True),
+)
+# Where a migration's reverse direction starts (Alembic downgrade(), Rails def down,
+# knex exports.down, TypeORM and Laravel down(), EF Core Down(MigrationBuilder), Goose and
+# dbmate SQL sections, Liquibase <rollback>), and where the forward direction resumes.
+_DOWN_MARKER = re.compile(
+    r"(?im)^[ \t]*(?:(?:async\s+)?def\s+(?:downgrade|down)\b"
+    r"|(?:(?:public|protected|private|static|override|async|export|function|void)\s+){0,4}down\s*\("
+    r"|exports\.down\s*=|function\s+downgrade\b|rollback\s*\(|--\s*\+goose\s+down\b|--\s*migrate:down\b)"
+    r"|<rollback\b"
+)
+_UP_MARKER = re.compile(
+    r"(?im)^[ \t]*(?:(?:async\s+)?def\s+(?:upgrade|up)\b"
+    r"|(?:(?:public|protected|private|static|override|async|export|function|void)\s+){0,4}up\s*\("
+    r"|exports\.up\s*=|function\s+upgrade\b|--\s*\+goose\s+up\b|--\s*migrate:up\b)"
+    r"|</rollback\s*>"
+)
+_ROLLBACK_MARKER = _DOWN_MARKER
+
+
+def down_regions(content: str) -> list[tuple[int, int]]:
+    """Spans of a migration's rollback code: from each down marker to the next up marker.
+
+    A rollback of a create-table migration drops the table; reporting it as a destructive
+    forward operation made every reversible schema history a list of HIGH findings.
+    """
+    markers = sorted(
+        [(match.start(), True) for match in _DOWN_MARKER.finditer(content)]
+        + [(match.start(), False) for match in _UP_MARKER.finditer(content)]
+    )
+    regions, start = [], None
+    for offset, down in markers:
+        if down and start is None:
+            start = offset
+        elif not down and start is not None:
+            regions.append((start, offset))
+            start = None
+    if start is not None:
+        regions.append((start, len(content)))
+    return regions
+
+
+def in_regions(offset: int, regions: list[tuple[int, int]]) -> bool:
+    return any(start <= offset < end for start, end in regions)
+
+
+def _migration_context(path: str) -> tuple[str, ...]:
+    normalized = path.replace("\\", "/")
+    return tuple(part.lower() for part in PurePosixPath(normalized).parts[:-1])
+
+
+def _framework(path: str, filename: str, content: str) -> str:
+    parts = _migration_context(path)
+    if _FLYWAY_NAME.match(filename):
+        return "Flyway"
+    if "-- +goose" in content.lower() or "github.com/pressly/goose" in content:
+        return "Goose"
+    if "-- atlas:" in content.lower() or "atlas.hcl" in parts:
+        return "Atlas"
+    if "-- migrate:up" in content.lower() or "-- migrate:down" in content.lower():
+        return "Dbmate"
+    if "drizzle-orm" in content or "drizzle-kit" in content:
+        return "Drizzle ORM"
+    if "diesel::" in content or "diesel" in parts:
+        return "Diesel"
+    if "sea_orm_migration" in content or "MigratorTrait" in content:
+        return "SeaORM"
+    if "sqlx::migrate" in content or "sqlx::migrate!" in content:
+        return "SQLx"
+    if "liquibase" in parts or "changelog" in parts or filename.startswith("changelog"):
+        return "Liquibase"
+    if "prisma" in parts:
+        return "Prisma"
+    if "alembic" in parts or _REVISION.search(content):
+        return "Alembic"
+    if ("db" in parts and "migrate" in parts) or "ActiveRecord::Migration" in content:
+        return "Rails Active Record"
+    if "django.db.migrations" in content or "migrations.Migration" in content:
+        return "Django"
+    if "MigrationBuilder" in content or "Microsoft.EntityFrameworkCore.Migrations" in content:
+        return "Entity Framework Core"
+    if "MigrationInterface" in content or "QueryRunner" in content:
+        return "TypeORM"
+    if "queryInterface" in content:
+        return "Sequelize"
+    if "knex.schema" in content or re.search(r"(?m)exports\.up\s*=", content):
+        return "Knex"
+    if "Schema::" in content or ("database" in parts and "migrations" in parts and filename.endswith(".php")):
+        return "Laravel"
+    if "Ecto.Migration" in content or ("priv" in parts and "repo" in parts):
+        return "Ecto"
+    return "Generic migration convention"
+
+
+def _migration_identifier(filename: str, content: str) -> str:
+    flyway = _FLYWAY_NAME.match(filename)
+    if flyway:
+        return flyway.group("identifier")
+    revision = _REVISION.search(content)
+    if revision:
+        return revision.group(1)
+    changeset = _changeset_id(content)
+    if changeset:
+        return changeset
+    stem = PurePosixPath(filename).stem
+    # Laravel names migrations YYYY_MM_DD_HHMMSS_name.
+    numeric = re.match(r"^(\d{4}_\d{2}_\d{2}_\d{6}|\d{8,14}|\d+)_", stem)
+    return numeric.group(1) if numeric else stem
+
+
+_MAX_MIGRATION_BYTES = 16 * 1024 * 1024
+
+
+class MigrationIntelligenceAnalyzer(Analyzer):
+    """Identify migration frameworks, operations, rollback markers and destructive changes."""
+
+    name = "migration-intelligence"
+    limits = AnalyzerLimits(
+        _MAX_MIGRATION_BYTES,
+        "whole",
+        outcome="UNKNOWN finding on oversize, growth or read failure",
+    )
+    domains = ("migrations",)
+    languages = (
+        "SQL", "Python", "Ruby", "JavaScript", "TypeScript", "C#", "PHP",
+        "Elixir", "Java", "Kotlin", "XML", "YAML", "JSON",
+    )
+
+    def supports(self, record: FileRecord) -> bool:
+        if record.error or record.extension.lower() not in _MIGRATION_EXTENSIONS:
+            return False
+        path = record.path.replace("\\", "/")
+        parts = _migration_context(path)
+        filename = PurePosixPath(path).name
+        return (
+            bool(set(parts) & _MIGRATION_DIRS)
+            or bool(_FLYWAY_NAME.match(filename))
+            or filename.lower().startswith("changelog")
+        )
+
+    def analyze(self, path: Path, record: FileRecord) -> list[Finding]:
+        try:
+            content = read_text_bounded(
+                path, _MAX_MIGRATION_BYTES,
+                expected_identity=record.analysis_identity,
+            )
+        except (OSError, UnicodeDecodeError) as exc:
+            return [Finding(
+                "migration",
+                f"Migration file read error: {record.path}",
+                describe_error(exc),
+                confidence="UNKNOWN", severity="LOW",
+                evidence=[record.path],
+                analyzer=self.name,
+            )]
+
+        filename = PurePosixPath(record.path.replace("\\", "/")).name
+        framework = _framework(record.path, filename, content)
+        identifier = _migration_identifier(filename, content)
+        rollback_present = bool(_ROLLBACK_MARKER.search(content))
+        parent_revision = _PARENT_REVISION.search(content)
+        operations: list[tuple[str, int, bool]] = []
+        lines = LineIndex(content)
+        rollback = down_regions(content)
+        for operation, pattern, destructive in _OPERATION_PATTERNS:
+            for match in pattern.finditer(content):
+                # A drop in rollback code reverses a forward operation; it is not destructive.
+                operations.append((operation, lines.line(match.start()),
+                                   destructive and not in_regions(match.start(), rollback)))
+        operations.sort(key=lambda item: (item[1], item[0]))
+
+        evidence = [
+            f"framework: {framework}",
+            f"migration: {identifier}",
+            *[
+                f"operation: {operation} at {record.path}:{line}"
+                for operation, line, _ in operations[:100]
+            ],
+        ]
+        if parent_revision:
+            evidence.append(f"parent revision: {parent_revision.group(1)}")
+        if rollback_present:
+            evidence.append("rollback/down migration marker present")
+        findings = [Finding(
+            "migration",
+            f"Migration inventory: {record.path}",
+            f"Framework: {framework}; identifier: {identifier}; "
+            f"{len(operations)} schema/data operations; "
+            f"rollback marker: {'present' if rollback_present else 'not detected'}. "
+            "Static markers do not prove rollback safety or migration execution state.",
+            confidence=(
+                "INFERRED" if framework == "Generic migration convention" else "CONFIRMED"
+            ),
+            evidence=evidence,
+            analyzer=self.name,
+        )]
+
+        # SQLSchemaAnalyzer already reports destructive SQL DDL, so this analyzer
+        # adds framework-level destructive findings only for code/XML migrations.
+        if record.extension.lower() != ".sql":
+            for operation, line, destructive in operations:
+                if destructive:
+                    findings.append(Finding(
+                        "migration",
+                        f"Potentially destructive migration operation: {operation}",
+                        "A destructive migration API or schema operation was observed. "
+                        "Review data-loss impact, transaction behavior, backward compatibility "
+                        "and the actual rollback implementation.",
+                        confidence="INFERRED",
+                        evidence=[f"{record.path}:{line}"],
+                        analyzer=self.name,
+                        severity="HIGH",
+                    ))
+        return findings

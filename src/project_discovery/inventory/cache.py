@@ -1,0 +1,132 @@
+"""SQLite metadata-aware fingerprint cache for incremental hashing."""
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+from typing import Iterable
+
+from .store import prepare_private_database, set_aside_unreadable_database, sqlite_text
+
+
+class ScanCache:
+    """Persist file fingerprints without storing target file contents."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Fingerprints reveal project paths and content hashes; keep them private.
+        prepare_private_database(path)
+        self.path = path
+        self.db = sqlite3.connect(path)
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS fingerprints (
+                project_root TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                ctime_ns INTEGER NOT NULL DEFAULT 0,
+                inode INTEGER NOT NULL DEFAULT 0,
+                inode_key TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(project_root, relative_path)
+            )"""
+        )
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(fingerprints)")
+        }
+        if "ctime_ns" not in columns:
+            self.db.execute(
+                "ALTER TABLE fingerprints ADD COLUMN ctime_ns INTEGER NOT NULL DEFAULT 0"
+            )
+        if "inode" not in columns:
+            self.db.execute(
+                "ALTER TABLE fingerprints ADD COLUMN inode INTEGER NOT NULL DEFAULT 0"
+            )
+        # File IDs can exceed a signed 64-bit INTEGER (ReFS and Dev Drive report 128 bits,
+        # NFS and overlayfs set the top bit), so they are stored as text. Rows written
+        # before this column have no key and simply miss once.
+        if "inode_key" not in columns:
+            self.db.execute("ALTER TABLE fingerprints ADD COLUMN inode_key TEXT NOT NULL DEFAULT ''")
+        self.db.commit()
+
+    # A database that opened but fails a read ("database disk image is malformed"):
+    # the scan continues without the cache, which is moved aside when it closes.
+    damaged: sqlite3.DatabaseError | None = None
+
+    def get(self, root: str, relative_path: str) -> tuple[int, int, int, int, str] | None:
+        if self.damaged is not None:
+            return None
+        try:
+            row = self.db.execute(
+                """SELECT size_bytes, mtime_ns, ctime_ns, inode_key, sha256
+                   FROM fingerprints WHERE project_root=? AND relative_path=?""",
+                (root, sqlite_text(relative_path)),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            raise  # locked or busy: not damage
+        except sqlite3.DatabaseError as exc:
+            self.damaged = exc
+            return None
+        if row is None or not row[3]:
+            return None
+        return int(row[0]), int(row[1]), int(row[2]), int(row[3]), str(row[4])
+
+    def put(
+        self,
+        root: str,
+        relative_path: str,
+        size: int,
+        mtime_ns: int,
+        ctime_ns: int,
+        inode: int,
+        digest: str,
+    ) -> None:
+        if self.damaged is not None:
+            return
+        self.db.execute(
+            """INSERT OR REPLACE INTO fingerprints
+               (project_root, relative_path, size_bytes, mtime_ns, sha256, ctime_ns, inode_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (root, sqlite_text(relative_path), size, mtime_ns, digest, ctime_ns, str(inode)),
+        )
+
+    def prune_missing(self, root: str, current_paths: Iterable[str]) -> int:
+        """Delete stale path entries without SQLite's bound-parameter limit."""
+        if self.damaged is not None:
+            return 0
+        try:
+            return self._prune_missing(root, current_paths)
+        except sqlite3.OperationalError:
+            raise
+        except sqlite3.DatabaseError as exc:
+            self.damaged = exc
+            return 0
+
+    def _prune_missing(self, root: str, current_paths: Iterable[str]) -> int:
+        self.db.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS current_scan_paths (relative_path TEXT PRIMARY KEY)"
+        )
+        self.db.execute("DELETE FROM current_scan_paths")
+        self.db.executemany(
+            "INSERT OR IGNORE INTO current_scan_paths(relative_path) VALUES (?)",
+            ((sqlite_text(path),) for path in current_paths),
+        )
+        cursor = self.db.execute(
+            """DELETE FROM fingerprints
+               WHERE project_root=?
+               AND relative_path NOT IN (SELECT relative_path FROM current_scan_paths)""",
+            (root,),
+        )
+        return cursor.rowcount
+
+    def __enter__(self) -> "ScanCache":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        try:
+            if self.damaged is None:
+                self.db.commit()
+        finally:
+            self.db.close()
+        if self.damaged is not None:
+            # The next scan into this output rebuilds the cache from scratch.
+            set_aside_unreadable_database(self.path, damaged=True)

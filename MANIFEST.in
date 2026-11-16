@@ -1,0 +1,6 @@
+include README.md
+recursive-include docs *.md
+recursive-include native *.c *.cpp *.h *.S *.toml *.rs
+include native/rust/Cargo.lock
+recursive-include src/project_discovery/reporting/web *.js
+recursive-include src/project_discovery/data *.txt

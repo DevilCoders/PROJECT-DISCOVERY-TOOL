@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "setuptools-rust>=1.10"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-discovery-tool"
+version = "0.2.0"
+description = "Read-only project intelligence for local directories and remote repositories"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["rich>=13.7", "packaging>=23"]
+
+[project.scripts]
+pdt = "project_discovery.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "build>=1.2",
+    "twine>=5.0",
+    "PyYAML>=6.0,<7",
+    "setuptools-rust>=1.10",
+]
+polyglot = ["tree-sitter-language-pack>=1.23,<2"]
+infrastructure = ["PyYAML>=6.0,<7"]
+documents = ["pypdf>=5,<7", "python-docx>=1.1,<2"]
+# Zstandard archives (.tar.zst, DEB data.tar.zst): Python 3.14 has compression.zstd built in.
+archives = ["zstandard>=0.22,<1; python_version < '3.14'"]
+all = [
+    "tree-sitter-language-pack>=1.23,<2",
+    "pypdf>=5,<7",
+    "python-docx>=1.1,<2",
+    "PyYAML>=6.0,<7",
+    "zstandard>=0.22,<1; python_version < '3.14'",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+[tool.setuptools.package-data]
+project_discovery = ["reporting/web/*.js", "data/*.txt", "data/*.dat"]
