@@ -123,6 +123,7 @@ from .reporting.writers import (
     write_remote_batch_summary, write_reports,
 )
 from .vulnerabilities.database import VulnerabilityDatabase, default_database_path, read_only_uri
+from .core.fingerprints import configure_fingerprint_key, key_id, load_fingerprint_key
 from .vulnerabilities.triage import TriageDecisions, load_triage
 from .vulnerabilities.vex import VexDocuments, load_vex
 
@@ -423,7 +424,9 @@ def _describe_analysis_settings(settings: dict | None) -> dict[str, str]:
     triage = (settings or {}).get("triage")
     return {"--provider-map": f"a map with SHA-256 {digest[:12]}" if digest else "none",
             "--vex": f"documents with SHA-256 {vex[:12]}" if vex else "none",
-            "--triage": f"decisions with SHA-256 {triage[:12]} (files and date)" if triage else "none"}
+            "--triage": f"decisions with SHA-256 {triage[:12]} (files and date)" if triage else "none",
+            "--fingerprint-key": (f"the key with id {(settings or {})['fingerprint_key']}"
+                                  if (settings or {}).get("fingerprint_key") else "none")}
 
 
 def _resumable_walk_stats(inventory_path: Path, root: Path, options: dict, settings: dict | None = None) -> dict | None:
@@ -714,7 +717,10 @@ def run_scan(
     provider_map: ProviderMap | None = None,
     vex: VexDocuments | None = None,
     triage: TriageDecisions | None = None,
+    fingerprint_key: tuple[bytes, str] | None = None,
 ) -> int:
+    # --fingerprint-key: keyed fingerprints of secret values, here and in every worker.
+    configure_fingerprint_key(fingerprint_key[0] if fingerprint_key else None)
     # The hosting-provider fingerprints this scan classifies hosts with (--provider-map; None:
     # none), in this process and in the analyzer workers, which receive the same map.
     configure_provider_map(provider_map)
@@ -725,6 +731,8 @@ def run_scan(
         analysis_settings["vex"] = vex.sha256
     if triage is not None:
         analysis_settings["triage"] = triage.sha256  # the files and the date (expiry depends on it)
+    if fingerprint_key:
+        analysis_settings["fingerprint_key"] = key_id(fingerprint_key[0])
     vex_statements = vex.statements if vex is not None else ()
     # no_color=None lets Rich honor the NO_COLOR environment convention.
     console = Console(stderr=True, quiet=quiet, no_color=True if no_color else None)
@@ -1338,6 +1346,9 @@ def run_scan(
                 "resumed_files_skipped": resumed_skipped,
             },
             "vulnerability_intelligence": vulnerability_db_status,
+            "secret_fingerprints": (
+                {"enabled": True, "key_id": key_id(fingerprint_key[0]), "source": fingerprint_key[1]}
+                if fingerprint_key else {"enabled": False}),
             "finding_persistence": {
                 "backend": "sqlite",
                 "record_count": len(findings),
@@ -2264,6 +2275,12 @@ def build_parser() -> argparse.ArgumentParser:
              "repeatable",
     )
     scan.add_argument(
+        "--fingerprint-key", type=Path, default=None, metavar="FILE",
+        help="Add keyed HMAC-SHA256 fingerprints of secret values to secret findings (never the "
+             "values), from this key file (16 bytes or more; default: the PDT_FINGERPRINT_KEY "
+             "environment variable), so a reused secret can be followed across files and scans",
+    )
+    scan.add_argument(
         "--provider-map", type=Path, default=None, metavar="FILE",
         help="TOML file naming the self-hosted source-hosting servers (GitHub Enterprise, GitLab, Bitbucket "
              "Data Center, Azure DevOps Server, Gitea, Forgejo, Gogs, Gerrit, Gitolite, SourceHut) by host, "
@@ -2622,6 +2639,10 @@ def main() -> None:
                     vex_documents = load_vex(args.vex)
                 except ValueError as exc:
                     parser.error(str(exc))
+            try:
+                fingerprint_key = load_fingerprint_key(args.fingerprint_key)
+            except (OSError, ValueError) as exc:
+                parser.error(f"--fingerprint-key: {exc}")
             triage_decisions = None
             if args.triage:
                 if args.vuln_db is None and not args.vuln_online:
@@ -2738,6 +2759,7 @@ def main() -> None:
                 "vulnerability_db": args.vuln_db,
                 "vex": vex_documents,
                 "triage": triage_decisions,
+                "fingerprint_key": fingerprint_key,
                 "jobs": args.jobs,
                 "fail_on": args.fail_on,
                 "strict": args.strict,
@@ -2807,6 +2829,7 @@ def main() -> None:
                 provider_map=provider_map,
                 vex=vex_documents,
                 triage=triage_decisions,
+                fingerprint_key=fingerprint_key,
             ))
 
         if not formats or formats - {"json", "markdown"}:

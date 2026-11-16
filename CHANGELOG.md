@@ -228,6 +228,17 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: keyed fingerprints of secret values
+- `pdt scan --fingerprint-key FILE` (or `PDT_FINGERPRINT_KEY`) adds an HMAC-SHA256 fingerprint of
+  each secret's value to its finding, never the value. A new `secret_reuse` code index pass
+  reports each secret found in two or more places.
+- The key and the values are written nowhere. Reports name the key by `key_id`, and `--resume`
+  requires the same key.
+- Fixed: with the process executor (the default for larger scans), worker processes rebuilt the
+  local advisory matcher without the coordinator's `--vex` statements and `--triage` decisions,
+  so neither applied to local findings. Workers now receive them, and the fingerprint key.
+- Report schema 1.26: `metrics.secret_fingerprints` and `metrics.code_index.secret_reuse`.
+
 ### Added: personal-data field names in more forms and categories
 - Field names match with `-` and `.` between words too (`first-name` in HTML forms and kebab-case
   keys, `first.name` in properties), alongside snake_case, camelCase and PascalCase.

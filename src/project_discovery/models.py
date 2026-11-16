@@ -46,7 +46,9 @@ from typing import Any, Literal, Sequence
 # 1.25 added, under metrics.vulnerability_intelligence.online, stale_answers (packages,
 # advisories, oldest_fetched_at), cache_mode (normal, refresh, cache-only) and the cache's
 # stale_hits and refresh.
-REPORT_SCHEMA_VERSION = "1.25"
+# 1.26 added metrics.secret_fingerprints (enabled, key_id, source) and the code index's
+# secret_reuse pass (metrics.code_index.secret_reuse).
+REPORT_SCHEMA_VERSION = "1.26"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

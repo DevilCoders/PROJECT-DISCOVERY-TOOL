@@ -47,6 +47,7 @@ pdt scan https://github.com/owner/repository        # a remote repository
 | `--url FILE` | — | A UTF-8 file with one repository per line: `URL [ref=NAME] [vcs=BACKEND]`, then an optional `# comment`. Blank lines and lines starting with `#` are skipped and duplicates removed. Each repository gets its own report directory. |
 | `--output DIR` | `NAME-pdt-report` beside a local project; `./NAME-pdt-report` for a URL; `./pdt-remote-reports` for a batch | The report directory. It must be outside the scanned project, and only one scan may use it at a time. |
 | `--format FORMATS` | `json,markdown,html` | Comma-separated report formats. |
+| `--fingerprint-key FILE` | `PDT_FINGERPRINT_KEY` | Add a keyed fingerprint of each secret's value to its finding (`fingerprint: hmac-sha256:…`, an HMAC-SHA256 under this key of 16 bytes or more), never the value. The same secret gives the same fingerprint in every file, scan and repository scanned with the key. A secret found in two or more places gets a "Secret value repeated" finding. Without the key, a fingerprint cannot be reversed or checked against a guessed value. Reports name the key only by an identifier derived from it (`metrics.secret_fingerprints.key_id`), and `--resume` requires the same key. Keep the key outside the scanned tree and out of version control. |
 | `--provider-map FILE` | none | A TOML file naming your self-hosted source-hosting servers by host (`*.example.com` for subdomains): GitHub Enterprise, self-managed GitLab, Bitbucket Data Center, Azure DevOps Server, Gitea, Forgejo, Gogs, Gerrit, Gitolite or SourceHut, or `unclassified` for a host no heuristic should name. Local Git remotes, remote targets and the no-download mode's API (with an optional `api_url` per host) use it before the public hosts and host-name guesses. Reports record the file's name, SHA-256 and entries; `--resume` requires the same map. Format: [Provider map](../analyzers/VCS_ANALYZER.md#provider-map). |
 
 A scan writes `discovery-report.json`, `discovery-report.md` and `discovery-report.html` (for the formats asked for) and keeps its working state in `OUTPUT/.pdt-cache/`: the inventory and code index (`inventory.sqlite3`), the fingerprint cache and the scan lock. A batch adds `batch-summary.json` and `batch-summary.md` with the status, revision, exit code and error of every repository.
@@ -426,6 +427,7 @@ pdt vuln-db status --db ~/.pdt/advisories.sqlite3
 | `CODEBERG_TOKEN` | `scan --no-download` | Token for codeberg.org. |
 | `PDT_API_URL_<HOST>` | `scan --no-download` | The API base URL for one host, also in batches. |
 | `NVD_API_KEY` | `--vuln-enrich nvd` | NVD API key (higher rate limits). |
+| `PDT_FINGERPRINT_KEY` | `pdt scan` | The secret-fingerprint key when `--fingerprint-key` is not given (16 bytes or more). |
 | `PDT_OSV_API_URL`, `PDT_NVD_API_URL`, `PDT_GITHUB_API_URL` | `--vuln-online` | Alternative endpoints, for example an internal mirror. |
 | `PDT_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` | online services | A CA bundle, as `--ca-bundle`. |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | online services | Standard proxy settings. |

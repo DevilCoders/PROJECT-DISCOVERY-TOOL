@@ -5,7 +5,9 @@ import codecs
 import re
 from pathlib import Path, PurePosixPath
 
+from ...core.fingerprints import fingerprint
 from ...core.limits import AnalyzerLimits, limit_reached
+from ...intelligence import facts as code_facts
 from ...catalog.languages import (
     detect_language,
     is_source_path,
@@ -214,6 +216,15 @@ def _reported(pattern_name: str, match: re.Match[str]) -> bool:
     return True
 
 
+def _secret_value(pattern_name: str, match: re.Match[str]) -> str:
+    """The secret a match holds, for its keyed fingerprint (never reported)."""
+    if pattern_name == "credential_assignment":
+        return _assignment_value(match)
+    if pattern_name == "credential_url":
+        return match.group("password")
+    return match.group(0)
+
+
 def credential_matches(text: str, relative: str):
     """(pattern name, match) for every credential the scanner reports in ``text``.
 
@@ -366,6 +377,11 @@ class SecretPatternAnalyzer(Analyzer):
                             if line_end < 0:
                                 line_end = len(combined)
                             excerpt = redact_source_excerpt(combined[line_start:line_end])
+                            # A keyed fingerprint of the value (--fingerprint-key), never the value.
+                            secret_fingerprint = fingerprint(_secret_value(pattern_name, match))
+                            if secret_fingerprint is not None:
+                                code_facts.emit_fact("secret_fingerprint", secret_fingerprint, line=line_number,
+                                                     pattern=pattern_name)
                             findings.append(Finding(
                                 "security",
                                 f"Potential hardcoded credential: {pattern_name}",
@@ -379,7 +395,8 @@ class SecretPatternAnalyzer(Analyzer):
                                     if low_risk else ""
                                 ),
                                 confidence="INFERRED",
-                                evidence=[f"{record.path}:{line_number}"],
+                                evidence=[f"{record.path}:{line_number}"] + (
+                                    [f"fingerprint: {secret_fingerprint}"] if secret_fingerprint else []),
                                 analyzer=self.name,
                                 severity=severity,
                                 code_evidence=[

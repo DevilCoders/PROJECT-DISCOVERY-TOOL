@@ -34,6 +34,7 @@ from ..models import FileRecord, Finding
 from .model import supports_language
 from .python_graph import _import_name, _strongly_connected_components
 from .reachability import reachability as _reachability
+from .secret_reuse import secret_reuse as _secret_reuse
 
 MAX_GRAPH_EDGES = 500_000
 MAX_LISTED = 100
@@ -3229,4 +3230,5 @@ _PASSES = (
     ("network_services", _network_services),
     ("provenance", _provenance),
     ("reachability", _reachability),
+    ("secret_reuse", _secret_reuse),
 )

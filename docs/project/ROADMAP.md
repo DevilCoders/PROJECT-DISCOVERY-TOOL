@@ -302,7 +302,10 @@ The baseline is not production-ready:
   - New categories and names: full name, postal and zip codes, more address kinds, birthdays, tax IDs, driver's licences and national insurance numbers, and account identifiers (account ID or number, bank account, IBAN, customer number).
   - 44 syntaxes and data formats are tested, and so are the names that must not count.
 - [x] Distinguish key-name evidence, placeholder/example values and likely non-placeholder values. Never label a field name alone as an exposed credential.
-- [ ] Add optional local keyed HMAC fingerprints to correlate repeated values without exposing reversible data; store no raw match in cache.
+- [x] Add optional local keyed HMAC fingerprints to correlate repeated values without exposing reversible data; store no raw match in cache ([SECURITY_ANALYZER.md](../analyzers/SECURITY_ANALYZER.md)):
+  - `--fingerprint-key FILE` (or `PDT_FINGERPRINT_KEY`) adds an HMAC-SHA256 fingerprint of each secret's value to its finding.
+  - The `secret_reuse` pass reports secrets found in two or more places.
+  - The key reaches worker processes. A test checks that neither the key nor the value appears in any output, cache or store file, with the thread and the process executor.
 - [ ] Add strict redaction tests for JSON/HTML/Markdown/terminal/exception logs and archive member findings.
 - [ ] Add allowlists/false-positive controls that do not suppress genuine findings silently; record suppression rules in the report.
 

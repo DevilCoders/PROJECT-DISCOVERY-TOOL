@@ -298,13 +298,15 @@ def _watch_coordinator() -> None:
 
 
 def _initialize_worker(vulnerability_db: str | None, plugin_setup=None, budget_policy=None, gpu=None,
-                       provider_map=None) -> None:
+                       provider_map=None, vulnerability_rules=None, fingerprint_key=None) -> None:
     """Load this worker process's own analyzer instances (built-ins and plugins)."""
     budgets.set_policy(budget_policy)
-    # The coordinator's --provider-map: a spawned worker starts without one.
+    # The coordinator's --provider-map and --fingerprint-key: a spawned worker starts without.
     from ..catalog.hosting import configure_provider_map
+    from ..core.fingerprints import configure_fingerprint_key
 
     configure_provider_map(provider_map)
+    configure_fingerprint_key(fingerprint_key)
     if gpu is not None:
         # The coordinator's --gpu setting; a spawned worker starts with GPU counting off.
         from .native import configure_gpu
@@ -323,7 +325,8 @@ def _initialize_worker(vulnerability_db: str | None, plugin_setup=None, budget_p
     # whose sandboxed hosts start on first use.
     analyzers = load_analyzers(plugin_policy=policy, plugin_specs=specs).analyzers
     if vulnerability_db:
-        analyzers.append(LocalVulnerabilityAnalyzer(Path(vulnerability_db)))
+        # With the coordinator's VEX statements and triage decisions (--vex, --triage).
+        analyzers.append(LocalVulnerabilityAnalyzer(Path(vulnerability_db), *(vulnerability_rules or ())))
     _worker_state["analyzers"] = analyzers
 
 
@@ -394,6 +397,14 @@ class AnalysisExecutor:
         self.workers = workers
         self._analyzers = list(analyzers)
         self._vulnerability_db = str(vulnerability_db) if vulnerability_db else None
+        # The coordinator's VEX statements and triage decisions: a worker process rebuilds its
+        # advisory matcher from the database path, and must apply the same rules.
+        local = next((analyzer for analyzer in self._analyzers
+                      if type(analyzer).__name__ == "LocalVulnerabilityAnalyzer"), None)
+        self._vulnerability_rules = (tuple(getattr(local, "vex", ())), getattr(local, "triage", None)) if local else None
+        from ..core.fingerprints import configured_fingerprint_key
+
+        self._fingerprint_key = configured_fingerprint_key()  # --fingerprint-key, for secret findings
         # (PluginPolicy, validated PluginSpecs) for worker processes to rebuild plugins.
         self._plugin_setup = plugin_setup
         # Analyzer time and memory budgets: thread workers share this process's policy,
@@ -431,7 +442,7 @@ class AnalysisExecutor:
                 max_workers=self.workers,
                 initializer=_initialize_worker,
                 initargs=(self._vulnerability_db, self._plugin_setup, self._budget_policy, self._gpu,
-                          self._provider_map),
+                          self._provider_map, self._vulnerability_rules, self._fingerprint_key),
             )
         return ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="pdt-analyzer")
 

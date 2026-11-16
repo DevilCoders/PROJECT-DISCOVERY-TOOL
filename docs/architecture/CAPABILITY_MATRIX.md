@@ -71,11 +71,11 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | HCL | configuration | optional parser | — | hcl | secret-patterns, tree-sitter-polyglot | 10 |
 | HLSL | shader | structure | structural lexer | hlsl | code-index, concurrency, dataflow, performance-hotspots, resource-management, shaders, tree-sitter-polyglot | 1 |
 | HTML | markup | optional parser | — | html | accessibility-markup, secret-patterns, tree-sitter-polyglot | 12 |
-| INI | configuration | inventory | — | — | secret-patterns | 12 |
+| INI | configuration | inventory | — | — | secret-patterns | 13 |
 | Intel HEX | firmware | inventory | — | — | — | 2 |
 | Java | source | structure | structural lexer, refined by Tree-sitter `java` | java | api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 17 |
 | JavaScript | source | structure | structural lexer, refined by Tree-sitter `javascript` | javascript | accessibility-markup, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 43 |
-| JSON | data | optional parser | — | json | ai-ml-intelligence, api-protocols, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 75 |
+| JSON | data | optional parser | — | json | ai-ml-intelligence, api-protocols, localization-intelligence, migration-intelligence, mobile-intelligence, secret-patterns, tree-sitter-polyglot | 76 |
 | Julia | source | optional parser | — | julia | dependency-lockfiles, tree-sitter-polyglot | 6 |
 | Jupyter Notebook | notebook | inventory | — | — | ai-ml-intelligence, secret-patterns | 1 |
 | Kconfig | configuration | inventory | — | — | secret-patterns | 1 |
@@ -129,7 +129,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | SystemVerilog | source | optional parser | — | systemverilog | hdl, tree-sitter-polyglot | 2 |
 | Text | documentation | inventory | — | — | secret-patterns | 49 |
 | Thrift | schema | inventory | — | — | api-rpc | 1 |
-| TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 17 |
+| TOML | data | optional parser | — | toml | secret-patterns, tree-sitter-polyglot | 18 |
 | TypeScript | source | structure | structural lexer, refined by Tree-sitter `typescript` | typescript | accessibility-markup, api-clients, api-graphql, api-policies, api-protocols, api-rpc, code-index, concurrency, coverage-artifacts, dataflow, frontend, identity-intelligence, messaging-intelligence, migration-intelligence, network-sockets, performance-hotspots, resource-management, tree-sitter-polyglot, type-systems | 27 |
 | UF2 Firmware | firmware | inventory | — | — | — | 2 |
 | Unity Asset YAML | game_source | inventory | — | — | — | 0 |
@@ -147,7 +147,7 @@ Analyzers are listed for a language when they declare it. `api-endpoints`, `nosq
 | XAML | markup | inventory | — | — | secret-patterns | 0 |
 | XLIFF | localization | inventory | — | — | localization-intelligence, secret-patterns | 1 |
 | XML | markup | optional parser | — | xml | localization-intelligence, migration-intelligence, ros-intelligence, secret-patterns, tree-sitter-polyglot | 17 |
-| YAML | data | optional parser | — | yaml | api-protocols, localization-intelligence, migration-intelligence, secret-patterns, tree-sitter-polyglot | 30 |
+| YAML | data | optional parser | — | yaml | api-protocols, localization-intelligence, migration-intelligence, secret-patterns, tree-sitter-polyglot | 31 |
 | Zig | source | structure | structural lexer | zig | code-index, concurrency, performance-hotspots, resource-management, tree-sitter-polyglot | 1 |
 
 ## Analyzer domains
