@@ -118,14 +118,26 @@ def keyed_identifier(keywords: str) -> str:
 # the scanner's own operators (typed defaults, :=, =>), so no detected syntax leaves its
 # value behind: "password :=" once lost only the operator and kept the literal.
 _ASSIGNED_VALUE = r"""("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
+_SECRET_WORDS = (
+    CREDENTIAL_KEYWORDS
+    + r"|pwd|account[_-]?key|shared[_-]?access[_-]?key|sas[_-]?token|private[_-]?key"
+    r"|database[_-]?url|connection[_-]?string|credential"
+)
 _SECRET_ASSIGNMENT = re.compile(
-    r"""(?i)(["']?"""
-    + keyed_identifier(
-        CREDENTIAL_KEYWORDS
-        + r"|pwd|account[_-]?key|shared[_-]?access[_-]?key|sas[_-]?token|private[_-]?key"
-        r"|database[_-]?url|connection[_-]?string|credential"
-    )
-    + ASSIGNMENT_OPERATOR + ")" + _ASSIGNED_VALUE
+    r"""(?i)(["']?""" + keyed_identifier(_SECRET_WORDS) + ASSIGNMENT_OPERATOR + ")" + _ASSIGNED_VALUE
+)
+# Values that other syntaxes write: triple-quoted literals (redacted before the assignment rule
+# above, which would take the opening quotes for an empty string), <password>…</password>
+# elements, and key="DbPassword" value="…" attribute pairs.
+_SECRET_TRIPLE_QUOTED = tuple(
+    re.compile(r"""(?i)(["']?""" + keyed_identifier(_SECRET_WORDS) + ASSIGNMENT_OPERATOR + ")"
+               + quotes + r"[^\r\n]*?(?:" + quotes + "|$)")
+    for quotes in ('"""', "'''")
+)
+_SECRET_ELEMENT = re.compile(r"(?i)(<(" + keyed_identifier(_SECRET_WORDS) + r")>)[^<\r\n]*+(</\2>)")
+_SECRET_KEY_VALUE = re.compile(
+    r"""(?i)(\b(?:key|name)\s*+=\s*+["'](?=[^"'\r\n]{0,120}?(?:""" + _SECRET_WORDS + r"""))[^"'\r\n]{1,120}+["']"""
+    r"""[^>\r\n]{0,200}?\bvalue\s*+=\s*+)("[^"\r\n]*+"|'[^'\r\n]*+')"""
 )
 _IDENTITY_ASSIGNMENT = re.compile(
     r"""(?i)(["']?"""
@@ -199,6 +211,10 @@ def redact_source_excerpt(source_line: str, *, max_chars: int = 400) -> str:
     value = _PRIVATE_KEY_BODY.sub("[REDACTED PRIVATE KEY MATERIAL]", value)
     value = _PRIVATE_KEY_MATERIAL_LINE.sub(r"\1[REDACTED PRIVATE KEY MATERIAL]\2", value)
     value = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", value)
+    value = _SECRET_TRIPLE_QUOTED[0].sub(r'\1"""[REDACTED]"""', value)
+    value = _SECRET_TRIPLE_QUOTED[1].sub(r"\1'''[REDACTED]'''", value)
+    value = _SECRET_ELEMENT.sub(r"\1[REDACTED]\3", value)
+    value = _SECRET_KEY_VALUE.sub(r'\1"[REDACTED]"', value)
     value = _SECRET_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     value = _IDENTITY_ASSIGNMENT.sub(r'\1"[REDACTED]"', value)
     # The shared registry guarantees every detected format is also redacted.

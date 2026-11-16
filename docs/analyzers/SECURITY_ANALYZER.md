@@ -6,7 +6,15 @@ The built-in secret scanner (`secret-patterns`) streams every textual source, co
 - **Private-key containers**: PKCS#12 (`.p12`, `.pfx`), Java (`.jks`, `.keystore`) and Bouncy Castle (`.bks`) keystores are reported by name as `Private-key container: PATH` (HIGH). Their content is binary and usually encrypted, so it is not decoded.
 - **Provider credential formats**: more than 30 high-confidence formats from one shared registry (`core/secret_patterns.py`), including GitHub, GitLab, AWS, Google, Slack, Stripe, OpenAI, Anthropic, Hugging Face, npm, PyPI, Docker, Azure storage and SAS keys, Vault, Doppler, age keys and JWTs. The same registry drives redaction, so every detected format is also removed from report excerpts.
 - **Credential URLs**: URLs whose user-info part (before `@`) carries both a user name and a password.
-- **Generic credential assignments**: a key containing `password`, `secret`, `token`, `api_key` and similar, assigned a value of at least 6 characters. Supported forms include `key = value`, `key: value`, `"key": value`, `'key' => value`, Go `:=` and typed defaults such as `secret: str = "…"`.
+- **Generic credential assignments**: a key containing `password`, `secret`, `token`, `api_key` and similar, assigned a value of at least 6 characters. Supported forms:
+  - Assignments: `key = value`, `key: value`, `"key": value`, `'key' => value`, Go `:=` and typed defaults such as `secret: str = "…"`. These cover JSON, TOML, INI, properties, dotenv, shell, YAML and HCL attributes.
+  - Markup: XML elements (`<password>…</password>`, as in Maven `settings.xml`), XML attributes (`password="…"`) and `.NET`-style pairs (`<add key="DbPassword" value="…"/>`, `<param name="password" value="…"/>`).
+  - HCL `variable "db_password" { default = "…" }` blocks.
+  - YAML block scalars (`password: |` with the value on the next line).
+  - Triple-quoted literals (`PASSWORD = """…"""`).
+  - Quoted dotenv and shell values that run over several lines.
+
+  Each form is redacted in excerpts as well. `tests/analyzers/security/test_credential_formats.py` checks that no field of the finding keeps the value.
   - In programming languages, only string literals count, because an unquoted right-hand side is an expression.
   - In configuration, environment and shell files, unquoted values are literals and count too.
   - Separators never span a line break.

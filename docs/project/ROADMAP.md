@@ -290,7 +290,13 @@ The baseline is not production-ready:
 - [x] Credential-related field-name indicators for password/passphrase, API key, client secret, tokens and private key.
 - [x] Initial secret-pattern scanner and archive member secret-pattern scanner with redacted evidence.
 - [x] Expand detectors for actual high-confidence secret value shapes: cloud keys, provider tokens, database URLs, private-key blocks, certificates, JWTs, OAuth credentials, signing keys, service-account credentials, webhook secrets and generic entropy/context-assisted tokens.
-- [ ] Add password/passphrase assignment value detection without ever storing or logging the matched value; support YAML, JSON, TOML, INI, XML, dotenv, HCL, source literals and multiline formats. Literal assignments are detected and redacted, with tests, in Python, Go, PHP, TypeScript, shell, YAML, INI and dotenv files. TOML, XML, HCL and multiline values have no tests.
+- [x] Add password/passphrase assignment value detection without ever storing or logging the matched value; support YAML, JSON, TOML, INI, XML, dotenv, HCL, source literals and multiline formats. Every form is detected and redacted, with tests that no field of a finding keeps the value ([SECURITY_ANALYZER.md](../analyzers/SECURITY_ANALYZER.md)):
+  - Assignments in Python, Go, PHP, TypeScript, shell, JSON, TOML, INI, properties, YAML and dotenv.
+  - XML elements and attributes, and `.NET` key/value pairs.
+  - HCL attributes and variable defaults.
+  - YAML block scalars, triple-quoted literals and multiline quoted values.
+
+  The redactor had let XML element values, key/value attribute pairs and triple-quoted literals through; it now hides them.
 - [ ] Extend PII field/value detectors for firstname, first_name, givenName, middleName, lastname, surname, username, user_name, email, phone, address, account ID and related schemas in 40+ language syntaxes and data formats.
 - [x] Distinguish key-name evidence, placeholder/example values and likely non-placeholder values. Never label a field name alone as an exposed credential.
 - [ ] Add optional local keyed HMAC fingerprints to correlate repeated values without exposing reversible data; store no raw match in cache.

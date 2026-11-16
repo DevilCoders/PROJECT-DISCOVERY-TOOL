@@ -53,8 +53,37 @@ _SPECIFIC_PATTERNS = (
     *((item.name, pattern, item.anchors) for item, pattern in COMPILED_FORMATS),
     ("credential_url", re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{0,31}://[^\s/:@]+:(?P<password>[^\s/@]+)@"), ("://",)),
 )
-_PATTERNS = (*_SPECIFIC_PATTERNS, ("credential_assignment", _ASSIGNMENT_ANY, ()))
-_EXPRESSION_PATTERNS = (*_SPECIFIC_PATTERNS, ("credential_assignment", _ASSIGNMENT_QUOTED, ()))
+# Syntaxes the assignment rule does not see (JSON, TOML, INI, dotenv and HCL attributes are
+# assignments). Each names its key ("key") and value ("double"/"single") like the rule, so the
+# same placeholder and key checks apply; the excerpt redactor covers each of them.
+_FORMAT_PATTERNS = (
+    # <password>value</password> (XML, .NET, Maven settings, Spring)
+    ("credential_assignment", re.compile(
+        r"(?i)<(?P<key>[A-Za-z_][A-Za-z0-9_.-]{0,60}+)>(?P<double>[^<\r\n]{6,500}+)</(?P=key)>"), ("</",)),
+    # <add key="DbPassword" value="..."/>, <param name="password" value="..."/>
+    ("credential_assignment", re.compile(
+        r"""(?i)\b(?:key|name)\s*+=\s*+"(?P<key>[A-Za-z0-9_.:-]{1,80}+)"\s++value\s*+=\s*+"(?P<double>[^"\r\n]{6,500}+)\""""),
+        ("value",)),
+    # HCL: variable "db_password" { ... default = "..." }
+    ("credential_assignment", re.compile(
+        r'(?i)\bvariable\s++"(?P<key>[A-Za-z0-9_-]{1,80}+)"\s*+\{(?:\s*+[a-z_]++\s*+=\s*+[^\r\n{}]*+){0,12}?'
+        r'\s*+default\s*+=\s*+"(?P<double>[^"\r\n]{6,500}+)"'), ("variable",)),
+    # YAML block scalars: "password: |" with the value on the next, deeper line
+    ("credential_assignment", re.compile(
+        r"(?m)^(?P<indent>[ \t]*+)(?P<key>[A-Za-z0-9_.-]{1,80}+)[ \t]*+:[ \t]*+[|>][-+0-9]{0,2}+[ \t]*+"
+        r"(?:#[^\r\n]*+)?\r?\n(?P=indent)[ \t]++(?P<double>[^\s#][^\r\n]{5,500}+)"), (": |", ": >", ":|", ":>")),
+    # Triple-quoted literals: PASSWORD = """...""" (Python, Kotlin, Scala, Groovy, TOML)
+    ("credential_assignment", re.compile(
+        rf"(?i)(?P<key>{_CREDENTIAL_KEY}){_ASSIGNMENT_OPERATOR}"
+        r'(?:"""(?P<double>[^"\r\n]{6,500}+)"""|' r"'''(?P<single>[^'\r\n]{6,500}+)''')"), ('"""', "'''")),
+)
+# A quoted value that runs over lines (dotenv and shell): KEY="first line ... ".
+_MULTILINE_VALUE = ("credential_assignment", re.compile(
+    rf"(?i)(?P<key>{_CREDENTIAL_KEY})=(?:"
+    r'"(?P<double>[^"\r\n]{6,500}+)\r?\n[^"]{0,4000}+"|' r"'(?P<single>[^'\r\n]{6,500}+)\r?\n[^']{0,4000}+')"),
+    ('="', "='"))
+_PATTERNS = (*_SPECIFIC_PATTERNS, ("credential_assignment", _ASSIGNMENT_ANY, ()), *_FORMAT_PATTERNS, _MULTILINE_VALUE)
+_EXPRESSION_PATTERNS = (*_SPECIFIC_PATTERNS, ("credential_assignment", _ASSIGNMENT_QUOTED, ()), *_FORMAT_PATTERNS)
 _SEVERITY = {
     "private_key": "CRITICAL",
     **{item.name: item.severity for item, _ in COMPILED_FORMATS},

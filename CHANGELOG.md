@@ -228,6 +228,15 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: credential assignments in every configuration syntax
+- The secret scanner finds passwords and secrets in more syntaxes: XML elements, `.NET`
+  key/value pairs (`<add key="DbPassword" value="…"/>`), HCL variable defaults, YAML block
+  scalars, triple-quoted literals and quoted values that run over several lines.
+- JSON, TOML, INI, properties and HCL attributes, already detected, now have tests too.
+- Fixed: the excerpt redactor left the value readable in `<password>…</password>` elements,
+  key/value attribute pairs and triple-quoted literals. Each is now hidden, and tests check that
+  no field of a finding keeps the value.
+
 ### Added: stale cache answers and offline online-lookups
 - Online answers past their TTL are kept 90 days. When OSV.dev cannot be reached, the lookup
   serves them instead of failing, labelled in each finding's evidence (when fetched, why served
