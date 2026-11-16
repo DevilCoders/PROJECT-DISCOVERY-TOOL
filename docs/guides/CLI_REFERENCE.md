@@ -389,7 +389,7 @@ Imports advisories from a local file, directory tree or OSV `all.zip` into the d
 | CycloneDX vulnerabilities (VDR and VEX BOMs) | each affected component's package URL. VEX analyses that say `not_affected`, `false_positive` or `resolved` are left out. |
 | CISA Known Exploited Vulnerabilities catalog (`known_exploited_vulnerabilities.json`) | none: it marks the CVEs it lists, and findings of them say so and are raised to at least HIGH. A catalog replaces the stored one, unless the stored one was released later. |
 
-A file in no known format is skipped and reported, as is a corrupt compressed file or archive member. When an advisory ID is already stored, the copy modified later is kept. An older record changes nothing and is counted as superseded, so importing an old snapshot cannot undo a correction or a withdrawal. Exit 0 when every record imported or was superseded, 1 when some were skipped (each is reported), and 2 when none could be imported (the database's snapshot provenance is then unchanged). The summary counts the records from each format.
+A file in no known format is skipped and reported, as is a corrupt compressed file or archive member. When an advisory ID is already stored, the copy modified later is kept. An older record changes nothing and is counted as superseded, so importing an old snapshot cannot undo a correction or a withdrawal. A JSON list is a feed when its first records look like one; each record is then checked on its own, so one malformed record does not reject the rest. The import is one transaction: one that fails or is interrupted (Ctrl-C included) leaves the database as it was. Exit 0 when every record imported or was superseded, 1 when some were skipped (each is reported), and 2 when none could be imported (the database's snapshot provenance is then unchanged). The summary counts the records from each format.
 
 | Option | Default | Description |
 |---|---|---|
@@ -402,7 +402,7 @@ A file in no known format is skipped and reported, as is a corrupt compressed fi
 pdt vuln-db status [--db FILE]
 ```
 
-Shows the advisory and affected-package counts, the last import and snapshot age (with a warning when the snapshot is stale), the snapshot source, the imported Known Exploited Vulnerabilities catalog (entries, version, release date) and the advisories per ecosystem. A missing database is an error (exit 2).
+Checks the file's integrity first (SQLite's `quick_check`). It then shows the advisory and affected-package counts, the last import and snapshot age (with a warning when the snapshot is stale), the snapshot source, the imported Known Exploited Vulnerabilities catalog (entries, version, release date) and the advisories per ecosystem. A missing database is an error (exit 2), and so is a damaged one: import the snapshot into a new file. A scan does not run the full check. It stops before it starts if the damage shows while it reads the snapshot's status; otherwise the lockfiles whose lookups hit the damage get `UNKNOWN` "Local advisory database unavailable" findings.
 
 | Option | Default | Description |
 |---|---|---|

@@ -643,9 +643,12 @@ def exploit_maturity(record: dict) -> str | None:
 def detect_format(document: Any) -> str:
     """The advisory format of a parsed JSON document."""
     if isinstance(document, list):
-        if document and all(isinstance(item, dict) and "ghsa_id" in item for item in document[:5]):
+        # A list is a feed when its first records look like one; each record is then checked
+        # on its own, so one malformed record does not reject the feed.
+        head = [item for item in document[:20] if isinstance(item, dict)]
+        if any("ghsa_id" in item for item in head):
             return "ghsa"
-        if document and all(isinstance(item, dict) and item.get("id") and "affected" in item for item in document[:5]):
+        if any(item.get("id") and isinstance(item.get("affected"), list) for item in head):
             return "osv-list"
         return "unknown"
     if not isinstance(document, dict):

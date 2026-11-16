@@ -794,11 +794,18 @@ def run_scan(
                 )
             if vulnerability_db == root or root in vulnerability_db.parents:
                 raise ValueError("The vulnerability database must be outside the analyzed project.")
-            with VulnerabilityDatabase(vulnerability_db, read_only=True) as advisory_store:
-                vulnerability_db_status = {
-                    "enabled": True,
-                    **advisory_store.status(),
-                }
+            try:
+                with VulnerabilityDatabase(vulnerability_db, read_only=True) as advisory_store:
+                    vulnerability_db_status = {
+                        "enabled": True,
+                        **advisory_store.status(),
+                    }
+            except sqlite3.DatabaseError as exc:
+                # Fail before the scan, not with an analyzer error per lockfile.
+                raise ValueError(
+                    f"The local vulnerability database {vulnerability_db} is damaged ({exc}); check it with "
+                    "`pdt vuln-db status` and import the snapshot into a new file."
+                ) from exc
             if inventory_only:
                 # No lockfile is read, so no match is possible: a 0-match result would read as clean.
                 vulnerability_db_status.update(
@@ -2394,9 +2401,17 @@ def main() -> None:
                 # Reading status must never create an empty database at a mistyped path.
                 raise FileNotFoundError(f"Advisory database not found: {args.db}")
             with VulnerabilityDatabase(args.db, read_only=True) as database:
-                status = database.status()
+                # A damaged file is checked before anything else reads it.
+                damage = database.integrity()
+                status = None if damage else database.status()
             print("[ VULNERABILITY DATABASE ]")
+            if damage or status is None:
+                print(f"[ ERROR ] The database is damaged: {'; '.join(damage[:3])}")
+                print("[ ERROR ] Import the snapshot into a new file (pdt vuln-db import SOURCE --db NEW). "
+                      "Imports are all-or-nothing, so a new file holds the whole snapshot or nothing.")
+                raise SystemExit(EXIT_USAGE)
             print(f"[ INFO ] Database: {status['database']}")
+            print("[ INFO ] Integrity: ok")
             print(f"[ INFO ] Advisories: {status['advisory_count']}")
             print(f"[ INFO ] Affected package records: {status['affected_package_records']}")
             print(f"[ INFO ] Last import: {status.get('last_imported_at', 'never')}")

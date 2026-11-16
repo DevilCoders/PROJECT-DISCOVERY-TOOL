@@ -264,7 +264,11 @@ The baseline is not production-ready:
   - Triage files (`pdt scan --triage`, TOML) record accepted, false-positive and mitigated decisions with a required reason, an expiry for accepted risks, and the reviewer. Expired and unused decisions are reported ([Triage](../analyzers/LOCKFILE_ANALYZER.md#triage)).
   - Fixed-version suggestions are the lowest release no known advisory affects.
   - Per-lockfile remediation plans group transitive packages by the direct dependency that brings them in ([Remediation](../analyzers/LOCKFILE_ANALYZER.md#remediation)).
-- [ ] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds.
+- [x] Test DB corruption/recovery, duplicate IDs, re-import, withdrawn advisories, boundary versions, prereleases, malformed records and large local feeds (`tests/vulnerabilities/test_database_robustness.py`). Fixes found along the way:
+  - Imports are one transaction, so an interrupted one no longer leaves half a snapshot under the old provenance.
+  - `pdt vuln-db status` checks integrity. A scan stops early when the damage shows while reading the snapshot's status; otherwise affected lockfiles are `UNKNOWN`.
+  - One malformed record no longer rejects a JSON list feed.
+  - A 20,000-record OSV zip imports and queries within the test's time bounds.
 - [x] Include advisory snapshot provenance, import timestamp, source identity/hash, ecosystem coverage and freshness warning in reports.
 
 ### Online vulnerability intelligence (opt-in)

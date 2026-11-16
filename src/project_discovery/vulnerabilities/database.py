@@ -21,7 +21,6 @@ from .cvss import base_score, qualitative_severity
 SCHEMA_VERSION = 3
 _MAX_ZIP_MEMBERS = 5_000_000
 _MAX_ZIP_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
-_IMPORT_BATCH = 500
 # One advisory document: an OSV record keeps its own budget; a feed (NVD, the Debian tracker,
 # a GitHub export, Alpine secdb, CSAF) holds many records in one file.
 MAX_DOCUMENT_BYTES = 1024 * 1024 * 1024
@@ -409,8 +408,10 @@ class VulnerabilityDatabase:
         records and the formats ``adapters`` converts (NVD, GitHub exports, the Debian tracker,
         Alpine secdb, CSAF, CycloneDX), as ``.json`` or ``.json.gz``.
 
-        Each advisory is applied atomically (SAVEPOINT); commits are batched for speed. An OSV
-        record keeps the ``max_record_bytes`` budget; a feed document may be ``max_document_bytes``.
+        The import is one transaction: one that fails or is interrupted leaves the database as
+        it was, never half a snapshot under the old provenance. Each advisory is also applied
+        atomically (SAVEPOINT), so a record SQLite refuses is skipped on its own. An OSV record
+        keeps the ``max_record_bytes`` budget; a feed document may be ``max_document_bytes``.
         """
         if self.read_only:
             raise PermissionError("advisory database was opened read-only")
@@ -425,7 +426,6 @@ class VulnerabilityDatabase:
         exploited = 0
         errors: list[str] = []
         affected_count = 0
-        pending = 0
         formats: dict[str, int] = {}
 
         self.connection.execute("BEGIN")
@@ -482,11 +482,6 @@ class VulnerabilityDatabase:
                             affected_count += stored_rows
                             imported += 1
                             stored += 1
-                    pending += 1
-                    if pending >= _IMPORT_BATCH:
-                        self.connection.execute("COMMIT")
-                        self.connection.execute("BEGIN")
-                        pending = 0
                 if stored:
                     formats[kind.split("-", 1)[0]] = formats.get(kind.split("-", 1)[0], 0) + stored
             if imported:
@@ -730,6 +725,15 @@ class VulnerabilityDatabase:
             except ValueError:
                 pass
         return result
+
+    def integrity(self, max_errors: int = 20) -> list[str]:
+        """SQLite's quick_check of the whole file: [] when it is sound, its errors when it is
+        damaged (a damaged snapshot is replaced by importing into a new file)."""
+        try:
+            rows = [str(row[0]) for row in self.connection.execute(f"PRAGMA quick_check({int(max_errors)})")]
+        except sqlite3.DatabaseError as exc:
+            return [f"{type(exc).__name__}: {exc}"]
+        return [] if rows == ["ok"] else rows
 
     def covers(self, ecosystem: str) -> bool:
         """Whether the snapshot holds any advisory for this ecosystem."""

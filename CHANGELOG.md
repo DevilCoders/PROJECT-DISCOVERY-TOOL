@@ -228,6 +228,18 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Fixed: advisory database recovery and robustness
+- `pdt vuln-db import` is one transaction. An import that fails or is interrupted used to leave
+  the batches it had committed, half a snapshot under the old provenance; now it leaves the
+  database as it was.
+- `pdt vuln-db status` checks the file's integrity (SQLite `quick_check`) and reports a damaged
+  database with the remedy. A scan stops before it starts when the damage shows while it reads the
+  snapshot's status.
+- A JSON list feed with a malformed record among its first five was rejected whole. Each record
+  is now checked on its own.
+- New tests cover damage and recovery, interrupted imports, duplicate IDs, re-imports,
+  withdrawals, version boundaries and prereleases, malformed records, and a 20,000-record feed.
+
 ### Added: triage files with accepted-risk rationale
 - `pdt scan --triage FILE` reads TOML decisions: an advisory or alias, optionally narrowed to an
   ecosystem, package, version or lockfile, with a status (`accepted`, `false_positive`,

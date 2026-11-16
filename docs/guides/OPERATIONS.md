@@ -454,6 +454,10 @@ A scan of an unpacked container image or root file system matches the installed 
 apk or rpm records against the advisories of the release its `os-release` names. See
 [LOCKFILE_ANALYZER.md](../analyzers/LOCKFILE_ANALYZER.md#installed-os-packages-and-sboms).
 
+An import is all-or-nothing: an interrupted one leaves the previous snapshot. `pdt vuln-db status`
+checks the file's integrity; if it reports damage (a disk fault, a copy cut short), import the
+snapshot into a new file and point `--vuln-db` at it.
+
 The database is opened read-only during scans. Refresh it by importing a newer snapshot;
 `status` reports the snapshot age. Databases created by 0.1.0 are migrated to indexed lookups
 the first time they are opened for import or status.
