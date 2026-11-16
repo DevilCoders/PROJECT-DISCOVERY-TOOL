@@ -43,7 +43,10 @@ from typing import Any, Literal, Sequence
 # status and SHA-256).
 # 1.24 added metrics.vulnerability_intelligence.triage (the --triage files, decisions, expired
 # and unused counts, the date they were judged on and SHA-256).
-REPORT_SCHEMA_VERSION = "1.24"
+# 1.25 added, under metrics.vulnerability_intelligence.online, stale_answers (packages,
+# advisories, oldest_fetched_at), cache_mode (normal, refresh, cache-only) and the cache's
+# stale_hits and refresh.
+REPORT_SCHEMA_VERSION = "1.25"
 
 Confidence = Literal["CONFIRMED", "INFERRED", "UNKNOWN"]
 Severity = Literal["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]

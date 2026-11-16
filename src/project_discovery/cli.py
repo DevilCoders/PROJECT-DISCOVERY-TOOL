@@ -2171,6 +2171,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --vuln-online: reuse cached answers for this long; 0 disables the cache (default: 24)",
     )
     scan.add_argument(
+        "--vuln-cache-refresh", action="store_true",
+        help="With --vuln-online: ask OSV.dev again for every package and store the answers, ignoring fresh "
+             "cache entries (to prepare a cache for later --vuln-cache-only scans)",
+    )
+    scan.add_argument(
+        "--vuln-cache-only", action="store_true",
+        help="With --vuln-online: answer from the cache only and contact no service; answers past their TTL "
+             "are used and labelled stale, packages not in the cache are UNKNOWN",
+    )
+    scan.add_argument(
         "--network-timeout", type=float, default=None, metavar="SECONDS",
         help=f"Per-request timeout for online services (default: {DEFAULT_NETWORK_TIMEOUT:.0f})",
     )
@@ -2686,6 +2696,8 @@ def main() -> None:
                 for option, value in (
                     ("--vuln-enrich", args.vuln_enrich), ("--vuln-cache", args.vuln_cache),
                     ("--vuln-cache-ttl", args.vuln_cache_ttl),
+                    ("--vuln-cache-refresh", args.vuln_cache_refresh or None),
+                    ("--vuln-cache-only", args.vuln_cache_only or None),
                 ):
                     if value is not None:
                         parser.error(f"{option} requires --vuln-online")
@@ -2703,13 +2715,17 @@ def main() -> None:
                     parser.error("--vuln-cache-ttl must be between 0 and 87600 hours")
                 if args.network_timeout is not None and not 0 < args.network_timeout <= 600:
                     parser.error("--network-timeout must be greater than 0 and at most 600 seconds")
-                online_vulnerabilities = OnlineVulnerabilityOptions.from_environment(
-                    cache_path=args.vuln_cache or default_vulnerability_cache_path(),
-                    cache_ttl_hours=args.vuln_cache_ttl,
-                    ca_bundle=resolve_ca_bundle(args.ca_bundle),
-                    timeout=args.network_timeout,
-                    enrich=enrich,
-                )
+                try:
+                    online_vulnerabilities = OnlineVulnerabilityOptions.from_environment(
+                        cache_path=args.vuln_cache or default_vulnerability_cache_path(),
+                        cache_ttl_hours=args.vuln_cache_ttl,
+                        ca_bundle=resolve_ca_bundle(args.ca_bundle),
+                        timeout=args.network_timeout,
+                        enrich=enrich,
+                        cache_only=args.vuln_cache_only, refresh=args.vuln_cache_refresh,
+                    )
+                except ValueError as exc:
+                    parser.error(str(exc))
                 validate_service_url(online_vulnerabilities.osv_url, label="PDT_OSV_API_URL")
                 if "nvd" in enrich:
                     validate_service_url(online_vulnerabilities.nvd_url, label="PDT_NVD_API_URL")

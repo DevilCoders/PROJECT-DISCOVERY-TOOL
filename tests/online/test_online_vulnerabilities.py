@@ -775,3 +775,66 @@ def test_online_matches_feed_the_reachability_pass(tmp_path: Path):
     assert [item["title"] for item in reachability] == ["Vulnerable package imported by the code: lodash@4.17.20"]
     assert "imported_by: app.js:1" in reachability[0]["evidence"]
     assert report["metrics"]["code_index"]["reachability"]["imported"] == 1
+
+
+def _age_cache(path: Path, days: float = 3) -> None:
+    """Make every cached answer older than its TTL, fetched ``days`` ago."""
+    import sqlite3
+    import time as _time
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("UPDATE responses SET fetched_at = fetched_at - ?, expires_at = ?",
+                           (days * 86400, _time.time() - 60))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_stale_answers_are_served_and_labelled_when_the_service_is_unreachable(tmp_path: Path):
+    project = _project(tmp_path)
+    with RunningService(_service()) as running:
+        options = _options(running, tmp_path)
+        _scan(project, tmp_path / "first", options)
+    _age_cache(tmp_path / "cache" / "online.sqlite3")
+    # The service is gone: the cache's expired answers stand in, clearly labelled.
+    _, report = _scan(project, tmp_path / "second", options)
+    finding, = [item for item in _online_findings(report) if item["title"].startswith(LODASH_GHSA)]
+    assert any("served stale (the service could not be reached)" in line for line in finding["evidence"])
+    status = report["metrics"]["vulnerability_intelligence"]["online"]
+    assert status["coverage"] == "partial" and status["stale_answers"]["packages"] == 2
+    assert status["cache"]["stale_hits"] >= 3
+    assert any(item["title"].startswith("Online vulnerability answers served from a stale cache")
+               for item in report["findings"])
+
+
+def test_a_refreshed_cache_serves_a_later_cache_only_scan(tmp_path: Path):
+    project = _project(tmp_path)
+    with RunningService(_service()) as running:
+        options = _options(running, tmp_path)
+        _scan(project, tmp_path / "first", options)
+        before = len(running.service.requests)
+        # Fresh entries are asked again and stored.
+        _scan(project, tmp_path / "refresh", _options(running, tmp_path, refresh=True))
+        assert len(running.service.requests) > before
+    # Offline: answers come from the cache only; a package it never saw is UNKNOWN.
+    lock = project / "web" / "package-lock.json"
+    data = json.loads(lock.read_text(encoding="utf-8"))
+    data["packages"]["node_modules/never-seen"] = {"version": "1.0.0"}
+    lock.write_text(json.dumps(data), encoding="utf-8")
+    _, report = _scan(project, tmp_path / "offline", _options(running, tmp_path, cache_only=True))
+    assert [item["title"] for item in _online_findings(report) if item["title"].startswith(LODASH_GHSA)]
+    status = report["metrics"]["vulnerability_intelligence"]["online"]
+    assert status["requests"]["osv_querybatch"] == 0 and status["cache_mode"] == "cache-only"
+    assert any("never-seen" in item["detail"] and "not in the cache" in item["detail"]
+               for item in report["findings"] if item["title"].startswith("Online vulnerability lookup failed"))
+
+
+def test_cache_modes_are_validated(tmp_path: Path, monkeypatch):
+    with pytest.raises(ValueError, match="cannot be combined"):
+        OnlineVulnerabilityOptions(cache_path=tmp_path / "c", cache_only=True, refresh=True)
+    with pytest.raises(ValueError, match="cannot enrich"):
+        OnlineVulnerabilityOptions(cache_path=tmp_path / "c", cache_only=True, enrich=frozenset({"nvd"}))
+    with pytest.raises(ValueError, match="need the cache"):
+        OnlineVulnerabilityOptions(cache_path=tmp_path / "c", cache_ttl_seconds=0, refresh=True)
+    assert _run_cli(monkeypatch, "scan", str(_project(tmp_path)), "--vuln-cache-only") == 2

@@ -67,6 +67,7 @@ class OsvClient:
         *,
         base_url: str = OSV_API_URL,
         requests_per_second: int = 20,
+        offline: bool = False,
     ) -> None:
         self.http = http
         self.cache = cache
@@ -74,6 +75,18 @@ class OsvClient:
         self.limiter = RateLimiter(requests_per_second, 1.0)
         self.batch_requests = 0
         self.record_requests = 0
+        # --vuln-cache-only: no request is made; answers come from the cache, however old.
+        self.offline = offline
+        # The answers served stale (the cache's, past their TTL), with the time they were fetched.
+        self.stale_packages: dict[PackageQuery, float] = {}
+        self.stale_records: dict[str, float] = {}
+
+    def _stale_ids(self, package: PackageQuery) -> list[str] | None:
+        found = self.cache.get_stale(endpoint_key(self.base_url, package.cache_key))
+        if found is None or not isinstance(found[0], list) or not all(valid_vulnerability_id(item) for item in found[0]):
+            return None
+        self.stale_packages[package] = found[1]
+        return found[0]
 
     def query(
         self, packages: Iterable[PackageQuery],
@@ -86,6 +99,12 @@ class OsvClient:
             cached = self.cache.get(endpoint_key(self.base_url, package.cache_key))
             if isinstance(cached, list) and all(valid_vulnerability_id(item) for item in cached):
                 results[package] = cached
+            elif self.offline:
+                stale = self._stale_ids(package)
+                if stale is not None:
+                    results[package] = stale
+                else:
+                    failures[package] = NetworkError("not in the cache (--vuln-cache-only)", kind="cache_miss")
             else:
                 pending.append(package)
         for start in range(0, len(pending), OSV_BATCH_SIZE):
@@ -93,12 +112,21 @@ class OsvClient:
             try:
                 answered = self._query_batch(batch)
             except NetworkError as exc:
+                # The service is out of reach: a stale answer, labelled, beats none.
                 for package in batch:
-                    failures[package] = exc
+                    stale = self._stale_ids(package)
+                    if stale is not None:
+                        results[package] = stale
+                    else:
+                        failures[package] = exc
                 continue
             for package, (ids, error) in answered.items():
                 if error is not None:
-                    failures[package] = error
+                    stale = self._stale_ids(package)
+                    if stale is not None:
+                        results[package] = stale
+                    else:
+                        failures[package] = error
                     continue
                 results[package] = ids
                 self.cache.put(endpoint_key(self.base_url, package.cache_key), ids)
@@ -164,11 +192,30 @@ class OsvClient:
         cached = self.cache.get(key)
         if isinstance(cached, dict):
             return None if cached.get("_pdt_missing") else cached
+
+        def stale_record() -> dict[str, Any] | None:
+            found = self.cache.get_stale(key)
+            if found is None or not isinstance(found[0], dict):
+                return None
+            self.stale_records[vulnerability_id] = found[1]
+            return found[0]
+
+        if self.offline:
+            record = stale_record()
+            if record is None:
+                raise NetworkError("not in the cache (--vuln-cache-only)", kind="cache_miss")
+            return None if record.get("_pdt_missing") else record
         self.record_requests += 1
-        status, record = self.http.get_json(
-            f"{self.base_url}/v1/vulns/{urllib.parse.quote(vulnerability_id, safe='')}",
-            limiter=self.limiter, not_found_ok=True, max_bytes=MAX_RECORD_BYTES,
-        )
+        try:
+            status, record = self.http.get_json(
+                f"{self.base_url}/v1/vulns/{urllib.parse.quote(vulnerability_id, safe='')}",
+                limiter=self.limiter, not_found_ok=True, max_bytes=MAX_RECORD_BYTES,
+            )
+        except NetworkError:
+            stale = stale_record()
+            if stale is None:
+                raise
+            return None if stale.get("_pdt_missing") else stale
         if status == 404:
             self.cache.put(key, {"_pdt_missing": True})
             return None

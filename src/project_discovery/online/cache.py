@@ -18,6 +18,9 @@ from ..inventory.store import prepare_private_database
 
 CACHE_SCHEMA_VERSION = "1"
 DEFAULT_CACHE_TTL_SECONDS = 24 * 3600
+# How long past its TTL an answer is kept to be served, labelled stale, when the service is out
+# of reach or the scan uses the cache only.
+STALE_RETENTION_SECONDS = 90 * 24 * 3600
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS responses (
@@ -44,17 +47,26 @@ def default_cache_path() -> Path:
 
 
 class ResponseCache:
-    """Thread-safe key/value cache; ``ttl_seconds == 0`` disables caching entirely."""
+    """Thread-safe key/value cache; ``ttl_seconds == 0`` disables caching entirely.
 
-    def __init__(self, path: Path | None, *, ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS) -> None:
+    An answer older than the TTL is not served as fresh, but it is kept for
+    ``STALE_RETENTION_SECONDS`` more: when the service cannot be reached (or the scan uses
+    the cache only), ``get_stale`` serves it with the time it was fetched, for the report to
+    label. ``refresh`` ignores fresh answers, so every lookup is asked again and stored.
+    """
+
+    def __init__(self, path: Path | None, *, ttl_seconds: float = DEFAULT_CACHE_TTL_SECONDS,
+                 refresh: bool = False) -> None:
         if ttl_seconds < 0:
             raise ValueError("cache TTL must not be negative")
         self.ttl_seconds = float(ttl_seconds)
         self.path = Path(path).expanduser() if path is not None else None
         self.enabled = self.path is not None and self.ttl_seconds > 0
+        self.refresh = refresh
         self.hits = 0
         self.misses = 0
         self.writes = 0
+        self.stale_hits = 0
         self._lock = threading.Lock()
         self._connection: sqlite3.Connection | None = None
         if not self.enabled:
@@ -68,14 +80,34 @@ class ResponseCache:
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', ?)",
                 (CACHE_SCHEMA_VERSION,),
             )
-            self._connection.execute("DELETE FROM responses WHERE expires_at <= ?", (time.time(),))
+            # Expired answers stay for the stale window; past it they are gone.
+            self._connection.execute("DELETE FROM responses WHERE expires_at <= ?",
+                                     (time.time() - STALE_RETENTION_SECONDS,))
             self._connection.commit()
         except sqlite3.Error:
             self._connection.close()
             raise
 
-    def get(self, key: str) -> Any | None:
+    def get_stale(self, key: str) -> tuple[Any, float] | None:
+        """(an answer however old, within the stale window; the time it was fetched), or None."""
         if not self.enabled or self._connection is None:
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT body, fetched_at FROM responses WHERE key=? AND expires_at>?",
+                (key, time.time() - STALE_RETENTION_SECONDS),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                value = json.loads(row[0])
+            except (json.JSONDecodeError, RecursionError):
+                return None
+            self.stale_hits += 1
+            return value, float(row[1])
+
+    def get(self, key: str) -> Any | None:
+        if not self.enabled or self._connection is None or self.refresh:
             return None
         with self._lock:
             row = self._connection.execute(
@@ -112,6 +144,8 @@ class ResponseCache:
             "hits": self.hits,
             "misses": self.misses,
             "writes": self.writes,
+            "stale_hits": self.stale_hits,
+            "refresh": self.refresh,
         }
 
     def close(self) -> None:

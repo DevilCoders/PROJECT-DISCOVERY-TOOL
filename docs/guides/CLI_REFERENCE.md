@@ -115,7 +115,9 @@ pdt scan . --output ../pdt --fail-on HIGH --strict --quiet --no-color
 | `--vuln-online` | off | Look lockfile packages up in OSV.dev. Only the ecosystem, package name and version are sent, never file contents or paths. Failures are `UNKNOWN` coverage findings. |
 | `--vuln-enrich SOURCES` | none | With `--vuln-online`: add CVSS and CWE details from `nvd` (NVD CVE API 2.0) and/or `ghsa` (GitHub Advisory Database), comma-separated. Keys come from `NVD_API_KEY` and `GITHUB_TOKEN`. |
 | `--vuln-cache FILE` | `~/.pdt/online-vulnerability-cache.sqlite3` | With `--vuln-online`: the response cache, outside the scanned project. |
-| `--vuln-cache-ttl HOURS` | `24` | With `--vuln-online`: how long cached answers are reused, 0 to 87,600; `0` disables the cache. |
+| `--vuln-cache-ttl HOURS` | `24` | With `--vuln-online`: how long cached answers are reused, 0 to 87,600; `0` disables the cache. Answers past it are kept 90 days more. They are served, labelled stale, when OSV.dev cannot be reached. |
+| `--vuln-cache-refresh` | off | With `--vuln-online`: ask OSV.dev again for every package and advisory, ignoring fresh cache entries, and store the answers. Use it to prepare a cache for a later `--vuln-cache-only` scan. |
+| `--vuln-cache-only` | off | With `--vuln-online`: contact no service and answer from the cache alone, for offline and air-gapped scans with a copied cache. Answers past their TTL are used and labelled stale, and packages not in the cache are `UNKNOWN`. Cannot be combined with `--vuln-enrich` or `--vuln-cache-refresh`. |
 | `--network-timeout SECONDS` | `30` | Per-request timeout for online services and provider APIs, above 0 and at most 600. Needs `--vuln-online` or `--no-download`. |
 | `--ca-bundle FILE` | system store | A PEM bundle for HTTPS to online services, for private or intercepting certificate authorities. Certificate verification is never disabled. Needs `--vuln-online` or `--no-download`. |
 

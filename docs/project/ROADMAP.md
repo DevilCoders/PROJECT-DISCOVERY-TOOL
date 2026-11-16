@@ -278,7 +278,10 @@ The baseline is not production-ready:
 - [x] Cache responses in a private SQLite file with a TTL (`--vuln-cache`, `--vuln-cache-ttl`), honor proxy variables and `--ca-bundle`, bound responses (including gzip), follow redirects only within the same host, and retry transient failures with `Retry-After` support.
 - [x] Report network failures, rate limits, timeouts, unreadable lockfiles and unavailable advisory details as `UNKNOWN` coverage findings and scan diagnostics, never as a clean result; keep local mode offline (a test runs a scan with every socket call disabled).
 - [x] Show online lookup provenance in every report format: provider, endpoint, query time, package/advisory counts, cache hits, requests per host, retries, failures and coverage state (JSON metrics; Markdown and HTML vulnerability views, with a warning whenever a lookup was incomplete and a per-finding source badge in HTML).
-- [ ] Serve stale cache entries, clearly labelled, when the advisory service is unreachable, and let operators refresh the cache ahead of an offline scan.
+- [x] Serve stale cache entries, clearly labelled, when the advisory service is unreachable, and let operators refresh the cache ahead of an offline scan. Tested against the loopback service ([ONLINE_MODE.md](../guides/ONLINE_MODE.md)):
+  - Expired answers are kept 90 days and served when OSV.dev cannot be reached. They are labelled in the finding's evidence and in an `UNKNOWN` coverage finding, with `coverage: partial`.
+  - `--vuln-cache-refresh` asks again for everything and stores the answers.
+  - `--vuln-cache-only` answers from the cache alone, for offline scans; packages it never saw are `UNKNOWN`.
 
 ## Phase 7 — Secrets, credentials and personal-data indicators
 

@@ -268,6 +268,8 @@ Transient failures (timeouts, connection resets, HTTP 408/425/429/5xx) are retri
 | `--vuln-enrich nvd,ghsa` | none | Add NVD and/or GitHub Advisory details (CVSS, CWE, aliases) |
 | `--vuln-cache FILE` | `~/.pdt/online-vulnerability-cache.sqlite3` | Response cache; must be outside the analyzed project |
 | `--vuln-cache-ttl HOURS` | 24 | How long answers are reused; `0` disables the cache |
+| `--vuln-cache-refresh` | off | Ask again for everything and store the answers (prepares a cache for offline scans) |
+| `--vuln-cache-only` | off | Answer from the cache alone; contact no service |
 | `--network-timeout SECONDS` | 30 | Per-request timeout |
 | `--ca-bundle FILE` | system trust store | PEM bundle for private or TLS-intercepting CAs; also read from `PDT_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and OpenSSL's `SSL_CERT_FILE` |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` | none | Standard proxy settings |
@@ -276,6 +278,13 @@ Transient failures (timeouts, connection resets, HTTP 408/425/429/5xx) are retri
 | `PDT_OSV_API_URL`, `PDT_NVD_API_URL`, `PDT_GITHUB_API_URL` | public endpoints | Mirrors or GitHub Enterprise Server; must be `https://` (plain `http://` only for loopback hosts) |
 
 Certificate verification is never disabled, and TLS 1.2 is the minimum. Requests follow redirects only to the same scheme and host, and only for GET and HEAD: a redirected POST (the OSV.dev batch query) fails at once instead of being turned into a GET without its body. An API key or token is sent only to its own service's host, as a header that is not forwarded on redirects, never logged, never cached and never written to reports (reports record only `nvd_api_key_used` / `github_token_used`). Rate limits are enforced client side with rolling windows: OSV.dev 20 requests per second, NVD 5 (50 with a key) per 30 seconds, GitHub 60 (5,000 with a token) per hour. Responses are capped at 32 MiB (8 MiB per advisory record), including after gzip decoding.
+
+**Stale answers and offline scans.** An answer past its TTL is no longer reused, but it is kept 90 days more. When OSV.dev cannot be reached (a network failure, a timeout, a rate limit that outlasts the retries), the lookup serves that stale answer instead of none, and labels it:
+- The finding's `source:` evidence line gives the time the answer was fetched and why it was served stale.
+- An `UNKNOWN` "Online vulnerability answers served from a stale cache" finding says how many answers were stale and how old the oldest was. Advisories changed since then are missing.
+- `coverage` is `partial`, and `metrics.vulnerability_intelligence.online.stale_answers` counts the stale packages and advisories.
+
+For a scan without network access, prepare a cache while the service is reachable with `pdt scan PATH --vuln-online --vuln-cache-refresh`. That asks again for every package and advisory and stores the answers. Then copy the cache file across, if needed, and scan with `--vuln-online --vuln-cache-only --vuln-cache FILE`. It contacts no service, uses the cached answers, labels those past their TTL as stale, and reports packages the cache never saw as `UNKNOWN`. `cache_mode` in the metrics records `normal`, `refresh` or `cache-only`.
 
 The cache stores public advisory data and the looked-up coordinates (owner-only file permissions on POSIX); failures are never cached. Every entry is keyed by the endpoint that answered (`PDT_OSV_API_URL`, `PDT_NVD_API_URL`, `PDT_GITHUB_API_URL`), so a run against another mirror never reuses the first mirror's answers. Enrichment merges the CVE and GHSA identifiers it finds into each finding's aliases. A lockfile skipped by `--skip` counts as a lockfile that was not checked: coverage is then `partial`, and reports name the actual causes of an incomplete lookup. A batch shares one cache, so a dependency used by many repositories is queried once.
 

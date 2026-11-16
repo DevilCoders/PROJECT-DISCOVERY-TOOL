@@ -63,6 +63,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _iso(timestamp: float) -> str:
+    """A cache entry's fetch time (seconds since the epoch) as ISO 8601 UTC."""
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+
+
 def _github_token() -> str | None:
     for variable in ("PDT_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
         value = os.environ.get(variable, "").strip()
@@ -88,11 +93,21 @@ class OnlineVulnerabilityOptions:
     max_enrichment: int = DEFAULT_MAX_ENRICHMENT
     workers: int = 8
     retries: int = 3
+    # --vuln-cache-only: answer from the cache (fresh or stale), never the network.
+    cache_only: bool = False
+    # --vuln-cache-refresh: query everything again and store the answers (ahead of offline scans).
+    refresh: bool = False
 
     def __post_init__(self) -> None:
         unknown = set(self.enrich) - set(ENRICHMENT_SOURCES)
         if unknown:
             raise ValueError(f"--vuln-enrich accepts: {', '.join(ENRICHMENT_SOURCES)}")
+        if self.cache_only and self.refresh:
+            raise ValueError("--vuln-cache-only and --vuln-cache-refresh cannot be combined")
+        if self.cache_only and self.enrich:
+            raise ValueError("--vuln-cache-only cannot enrich: NVD and GitHub enrichment needs the network")
+        if (self.cache_only or self.refresh) and (self.cache_path is None or self.cache_ttl_seconds <= 0):
+            raise ValueError("--vuln-cache-only and --vuln-cache-refresh need the cache (a --vuln-cache-ttl above 0)")
         if not 1 <= self.workers <= 32:
             raise ValueError("online lookup workers must be between 1 and 32")
         if self.max_enrichment < 0:
@@ -104,10 +119,11 @@ class OnlineVulnerabilityOptions:
     def from_environment(
         cls, *, cache_path: Path | None = None, cache_ttl_hours: float | None = None,
         ca_bundle: Path | None = None, timeout: float | None = None,
-        enrich: Iterable[str] = (),
+        enrich: Iterable[str] = (), cache_only: bool = False, refresh: bool = False,
     ) -> "OnlineVulnerabilityOptions":
         """Build options from CLI values plus the documented environment variables."""
         return cls(
+            cache_only=cache_only, refresh=refresh,
             cache_path=cache_path if cache_path is not None else default_cache_path(),
             cache_ttl_seconds=(
                 DEFAULT_CACHE_TTL_SECONDS if cache_ttl_hours is None else cache_ttl_hours * 3600
@@ -136,7 +152,9 @@ class OnlineVulnerabilityOptions:
             "github_token_used": "ghsa" in self.enrich and self.github_token is not None,
             "custom_ca_bundle": self.ca_bundle is not None,
             "request_timeout_seconds": self.timeout,
-            "data_sent": "package ecosystem, name and version; advisory IDs for enrichment",
+            "data_sent": ("nothing: answers come from the cache (--vuln-cache-only)" if self.cache_only else
+                          "package ecosystem, name and version; advisory IDs for enrichment"),
+            "cache_mode": "cache-only" if self.cache_only else "refresh" if self.refresh else "normal",
         }
 
 
@@ -311,8 +329,8 @@ class OnlineVulnerabilityLookup:
         enrichment_failures: dict[str, NetworkError] = {}
         enrichment_skipped = 0
         http = HttpClient(ca_bundle=options.ca_bundle, timeout=options.timeout, retries=options.retries)
-        with ResponseCache(options.cache_path, ttl_seconds=options.cache_ttl_seconds) as cache:
-            osv = OsvClient(http, cache, base_url=options.osv_url)
+        with ResponseCache(options.cache_path, ttl_seconds=options.cache_ttl_seconds, refresh=options.refresh) as cache:
+            osv = OsvClient(http, cache, base_url=options.osv_url, offline=options.cache_only)
             if queries:
                 results, failures = osv.query(queries)
             identifiers = sorted({identifier for ids in results.values() for identifier in ids})
@@ -338,6 +356,7 @@ class OnlineVulnerabilityLookup:
                 "osv_querybatch": osv.batch_requests,
                 "osv_vulns": osv.record_requests,
             }
+            stale_packages, stale_records = dict(osv.stale_packages), dict(osv.stale_records)
 
         for query in queries:
             ids = results.get(query)
@@ -404,10 +423,21 @@ class OnlineVulnerabilityLookup:
                     graph=graphs.get(lockfile), suggestion=item["suggestion"] if item else None,
                     triage=self.triage, triage_matches=triage_matched,
                 ):
-                    finding.evidence.append(
-                        f"source: OSV.dev ({urllib.parse.urlsplit(options.osv_url).hostname}), "
-                        f"queried {started_at}"
-                    )
+                    fetched = [stale_packages[query]] if query in stale_packages else []
+                    fetched += [stale_records[identifier] for identifier in results.get(query, ())
+                                if identifier in stale_records]
+                    if fetched:
+                        # An answer from the cache past its TTL: say how old it is.
+                        finding.evidence.append(
+                            f"source: OSV.dev ({urllib.parse.urlsplit(options.osv_url).hostname}) answer cached "
+                            f"{_iso(min(fetched))}, served stale ("
+                            + ("--vuln-cache-only" if options.cache_only else "the service could not be reached")
+                            + "); advisories changed since are missing")
+                    else:
+                        finding.evidence.append(
+                            f"source: OSV.dev ({urllib.parse.urlsplit(options.osv_url).hostname}), "
+                            f"queried {started_at}"
+                        )
                     findings.append(finding)
                 # The decisions that matched, for the report of decisions that match nothing.
                 facts_by_lockfile.setdefault(lockfile, []).extend(
@@ -503,9 +533,29 @@ class OnlineVulnerabilityLookup:
                 analyzer=ONLINE_ANALYZER_NAME,
                 severity="INFO",
             ))
+        stale_answers = len(stale_packages) + len(stale_records)
+        status["stale_answers"] = {"packages": len(stale_packages), "advisories": len(stale_records)}
+        if stale_answers:
+            oldest = _iso(min([*stale_packages.values(), *stale_records.values()]))
+            status["stale_answers"]["oldest_fetched_at"] = oldest
+            message = (
+                f"{len(stale_packages):,} package answer(s) and {len(stale_records):,} advisory record(s) came from "
+                f"the cache past their TTL (the oldest fetched {oldest}), "
+                + ("because the scan uses the cache only" if options.cache_only else
+                   "because OSV.dev could not be reached")
+                + ". Advisories published or changed since then are missing. Refresh the cache with "
+                "--vuln-online --vuln-cache-refresh while the service is reachable."
+            )
+            diagnostics.append(message)
+            findings.append(_coverage_finding(
+                f"Online vulnerability answers served from a stale cache: {stale_answers:,}", message,
+                sorted({path for item in stale_packages for path in paths_by_package.get(item, ())})[:_MAX_EVIDENCE_LOCKFILES],
+            ))
         failed_scope = len(failures) + len(over_limit) + len(parse_failures)
         if not lockfile_count:
             coverage = "not_applicable"
+        elif failed_scope == 0 and not record_failures and stale_answers:
+            coverage = "partial"  # answered, but from outdated answers
         elif failed_scope == 0 and not record_failures:
             coverage = "complete"
         elif queries and len(failures) == len(queries) and not results:

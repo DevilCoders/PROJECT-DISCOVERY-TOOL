@@ -228,6 +228,16 @@ are in [docs/guides/ONLINE_MODE.md](docs/guides/ONLINE_MODE.md).
   records, `reparse_tag` on file records, `device_major` and `device_minor` on special entries,
   and `metrics.reparse_tags`.
 
+### Added: stale cache answers and offline online-lookups
+- Online answers past their TTL are kept 90 days. When OSV.dev cannot be reached, the lookup
+  serves them instead of failing, labelled in each finding's evidence (when fetched, why served
+  stale) and in an `UNKNOWN` coverage finding. Coverage is then `partial`.
+- `--vuln-cache-refresh` asks again for everything and stores the answers. `--vuln-cache-only`
+  contacts no service and answers from the cache alone, for offline and air-gapped scans;
+  packages it never saw are `UNKNOWN`.
+- Report schema 1.25: `stale_answers` and `cache_mode` in the online metrics, and the cache's
+  `stale_hits` and `refresh`.
+
 ### Fixed: advisory database recovery and robustness
 - `pdt vuln-db import` is one transaction. An import that fails or is interrupted used to leave
   the batches it had committed, half a snapshot under the old provenance; now it leaves the
